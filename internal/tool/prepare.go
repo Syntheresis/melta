@@ -78,26 +78,12 @@ func consumedIntAtUse(args map[string]any, key string) int {
 	return v
 }
 
-// approvedBinding is the canonical witness carried from authorization: the
-// lexical write-dir witness (empty when unconstrained), plus the canonical
-// Workspace root witness and the canonical write-dir boundary bound at
-// authorization so inner preparation compares against them instead of
-// re-binding fresh ones after approval; an empty witness falls back to a
-// fresh resolution from its lexical input.
+// approvedBinding carries the lexical write-dir and canonical root/write-dir
+// witnesses. An empty canonical witness is bound from its lexical input.
 type approvedBinding struct {
 	writeDir          string
 	rootCanonical     string
 	writeDirCanonical string
-}
-
-// canonicalBinding is the resolved target binding one preparation step
-// produces: the display path, the canonical target, the canonical write-dir
-// boundary (empty when unconstrained), and the leaf-existence observation.
-type canonicalBinding struct {
-	displayAbs        string
-	canonical         string
-	writeDirCanonical string
-	leafExists        bool
 }
 
 // bindWriteDir resolves the lexical write-dir witness to its canonical
@@ -113,43 +99,36 @@ func bindWriteDir(root, toolName, writeDir string) (string, error) {
 	return resolved.CanonicalPath, nil
 }
 
-// bindCanonicalTarget resolves one call's display path from the bound root,
-// applies the write-dir check, and binds the canonical write-dir boundary —
-// the authorization-time witness when bound, else a fresh resolution from
-// the lexical witness.
-func bindCanonicalTarget(root, toolName, path string, approved approvedBinding) (canonicalBinding, error) {
-	displayAbs, err := fileDisplayAbsPathAtRoot(root, path)
-	if err != nil {
-		return canonicalBinding{}, fmt.Errorf("%s: resolve path: %w", toolName, err)
-	}
-	resolved, err := pathutil.ResolveFilePathFrom(root, path)
-	if err != nil {
-		return canonicalBinding{}, fmt.Errorf("%s: resolve path: %w", toolName, err)
-	}
-	if err := checkWriteDirTarget(root, toolName, resolved.CanonicalPath, CapabilityOptions{WriteDir: approved.writeDir}); err != nil {
-		return canonicalBinding{}, err
-	}
-	writeDirCanonical := approved.writeDirCanonical
-	if writeDirCanonical == "" {
-		writeDirCanonical, err = bindWriteDir(root, toolName, approved.writeDir)
+func bindApproved(root, toolName string, approved approvedBinding) (approvedBinding, error) {
+	var err error
+	if approved.rootCanonical == "" {
+		approved.rootCanonical, err = bindWorkspaceRoot(root)
 		if err != nil {
-			return canonicalBinding{}, err
+			return approvedBinding{}, fmt.Errorf("%s: resolve path: %w", toolName, err)
 		}
 	}
-	return canonicalBinding{displayAbs: displayAbs, canonical: resolved.CanonicalPath, writeDirCanonical: writeDirCanonical, leafExists: resolved.LeafExists}, nil
+	if approved.writeDirCanonical == "" {
+		approved.writeDirCanonical, err = bindWriteDir(root, toolName, approved.writeDir)
+		if err != nil {
+			return approvedBinding{}, err
+		}
+	}
+	return approved, nil
 }
 
-// fileDisplayAbsPathAtRoot resolves one call's display path from the bound
-// root.
-func fileDisplayAbsPathAtRoot(root, path string) (string, error) {
-	if root != "" && !filepath.IsAbs(path) {
-		path = filepath.Join(root, path)
-	}
-	absPath, err := filepath.Abs(path)
+// bindCanonicalTarget resolves the target and checks it against the current
+// write-dir while retaining the supplied witnesses for revalidation.
+func bindCanonicalTarget(root, toolName, path string, approved approvedBinding) (boundCall, error) {
+	resolved, err := pathutil.ResolveFilePathFrom(root, path)
 	if err != nil {
-		return "", err
+		return boundCall{}, fmt.Errorf("%s: resolve path: %w", toolName, err)
 	}
-	return absPath, nil
+	if err := checkWriteDirTarget(root, toolName, resolved.CanonicalPath, CapabilityOptions{WriteDir: approved.writeDir}); err != nil {
+		return boundCall{}, err
+	}
+	return boundCall{root: root, toolName: toolName, path: path, rootCanonical: approved.rootCanonical,
+		displayAbs: resolved.AbsPath, canonical: resolved.CanonicalPath, writeDir: approved.writeDir,
+		writeDirCanonical: approved.writeDirCanonical, leafExists: resolved.LeafExists}, nil
 }
 
 // bindWorkspaceRoot resolves the lexical Workspace root to its canonical
@@ -170,7 +149,7 @@ func revalidateWorkspaceRoot(root, boundCanonical string) error {
 	if err != nil {
 		return err
 	}
-	if boundCanonical != "" && resolved.CanonicalPath != boundCanonical {
+	if resolved.CanonicalPath != boundCanonical {
 		return fmt.Errorf("approved canonical workspace root changed from %s to %s", boundCanonical, resolved.CanonicalPath)
 	}
 	return nil
@@ -190,6 +169,8 @@ type boundCall struct {
 	canonical         string
 	writeDir          string // lexical write-dir witness (empty when unconstrained)
 	writeDirCanonical string // canonical write-dir boundary bound at preparation
+	displayAbs        string
+	leafExists        bool
 }
 
 func (b boundCall) revalidate() error {
@@ -200,7 +181,7 @@ func (b boundCall) revalidate() error {
 	if err != nil {
 		return err
 	}
-	if b.canonical != "" && resolved.CanonicalPath != b.canonical {
+	if resolved.CanonicalPath != b.canonical {
 		return canonicalChangedError(b.canonical, resolved.CanonicalPath)
 	}
 	return b.revalidateWriteDir()
@@ -244,30 +225,20 @@ func (b boundCall) revalidateWriteDir() error {
 // happens here.
 func prepareRead(root string, cfg config.ToolsConfig, args map[string]any, approved approvedBinding) (*PreparedCall, error) {
 	path, _ := args["path"].(string)
-	rootCanonical := approved.rootCanonical
-	if rootCanonical == "" {
-		var err error
-		rootCanonical, err = bindWorkspaceRoot(root)
-		if err != nil {
-			return nil, fmt.Errorf("read_file: resolve path: %w", err)
-		}
-	}
-	binding, err := bindCanonicalTarget(root, "read_file", path, approved)
+	approved, err := bindApproved(root, "read_file", approved)
 	if err != nil {
 		return nil, err
 	}
-	bound := boundCall{
-		root: root, toolName: "read_file", path: path,
-		rootCanonical: rootCanonical, canonical: binding.canonical,
-		writeDir: approved.writeDir, writeDirCanonical: binding.writeDirCanonical,
+	bound, err := bindCanonicalTarget(root, "read_file", path, approved)
+	if err != nil {
+		return nil, err
 	}
-
-	targets := []PreparedTarget{{CanonicalPath: binding.canonical}}
+	targets := []PreparedTarget{{CanonicalPath: bound.canonical}}
 	parent := readTarget{}
-	if !binding.leafExists {
+	if !bound.leafExists {
 		parent = readTarget{
-			displayPath:   filepath.Dir(binding.displayAbs),
-			canonicalPath: filepath.Dir(binding.canonical),
+			displayPath:   filepath.Dir(bound.displayAbs),
+			canonicalPath: filepath.Dir(bound.canonical),
 		}
 		targets = append(targets, PreparedTarget{CanonicalPath: parent.canonicalPath})
 	}
@@ -276,10 +247,10 @@ func prepareRead(root string, cfg config.ToolsConfig, args map[string]any, appro
 		if err := bound.revalidate(); err != nil {
 			return "", fmt.Errorf("read_file: resolve path: %w", err)
 		}
-		if _, err := ensureRegularExistingTarget(binding.canonical); err != nil {
+		if _, err := ensureRegularExistingTarget(bound.canonical); err != nil {
 			return "", fmt.Errorf("read_file: %w", err)
 		}
-		f, err := safefs.OpenExisting(binding.canonical, os.O_RDONLY)
+		f, err := safefs.OpenExisting(bound.canonical, os.O_RDONLY)
 		if err != nil {
 			if os.IsNotExist(err) {
 				// Suggestions run only when preparation observed the leaf
@@ -287,7 +258,7 @@ func prepareRead(root string, cfg config.ToolsConfig, args map[string]any, appro
 				// existed during preparation and disappeared before
 				// opening returns plain not-found with no undeclared
 				// fallback I/O (parent is unbound here).
-				return suggestFromBoundDirectory(parent, binding.displayAbs), nil
+				return suggestFromBoundDirectory(parent, bound.displayAbs), nil
 			}
 			return "", fmt.Errorf("read_file: %w", err)
 		}
@@ -296,7 +267,7 @@ func prepareRead(root string, cfg config.ToolsConfig, args map[string]any, appro
 		if err != nil {
 			return "", fmt.Errorf("read_file: stat: %w", err)
 		}
-		if err := ensureRegularFileInfo(binding.canonical, info); err != nil {
+		if err := ensureRegularFileInfo(bound.canonical, info); err != nil {
 			return "", fmt.Errorf("read_file: %w", err)
 		}
 
@@ -385,88 +356,26 @@ func suggestFromBoundDirectory(parent readTarget, displayPath string) string {
 func prepareWrite(root string, store SnapshotStore, args map[string]any, approved approvedBinding) (*PreparedCall, error) {
 	path, _ := args["path"].(string)
 	content, _ := args["content"].(string)
-	rootCanonical := approved.rootCanonical
-	if rootCanonical == "" {
-		var err error
-		rootCanonical, err = bindWorkspaceRoot(root)
-		if err != nil {
-			return nil, fmt.Errorf("write_file: resolve path: %w", err)
-		}
-	}
-	binding, err := bindCanonicalTarget(root, "write_file", path, approved)
+	approved, err := bindApproved(root, "write_file", approved)
 	if err != nil {
 		return nil, err
 	}
-	bound := boundCall{
-		root: root, toolName: "write_file", path: path,
-		rootCanonical: rootCanonical, canonical: binding.canonical,
-		writeDir: approved.writeDir, writeDirCanonical: binding.writeDirCanonical,
+	bound, err := bindCanonicalTarget(root, "write_file", path, approved)
+	if err != nil {
+		return nil, err
 	}
-
 	execute := func(_ context.Context) (string, error) {
-		if err := bound.revalidate(); err != nil {
-			return "", fmt.Errorf("write_file: resolve path: %w", err)
+		_, err := writeBound(bound, store, []byte(content), false)
+		if err != nil {
+			return "", err
 		}
-		return writeWithSnapshotBookkeeping(bound, store, binding.displayAbs, binding.canonical, content, path)
+		return fmt.Sprintf("Wrote %s.", path), nil
 	}
 
 	return &PreparedCall{
-		Targets: []PreparedTarget{{CanonicalPath: binding.canonical}},
+		Targets: []PreparedTarget{{CanonicalPath: bound.canonical}},
 		Execute: execute,
 	}, nil
-}
-
-// writeMutation opens the write target (creating required parents), replaces
-// its content, and reports whether a mutation may have started plus whether
-// the intended bytes are known to have been fully produced.
-func writeMutation(canonical string, content, displayPath string) (string, bool, bool, error) {
-	f, _, err := openWriteTargetForMutation(canonical)
-	if err != nil {
-		return "", false, false, fmt.Errorf("write_file: %w", err)
-	}
-	defer f.Close()
-
-	// A successful open has created or opened the target, so any failure from
-	// here on has an uncertain started state.
-	complete, werr := writeReplacement(f, []byte(content))
-	if werr != nil {
-		return "", true, complete, fmt.Errorf("write_file: %w", werr)
-	}
-
-	return fmt.Sprintf("Wrote %s.", displayPath), true, true, nil
-}
-
-// writeWithSnapshotBookkeeping wraps writeMutation with the mandatory snapshot
-// transaction: preflight, capture plus the pre-mutation proof clear, the
-// post-capture binding revalidation, and the abandon-on-proven-non-mutation /
-// produced-identity failure behavior.
-func writeWithSnapshotBookkeeping(bound boundCall, store SnapshotStore, displayAbs, canonical, content, displayPath string) (string, error) {
-	if err := preflightWriteSnapshotTarget(canonical); err != nil {
-		return "", err
-	}
-	snapshot, err := captureSnapshotEntry(store, displayAbs, canonical)
-	if err != nil {
-		return "", fmt.Errorf("write_file: snapshot: %w", err)
-	}
-	// Retained legacy behavior: the binding is revalidated again after the
-	// snapshot was captured, so a target repointed during snapshotting
-	// fails before any mutation, and the unmutated snapshot claim is
-	// abandoned exactly like every other pre-mutation failure.
-	if err := bound.revalidate(); err != nil {
-		err = fmt.Errorf("write_file: resolve path: %w", err)
-		if abandonErr := abandonUnmutatedSnapshot(snapshot); abandonErr != nil {
-			return "", fmt.Errorf("%w; additionally failed to abandon snapshot: %v", err, abandonErr)
-		}
-		return "", err
-	}
-	res, started, complete, err := writeMutation(canonical, content, displayPath)
-	if err != nil {
-		return "", finishMutationFailure(snapshot, started, complete, []byte(content), err)
-	}
-	if err := recordProducedSnapshotContent(snapshot, []byte(content)); err != nil {
-		return "", fmt.Errorf("write_file: record snapshot identity: %w", err)
-	}
-	return res, nil
 }
 
 // PrepareWriteCall is the exported preparation entry for target callers.
@@ -489,81 +398,80 @@ func prepareEdit(root string, store SnapshotStore, args map[string]any, approved
 	oldString, _ := args["old_string"].(string)
 	newString, _ := args["new_string"].(string)
 	replaceAll, _ := args["replace_all"].(bool)
-	rootCanonical := approved.rootCanonical
-	if rootCanonical == "" {
-		var err error
-		rootCanonical, err = bindWorkspaceRoot(root)
-		if err != nil {
-			return nil, fmt.Errorf("edit_file: resolve path: %w", err)
-		}
-	}
-	binding, err := bindCanonicalTarget(root, "edit_file", path, approved)
+	approved, err := bindApproved(root, "edit_file", approved)
 	if err != nil {
 		return nil, err
 	}
-	bound := boundCall{
-		root: root, toolName: "edit_file", path: path,
-		rootCanonical: rootCanonical, canonical: binding.canonical,
-		writeDir: approved.writeDir, writeDirCanonical: binding.writeDirCanonical,
+	bound, err := bindCanonicalTarget(root, "edit_file", path, approved)
+	if err != nil {
+		return nil, err
 	}
-
 	execute := func(_ context.Context) (string, error) {
-		if err := bound.revalidate(); err != nil {
-			return "", fmt.Errorf("edit_file: resolve path: %w", err)
+		var result *editResult
+		_, err := mutateBound(bound, store, func() error {
+			return preflightEditSnapshotTarget(bound.canonical)
+		}, func() (mutationOutcome, []byte, bool, error) {
+			res, produced, outcome, err := editMutation(bound.canonical, path, oldString, newString, replaceAll)
+			result = res
+			return outcome, produced, false, err
+		})
+		if err != nil {
+			return "", err
 		}
-		return editWithSnapshotBookkeeping(bound, store, binding.displayAbs, binding.canonical, path, oldString, newString, replaceAll)
+		return result.Result, nil
 	}
 
 	return &PreparedCall{
-		Targets: []PreparedTarget{{CanonicalPath: binding.canonical}},
+		Targets: []PreparedTarget{{CanonicalPath: bound.canonical}},
 		Execute: execute,
 	}, nil
 }
 
 // editMutation validates the edit against current file content and applies
-// it; mutationStarted reports whether bytes may have landed, and complete
-// whether the updated bytes are known to have been fully produced. produced
-// carries the updated content once it is known, even on a write failure.
-func editMutation(canonical string, displayPath, oldString, newString string, replaceAll bool) (res *editResult, produced []byte, started, complete bool, err error) {
+// it, returning the mutation outcome independently from any error.
+func editMutation(canonical string, displayPath, oldString, newString string, replaceAll bool) (res *editResult, produced []byte, outcome mutationOutcome, err error) {
 	if oldString == "" {
-		return nil, nil, false, false, fmt.Errorf("edit_file: old_string must not be empty")
+		return nil, nil, mutationUntouched, fmt.Errorf("edit_file: old_string must not be empty")
 	}
 	if oldString == newString {
-		return nil, nil, false, false, fmt.Errorf("edit_file: old_string and new_string are identical")
+		return nil, nil, mutationUntouched, fmt.Errorf("edit_file: old_string and new_string are identical")
 	}
 
 	if _, err := ensureRegularExistingTarget(canonical); err != nil {
-		return nil, nil, false, false, fmt.Errorf("edit_file: %w", err)
+		return nil, nil, mutationUntouched, fmt.Errorf("edit_file: %w", err)
 	}
 
 	f, err := openExistingMutationFile(canonical, os.O_RDWR)
 	if err != nil {
-		return nil, nil, false, false, fmt.Errorf("edit_file: %w", err)
+		return nil, nil, mutationUntouched, fmt.Errorf("edit_file: %w", err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, nil, false, false, fmt.Errorf("edit_file: stat: %w", err)
+		return nil, nil, mutationUntouched, fmt.Errorf("edit_file: stat: %w", err)
 	}
 	if err := ensureRegularFileInfo(canonical, info); err != nil {
-		return nil, nil, false, false, fmt.Errorf("edit_file: %w", err)
+		return nil, nil, mutationUntouched, fmt.Errorf("edit_file: %w", err)
 	}
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return nil, nil, false, false, fmt.Errorf("edit_file: %w", err)
+		return nil, nil, mutationUntouched, fmt.Errorf("edit_file: %w", err)
 	}
 	content := string(data)
 
 	edit, err := ApplyEdit(content, oldString, newString, replaceAll, displayPath)
 	if err != nil {
-		return nil, nil, false, false, err
+		return nil, nil, mutationUntouched, err
 	}
 	produced = []byte(edit.UpdatedContent)
 
 	complete, werr := writeReplacement(f, produced)
+	if !complete {
+		return nil, produced, mutationUncertain, fmt.Errorf("edit_file: %w", werr)
+	}
 	if werr != nil {
-		return nil, produced, true, complete, fmt.Errorf("edit_file: %w", werr)
+		return nil, produced, mutationCompleted, fmt.Errorf("edit_file: %w", werr)
 	}
 
 	return &editResult{
@@ -571,40 +479,7 @@ func editMutation(canonical string, displayPath, oldString, newString string, re
 		UpdatedContent: edit.UpdatedContent,
 		LineRanges:     edit.LineRanges,
 		Count:          edit.Count,
-	}, produced, true, true, nil
-}
-
-// editWithSnapshotBookkeeping wraps editMutation with the mandatory snapshot
-// transaction: preflight, capture plus the pre-mutation proof clear, the
-// post-capture binding revalidation, and the abandon-on-proven-non-mutation /
-// produced-identity failure behavior.
-func editWithSnapshotBookkeeping(bound boundCall, store SnapshotStore, displayAbs, canonical, displayPath, oldString, newString string, replaceAll bool) (string, error) {
-	if err := preflightEditSnapshotTarget(canonical); err != nil {
-		return "", err
-	}
-	snapshot, err := captureSnapshotEntry(store, displayAbs, canonical)
-	if err != nil {
-		return "", fmt.Errorf("edit_file: snapshot: %w", err)
-	}
-	// Retained legacy behavior: the binding is revalidated again after the
-	// snapshot was captured, so a target repointed during snapshotting
-	// fails before any mutation, and the unmutated snapshot claim is
-	// abandoned exactly like every other pre-mutation failure.
-	if err := bound.revalidate(); err != nil {
-		err = fmt.Errorf("edit_file: resolve path: %w", err)
-		if abandonErr := abandonUnmutatedSnapshot(snapshot); abandonErr != nil {
-			return "", fmt.Errorf("%w; additionally failed to abandon snapshot: %v", err, abandonErr)
-		}
-		return "", err
-	}
-	res, produced, started, complete, err := editMutation(canonical, displayPath, oldString, newString, replaceAll)
-	if err != nil {
-		return "", finishMutationFailure(snapshot, started, complete, produced, err)
-	}
-	if err := recordProducedSnapshotContent(snapshot, produced); err != nil {
-		return "", fmt.Errorf("edit_file: record snapshot identity: %w", err)
-	}
-	return res.Result, nil
+	}, produced, mutationCompleted, nil
 }
 
 // PrepareEditCall is the exported preparation entry for target callers.
@@ -622,13 +497,13 @@ func PrepareEditCall(root, rootCanonical, writeDirCanonical string, opts Capabil
 // performs only path resolution, collision and write-dir checks; no content
 // read happens here, so a patch source/destination outside write_dir is
 // rejected at preparation, before authorization.
-func preparePatchFromArgs(root string, args map[string]any, writeDir string) (*patch, []applyPatchTarget, error) {
+func preparePatchFromArgs(root string, args map[string]any, approved approvedBinding) (*patch, []boundCall, error) {
 	input, _ := args["input"].(string)
 	p, err := parsePatch(input)
 	if err != nil {
 		return nil, nil, err
 	}
-	targets, err := resolveApplyPatchTargetsFromParsed(root, p, CapabilityOptions{WriteDir: writeDir})
+	targets, err := resolveApplyPatchTargetsFromParsed(root, p, approved)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -648,17 +523,20 @@ func preparePatchFromArgs(root string, args map[string]any, writeDir string) (*p
 // content access, and returns the structured result carrying the
 // model-visible summary and the captured preview data.
 func PreparePatchCall(root, rootCanonical, writeDirCanonical string, opts CapabilityOptions, store SnapshotStore, args map[string]any) (*PreparedPatchCall, error) {
-	p, targets, err := preparePatchFromArgs(root, args, opts.WriteDir)
+	approved, err := bindApproved(root, "apply_patch", approvedBinding{rootCanonical: rootCanonical, writeDir: opts.WriteDir, writeDirCanonical: writeDirCanonical})
+	if err != nil {
+		return nil, err
+	}
+	p, targets, err := preparePatchFromArgs(root, args, approved)
 	if err != nil {
 		return nil, err
 	}
 	displayTargets := make([]PreparedTarget, 0, len(targets))
 	for _, t := range targets {
-		displayTargets = append(displayTargets, PreparedTarget{CanonicalPath: t.CanonicalPath})
+		displayTargets = append(displayTargets, PreparedTarget{CanonicalPath: t.canonical})
 	}
-	writeDir := opts.WriteDir
 	execute := func(_ context.Context) (PreparedPatchResult, error) {
-		result, previews, err := executeParsedPatch(root, rootCanonical, store, p, targets, writeDir, writeDirCanonical)
+		result, previews, err := executeParsedPatch(store, p, targets)
 		return PreparedPatchResult{Result: result, Previews: previews}, err
 	}
 	return &PreparedPatchCall{Targets: displayTargets, Execute: execute}, nil

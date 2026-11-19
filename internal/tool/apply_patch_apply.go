@@ -7,49 +7,35 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Syntheresis/melta/internal/pathutil"
 	"github.com/Syntheresis/melta/internal/safefs"
 )
 
 // executeParsedPatch is the shared apply engine for an already-parsed patch
-// and its prepared targets. The flow is validate-first all-or-nothing:
+// and its prepared targets. Before applying the patch,
 // the bound canonical Workspace root, the bound canonical write-dir
 // boundary and every bound target are revalidated before any content
 // access, every op is located
 // against current files before any mutation, and per-op current-content
-// checks rerun inside the apply loop. The only path to a partial apply is a
-// mid-write I/O error after validation passed; on that rare failure,
-// committed files stay on disk, remain snapshotted, and are recoverable via
-// turn revert. Partial failures return *ExitError carrying the committed-files
-// A/M/D summary for model-visible output.
+// checks rerun inside the apply loop. A later mutation or bookkeeping failure
+// returns *ExitError with the completed-files A/M/D summary; uncertain
+// mutations retain their preimage without claiming a produced identity.
 //
 // The engine captures per-op pre/post/hunk data during apply and returns it
 // as the second value. Callers attach those previews to display metadata so
 // renderers do not need post-write disk reads. Read-after-apply is not
-// viable for updates, deletes, or moves. A nil approved list means the
-// freshly resolved plan is authoritative.
-func executeParsedPatch(root, rootCanonical string, store SnapshotStore, p *patch, approved []applyPatchTarget, writeDir, writeDirCanonical string) (string, []AppliedFilePreview, error) {
+// viable for updates, deletes, or moves.
+func executeParsedPatch(store SnapshotStore, p *patch, targets []boundCall) (string, []AppliedFilePreview, error) {
 	// Revalidate the bound root, the canonical write-dir boundary and every
 	// target before content access; the per-op checks rerun where the apply
 	// safety requires.
-	if err := revalidateWorkspaceRoot(root, rootCanonical); err != nil {
-		return "", nil, err
-	}
-	if err := revalidateWriteDirWitness(root, writeDir, writeDirCanonical); err != nil {
-		return "", nil, err
-	}
-	current, err := resolveApplyPatchTargetsFromParsed(root, p, CapabilityOptions{WriteDir: writeDir})
-	if err != nil {
-		return "", nil, err
-	}
-	if approved != nil {
-		if err := compareApplyPatchTargets(approved, current); err != nil {
+	for _, target := range targets {
+		if err := target.revalidate(); err != nil {
 			return "", nil, err
 		}
 	}
 
 	// Phase 1: validate (read-only).
-	plans, err := buildApplyPlans(p, root, current)
+	plans, err := buildApplyPlans(p, targets)
 	if err != nil {
 		return "", nil, err
 	}
@@ -62,20 +48,7 @@ func executeParsedPatch(root, rootCanonical string, store SnapshotStore, p *patc
 	committed := make([]appliedOp, 0, len(plans))
 	for i := range plans {
 		pl := &plans[i]
-		srcBound := boundCall{
-			root: root, toolName: "apply_patch", path: pl.op.path,
-			rootCanonical: rootCanonical, canonical: pl.canonicalPath,
-			writeDir: writeDir, writeDirCanonical: writeDirCanonical,
-		}
-		var dstBound boundCall
-		if pl.moveCanonical != "" {
-			dstBound = boundCall{
-				root: root, toolName: "apply_patch", path: pl.op.movePath,
-				rootCanonical: rootCanonical, canonical: pl.moveCanonical,
-				writeDir: writeDir, writeDirCanonical: writeDirCanonical,
-			}
-		}
-		preview, err := applyOne(pl, store, &committed, srcBound, dstBound)
+		preview, err := applyOne(pl, store, &committed)
 		if err != nil {
 			return "", nil, err
 		}
@@ -124,35 +97,26 @@ type AppliedHunkPreview struct {
 }
 
 type applyPlan struct {
-	op             fileOp
-	root           string
-	canonicalPath  string
-	displayAbsPath string
-	newContent     string // for Add / Update / Move
-	moveCanonical  string // for Move
-	moveDisplay    string
-	preLines       []string             // pre-mutation content (for Update/Delete/Move source)
-	preContent     []byte               // exact content validated before mutation
-	hunks          []AppliedHunkPreview // applied hunks (for Update/Move destination)
+	op          fileOp
+	newContent  string               // for Add / Update / Move
+	preLines    []string             // pre-mutation content (for Update/Delete/Move source)
+	preContent  []byte               // exact content validated before mutation
+	hunks       []AppliedHunkPreview // applied hunks (for Update/Move destination)
+	source      boundCall
+	destination boundCall
 }
 
-func buildApplyPlans(p *patch, root string, targets []applyPatchTarget) ([]applyPlan, error) {
+func buildApplyPlans(p *patch, targets []boundCall) ([]applyPlan, error) {
 	plans := make([]applyPlan, 0, len(p.ops))
 	targetIdx := 0
 	for _, op := range p.ops {
-		if targetIdx >= len(targets) {
-			return nil, fmt.Errorf("apply_patch: target plan missing %s", op.path)
-		}
 		target := targets[targetIdx]
 		targetIdx++
-		if target.Path != op.path || target.Destination {
-			return nil, fmt.Errorf("apply_patch: target plan mismatch for %s", op.path)
-		}
-		pl := applyPlan{op: op, root: root, canonicalPath: target.CanonicalPath, displayAbsPath: target.AbsPath}
+		pl := applyPlan{op: op, source: target}
 
 		switch op.kind {
 		case opAdd:
-			existed, shapeErr := ensureRegularExistingTarget(pl.canonicalPath)
+			existed, shapeErr := ensureRegularExistingTarget(pl.source.canonical)
 			if shapeErr != nil {
 				return nil, fmt.Errorf("apply_patch: %s: %w", op.path, shapeErr)
 			}
@@ -161,14 +125,14 @@ func buildApplyPlans(p *patch, root string, targets []applyPatchTarget) ([]apply
 			}
 			pl.newContent = buildAddContent(op)
 		case opUpdate:
-			existed, shapeErr := ensureRegularExistingTarget(pl.canonicalPath)
+			existed, shapeErr := ensureRegularExistingTarget(pl.source.canonical)
 			if shapeErr != nil {
 				return nil, fmt.Errorf("apply_patch: %s: %w", op.path, shapeErr)
 			}
 			if !existed {
 				return nil, fmt.Errorf("apply_patch: %s does not exist (Update requires the path to exist)", op.path)
 			}
-			preContent, preLines, content, hunks, err := computeUpdatedContent(pl.canonicalPath, op)
+			preContent, preLines, content, hunks, err := computeUpdatedContent(pl.source.canonical, op)
 			if err != nil {
 				return nil, err
 			}
@@ -177,7 +141,7 @@ func buildApplyPlans(p *patch, root string, targets []applyPatchTarget) ([]apply
 			pl.newContent = content
 			pl.hunks = hunks
 		case opDelete:
-			existed, shapeErr := ensureRegularExistingTarget(pl.canonicalPath)
+			existed, shapeErr := ensureRegularExistingTarget(pl.source.canonical)
 			if shapeErr != nil {
 				return nil, fmt.Errorf("apply_patch: %s: %w", op.path, shapeErr)
 			}
@@ -186,7 +150,7 @@ func buildApplyPlans(p *patch, root string, targets []applyPatchTarget) ([]apply
 			}
 			// Capture pre-mutation content for the preview stash so the
 			// GUI / CLI can show the file's pre-delete state.
-			data, readErr := readFileBytes(pl.canonicalPath)
+			data, readErr := readFileBytes(pl.source.canonical)
 			if readErr != nil {
 				return nil, fmt.Errorf("apply_patch: read %s: %w", op.path, readErr)
 			}
@@ -195,16 +159,9 @@ func buildApplyPlans(p *patch, root string, targets []applyPatchTarget) ([]apply
 		}
 
 		if op.movePath != "" {
-			if targetIdx >= len(targets) {
-				return nil, fmt.Errorf("apply_patch: target plan missing %s", op.movePath)
-			}
 			moveTarget := targets[targetIdx]
 			targetIdx++
-			if moveTarget.Path != op.movePath || !moveTarget.Destination {
-				return nil, fmt.Errorf("apply_patch: target plan mismatch for %s", op.movePath)
-			}
-			moveCanonical := moveTarget.CanonicalPath
-			moveDisplay := moveTarget.AbsPath
+			moveCanonical := moveTarget.canonical
 			existed, shapeErr := ensureRegularExistingTarget(moveCanonical)
 			if shapeErr != nil {
 				return nil, fmt.Errorf("apply_patch: %s (move destination): %w", op.movePath, shapeErr)
@@ -212,17 +169,13 @@ func buildApplyPlans(p *patch, root string, targets []applyPatchTarget) ([]apply
 			if existed {
 				return nil, fmt.Errorf("apply_patch: %s (move destination) already exists (Move over an existing file is not allowed)", op.movePath)
 			}
-			pl.moveCanonical = moveCanonical
-			pl.moveDisplay = moveDisplay
+			pl.destination = moveTarget
 			if len(op.hunks) == 0 {
 				pl.newContent = string(pl.preContent)
 			}
 		}
 
 		plans = append(plans, pl)
-	}
-	if targetIdx != len(targets) {
-		return nil, fmt.Errorf("apply_patch: target plan has extra entries")
 	}
 	return plans, nil
 }
@@ -363,30 +316,29 @@ func hunkTransformPreservingMatchedContext(h hunk, matchedLines []string, synthe
 }
 
 // applyOne applies a single op's mutation and returns the per-file
-// preview data captured during the apply. On a mid-write failure it wraps the
-// partial-failure summary in *ExitError so the model sees the committed-files
-// A/M/D list. committed is the running list of ops that have already landed on
-// disk; applyOne appends to it on success and reads it for partial-failure
-// summaries. srcBound and dstBound carry the approved witnesses to each
-// mutation's snapshot-to-I/O boundary.
-func applyOne(pl *applyPlan, store SnapshotStore, committed *[]appliedOp, srcBound, dstBound boundCall) ([]AppliedFilePreview, error) {
+// preview data captured during the apply. Failures include the completed-files
+// A/M/D list in *ExitError.
+func applyOne(pl *applyPlan, store SnapshotStore, committed *[]appliedOp) ([]AppliedFilePreview, error) {
 	if err := revalidateApplyPlan(pl); err != nil {
 		return nil, &ExitError{Output: buildPartialSummary(*committed) + "\n\n" + err.Error()}
 	}
 
 	// Move: write the destination first (so it lands), then snapshot + delete the source.
 	if pl.op.movePath != "" {
-		if err := writeWithSnapshot(store, dstBound, pl.moveDisplay, pl.moveCanonical, pl.newContent, true); err != nil {
+		outcome, err := writeBound(pl.destination, store, []byte(pl.newContent), true)
+		if outcome == mutationCompleted {
+			*committed = append(*committed, appliedOp{kind: "M", path: pl.op.movePath})
+		}
+		if err != nil {
 			return nil, &ExitError{Output: buildPartialSummary(*committed) + "\n\n" + err.Error()}
 		}
-		*committed = append(*committed, appliedOp{kind: "M", path: pl.op.movePath})
 		if err := revalidateApplySourceContent(pl); err != nil {
 			return nil, &ExitError{Output: buildPartialSummary(*committed) + "\n\n" + err.Error()}
 		}
 	}
 
 	// Now the original-path mutation (Add / Update / Delete), tracked separately for Move.
-	origErr := applyOriginalMutation(pl, store, committed, srcBound)
+	origErr := applyOriginalMutation(pl, store, committed)
 	if origErr != nil {
 		return nil, &ExitError{Output: buildPartialSummary(*committed) + "\n\n" + origErr.Error()}
 	}
@@ -394,16 +346,16 @@ func applyOne(pl *applyPlan, store SnapshotStore, committed *[]appliedOp, srcBou
 }
 
 func revalidateApplyPlan(pl *applyPlan) error {
-	if err := revalidateApplyPatchTarget(pl.root, pl.op.path, pl.canonicalPath); err != nil {
+	if err := pl.source.revalidate(); err != nil {
 		return err
 	}
-	if pl.moveCanonical != "" {
-		if err := revalidateApplyPatchTarget(pl.root, pl.op.movePath, pl.moveCanonical); err != nil {
+	if pl.op.movePath != "" {
+		if err := pl.destination.revalidate(); err != nil {
 			return err
 		}
 	}
-	if pl.op.kind == opUpdate || pl.op.kind == opDelete || pl.moveCanonical != "" {
-		data, err := readFileBytes(pl.canonicalPath)
+	if pl.op.kind == opUpdate || pl.op.kind == opDelete || pl.op.movePath != "" {
+		data, err := readFileBytes(pl.source.canonical)
 		if err != nil {
 			return fmt.Errorf("apply_patch: read %s before mutation: %w", pl.op.path, err)
 		}
@@ -415,23 +367,12 @@ func revalidateApplyPlan(pl *applyPlan) error {
 }
 
 func revalidateApplySourceContent(pl *applyPlan) error {
-	data, err := readFileBytes(pl.canonicalPath)
+	data, err := readFileBytes(pl.source.canonical)
 	if err != nil {
 		return fmt.Errorf("apply_patch: read %s before mutation: %w", pl.op.path, err)
 	}
 	if !bytes.Equal(data, pl.preContent) {
 		return fmt.Errorf("apply_patch: %s changed after validation", pl.op.path)
-	}
-	return nil
-}
-
-func revalidateApplyPatchTarget(root, path, approvedCanonical string) error {
-	resolved, err := pathutil.ResolveFilePathFrom(root, path)
-	if err != nil {
-		return fmt.Errorf("apply_patch: %s: %w", path, err)
-	}
-	if resolved.CanonicalPath != approvedCanonical {
-		return fmt.Errorf("apply_patch: approved canonical path changed from %s to %s", approvedCanonical, resolved.CanonicalPath)
 	}
 	return nil
 }
@@ -443,7 +384,7 @@ func revalidateApplyPatchTarget(root, path, approvedCanonical string) error {
 // produce one entry each.
 func buildOpPreviews(pl *applyPlan) []AppliedFilePreview {
 	switch {
-	case pl.moveCanonical != "":
+	case pl.op.movePath != "":
 		postLines := splitLinesRaw([]byte(pl.newContent))
 		return []AppliedFilePreview{
 			{Op: "M", Path: pl.op.movePath, Post: postLines, Hunks: pl.hunks},
@@ -461,118 +402,39 @@ func buildOpPreviews(pl *applyPlan) []AppliedFilePreview {
 	return nil
 }
 
-func applyOriginalMutation(pl *applyPlan, store SnapshotStore, committed *[]appliedOp, srcBound boundCall) error {
-	if pl.moveCanonical != "" {
-		// For Move the source-path delete is the original-path mutation; the
-		// kind is "D" of the source.
-		if err := deleteWithSnapshot(store, srcBound, pl.displayAbsPath, pl.canonicalPath); err != nil {
-			return err
+func applyOriginalMutation(pl *applyPlan, store SnapshotStore, committed *[]appliedOp) error {
+	var outcome mutationOutcome
+	var err error
+	kind := ""
+	if pl.op.movePath != "" {
+		kind = "D"
+		outcome, err = deleteBound(pl.source, store)
+	} else {
+		switch pl.op.kind {
+		case opAdd:
+			kind = "A"
+			outcome, err = writeBound(pl.source, store, []byte(pl.newContent), true)
+		case opUpdate:
+			kind = "M"
+			outcome, err = writeBound(pl.source, store, []byte(pl.newContent), false)
+		case opDelete:
+			kind = "D"
+			outcome, err = deleteBound(pl.source, store)
 		}
-		*committed = append(*committed, appliedOp{kind: "D", path: pl.op.path})
-		return nil
 	}
-
-	switch pl.op.kind {
-	case opAdd:
-		if err := writeWithSnapshot(store, srcBound, pl.displayAbsPath, pl.canonicalPath, pl.newContent, true); err != nil {
-			return err
-		}
-		*committed = append(*committed, appliedOp{kind: "A", path: pl.op.path})
-	case opUpdate:
-		if err := writeWithSnapshot(store, srcBound, pl.displayAbsPath, pl.canonicalPath, pl.newContent, false); err != nil {
-			return err
-		}
-		*committed = append(*committed, appliedOp{kind: "M", path: pl.op.path})
-	case opDelete:
-		if err := deleteWithSnapshot(store, srcBound, pl.displayAbsPath, pl.canonicalPath); err != nil {
-			return err
-		}
-		*committed = append(*committed, appliedOp{kind: "D", path: pl.op.path})
+	if outcome == mutationCompleted {
+		*committed = append(*committed, appliedOp{kind: kind, path: pl.op.path})
 	}
-	return nil
+	return err
 }
 
-// writeWithSnapshot captures the target's preimage, clears the LastWrite
-// proof, revalidates the approved witnesses, then writes the new content.
-// A failure that proves no mutation ran abandons the snapshot; a failure with
-// known-complete produced bytes records them; an uncertain started mutation
-// retains the preimage with nil identity. forNew enforces the Add /
-// Move-dest exclusive-create guarantee: if the path was validated to not
-// exist and OpenForWrite reports it now does (concurrent create between
-// validate and apply), the write is refused.
-func writeWithSnapshot(store SnapshotStore, bound boundCall, displayAbsPath, canonicalPath, content string, forNew bool) error {
-	snap, err := captureSnapshotEntry(store, displayAbsPath, canonicalPath)
-	if err != nil {
-		return fmt.Errorf("snapshot: %w", err)
-	}
-	// The fail-closed root/write-dir/target revalidators run after capture
-	// and before any open/truncate; a newly resolved target is never
-	// substituted.
-	if err := bound.revalidate(); err != nil {
-		err = fmt.Errorf("apply_patch: resolve path: %w", err)
-		if abandonErr := abandonUnmutatedSnapshot(snap); abandonErr != nil {
-			return fmt.Errorf("%w; additionally failed to abandon snapshot: %v", err, abandonErr)
+func deleteBound(bound boundCall, store SnapshotStore) (mutationOutcome, error) {
+	return mutateBound(bound, store, nil, func() (mutationOutcome, []byte, bool, error) {
+		if err := safefs.RemoveLeaf(bound.canonical); err != nil {
+			return mutationUntouched, nil, false, fmt.Errorf("remove: %w", err)
 		}
-		return err
-	}
-
-	f, existed, err := openWriteTargetForMutation(canonicalPath)
-	if err != nil {
-		if abandonErr := abandonUnmutatedSnapshot(snap); abandonErr != nil {
-			return fmt.Errorf("%w; additionally failed to abandon snapshot: %v", err, abandonErr)
-		}
-		return fmt.Errorf("open: %w", err)
-	}
-	defer f.Close()
-
-	if forNew && existed {
-		appearedErr := fmt.Errorf("path %s appeared during apply (Add requires the path to not exist)", canonicalPath)
-		_ = f.Close()
-		if abandonErr := abandonUnmutatedSnapshot(snap); abandonErr != nil {
-			return fmt.Errorf("%w; additionally failed to abandon snapshot: %v", appearedErr, abandonErr)
-		}
-		return appearedErr
-	}
-
-	complete, werr := writeReplacement(f, []byte(content))
-	if werr != nil {
-		return finishMutationFailure(snap, true, complete, []byte(content), werr)
-	}
-	if err := recordProducedSnapshotContent(snap, []byte(content)); err != nil {
-		return fmt.Errorf("record snapshot identity: %w", err)
-	}
-	return nil
-}
-
-// deleteWithSnapshot captures the target's preimage, clears the LastWrite
-// proof, revalidates the approved witnesses, then removes it. The snapshot
-// captures the file's content so the restore traversal can recover it. A
-// failed absence record leaves nil proof and preserves the preimage for a
-// later restore skip.
-func deleteWithSnapshot(store SnapshotStore, bound boundCall, displayAbsPath, canonicalPath string) error {
-	snap, err := captureSnapshotEntry(store, displayAbsPath, canonicalPath)
-	if err != nil {
-		return fmt.Errorf("snapshot: %w", err)
-	}
-	// The fail-closed root/write-dir/target revalidators run after capture
-	// and before the remove; a newly resolved target is never substituted.
-	if err := bound.revalidate(); err != nil {
-		err = fmt.Errorf("apply_patch: resolve path: %w", err)
-		if abandonErr := abandonUnmutatedSnapshot(snap); abandonErr != nil {
-			return fmt.Errorf("%w; additionally failed to abandon snapshot: %v", err, abandonErr)
-		}
-		return err
-	}
-	if err := safefs.RemoveLeaf(canonicalPath); err != nil {
-		if abandonErr := abandonUnmutatedSnapshot(snap); abandonErr != nil {
-			return fmt.Errorf("%w; additionally failed to abandon snapshot: %v", err, abandonErr)
-		}
-		return fmt.Errorf("remove: %w", err)
-	}
-	if err := recordProducedSnapshotAbsence(snap); err != nil {
-		return fmt.Errorf("record snapshot identity: %w", err)
-	}
-	return nil
+		return mutationCompleted, nil, true, nil
+	})
 }
 
 func buildSuccessSummary(committed []appliedOp) string {

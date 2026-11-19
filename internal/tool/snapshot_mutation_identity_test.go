@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -197,6 +198,216 @@ func TestFailedFinalIdentityRecordKeepsNilProofAndSkipsRevert(t *testing.T) {
 	result := revertTestGroup(t, groupDir)
 	testassert.Require(t, len(result.Restored) == 0 && len(result.Skipped) == 1 && result.Skipped[0].Path == path, "restored = %v skipped = %+v, want the nil proof to skip %s", result.Restored, result.Skipped, path)
 	assertFileContent(t, path, "created")
+}
+
+func TestPatchPartialSummaryUsesCompletedMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name, patch, target, targetContent string
+		want, forbidden                    []string
+		record                             int
+		step                               mutationFailureStep
+		targetMissing, sourceUnchanged     bool
+	}{
+		{name: "add_record", patch: "*** Add File: new.txt\n+after", target: "new.txt", targetContent: "after", want: []string{"A new.txt"}, record: 3},
+		{name: "update_sync_record", patch: "*** Update File: old.txt\n@@\n-before\n+after", target: "old.txt", targetContent: "after", want: []string{"M old.txt"}, record: 3, step: failAfterSync},
+		{name: "delete_record", patch: "*** Delete File: old.txt", target: "old.txt", targetMissing: true, want: []string{"D old.txt"}, record: 3},
+		{name: "move_destination_record", patch: "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after", target: "new.txt", targetContent: "after", sourceUnchanged: true, want: []string{"M new.txt"}, forbidden: []string{"D old.txt"}, record: 3},
+		{name: "move_destination_short", patch: "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after", target: "new.txt", targetContent: "af", sourceUnchanged: true, forbidden: []string{"M new.txt", "D old.txt"}, step: failShortWriteError},
+		{name: "move_source_record", patch: "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after", target: "old.txt", targetMissing: true, want: []string{"M new.txt", "D old.txt"}, record: 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			old := snapshotLifecycleFile(t, root, "old.txt", "before")
+			path := filepath.Join(root, tc.target)
+			store := newTempCodeGroupStore(t)
+			if tc.record != 0 {
+				withSnapshotMetaPublishFailure(t, tc.record)
+			}
+			if tc.step != "" {
+				withMutationFailure(t, path, tc.step)
+			}
+			_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, tc.patch)})
+			var exitErr *ExitError
+			testassert.Require(t, errors.As(err, &exitErr), "error = %v, want partial summary", err)
+			for _, line := range tc.want {
+				testassert.Require(t, strings.Contains(exitErr.Output, line), "summary = %q, want %q", exitErr.Output, line)
+			}
+			for _, line := range tc.forbidden {
+				testassert.Require(t, !strings.Contains(exitErr.Output, line), "summary = %q, must not report %q", exitErr.Output, line)
+			}
+			meta := metaForCanonical(t, store, path)
+			testassert.Require(t, meta.LastWrite == nil, "LastWrite = %+v, want nil", meta.LastWrite)
+			if tc.sourceUnchanged {
+				assertFileContent(t, old, "before")
+			}
+			if tc.targetMissing {
+				assertPathMissing(t, path)
+			} else {
+				assertFileContent(t, path, tc.targetContent)
+			}
+			result := revertTestGroup(t, store.groupDir)
+			testassert.Require(t, len(result.Skipped) == 1, "revert = %+v, want skipped uncertain proof", result)
+		})
+	}
+}
+
+func TestPatchPreconditionsUseCurrentExistence(t *testing.T) {
+	for _, tc := range []struct {
+		name, input          string
+		exists, missingAfter bool
+	}{
+		{"add_existing_disappears", "*** Add File: file.txt\n+after", true, false},
+		{"update_missing_appears", "*** Update File: file.txt\n@@\n-before\n+after", false, false},
+		{"delete_missing_appears", "*** Delete File: file.txt", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "file.txt")
+			if tc.exists {
+				testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
+			}
+			store := newTempCodeGroupStore(t)
+			args, err := NormalizePatchArgs(map[string]any{"input": applyPatchInput(t, tc.input)})
+			testassert.NoError(t, err)
+			call, err := PreparePatchCall(root, "", "", CapabilityOptions{}, store, args)
+			testassert.NoError(t, err)
+			if tc.exists {
+				testassert.NoError(t, os.Remove(path))
+			} else {
+				testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
+			}
+			_, err = call.Execute(context.Background())
+			testassert.NoError(t, err)
+			if tc.missingAfter {
+				assertPathMissing(t, path)
+			} else {
+				assertFileContent(t, path, "after")
+			}
+			result := revertTestGroup(t, store.groupDir)
+			testassert.Require(t, len(result.Restored) == 1 && len(result.Skipped) == 0, "revert = %+v", result)
+			if tc.exists {
+				assertPathMissing(t, path)
+			} else {
+				assertFileContent(t, path, "before")
+			}
+		})
+	}
+	t.Run("move_destination_disappears", func(t *testing.T) {
+		root := t.TempDir()
+		source := snapshotLifecycleFile(t, root, "old.txt", "before")
+		destination := snapshotLifecycleFile(t, root, "new.txt", "outside")
+		store := newTempCodeGroupStore(t)
+		args, err := NormalizePatchArgs(map[string]any{"input": applyPatchInput(t, "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after")})
+		testassert.NoError(t, err)
+		call, err := PreparePatchCall(root, "", "", CapabilityOptions{}, store, args)
+		testassert.NoError(t, err)
+		testassert.NoError(t, os.Remove(destination))
+		_, err = call.Execute(context.Background())
+		testassert.NoError(t, err)
+		assertPathMissing(t, source)
+		assertFileContent(t, destination, "after")
+		result := revertTestGroup(t, store.groupDir)
+		testassert.Require(t, len(result.Restored) == 2 && len(result.Skipped) == 0, "revert = %+v", result)
+		assertFileContent(t, source, "before")
+		assertPathMissing(t, destination)
+	})
+}
+
+func TestPatchUpdateDisappearsDuringCapture(t *testing.T) {
+	root := t.TempDir()
+	path := snapshotLifecycleFile(t, root, "file.txt", "before")
+	store := newRecordingCodeGroupStore(t)
+	store.onSnapshot = func(int) { testassert.NoError(t, os.Remove(path)) }
+	result, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{
+		"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-before\n+after"),
+	})
+	testassert.NoError(t, err)
+	testassert.Require(t, strings.Contains(result.Result, "M file.txt"), "result = %q, want completed update", result.Result)
+	assertFileContent(t, path, "after")
+	last := soleSnapshotMeta(t, store.testCodeGroupStore).LastWrite
+	testassert.Require(t, last != nil && last.Hash == snapshotIdentityHash("after"), "LastWrite = %+v, want produced bytes", last)
+	restored := revertTestGroup(t, store.groupDir)
+	testassert.Require(t, len(restored.Restored) == 1 && restored.Restored[0] == path && len(restored.Skipped) == 0, "revert = %+v", restored)
+	assertFileContent(t, path, "before")
+}
+
+func TestMutationPreflightBeforeCapture(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		run    func(*testing.T, string, string, SnapshotStore) error
+		delete bool
+	}{
+		{"write", func(t *testing.T, root, path string, store SnapshotStore) error {
+			_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "after"})
+			return err
+		}, false},
+		{"edit", func(t *testing.T, root, path string, store SnapshotStore) error {
+			_, err := execEdit(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "old_string": "before", "new_string": "after"})
+			return err
+		}, false},
+		{"patch_update", func(t *testing.T, root, _ string, store SnapshotStore) error {
+			_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-before\n+after")})
+			return err
+		}, false},
+		{"patch_delete", func(t *testing.T, root, _ string, store SnapshotStore) error {
+			_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Delete File: file.txt")})
+			return err
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := snapshotLifecycleFile(t, root, "file.txt", "before")
+			testassert.NoError(t, os.Chmod(path, 0o444))
+			if f, err := os.OpenFile(path, os.O_RDWR, 0); err == nil {
+				f.Close()
+				t.Skip("filesystem permits writing a read-only file")
+			} else if !errors.Is(err, os.ErrPermission) {
+				t.Fatal(err)
+			}
+			store := newRecordingCodeGroupStore(t)
+			err := tc.run(t, root, path, store)
+			if tc.delete {
+				testassert.NoError(t, err)
+				assertPathMissing(t, path)
+				result := revertTestGroup(t, store.groupDir)
+				testassert.Require(t, len(result.Restored) == 1 && len(result.Skipped) == 0, "revert = %+v", result)
+				assertFileContent(t, path, "before")
+			} else {
+				testassert.Require(t, err != nil, "mutation of read-only target succeeded")
+				testassert.Require(t, len(store.calls) == 0, "captures = %+v, want preflight refusal", store.calls)
+				assertSnapshotEntryCount(t, store.groupDir, 0)
+				assertFileContent(t, path, "before")
+			}
+		})
+	}
+}
+
+func TestPreparedEditAndWriteWithAppearedTarget(t *testing.T) {
+	for _, edit := range []bool{true, false} {
+		t.Run(map[bool]string{true: "edit", false: "write"}[edit], func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "file.txt")
+			store := newTempCodeGroupStore(t)
+			var call *PreparedCall
+			var args map[string]any
+			var err error
+			if edit {
+				args, err = NormalizeEditArgs(map[string]any{"path": path, "old_string": "before", "new_string": "after"})
+				testassert.NoError(t, err)
+				call, err = PrepareEditCall(root, "", "", CapabilityOptions{}, store, args)
+				testassert.NoError(t, err)
+			} else {
+				args, err = NormalizeWriteArgs(map[string]any{"path": path, "content": "after"})
+				testassert.NoError(t, err)
+				call, err = PrepareWriteCall(root, "", "", CapabilityOptions{}, store, args)
+				testassert.NoError(t, err)
+			}
+			testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
+			_, err = call.Execute(context.Background())
+			testassert.NoError(t, err)
+			assertFileContent(t, path, "after")
+		})
+	}
 }
 
 // --- destination appeared during apply: refusal plus abandonment cleanup ---

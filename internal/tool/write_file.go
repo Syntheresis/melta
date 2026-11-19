@@ -47,6 +47,76 @@ type snapshotEntry struct {
 	prior   *snapshot.SnapshotContentIdentity
 }
 
+type mutationOutcome uint8
+
+const (
+	mutationUntouched mutationOutcome = iota
+	mutationCompleted
+	mutationUncertain
+)
+
+// mutateBound revalidates around capture and keeps the mutation outcome separate from errors.
+func mutateBound(bound boundCall, store SnapshotStore, preflight func() error, mutate func() (mutationOutcome, []byte, bool, error)) (mutationOutcome, error) {
+	if err := bound.revalidate(); err != nil {
+		return mutationUntouched, fmt.Errorf("%s: resolve path: %w", bound.toolName, err)
+	}
+	if preflight != nil {
+		if err := preflight(); err != nil {
+			return mutationUntouched, err
+		}
+	}
+	entry, err := captureSnapshotEntry(store, bound.displayAbs, bound.canonical)
+	if err != nil {
+		return mutationUntouched, fmt.Errorf("%s: snapshot: %w", bound.toolName, err)
+	}
+	if err := bound.revalidate(); err != nil {
+		err = fmt.Errorf("%s: resolve path: %w", bound.toolName, err)
+		return mutationUntouched, abandonMutation(entry, err)
+	}
+	outcome, produced, absent, err := mutate()
+	if outcome == mutationUntouched {
+		return outcome, abandonMutation(entry, err)
+	}
+	if outcome == mutationCompleted {
+		var recordErr error
+		if absent {
+			recordErr = entry.store.RecordSnapshotAbsence(entry.entryID)
+		} else {
+			recordErr = entry.store.RecordSnapshotContent(entry.entryID, produced)
+		}
+		if recordErr != nil {
+			if err != nil {
+				return outcome, fmt.Errorf("%w; additionally failed to record snapshot identity: %v", err, recordErr)
+			}
+			return outcome, fmt.Errorf("%s: record snapshot identity: %w", bound.toolName, recordErr)
+		}
+	}
+	return outcome, err
+}
+
+func writeBound(bound boundCall, store SnapshotStore, content []byte, createOnly bool) (mutationOutcome, error) {
+	return mutateBound(bound, store, func() error {
+		return preflightWriteSnapshotTarget(bound.canonical, bound.toolName)
+	}, func() (mutationOutcome, []byte, bool, error) {
+		f, existed, err := openWriteTargetForMutation(bound.canonical)
+		if err != nil {
+			return mutationUntouched, nil, false, fmt.Errorf("%s: open: %w", bound.toolName, err)
+		}
+		defer f.Close()
+		if createOnly && existed {
+			return mutationUntouched, nil, false, fmt.Errorf("path %s appeared during apply (Add requires the path to not exist)", bound.canonical)
+		}
+		complete, err := writeReplacement(f, content)
+		if err != nil {
+			err = fmt.Errorf("%s: %w", bound.toolName, err)
+		}
+		if complete {
+			return mutationCompleted, content, false, err
+		}
+		return mutationUncertain, nil, false, err
+	})
+}
+
 // captureSnapshotEntry captures the preimage and persists the cleared
 // LastWrite proof under the existing execution/artifact ownership. A failed
 // clear abandons the capture (a newly created preimage is discarded) and the
@@ -113,35 +183,11 @@ func writeReplacement(f mutationFile, content []byte) (complete bool, err error)
 	return true, nil
 }
 
-// finishMutationFailure resolves a mutation error against the snapshot entry:
-// a proven non-mutation abandons the entry; a mutation whose complete
-// produced content is known records that producer-owned identity; an
-// uncertain started mutation retains the preimage with the cleared nil
-// identity. No post-error filesystem reread establishes output.
-func finishMutationFailure(entry snapshotEntry, started, complete bool, produced []byte, err error) error {
-	if !started {
-		if abandonErr := abandonUnmutatedSnapshot(entry); abandonErr != nil {
-			return fmt.Errorf("%w; additionally failed to abandon snapshot: %v", err, abandonErr)
-		}
-		return err
-	}
-	if complete {
-		if recordErr := entry.store.RecordSnapshotContent(entry.entryID, produced); recordErr != nil {
-			return fmt.Errorf("%w; additionally failed to record snapshot identity: %v", err, recordErr)
-		}
+func abandonMutation(entry snapshotEntry, err error) error {
+	if abandonErr := abandonUnmutatedSnapshot(entry); abandonErr != nil {
+		return fmt.Errorf("%w; additionally failed to abandon snapshot: %v", err, abandonErr)
 	}
 	return err
-}
-
-// recordProducedSnapshotContent records the identity of content the producer
-// completed. A failure leaves the cleared nil proof and reports its error;
-// the retained preimage serves a later restore skip.
-func recordProducedSnapshotContent(entry snapshotEntry, content []byte) error {
-	return entry.store.RecordSnapshotContent(entry.entryID, content)
-}
-
-func recordProducedSnapshotAbsence(entry snapshotEntry) error {
-	return entry.store.RecordSnapshotAbsence(entry.entryID)
 }
 
 // openWriteTargetForMutation opens the canonical write target through the
@@ -175,25 +221,25 @@ func openWriteTargetForMutationReal(absPath string) (mutationFile, bool, error) 
 	return f, openedExisting, nil
 }
 
-func preflightWriteSnapshotTarget(absPath string) error {
+func preflightWriteSnapshotTarget(absPath, toolName string) error {
 	existed, err := ensureRegularExistingTarget(absPath)
 	if err != nil {
-		return fmt.Errorf("write_file: %w", err)
+		return fmt.Errorf("%s: %w", toolName, err)
 	}
 	if !existed {
 		return nil
 	}
 	f, err := safefs.OpenExisting(absPath, os.O_RDWR)
 	if err != nil {
-		return fmt.Errorf("write_file: %w", err)
+		return fmt.Errorf("%s: %w", toolName, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("write_file: stat: %w", err)
+		return fmt.Errorf("%s: stat: %w", toolName, err)
 	}
 	if err := ensureRegularFileInfo(absPath, info); err != nil {
-		return fmt.Errorf("write_file: %w", err)
+		return fmt.Errorf("%s: %w", toolName, err)
 	}
 	return nil
 }
