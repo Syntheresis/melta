@@ -910,7 +910,7 @@ func TestServeFrameBounds(t *testing.T) {
 func TestServeHandshakeFailures(t *testing.T) {
 	t.Run("version mismatch", func(t *testing.T) {
 		p := startPeer(t, singleNative(baseDeclaration(), nil, nil))
-		params, _ := json.Marshal(worker.ActivateParams{ContractVersion: "1"})
+		params, _ := json.Marshal(worker.ActivateParams{ContractVersion: "3"})
 		p.send(worker.Frame{Kind: worker.KindRequest, ID: "activate", Method: worker.MethodActivate, Params: params})
 		response := p.readResponse("activate")
 		if response.Error == nil || response.Error.Class != worker.ClassIncompatible {

@@ -165,7 +165,7 @@ func testJobsAcrossSessions(t *testing.T, store harness.Storage) {
 	// loop observed the real output.
 	reads := 0
 	readCallID := "call-b-read"
-	modelFn := func(_ context.Context, req model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		prompt := requestUserText(req)
 		if requestMessageRole(req) == "tool" {
 			// Readiness rendezvous through the model loop: while the turn

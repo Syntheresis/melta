@@ -62,7 +62,7 @@ func newInvocationRecordingFixture(t *testing.T, store harness.Storage, script *
 					rec.emit("invocation:" + adm.OperationID + ":" + string(request.Purpose))
 					purpose := request.Purpose
 					return harness.InvocationExecution{
-						Model: func(ctx context.Context, req model.Request) (model.Stream, error) {
+						Model: func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 							system := ""
 							if len(req.Messages) > 0 {
 								system = req.Messages[0].TextContent()
@@ -70,7 +70,7 @@ func newInvocationRecordingFixture(t *testing.T, store harness.Storage, script *
 							rec.mu.Lock()
 							rec.attempts = append(rec.attempts, recordedAttempt{operation: adm.OperationID, purpose: purpose, systemText: system})
 							rec.mu.Unlock()
-							return script.effect(ctx, req)
+							return script.effect(ctx, req, nil)
 						},
 						LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 							return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}

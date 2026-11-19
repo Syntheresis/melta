@@ -241,7 +241,8 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 			}},
 			{ID: "req.effectful", ExtensionID: "req-ext", Mode: harness.HookModeEffectful, Run: func(context.Context, harness.RequestHookInput) (harness.RequestConsequence, error) {
 				p := netPrompt
-				return harness.RequestConsequence{Prompt: &p, Messages: []model.Message{addition}}, nil
+				position := 0
+				return harness.RequestConsequence{Prompt: &p, Edits: []harness.RequestMessageEdit{{Position: &position}, {Message: &addition}}}, nil
 			}},
 		}
 		script := newScriptModel(publicTurn(), publicTurn(), publicTurn())
@@ -253,7 +254,7 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 					return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 						return harness.InvocationExecution{
 							Model:        script.effect,
-							RequestHooks: hooks,
+							RequestStage: func() harness.RequestStage { return harness.RequestStage{Catalog: publicCapture().Tools, Hooks: hooks} },
 							LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) harness.PreparedTool { return harness.PreparedTool{} }, hookNormalize),
 						}, nil
 					}}, nil
@@ -286,10 +287,13 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 		entries, err := store.ReadEntries(ctx, session, 0)
 		testassert.NoError(t, err)
 		type evidenceWire struct {
-			BoundaryEntryID string            `json:"boundary_entry_id"`
-			Prompt          *string           `json:"prompt"`
-			Messages        []json.RawMessage `json:"messages"`
-			HookIDs         []struct {
+			BoundaryEntryID string  `json:"boundary_entry_id"`
+			Prompt          *string `json:"prompt"`
+			Edits           []struct {
+				Position *int            `json:"position"`
+				Message  json.RawMessage `json:"message"`
+			} `json:"edits"`
+			HookIDs []struct {
 				ExtensionID string `json:"extension_id"`
 				HookID      string `json:"hook_id"`
 			} `json:"hook_ids"`
@@ -363,7 +367,8 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 		testassert.Require(t, destIDs[copiedEvidence.BoundaryEntryID], "copied evidence boundary %q names no destination entry", copiedEvidence.BoundaryEntryID)
 		testassert.Require(t, copiedEvidence.Prompt != nil && *copiedEvidence.Prompt == netPrompt,
 			"copied evidence prompt = %v, want the net contribution the assistant consumed", copiedEvidence.Prompt)
-		testassert.Require(t, len(copiedEvidence.Messages) == 1 && len(copiedEvidence.HookIDs) == 2 &&
+		testassert.Require(t, len(copiedEvidence.Edits) == 2 && copiedEvidence.Edits[0].Position != nil &&
+			*copiedEvidence.Edits[0].Position == 0 && len(copiedEvidence.Edits[1].Message) > 0 && len(copiedEvidence.HookIDs) == 2 &&
 			copiedEvidence.HookIDs[0].HookID == "req.pure" && copiedEvidence.HookIDs[1].HookID == "req.effectful",
 			"copied evidence = %+v, want the retained delta and recorded provenance unchanged", copiedEvidence)
 		{

@@ -167,7 +167,7 @@ func TestBaselineModelBinding(t *testing.T) {
 			if row.name == "neither" && (!errors.Is(err, config.ErrMissingEnvVar) || strings.Contains(err.Error(), "prov/missing")) {
 				t.Fatalf("final refusal reason: %v", err)
 			}
-			if !row.wantErr && (entry == nil || transport == nil || sel.inputs.Model.String() != row.want) {
+			if !row.wantErr && (entry == nil || transport.transport == nil || sel.inputs.Model.String() != row.want) {
 				t.Fatalf("binding: %v %v %s", entry, transport, sel.inputs.Model.String())
 			}
 		})

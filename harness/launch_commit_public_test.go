@@ -32,7 +32,7 @@ func TestLaunchChildCommitPointOwnsAdmittedChild(t *testing.T) {
 			testassert.NoError(t, err)
 			t.Cleanup(func() { testassert.NoError(t, inner.Close()) })
 			store := &publicationCancelStore{Storage: inner}
-			f := newPublicFixtureWithJobs(t, store, nil, nil, func(context.Context, model.Request) (model.Stream, error) {
+			f := newPublicFixtureWithJobs(t, store, nil, nil, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return nil, errors.New("scripted child model failure")
 			}, nil)
 			t.Cleanup(func() { testassert.NoError(t, converge(t, f)) })

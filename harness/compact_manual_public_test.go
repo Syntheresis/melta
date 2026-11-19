@@ -734,7 +734,7 @@ func TestPublicManualCompactInterruptKeepsPriorProjection(t *testing.T) {
 						return harness.Execution{OpenInvocation: func(_ context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 							attempt := conversation.effect
 							if request.Purpose == harness.InvocationPurposeMaintenance {
-								attempt = func(ctx context.Context, _ model.Request) (model.Stream, error) {
+								attempt = func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 									select {
 									case summaryStarted <- struct{}{}:
 									default:

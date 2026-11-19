@@ -23,6 +23,7 @@ import (
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/prompt"
+	"github.com/Syntheresis/melta/protocol"
 )
 
 // Preparation fixtures: the public Open over the existing owner environment
@@ -1793,11 +1794,20 @@ func TestPreparationVisibilityRestoresThroughRequestHooks(t *testing.T) {
 					return extension.PreparationConsequence{ToolNames: []string{}}, nil
 				}},
 				"request.restore": {Request: func(_ context.Context, _ extension.CallContext, input harness.RequestHookInput) (harness.RequestConsequence, error) {
+					hidden := []model.ToolDefinition{input.Catalog[0]}
 					// The first request keeps the preparation-hidden advertisement;
 					// the next request, after the refused call, restores the tool.
-					for _, message := range input.Messages {
+					for i, message := range input.Messages {
 						if message.Role == model.RoleTool {
-							return harness.RequestConsequence{ToolNames: []string{"hidden"}}, nil
+							if strings.Contains(message.TextContent(), "not available") {
+								edits := make([]harness.RequestMessageEdit, len(input.Messages))
+								for j := range edits {
+									edits[j].Position = input.MessagePositions[j]
+								}
+								edits[i].Content = []model.ContentPart{{Kind: model.PartText, Text: "still unavailable"}}
+								return harness.RequestConsequence{Edits: edits, Tools: hidden}, nil
+							}
+							return harness.RequestConsequence{Tools: hidden}, nil
 						}
 					}
 					return harness.RequestConsequence{}, nil
@@ -1806,7 +1816,7 @@ func TestPreparationVisibilityRestoresThroughRequestHooks(t *testing.T) {
 					return harness.RequestConsequence{}, nil
 				}},
 				"request.foreign": {Request: func(context.Context, extension.CallContext, harness.RequestHookInput) (harness.RequestConsequence, error) {
-					return harness.RequestConsequence{ToolNames: []string{"foreign"}}, nil
+					return harness.RequestConsequence{Tools: []model.ToolDefinition{{Name: "foreign", Parameters: json.RawMessage(`{}`)}}}, nil
 				}},
 				"hidden":  {Tool: visibilityTool{executes: &executes}},
 				"visible": {Tool: visibilityTool{executes: &executes}},
@@ -1888,7 +1898,7 @@ func TestPreparationVisibilityRestoresThroughRequestHooks(t *testing.T) {
 		testassert.Require(t, len(restorerRequests) >= 3, "restorer requests = %d, want the refused call, restored call, and follow-up", len(restorerRequests))
 		testassert.Require(t, len(restorerRequests[0].Tools) == 0, "pre-restoration advertisement = %+v, want none", restorerRequests[0].Tools)
 		testassert.Require(t, len(restorerRequests[1].Tools) == 1 && restorerRequests[1].Tools[0].Function.Name == "hidden" && restorerRequests[1].Tools[0].Function.Description == "transformed hidden description", "restored advertisement = %+v, want the hidden tool with the transformed description", restorerRequests[1].Tools)
-		testassert.Require(t, strings.Contains(string(restorerRequests[1].Messages[len(restorerRequests[1].Messages)-1].Content), `Tool \"hidden\" is not available.`), "pre-restoration tool result = %s, want the unavailable refusal", restorerRequests[1].Messages[len(restorerRequests[1].Messages)-1].Content)
+		testassert.Require(t, strings.Contains(string(restorerRequests[1].Messages[len(restorerRequests[1].Messages)-1].Content), "still unavailable"), "pre-restoration tool result = %s, want the edited unavailable refusal", restorerRequests[1].Messages[len(restorerRequests[1].Messages)-1].Content)
 		testassert.Require(t, strings.Contains(string(restorerRequests[2].Messages[len(restorerRequests[2].Messages)-1].Content), "hidden-ok"), "restored tool result = %s, want the executed content", restorerRequests[2].Messages[len(restorerRequests[2].Messages)-1].Content)
 		testassert.Require(t, len(reorderRequests) >= 2 && len(reorderRequests[0].Tools) == 2 && reorderRequests[0].Tools[0].Function.Name == "visible" && reorderRequests[0].Tools[1].Function.Name == "hidden", "reordered advertisement = %+v, want visible then hidden", reorderRequests[0].Tools)
 
@@ -1919,6 +1929,74 @@ func TestPreparationVisibilityRestoresThroughRequestHooks(t *testing.T) {
 		}
 		testassert.NoError(t, r2.Close(ctx))
 	})
+}
+
+func TestRequestBodyParametersAcrossRetries(t *testing.T) {
+	t.Setenv("PRODUCTION_TEST_KEY", "test-key")
+	e := newOwnerEnv(t)
+	config := strings.Replace(productionConfigDocument(e.server.URL, "A"), `"provider_side": "provider-value"`, `"provider_side":"provider-value","shared":"provider","_melta_hidden":true`, 1)
+	config = strings.Replace(config, `"m": {"name":`, `"summary":{"name":"Summary","context_window":262144,"extra_body":{"model_side":"summary-value"}},"m": {"name":`, 1)
+	config = strings.TrimSuffix(config, "}") + `,"compaction":{"model":"prov/summary"}}`
+	writeServiceFile(t, e.configPath, config)
+	writeAgentDefinitions(t, e.configPath, `{"body":{"model":"prov/m","system_prompt":"simple","capabilities":["request.first","request.second"]}}`)
+	enableFixturePlugin(t, e.configPath, "gate")
+	var attempts, hooks atomic.Int64
+	native := testNative("gate", extension.LifetimeHarness, []extension.Capability{
+		extension.HookCapability("request.first", extension.SingleHook(extension.BoundaryRequest, extension.HookModePure)),
+		extension.HookCapability("request.second", extension.SingleHook(extension.BoundaryRequest, extension.HookModeEffectful)),
+	}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+		return extension.Instance{Capabilities: map[string]extension.Implementation{
+			"request.first": {Request: func(_ context.Context, _ extension.CallContext, input harness.RequestHookInput) (harness.RequestConsequence, error) {
+				hooks.Add(1)
+				want := `"model-value"`
+				if input.Purpose == harness.InvocationPurposeMaintenance {
+					want = `"summary-value"`
+				}
+				if string(input.Parameters["shared"]) != `"provider"` || string(input.Parameters["model_side"]) != want || input.Parameters["_melta_hidden"] != nil {
+					return harness.RequestConsequence{}, fmt.Errorf("defaults: %s", input.Parameters)
+				}
+				return harness.RequestConsequence{Parameters: model.Extra{"shared": json.RawMessage(`"first"`), "": json.RawMessage(`true`)}}, nil
+			}},
+			"request.second": {Request: func(_ context.Context, _ extension.CallContext, input harness.RequestHookInput) (harness.RequestConsequence, error) {
+				hooks.Add(1)
+				if string(input.Parameters["shared"]) != `"first"` || string(input.Parameters[""]) != `true` {
+					return harness.RequestConsequence{}, fmt.Errorf("preceding view: %s", input.Parameters)
+				}
+				return harness.RequestConsequence{Parameters: model.Extra{"shared": json.RawMessage(`"second"`)}}, nil
+			}},
+		}}, nil
+	})
+	e.server.setScript(func(context.Context, string) []string {
+		if attempts.Add(1)%2 == 1 {
+			return []string{"HTTP 503", `{"error":{"message":"retry"}}`}
+		}
+		return textTurnEvents("done")
+	})
+	ctx := context.Background()
+	r, err := e.open(ctx, native)
+	testassert.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close(ctx) })
+	s, err := r.createSession(ctx, e.dataDir, "body")
+	testassert.NoError(t, err)
+	submitThroughRuntime(t, r, s.Identity.SessionID, "body", "hello")
+	awaitOperation(t, r, s.Identity.SessionID, "body", harness.OperationSuccess)
+	awaitRestorableSession(t, r, s.Identity.SessionID)
+	_, err = r.CompactSession(ctx, testCaller(r), s.Identity.SessionID, protocol.CompactRequest{OperationId: "body-summary"})
+	testassert.NoError(t, err)
+	awaitOperation(t, r, s.Identity.SessionID, "body-summary", harness.OperationSuccess)
+	testassert.Require(t, attempts.Load() == 4 && hooks.Load() == 4, "attempts=%d hooks=%d", attempts.Load(), hooks.Load())
+	for i := 0; i < 4; i++ {
+		var body map[string]json.RawMessage
+		testassert.NoError(t, json.Unmarshal([]byte(e.server.bodyAt(i)), &body))
+		wantModel, wantSide := `"m"`, `"model-value"`
+		if i >= 2 {
+			wantModel, wantSide = `"summary"`, `"summary-value"`
+		}
+		testassert.Require(t, string(body["shared"]) == `"second"` && string(body[""]) == `true` &&
+			string(body["provider_number"]) == "9007199254740993" && string(body["model_side"]) == wantSide && string(body["model"]) == wantModel &&
+			body["_melta_hidden"] == nil, "attempt %d: model=%s model_side=%s shared=%s empty=%s provider_number=%s private=%s",
+			i+1, body["model"], body["model_side"], body["shared"], body[""], body["provider_number"], body["_melta_hidden"])
+	}
 }
 
 type promptAssemblyProbe struct {

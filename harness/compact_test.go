@@ -22,8 +22,8 @@ import (
 
 // forbiddenConversationModel fails the test if the conversation model
 // transport ever runs during a compaction.
-func forbiddenConversationModel(t *testing.T) func(context.Context, model.Request) (model.Stream, error) {
-	return func(context.Context, model.Request) (model.Stream, error) {
+func forbiddenConversationModel(t *testing.T) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		t.Errorf("the conversation model transport must never run during compaction")
 		return nil, errors.New("conversation model must not run")
 	}
@@ -40,7 +40,7 @@ func summaryStream(text string, usage model.Usage) *scriptStream {
 // the Operation's retry classifier, and answers a conversation request with
 // the forbidden-model tripwire — compaction never wires a conversation
 // invocation.
-func compactionExecution(t *testing.T, compact func(context.Context, model.Request) (model.Stream, error), retry RetryPolicy) Execution {
+func compactionExecution(t *testing.T, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), retry RetryPolicy) Execution {
 	noop := func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
 	return Execution{
 		Retry: retry,
@@ -165,7 +165,7 @@ func TestRunCompactionReadyPathRunsOneRequest(t *testing.T) {
 
 	var requests []model.Request
 	var reservedID string
-	compact := func(ctx context.Context, req model.Request) (model.Stream, error) {
+	compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		requests = append(requests, req)
 		reg, err := store.ReadRegister(context.Background(), opKey)
 		if err != nil {
@@ -228,7 +228,7 @@ func TestRunCompactionFullInputRunsOneRequest(t *testing.T) {
 	fixture.entries[0].input.Content = admissionContent(large)
 	store := idleFixture(t, fixture, hexID(20))
 	var requests []model.Request
-	exec := compactionExecution(t, func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		requests = append(requests, req)
 		return summaryStream("S1", model.Usage{InputTokens: 5, OutputTokens: 3}), nil
 	}, nil)
@@ -252,7 +252,7 @@ func TestRunCompactionFullInputRunsOneRequest(t *testing.T) {
 // settlement.
 func TestCompactModelEffectSettlements(t *testing.T) {
 	compactRef := testCompactCapture().Model
-	run := func(t *testing.T, compact func(context.Context, model.Request) (model.Stream, error), retry RetryPolicy, execCtx context.Context) (*Harness, *graphStorage, *coordinator, string, error) {
+	run := func(t *testing.T, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), retry RetryPolicy, execCtx context.Context) (*Harness, *graphStorage, *coordinator, string, error) {
 		t.Helper()
 		store := idleFixture(t, validTestGraph(), hexID(20))
 		exec := compactionExecution(t, compact, retry)
@@ -268,7 +268,7 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 	t.Run("attempts run through the compact transport", func(t *testing.T) {
 		spy := &retrySpy{limit: 1}
 		calls := 0
-		compact := func(ctx context.Context, req model.Request) (model.Stream, error) {
+		compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 			calls++
 			if calls == 1 {
 				return nil, &net.OpError{Op: "dial", Err: errors.New("boom")}
@@ -289,7 +289,7 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 	})
 
 	t.Run("failed summary settles the reported usage", func(t *testing.T) {
-		compact := func(ctx context.Context, req model.Request) (model.Stream, error) {
+		compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 			// The failing response reports usage before the read failure:
 			// the errored assembly retains it.
 			return failStream(errors.New("provider failure"),
@@ -310,7 +310,7 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 	})
 
 	t.Run("interruption settles through the terminal path", func(t *testing.T) {
-		_, store, _, sessionID, err := run(t, func(ctx context.Context, req model.Request) (model.Stream, error) {
+		_, store, _, sessionID, err := run(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 			t.Errorf("no attempt may start under a canceled execution context")
 			return nil, errors.New("unreachable")
 		}, nil, canceledContext())
@@ -332,7 +332,7 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 	t.Run("refusal-only completed output is carried to the folding stage", func(t *testing.T) {
 		refusal := turnDelta("stop", "")
 		refusal.RefusalFragment = "no"
-		compact := func(ctx context.Context, req model.Request) (model.Stream, error) {
+		compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 			return streamOf(refusal, usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1})), nil
 		}
 		store := idleFixture(t, validTestGraph(), hexID(20))
@@ -380,7 +380,7 @@ func canceledContext() context.Context {
 // usage and no compaction entry.
 func TestRunCompactionCanceledBeforeRunSettlesInterruption(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
-	exec := compactionExecution(t, func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		t.Errorf("no request may run under a canceled execution context")
 		return nil, errors.New("unreachable")
 	}, nil)
@@ -416,7 +416,7 @@ func TestRunCompactionCanceledAfterSummarySettlesInterruption(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	requests := 0
-	compact := func(ctx context.Context, req model.Request) (model.Stream, error) {
+	compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		requests++
 		return &cancelOnCloseStream{scriptStream: summaryStream("S1", model.Usage{InputTokens: 4, OutputTokens: 2}), cancel: cancel}, nil
 	}
@@ -572,7 +572,7 @@ func TestRunCompactionExistingSummaryAndNewMessages(t *testing.T) {
 	fixture.ops = append(fixture.ops, op4)
 	store := idleFixture(t, fixture, hexID(20))
 	var requests []model.Request
-	exec := compactionExecution(t, func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		requests = append(requests, req)
 		return summaryStream("S1", model.Usage{}), nil
 	}, nil)
@@ -592,7 +592,7 @@ func TestRunCompactionExistingSummaryAndNewMessages(t *testing.T) {
 func TestRunCompactionSummaryOnlySessionSuppliesSummary(t *testing.T) {
 	store := idleFixture(t, compactedFixtureGraph(), hexID(20))
 	var requests []model.Request
-	exec := compactionExecution(t, func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		requests = append(requests, req)
 		return summaryStream("S1", model.Usage{}), nil
 	}, nil)
@@ -612,7 +612,7 @@ func TestRunCompactionSummaryOnlySessionSuppliesSummary(t *testing.T) {
 // writes no compaction work.
 func TestRunCompactionEmptySnapshotFailsNothingToCompact(t *testing.T) {
 	store := emptyStore(t)
-	exec := compactionExecution(t, func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		t.Errorf("no request may run for an empty snapshot")
 		return nil, errors.New("unreachable")
 	}, nil)
@@ -640,7 +640,7 @@ func TestRunCompactionEmptySnapshotFailsNothingToCompact(t *testing.T) {
 // boundary violation about an outputless settlement.
 func TestRunCompactionErroredSummaryCarriesOutputThroughTheRun(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
-	exec := compactionExecution(t, func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		return erroredTurnStream(), nil // text "partial" with usage, then the read failure
 	}, (&retrySpy{limit: 0}).retry)
 	prepared := compactPrepared(testCapture(), exec)
@@ -669,7 +669,7 @@ func TestRunCompactionEmptySummaryFailsWithTheRetainedDetail(t *testing.T) {
 	calls := 0
 	refusal := turnDelta("stop", "")
 	refusal.RefusalFragment = "no"
-	exec := compactionExecution(t, func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		calls++
 		return streamOf(refusal, usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1})), nil
 	}, nil)
@@ -829,7 +829,7 @@ func TestMaintenanceNonComparableCauseSettlesWithoutPanic(t *testing.T) {
 					strategy.consumeCause = &row.cause
 				}
 				binding := &StrategyBinding{ID: "test.cause/v1", Strategy: strategy}
-				compactFn := func(context.Context, model.Request) (model.Stream, error) {
+				compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					if row.source == "opener" {
 						t.Fatal("the maintenance opener failure reached the compact model")
 					}
@@ -907,7 +907,7 @@ func TestMaintenanceNonComparableCauseSettlesWithoutPanic(t *testing.T) {
 // token or a retry, and the rollback retains the running state for recovery.
 func TestMaintenanceInterruptionPublicationFailureWins(t *testing.T) {
 	store := emptyStore(t)
-	exec := compactionExecution(t, func(context.Context, model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		t.Fatal("a pre-plan interruption reached the compact model")
 		return nil, nil
 	}, nil)
@@ -950,7 +950,7 @@ func TestCommitCompactionAutomaticCommitsAtomically(t *testing.T) {
 	capture.Strategy = StrategyCapture{ID: "test.auto/v1"}
 	usage := model.Usage{InputTokens: 7, CachedInputTokens: 3, OutputTokens: 4}
 	arrived, release, conversation := parkedConversation(t)
-	exec := purposeExecution(conversation, func(context.Context, model.Request) (model.Stream, error) {
+	exec := purposeExecution(conversation, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return summaryStream("summary one", usage), nil
 	})
 	exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: "test.auto/v1", Strategy: strategy})
@@ -1007,7 +1007,7 @@ func TestCommitCompactionManualSettlesInTheSameTransaction(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
 	beforeEntries, _ := storedSessionState(store, testSessionID)
 	usage := model.Usage{InputTokens: 6, CachedInputTokens: 1, OutputTokens: 2}
-	exec := compactionExecution(t, func(context.Context, model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return summaryStream("manual summary", usage), nil
 	}, nil)
 	prepared := compactPrepared(testCapture(), exec)
@@ -1045,7 +1045,7 @@ func TestCommitCompactionManualSettlesInTheSameTransaction(t *testing.T) {
 func TestManualCompactAdoptsAdmissionAndReleasesAfterClose(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
 	var events []string
-	exec := compactionExecution(t, func(context.Context, model.Request) (model.Stream, error) {
+	exec := compactionExecution(t, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return summaryStream("summary", model.Usage{}), nil
 	}, nil)
 	exec.Close = func() error {
@@ -1098,7 +1098,7 @@ func TestCommitCompactionInjectedFailureLeavesPreviousStateCurrent(t *testing.T)
 	setup := func(t *testing.T) (*Harness, *graphStorage, *coordinator) {
 		t.Helper()
 		store := idleFixture(t, validTestGraph(), hexID(20))
-		exec := compactionExecution(t, func(context.Context, model.Request) (model.Stream, error) {
+		exec := compactionExecution(t, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return summaryStream("summary", model.Usage{InputTokens: 7, CachedInputTokens: 3, OutputTokens: 4}), nil
 		}, nil)
 		prepared := compactPrepared(testCapture(), exec)

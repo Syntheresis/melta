@@ -108,7 +108,7 @@ func awaitHarnessQuiet(t *testing.T, h *Harness, sessionID string) SessionReadVi
 // boundaries.
 func TestObserveFactKinds(t *testing.T) {
 	rounds := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		rounds++
 		if rounds == 1 {
 			return completedTurnStream(testToolCall("call-1")), nil
@@ -213,7 +213,7 @@ func TestObserveRunLifecycle(t *testing.T) {
 		var calls atomic.Int32
 		gate1 := make(chan struct{})
 		gate2 := make(chan struct{})
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			switch calls.Add(1) {
 			case 1:
 				<-gate1
@@ -299,7 +299,7 @@ func TestObserveBufferClocks(t *testing.T) {
 		}
 		c := cachedCoordinator(t, h, testSessionID)
 		testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return completedTurnStream(), nil
 			}, nil), nil
 		})))
@@ -566,7 +566,7 @@ func TestObserveDurableAdvances(t *testing.T) {
 		col := observeHarness(h)
 		base := snapshotPair(t, h, sessionID)
 		testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return completedTurnStream(), nil
 			}, nil), nil
 		})))
@@ -581,7 +581,7 @@ func TestObserveDurableAdvances(t *testing.T) {
 		// one invalidation, one durable advance.
 		compactBase := idleFixture(t, validTestGraph(), hexID(20))
 		var factsCol *factCollector
-		compactExec := compactionExecution(t, func(context.Context, model.Request) (model.Stream, error) {
+		compactExec := compactionExecution(t, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			factsCol.reset() // the admission and install publications precede the checkpoint transaction
 			return summaryStream("summary", model.Usage{}), nil
 		}, nil)
@@ -611,7 +611,7 @@ func TestObserveDurableAdvances(t *testing.T) {
 		}
 		c := cachedCoordinator(t, h, testSessionID)
 		testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return completedTurnStream(), nil
 			}, nil), nil
 		})))
@@ -719,7 +719,7 @@ func TestObserveIntentOnly(t *testing.T) {
 
 	t.Run("tool intent", func(t *testing.T) {
 		rounds := 0
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -905,7 +905,7 @@ func TestObserveConcurrentCommits(t *testing.T) {
 	run := func(coordinator *coordinator, session, operationID string) func() {
 		return func() {
 			testassert.Check(t, executeDirect(h, coordinator, context.Background(), operationID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-				return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+				return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return completedTurnStream(), nil
 				}, nil), nil
 			})) == nil, "run for session %s failed", session)
@@ -1217,7 +1217,7 @@ func TestObserveStreamFilter(t *testing.T) {
 
 	t.Run("assembly close stays exactly once through the wrapper", func(t *testing.T) {
 		stream := completedTurnStream()
-		modelFn := func(context.Context, model.Request) (model.Stream, error) { return stream, nil }
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) { return stream, nil }
 		h, _, c, _ := newEffectHarness(t, nil)
 		observeHarness(h)
 		testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
@@ -1241,7 +1241,7 @@ func TestObserveStreamFilter(t *testing.T) {
 // attributed to the enclosing Operation.
 func TestObserveCompactAttribution(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
-	compactFn := func(context.Context, model.Request) (model.Stream, error) {
+	compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return completedTurnStream(), nil
 	}
 	exec := compactionExecution(t, compactFn, nil)
@@ -1267,7 +1267,7 @@ func TestObserveCompactAttribution(t *testing.T) {
 // committed assistant entry retains the assembled refusal: the live facts
 // never replace the durable value.
 func TestObserveRefusalFacts(t *testing.T) {
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return streamOf(
 			model.StreamDelta{HasChoice: true, Role: "assistant", RefusalFragment: "I cannot"},
 			model.StreamDelta{HasChoice: true, RefusalFragment: " help with that."},
@@ -1318,7 +1318,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		round := 0
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			round++
 			if round > rounds {
 				return completedTurnStream(), nil
@@ -1414,7 +1414,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 		round := 0
 		col := observeHarness(h)
 		testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				round++
 				if round == 1 {
 					return stream, nil
@@ -1448,7 +1448,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 		round := 0
 		col := observeHarness(h)
 		testassert.NoError(t, executeDirect(h, c, ctx, testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				round++
 				if round == 1 {
 					return &cancelOnCloseStream{scriptStream: completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), cancel: cancel}, nil
@@ -1479,7 +1479,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 			return nil, errors.New("hook boom")
 		}}}
 		exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-			return InvocationExecution{Model: func(context.Context, model.Request) (model.Stream, error) {
+			return InvocationExecution{Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				rounds++
 				if rounds == 1 {
 					return completedTurnStream(testToolCall("call-1")), nil

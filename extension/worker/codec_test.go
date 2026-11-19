@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,6 +152,7 @@ func testPreparationInput() extension.PreparationInput {
 }
 
 func testRequestHookInput() harness.RequestHookInput {
+	position := 0
 	return harness.RequestHookInput{
 		RequestID:         "request-1",
 		Purpose:           harness.InvocationPurposeConversation,
@@ -163,6 +165,65 @@ func testRequestHookInput() harness.RequestHookInput {
 		Prompt:            "prompt",
 		Catalog:           []model.ToolDefinition{testToolDefinition("catalog-tool")},
 		Tools:             []model.ToolDefinition{testToolDefinition("visible-tool")},
+		MessagePositions:  []*int{&position},
+		Parameters:        model.Extra{"": json.RawMessage(" true "), "temperature": json.RawMessage("0.2")},
+	}
+}
+
+func TestCodecsRoundTripRequestEditPresence(t *testing.T) {
+	position := 0
+	for _, edits := range [][]harness.RequestMessageEdit{nil, {}, {{Position: &position}}, {{Position: &position, Content: []model.ContentPart{}}}} {
+		got, err := worker.EncodeRequestHookResult(harness.RequestConsequence{Edits: edits})
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := worker.DecodeRequestHookResult(got)
+		if err != nil || !reflect.DeepEqual(decoded.Edits, edits) {
+			t.Fatalf("round trip %s: %#v, %v", got, decoded.Edits, err)
+		}
+	}
+	for _, bad := range []string{
+		`{"edits":[{"position":null}]}`, `{"edits":null}`, `{"edits":[{"position":0,"content":null}]}`,
+		`{"edits":[{}]}`, `{"edits":[{"position":-1}]}`,
+		`{"edits":[{"position":0,"message":{"role":"user","content":[]}}]}`,
+		`{"edits":[{"content":[],"message":{"role":"user","content":[]}}]}`,
+	} {
+		if _, err := worker.DecodeRequestHookResult(json.RawMessage(bad)); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}
+
+func TestRequestHookInputPositionsRequired(t *testing.T) {
+	raw, err := worker.EncodeRequestHookParams(testRequestHookInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "message_positions")
+	for _, bad := range []json.RawMessage{nil, json.RawMessage(`[]`), json.RawMessage(`[null]`)} {
+		if bad != nil {
+			fields["message_positions"] = bad
+		}
+		wire, _ := json.Marshal(fields)
+		if _, err := worker.DecodeRequestHookParams(wire); err == nil {
+			t.Errorf("accepted positions %s", bad)
+		}
+	}
+	input := testRequestHookInput()
+	input.Messages, input.MessagePositions = nil, nil
+	raw, err = worker.EncodeRequestHookParams(input)
+	if err != nil || !strings.Contains(string(raw), `"message_positions":[]`) {
+		t.Errorf("empty input = %s, %v", raw, err)
+	}
+	input = testRequestHookInput()
+	input.MessagePositions = []*int{nil}
+	raw, err = worker.EncodeRequestHookParams(input)
+	if err != nil || !strings.Contains(string(raw), `"message_positions":[{}]`) {
+		t.Errorf("addition input = %s, %v", raw, err)
 	}
 }
 
@@ -354,9 +415,9 @@ func TestCodecsRoundTripAndValidate(t *testing.T) {
 	requestHook := extension.HookCapability("hook-request", extension.SingleHook(extension.BoundaryRequest, extension.HookModePure))
 	roundTrip(t, "request hook input", methodSchema(t, requestHook, "request", "input"), testRequestHookInput(), worker.EncodeRequestHookParams, worker.DecodeRequestHookParams)
 	roundTrip(t, "request hook result", methodSchema(t, requestHook, "request", "success"), harness.RequestConsequence{
-		Prompt:    stringPointer("replaced"),
-		Messages:  []model.Message{testMessage()},
-		ToolNames: []string{"tool-a"},
+		Prompt: stringPointer("replaced"),
+		Edits:  []harness.RequestMessageEdit{{Position: new(int)}},
+		Tools:  []model.ToolDefinition{testToolDefinition("tool-a")},
 	}, worker.EncodeRequestHookResult, worker.DecodeRequestHookResult)
 
 	beforeTool := extension.HookCapability("hook-before", extension.SingleHook(extension.BoundaryBeforeTool, extension.HookModePure))
@@ -695,9 +756,9 @@ func TestPresencePreservedExactly(t *testing.T) {
 	assertToolNames("empty preparation tool names", []string{}, worker.EncodePrepareHookResult, worker.DecodePrepareHookResult)
 
 	requestEmpty := ""
-	encodeRequest := func(prompt *string, names []string) json.RawMessage {
+	encodeRequest := func(prompt *string, tools []model.ToolDefinition) json.RawMessage {
 		t.Helper()
-		raw, err := worker.EncodeRequestHookResult(harness.RequestConsequence{Prompt: prompt, ToolNames: names})
+		raw, err := worker.EncodeRequestHookResult(harness.RequestConsequence{Prompt: prompt, Tools: tools})
 		if err != nil {
 			t.Fatalf("encoding request consequence: %v", err)
 		}
@@ -709,24 +770,24 @@ func TestPresencePreservedExactly(t *testing.T) {
 	if _, present := members(encodeRequest(&requestEmpty, nil))["prompt"]; !present {
 		t.Fatal("present empty request prompt was dropped")
 	}
-	if _, present := members(encodeRequest(nil, nil))["tool_names"]; present {
-		t.Fatal("absent request tool names were encoded")
+	if _, present := members(encodeRequest(nil, nil))["tools"]; present {
+		t.Fatal("absent request tools were encoded")
 	}
-	if _, present := members(encodeRequest(nil, []string{}))["tool_names"]; !present {
-		t.Fatal("present empty request tool names were dropped")
+	if _, present := members(encodeRequest(nil, []model.ToolDefinition{}))["tools"]; !present {
+		t.Fatal("present empty request tools were dropped")
 	}
 	decodedAbsent, err := worker.DecodeRequestHookResult(encodeRequest(nil, nil))
 	if err != nil {
 		t.Fatalf("decoding absent request consequence: %v", err)
 	}
-	if decodedAbsent.ToolNames != nil || decodedAbsent.Prompt != nil {
+	if decodedAbsent.Tools != nil || decodedAbsent.Prompt != nil {
 		t.Fatalf("absent request members decoded as %#v", decodedAbsent)
 	}
-	decodedEmpty, err := worker.DecodeRequestHookResult(encodeRequest(&requestEmpty, []string{}))
+	decodedEmpty, err := worker.DecodeRequestHookResult(encodeRequest(&requestEmpty, []model.ToolDefinition{}))
 	if err != nil {
 		t.Fatalf("decoding empty request consequence: %v", err)
 	}
-	if decodedEmpty.ToolNames == nil || decodedEmpty.Prompt == nil || *decodedEmpty.Prompt != "" {
+	if decodedEmpty.Tools == nil || decodedEmpty.Prompt == nil || *decodedEmpty.Prompt != "" {
 		t.Fatalf("empty request members decoded as %#v", decodedEmpty)
 	}
 

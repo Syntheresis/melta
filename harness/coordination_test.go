@@ -55,7 +55,7 @@ type modelScript struct {
 	arrived  chan struct{}
 	gate     chan struct{}
 	attempts []modelAttempt
-	model    func(context.Context, model.Request) (model.Stream, error)
+	model    func(context.Context, model.Request, model.Extra) (model.Stream, error)
 }
 
 func newModelScript(attempts ...modelAttempt) *modelScript {
@@ -64,7 +64,7 @@ func newModelScript(attempts ...modelAttempt) *modelScript {
 	return s
 }
 
-func (s *modelScript) invoke(_ context.Context, req model.Request) (model.Stream, error) {
+func (s *modelScript) invoke(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 	s.mu.Lock()
 	s.requests = append(s.requests, req)
 	gate := s.gate
@@ -913,7 +913,7 @@ func TestFinalBoundarySerialization(t *testing.T) {
 			first   = true
 		)
 		inner := script.model
-		script.model = func(ctx context.Context, req model.Request) (model.Stream, error) {
+		script.model = func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 			if first { // submit at the model-result boundary, before the settlement returns
 				first = false
 				{
@@ -921,7 +921,7 @@ func TestFinalBoundarySerialization(t *testing.T) {
 					testassert.Check(t, err == nil, "boundary submit: %v", err)
 				}
 			}
-			return inner(ctx, req)
+			return inner(ctx, req, parameters)
 		}
 		prepared := modelPrepared(script.model)
 		h, cancel := newCancelableHarness(t, store, prepared, nil)
@@ -967,7 +967,7 @@ func TestFinalBoundarySerialization(t *testing.T) {
 			first   = true
 		)
 		inner := script.model
-		script.model = func(ctx context.Context, req model.Request) (model.Stream, error) {
+		script.model = func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 			if first { // defer one queued message at the final model-result boundary
 				first = false
 				{
@@ -975,7 +975,7 @@ func TestFinalBoundarySerialization(t *testing.T) {
 					testassert.Check(t, err == nil, "boundary submit: %v", err)
 				}
 			}
-			return inner(ctx, req)
+			return inner(ctx, req, parameters)
 		}
 		prepared := modelPrepared(script.model)
 		h, cancel := newCancelableHarness(t, store, prepared, nil)
@@ -1585,12 +1585,12 @@ func TestSessionsExecuteConcurrently(t *testing.T) {
 	first.gate = firstGate
 	second := newModelScript()
 	firstModel, secondModel := first.model, second.model
-	exec := effectExecution(func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := effectExecution(func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 		texts := textsOf(req)
 		if texts[len(texts)-1] == "first" {
-			return firstModel(ctx, req)
+			return firstModel(ctx, req, parameters)
 		}
-		return secondModel(ctx, req)
+		return secondModel(ctx, req, parameters)
 	}, nil)
 	prepared := preparedExecuting(exec)
 	h, cancel := newCancelableHarness(t, store, prepared, nil)

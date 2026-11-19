@@ -495,7 +495,7 @@ func seedRunningOperation(t *testing.T, store harness.Storage, workspace string)
 					Compact:  harness.CompactCapture{Model: prepModelRef, SystemPrompt: "summarize"},
 					Strategy: harness.StrategyCapture{ID: harness.IncludedStrategyID, RequiresContextWindow: true}},
 				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-					modelFn := func(context.Context, model.Request) (model.Stream, error) {
+					modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						select {
 						case arrived <- struct{}{}:
 						default:

@@ -1120,7 +1120,7 @@ func validateHookResultEntry(v hookResultEntry) error {
 		if v.InputEvidence == nil {
 			return errors.New("request-bound hook result requires its consumed input evidence")
 		}
-		if err := validateRequestEvidence(*v.InputEvidence); err != nil {
+		if err := validateRequestHookEvidence(v.Purpose, *v.InputEvidence); err != nil {
 			return fmt.Errorf("input_evidence: %w", err)
 		}
 		if len(v.Arguments) > 0 {
@@ -1582,6 +1582,12 @@ func validateMaintenanceFact(fact maintenanceFact) error {
 	if fact.Model.Provider == "" || fact.Model.Model == "" {
 		return fmt.Errorf("model %q must be a complete model identity", fact.Model.String())
 	}
+	if err := validateRequestParameters(fact.Parameters); err != nil {
+		return err
+	}
+	if err := validateHookIdentities(fact.HookIDs); err != nil {
+		return err
+	}
 	return validateMaintenanceInput(fact.Input)
 }
 
@@ -1600,17 +1606,21 @@ func encodeMaintenanceFacts(facts []maintenanceFact) (json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		raw, err := json.Marshal(struct {
-			RequestID string          `json:"request_id"`
-			Model     json.RawMessage `json:"model"`
-			Input     json.RawMessage `json:"input"`
-			Usage     *UsageCount     `json:"usage,omitempty"`
-		}{
-			RequestID: fact.RequestID,
-			Model:     modelRaw,
-			Input:     inputRaw,
-			Usage:     fact.Usage,
-		})
+		obj := map[string]json.RawMessage{"request_id": mustMarshal(fact.RequestID), "model": modelRaw, "input": inputRaw}
+		if fact.Usage != nil {
+			obj["usage"] = mustMarshal(fact.Usage)
+		}
+		if fact.Parameters != nil {
+			if obj["parameters"], err = marshalExtra(fact.Parameters); err != nil {
+				return nil, err
+			}
+		}
+		if len(fact.HookIDs) != 0 {
+			if obj["hook_ids"], err = encodeHookIdentities(fact.HookIDs); err != nil {
+				return nil, err
+			}
+		}
+		raw, err := json.Marshal(obj)
 		if err != nil {
 			return nil, err
 		}
@@ -1645,7 +1655,7 @@ func decodeMaintenanceFact(raw json.RawMessage) (maintenanceFact, error) {
 	if err != nil {
 		return maintenanceFact{}, err
 	}
-	if err := rejectUnknownMembers(obj, "request_id", "model", "input", "usage"); err != nil {
+	if err := rejectUnknownMembers(obj, "request_id", "model", "input", "usage", "parameters", "hook_ids"); err != nil {
 		return maintenanceFact{}, err
 	}
 	requestID, err := stringMember(obj, "request_id", true)
@@ -1681,6 +1691,14 @@ func decodeMaintenanceFact(raw json.RawMessage) (maintenanceFact, error) {
 		usage = &counts
 	}
 	fact := maintenanceFact{RequestID: requestID, Model: source, Input: input, Usage: usage}
+	fact.Parameters, err = extraMember(obj, "parameters", false)
+	if err != nil {
+		return maintenanceFact{}, err
+	}
+	fact.HookIDs, err = decodeHookIdentities(obj, "hook_ids")
+	if err != nil {
+		return maintenanceFact{}, err
+	}
 	if err := validateMaintenanceFact(fact); err != nil {
 		return maintenanceFact{}, err
 	}
@@ -3449,15 +3467,15 @@ func validateActiveEffect(v ActiveEffect) error {
 		}
 		switch v.Purpose {
 		case InvocationPurposeConversation:
-			if v.Evidence == nil {
+			if v.Evidence == nil || v.Evidence.SummaryInput != nil || v.Evidence.SummaryBase != nil {
 				return errors.New("conversation model active effect requires its effective input evidence")
 			}
 			if v.Evidence.BoundaryEntryID == "" {
 				return errors.New("conversation model active effect requires a nonempty boundary reference")
 			}
 		case InvocationPurposeMaintenance:
-			if v.Evidence != nil {
-				return errors.New("maintenance model active effect carries no conversation evidence")
+			if v.Evidence == nil || v.Evidence.SummaryInput == nil || v.Evidence.SummaryBase != nil || v.Evidence.Edits != nil || len(v.Evidence.Tools) != 0 || v.Evidence.Prompt != "" {
+				return errors.New("maintenance model active effect requires materialized tool-free summary input")
 			}
 		default:
 			return fmt.Errorf("model active effect purpose %q is not one of conversation or maintenance", v.Purpose)
@@ -3523,7 +3541,7 @@ func validateActiveEffect(v ActiveEffect) error {
 			if v.Purpose == InvocationPurposeConversation && v.Evidence.BoundaryEntryID == "" {
 				return errors.New("conversation request-bound hook active effect requires a nonempty boundary reference")
 			}
-			if err := validateRequestEvidence(*v.Evidence); err != nil {
+			if err := validateRequestHookEvidence(v.Purpose, *v.Evidence); err != nil {
 				return fmt.Errorf("evidence: %w", err)
 			}
 			if v.InputArgumentsBase64 != "" || len(v.FinalArguments) > 0 || len(v.ContributionIDs) > 0 {
@@ -4139,25 +4157,29 @@ func encodeRequestEvidence(v RequestEvidence) (json.RawMessage, error) {
 		"boundary_entry_id": mustMarshal(v.BoundaryEntryID),
 		"prompt":            mustMarshal(v.Prompt),
 	}
+	if v.Tools == nil {
+		v.Tools = []model.ToolDefinition{}
+	}
+	if err := encodeRequestInputs(obj, v.Edits, v.Tools, v.Parameters); err != nil {
+		return nil, err
+	}
+	if v.SummaryBase != nil {
+		raw, err := encodeMaintenanceInput(v.SummaryBase)
+		if err != nil {
+			return nil, err
+		}
+		obj["summary_base"] = raw
+	}
+	if v.SummaryInput != nil {
+		raw, err := encodeMaintenanceInput(v.SummaryInput)
+		if err != nil {
+			return nil, err
+		}
+		obj["summary_input"] = raw
+	}
 	if v.CheckpointEntryID != "" {
 		obj["checkpoint_entry_id"] = mustMarshal(v.CheckpointEntryID)
 	}
-	if len(v.Messages) > 0 {
-		messages := make([]json.RawMessage, 0, len(v.Messages))
-		for _, m := range v.Messages {
-			raw, err := encodeMessageValue(m)
-			if err != nil {
-				return nil, err
-			}
-			messages = append(messages, raw)
-		}
-		obj["messages"] = mustMarshal(messages)
-	}
-	names := v.ToolNames
-	if names == nil {
-		names = []string{}
-	}
-	obj["tool_names"] = mustMarshal(names)
 	if len(v.HookIDs) > 0 {
 		raw, err := encodeHookIdentities(v.HookIDs)
 		if err != nil {
@@ -4169,13 +4191,13 @@ func encodeRequestEvidence(v RequestEvidence) (json.RawMessage, error) {
 }
 
 // decodeRequestEvidence reads one closed request-evidence record with exact
-// keys and re-validates it. Empty messages and hook_ids decode to absence.
+// keys and re-validates it. The advertisement is always present.
 func decodeRequestEvidence(raw json.RawMessage) (RequestEvidence, error) {
 	obj, err := decodePayloadObject(raw)
 	if err != nil {
 		return RequestEvidence{}, fmt.Errorf("request evidence: %w", err)
 	}
-	if err := rejectUnknownMembers(obj, "checkpoint_entry_id", "boundary_entry_id", "prompt", "messages", "tool_names", "hook_ids"); err != nil {
+	if err := rejectUnknownMembers(obj, "checkpoint_entry_id", "boundary_entry_id", "prompt", "hook_ids", "edits", "tools", "parameters", "summary_base", "summary_input"); err != nil {
 		return RequestEvidence{}, err
 	}
 	boundaryEntryID, err := stringMember(obj, "boundary_entry_id", true)
@@ -4194,43 +4216,46 @@ func decodeRequestEvidence(raw json.RawMessage) (RequestEvidence, error) {
 	v.CheckpointEntryID = checkpointEntryID
 	v.BoundaryEntryID = boundaryEntryID
 	v.Prompt = prompt
-	messagesRaw, err := arrayMember(obj, "messages", false)
-	if err != nil {
-		return RequestEvidence{}, err
-	}
-	for i, item := range messagesRaw {
-		m, err := decodeMessageValue(item)
-		if err != nil {
-			return RequestEvidence{}, fmt.Errorf("messages[%d]: %w", i, err)
-		}
-		v.Messages = append(v.Messages, m)
-	}
-	if _, err := member(obj, "tool_names", true); err != nil {
-		return RequestEvidence{}, err
-	}
-	toolNames, err := optionalStringMemberList(obj, "tool_names")
-	if err != nil {
-		return RequestEvidence{}, err
-	}
-	v.ToolNames = toolNames
 	hookIDs, err := decodeHookIdentities(obj, "hook_ids")
 	if err != nil {
 		return RequestEvidence{}, err
 	}
 	v.HookIDs = hookIDs
+	if _, err := member(obj, "tools", true); err != nil {
+		return RequestEvidence{}, err
+	}
+	if err := decodeRequestInputs(obj, &v.Edits, &v.Tools, &v.Parameters); err != nil {
+		return RequestEvidence{}, err
+	}
+	if _, ok := obj["summary_base"]; ok {
+		raw, err := member(obj, "summary_base", true)
+		if err != nil {
+			return RequestEvidence{}, err
+		}
+		v.SummaryBase, err = decodeMaintenanceInput(raw)
+		if err != nil {
+			return RequestEvidence{}, err
+		}
+	}
+	if _, ok := obj["summary_input"]; ok {
+		raw, err := member(obj, "summary_input", true)
+		if err != nil {
+			return RequestEvidence{}, err
+		}
+		v.SummaryInput, err = decodeMaintenanceInput(raw)
+		if err != nil {
+			return RequestEvidence{}, err
+		}
+	}
 	if err := validateRequestEvidence(v); err != nil {
 		return RequestEvidence{}, err
 	}
 	return v, nil
 }
 
-// validateRequestEvidence enforces the closed evidence shape: the canonical
-// boundary reference is required and durable-shaped, a present checkpoint
-// reference is durable-shaped, tool names are non-empty and unique, recorded
-// contributions are validated messages, and hook provenance is unique.
 // validateFrozenInputEvidence enforces the checkpoint and maintenance
 // settlement evidence shape: canonical boundary/checkpoint references only,
-// never effective prompt, messages, tool names or hook identities. A present
+// never effective prompt, edits, advertisement or hook identities. A present
 // maintenance settlement record requires its boundary; a checkpoint always
 // does. The empty-history summary hook's consumed evidence is a different
 // record and may omit its boundary under its purpose.
@@ -4238,13 +4263,32 @@ func validateFrozenInputEvidence(v RequestEvidence, requireBoundary bool) error 
 	if requireBoundary && v.BoundaryEntryID == "" {
 		return errors.New("frozen input evidence requires its canonical boundary reference")
 	}
-	if v.Prompt != "" || len(v.Messages) > 0 || len(v.ToolNames) > 0 || len(v.HookIDs) > 0 {
+	if v.Prompt != "" || len(v.HookIDs) > 0 || v.Edits != nil || len(v.Tools) != 0 || v.Parameters != nil || v.SummaryBase != nil || v.SummaryInput != nil {
 		return errors.New("frozen input evidence carries only canonical boundary and checkpoint references")
 	}
 	return nil
 }
 
+func validateRequestHookEvidence(purpose InvocationPurpose, v RequestEvidence) error {
+	if v.SummaryInput != nil {
+		return errors.New("request hook evidence cannot carry summary model input")
+	}
+	if purpose == InvocationPurposeMaintenance && v.SummaryBase == nil {
+		return errors.New("maintenance request hook evidence requires its summary base")
+	}
+	return validateRequestEvidence(v)
+}
+
 func validateRequestEvidence(v RequestEvidence) error {
+	if err := validateRequestEdits(v.Edits); err != nil {
+		return err
+	}
+	if err := validateRequestParameters(v.Parameters); err != nil {
+		return err
+	}
+	if err := model.ValidateRequest(model.Request{Tools: v.Tools}); err != nil {
+		return err
+	}
 	if v.BoundaryEntryID == "" {
 		if v.CheckpointEntryID != "" {
 			return errors.New("evidence checkpoint reference requires its boundary reference")
@@ -4259,87 +4303,32 @@ func validateRequestEvidence(v RequestEvidence) error {
 			}
 		}
 	}
-	for i, m := range v.Messages {
-		if _, err := validateContributionMessage(m); err != nil {
-			return fmt.Errorf("messages[%d]: %w", i, err)
-		}
-	}
-	if v.ToolNames != nil {
-		seen := make(map[string]bool, len(v.ToolNames))
-		for _, name := range v.ToolNames {
-			if name == "" {
-				return errors.New("evidence tool_names carries an empty name")
-			}
-			if seen[name] {
-				return fmt.Errorf("evidence tool_names has duplicate name %q", name)
-			}
-			seen[name] = true
-		}
-	}
 	return validateHookIdentities(v.HookIDs)
 }
 
-// optionalStringMemberList reads one string-list member: absence decodes to
-// nil, and a present-empty array stays a meaningful present-empty selection.
-func optionalStringMemberList(obj map[string]json.RawMessage, key string) ([]string, error) {
-	if _, present := obj[key]; !present {
-		return nil, nil
-	}
-	items, err := arrayMember(obj, key, true)
-	if err != nil {
-		return nil, err
-	}
-	list := make([]string, 0, len(items))
-	for i, raw := range items {
-		var s string
-		if err := json.Unmarshal(raw, &s); err != nil {
-			return nil, fmt.Errorf("%s[%d] must be a JSON string: %w", key, i, err)
-		}
-		if s == "" {
-			return nil, fmt.Errorf("%s[%d] must be non-empty", key, i)
-		}
-		list = append(list, s)
-	}
-	return list, nil
-}
-
-// encodeRequestConsequence renders one closed request consequence. Prompt
-// presence (including empty) and ToolNames presence (including the full or
-// empty selection) survive exactly; empty Messages encode by absence.
+// encodeRequestConsequence preserves absent and present-empty edits and tools.
 func encodeRequestConsequence(v RequestConsequence) (json.RawMessage, error) {
 	if err := validateRequestConsequenceShape(v); err != nil {
 		return nil, invalidInput("request consequence: %v", err)
 	}
 	obj := map[string]json.RawMessage{}
+	if err := encodeRequestInputs(obj, v.Edits, v.Tools, v.Parameters); err != nil {
+		return nil, err
+	}
 	if v.Prompt != nil {
 		obj["prompt"] = mustMarshal(*v.Prompt)
-	}
-	if len(v.Messages) > 0 {
-		messages := make([]json.RawMessage, 0, len(v.Messages))
-		for _, m := range v.Messages {
-			raw, err := encodeMessageValue(m)
-			if err != nil {
-				return nil, err
-			}
-			messages = append(messages, raw)
-		}
-		obj["messages"] = mustMarshal(messages)
-	}
-	if v.ToolNames != nil {
-		obj["tool_names"] = mustMarshal(v.ToolNames)
 	}
 	return json.Marshal(obj)
 }
 
 // decodeRequestConsequence reads one closed request consequence with exact
-// keys. A present empty tool_names is the recorded no-advertisement
-// selection; a present full list stays the recorded full selection.
+// keys and preserves list presence.
 func decodeRequestConsequence(raw json.RawMessage) (RequestConsequence, error) {
 	obj, err := decodePayloadObject(raw)
 	if err != nil {
 		return RequestConsequence{}, fmt.Errorf("request consequence: %w", err)
 	}
-	if err := rejectUnknownMembers(obj, "prompt", "messages", "tool_names"); err != nil {
+	if err := rejectUnknownMembers(obj, "prompt", "edits", "tools", "parameters"); err != nil {
 		return RequestConsequence{}, err
 	}
 	prompt, err := optionalStringMember(obj, "prompt")
@@ -4348,47 +4337,26 @@ func decodeRequestConsequence(raw json.RawMessage) (RequestConsequence, error) {
 	}
 	var v RequestConsequence
 	v.Prompt = prompt
-	messagesRaw, err := arrayMember(obj, "messages", false)
-	if err != nil {
+	if err := decodeRequestInputs(obj, &v.Edits, &v.Tools, &v.Parameters); err != nil {
 		return RequestConsequence{}, err
 	}
-	for i, item := range messagesRaw {
-		m, err := decodeMessageValue(item)
-		if err != nil {
-			return RequestConsequence{}, fmt.Errorf("messages[%d]: %w", i, err)
-		}
-		v.Messages = append(v.Messages, m)
-	}
-	toolNames, err := optionalStringMemberList(obj, "tool_names")
-	if err != nil {
-		return RequestConsequence{}, err
-	}
-	v.ToolNames = toolNames
 	if err := validateRequestConsequenceShape(v); err != nil {
 		return RequestConsequence{}, err
 	}
 	return v, nil
 }
 
-// validateRequestConsequenceShape enforces the consequence's member shapes:
-// recorded contributions are validated messages and tool names are non-empty
-// and unique. Catalog membership is decided at the applying boundary, which
-// alone knows the captured catalog.
+// validateRequestConsequenceShape checks the member values. Catalog membership
+// is decided at the applying boundary, which knows the stage catalog.
 func validateRequestConsequenceShape(v RequestConsequence) error {
-	for i, m := range v.Messages {
-		if _, err := validateContributionMessage(m); err != nil {
-			return fmt.Errorf("messages[%d]: %w", i, err)
-		}
+	if err := validateRequestEdits(v.Edits); err != nil {
+		return err
 	}
-	seen := make(map[string]bool, len(v.ToolNames))
-	for _, name := range v.ToolNames {
-		if name == "" {
-			return errors.New("consequence tool_names carries an empty name")
-		}
-		if seen[name] {
-			return fmt.Errorf("consequence tool_names has duplicate name %q", name)
-		}
-		seen[name] = true
+	if err := validateRequestParameters(v.Parameters); err != nil {
+		return err
+	}
+	if err := model.ValidateRequest(model.Request{Tools: v.Tools}); err != nil {
+		return err
 	}
 	return nil
 }

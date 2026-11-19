@@ -813,15 +813,17 @@ func prepareHook(_ context.Context, _ extension.CallContext, input extension.Pre
 
 func requestHook(_ context.Context, _ extension.CallContext, input harness.RequestHookInput) (harness.RequestConsequence, error) {
 	names := make([]string, 0, len(input.Tools))
-	visible := make([]string, 0, len(input.Tools))
+	visible := make([]model.ToolDefinition, 0, len(input.Tools))
+	var visibleNames []string
 	for index, tool := range input.Tools {
 		names = append(names, tool.Name)
 		if index%2 == 0 {
-			visible = append(visible, tool.Name)
+			visible = append(visible, tool)
+			visibleNames = append(visibleNames, tool.Name)
 		}
 	}
-	record("hook:request:in=%s->out=%s", strings.Join(names, ","), strings.Join(visible, ","))
-	return harness.RequestConsequence{ToolNames: visible}, nil
+	record("hook:request:in=%s->out=%s", strings.Join(names, ","), strings.Join(visibleNames, ","))
+	return harness.RequestConsequence{Tools: visible}, nil
 }
 
 func beforeToolHook(_ context.Context, _ extension.CallContext, call model.ToolCall) (json.RawMessage, error) {

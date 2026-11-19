@@ -36,8 +36,10 @@ const (
 	// 19 records bound tool identity and moves effective arguments to results;
 	// 20 renames Session ownership lineage and member kinds; 21 removes the
 	// maintenance conversation-source association and requires the running
-	// request purpose. The SQL tables are unchanged.
-	sqliteSchemaVersion = 21
+	// request purpose; 22 records positional request edits, advertised tool
+	// definitions, body parameters, and materialized summary inputs. The SQL
+	// tables are unchanged.
+	sqliteSchemaVersion = 22
 
 	// sqlitePoolDSN configures every physical connection of the long-lived
 	// pool: write-ahead logging, full synchronous durability, immediate

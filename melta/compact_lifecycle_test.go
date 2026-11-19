@@ -329,7 +329,7 @@ func compactRawOperationRegister(admission, state string) string {
 func compactRawRunningModelState(now, reserved, boundary string) string {
 	return fmt.Sprintf(
 		`{"status":"running","started_at":%q,`+
-			`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live-%s","model":{"provider":"prov","model":"m"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"compact-sys","tool_names":[]}},`+
+			`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live-%s","model":{"provider":"prov","model":"m"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"compact-sys","tools":[]}},`+
 			`"running_request":{"request_id":"request-live-%s","purpose":"conversation","boundary_entry_id":%q,"hook_results":[]},`+
 			`"pending_tool_calls":[],"usage":{"by_model":[]}}`,
 		now, reserved, reserved, boundary, reserved, boundary)
@@ -354,7 +354,7 @@ func compactRawInputEntry(sessionID, entryID, operationID, origin, text string) 
 func compactRawAssistantEntry(sessionID, entryID, operationID, boundaryID, text string) string {
 	return fmt.Sprintf(
 		`{"session_id":%q,"entry_id":%q,"operation_id":%q,"status":"completed",`+
-			`"source":{"provider":"prov","model":"m"},"content":[{"kind":"text","text":%q}],"tool_calls":[],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"compact-sys","tool_names":[]}}`,
+			`"source":{"provider":"prov","model":"m"},"content":[{"kind":"text","text":%q}],"tool_calls":[],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"compact-sys","tools":[]}}`,
 		sessionID, entryID, operationID, text, "request-a-"+entryID, boundaryID)
 }
 
@@ -370,7 +370,7 @@ func compactRawCompactionEntry(sessionID, entryID, operationID, summary, boundar
 			`"messages":[{"role":"assistant","source":{"provider":"prov","model":"m"},"content":[{"kind":"text","text":%q}]}],`+
 			`"boundary_entry_id":%q,"configuration_revision":"rev-1",`+
 			`"facts":[{"request_id":%q,"model":{"provider":"prov","model":"m"},"input":[{"role":"user","content":[{"kind":"text","text":"transcript seed"}]}]}],`+
-			`"evidence":{"boundary_entry_id":%q,"prompt":"","tool_names":[]}}`,
+			`"evidence":{"boundary_entry_id":%q,"prompt":"","tools":[]}}`,
 		sessionID, entryID, operationID, "[Previous conversation summary]\n\n"+summary+"\n\n[End of summary. Continue from here.]", boundaryID, "maintainer-"+entryID, boundaryID)
 }
 

@@ -747,7 +747,7 @@ func TestExecutionUsePinsTheGraphThroughSuccessorDrain(t *testing.T) {
 	second := make(chan struct{})
 	secondArrived := make(chan struct{}, 1)
 	var attempts atomic.Int32
-	modelFn := func(ctx context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		if attempts.Add(1) == 1 {
 			select {
 			case <-first:

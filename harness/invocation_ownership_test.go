@@ -23,9 +23,8 @@ import (
 // hook slot, nils the opener's argument-hook variable after zeroing its first
 // element through a tampered replacement, replaces the first output hook slot,
 // and the first output hook zeroes its chain's later slot: the Harness must
-// still run the originally accepted identities, modes, and order for every
-// family at every later use, settle the turn from them, and record only the
-// original identities durably.
+// keep the accepted request chain for that round and the opened argument and
+// output chains for the invocation. The next round sees the changed supplier.
 func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 	var trace []string
 	ran := func(entry string) { trace = append(trace, entry) }
@@ -83,7 +82,7 @@ func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 	}}
 
 	rounds := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		rounds++
 		if rounds == 1 {
 			return completedTurnStream(testToolCall("call-1")), nil
@@ -96,7 +95,7 @@ func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 		sharedArgs = []ToolArgumentsHook{argPure, argEffectful}
 		sharedOutput = []ToolOutputHook{outOne, outTwo}
 		inv := invocationExecution(modelFn, spy.tool)
-		inv.RequestHooks = sharedRequest
+		inv.RequestStage = fixtureRequestStage(sharedRequest...)
 		inv.ToolHooks = sharedArgs
 		inv.ToolOutputHooks = sharedOutput
 		return inv, nil
@@ -114,12 +113,11 @@ func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 	testassert.Require(t, sharedOutput[0].ID == "tampered.out", "opener output array slot 0 = %+v, want the replacement to stand on the opener side", sharedOutput[0])
 	testassert.Require(t, sharedOutput[1].ID == "", "opener output array slot 1 = %+v, want the zeroed entry to stand on the opener side", sharedOutput[1])
 
-	// The accepted families ran unchanged: original identities, modes, and
-	// configured order at every later use, with no tampered entry anywhere.
+	// Only the next request sees the changed supplier.
 	want := []string{
 		"own.req.pure", "own.req.effectful", // round 1 request family
 		"own.arg.pure", "own.arg.effectful", "own.out.one", "own.out.two", // the settled call's argument then output families
-		"own.req.pure", "own.req.effectful", // round 2 re-runs the accepted request family
+		"own.req.pure", "tampered.req", // round 2 snapshots again
 	}
 	testassert.Require(t, len(trace) == len(want), "hook trace = %+v, want %+v", trace, want)
 	for i := range want {
@@ -128,11 +126,11 @@ func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 		}
 	}
 
-	// The durable evidence carries only the accepted identities.
+	// The durable evidence carries only identities accepted at their own stages.
 	committed := hookGraphHookResults(t, store, sessionID)
 	testassert.Equal(t, len(committed), 3) // the effectful request hook once per round plus the effectful argument hook once
 	for _, entry := range committed {
-		testassert.Require(t, (entry.HookID == "own.req.effectful" || entry.HookID == "own.arg.effectful") && entry.ExtensionID == "own-ext" && entry.Status == hookSucceeded,
+		testassert.Require(t, ((entry.HookID == "own.req.effectful" || entry.HookID == "own.arg.effectful") && entry.ExtensionID == "own-ext" || entry.HookID == "tampered.req" && entry.ExtensionID == "tamper-ext") && entry.Status == hookSucceeded,
 			"committed hook result = %+v, want an accepted effectful hook settling succeeded", entry)
 	}
 	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
@@ -162,7 +160,7 @@ func TestMaintenanceOpenedInvocationDeclarationsArePreserved(t *testing.T) {
 	// The compact callback tampers every opener-retained array the moment it
 	// runs — a replacement, a nil-out, and a zero-out — strictly after the
 	// acceptance boundary copied them.
-	compactFn := func(context.Context, model.Request) (model.Stream, error) {
+	compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		passes++
 		sharedRequest[0] = RequestHook{ID: "tampered.req", ExtensionID: "tamper-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			t.Errorf("a tampered maintenance request hook ran")
@@ -192,7 +190,7 @@ func TestMaintenanceOpenedInvocationDeclarationsArePreserved(t *testing.T) {
 				return "", nil
 			}}}
 			inv := invocationExecution(compactFn, noopTool)
-			inv.RequestHooks = sharedRequest
+			inv.RequestStage = fixtureRequestStage(sharedRequest...)
 			inv.ToolHooks = sharedArgs
 			inv.ToolOutputHooks = sharedOutput
 			return inv, nil

@@ -37,7 +37,7 @@ func publicationFailureCauses() []error {
 func executorTurnFixture(t *testing.T, hook bool) (*Harness, *graphStorage, *coordinator, string, PreparedExecution, context.CancelFunc, *int, *int, *int) {
 	t.Helper()
 	var rounds, preparedCalls, executed int
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		rounds++
 		if rounds == 1 {
 			return completedTurnStream(testToolCall("call-1")), nil
@@ -186,7 +186,7 @@ func TestImmediateToolResultPublicationFailureRetainsNoActiveEffect(t *testing.T
 	for _, cause := range publicationFailureCauses() {
 		t.Run(cause.Error(), func(t *testing.T) {
 			var rounds int
-			modelFn := func(context.Context, model.Request) (model.Stream, error) {
+			modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				rounds++
 				if rounds == 1 {
 					return completedTurnStream(testToolCall("call-1")), nil
@@ -275,7 +275,9 @@ func TestRequestHookPublicationFailuresAtIntentAndResult(t *testing.T) {
 			hookRan++
 			return RequestConsequence{}, nil
 		}}
-		modelFn := func(context.Context, model.Request) (model.Stream, error) { return completedTurnStream(), nil }
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+			return completedTurnStream(), nil
+		}
 		exec := requestHookFixtureExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, hook)
 		h, store, _, sessionID, err := freshExecutionRunConfig(t, context.Background(), testCapture(), exec, func(store *graphStorage) {
 			failEffectRegister(store,
@@ -345,7 +347,7 @@ func TestRequestHookPublicationFailureThroughExecuteAndWait(t *testing.T) {
 					}
 					return RequestConsequence{}, nil
 				}}
-				return requestHookFixtureExecution(func(context.Context, model.Request) (model.Stream, error) {
+				return requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					modelCalls++
 					return completedTurnStream(), nil
 				}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, hook), nil
@@ -449,7 +451,7 @@ func TestWaitRetainsPublicationFailureAtPendingCallBoundaries(t *testing.T) {
 	t.Run("a hook domain failure settles the call and never contaminates Wait", func(t *testing.T) {
 		var rounds, preparedCalls int
 		domainErr := errors.New("the hook could not inspect the call")
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil

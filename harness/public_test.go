@@ -80,7 +80,7 @@ func publicNormalize(_ context.Context, call model.ToolCall) (json.RawMessage, e
 // publicExecution is the suite's ordinary opened execution: an opener whose
 // invocations carry the two actual model callbacks selected by purpose, the
 // suite's required normalizer, and the immediate "no tools" result plan.
-func publicExecution(conversation, compact func(context.Context, model.Request) (model.Stream, error)) harness.Execution {
+func publicExecution(conversation, compact func(context.Context, model.Request, model.Extra) (model.Stream, error)) harness.Execution {
 	return harness.Execution{OpenInvocation: func(_ context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 		modelFn := conversation
 		if request.Purpose == harness.InvocationPurposeMaintenance {
@@ -98,7 +98,7 @@ func publicExecution(conversation, compact func(context.Context, model.Request) 
 // publicExecutionOver is the suite's opened execution shape over a caller's
 // tool-plan function: its invocations carry the purpose-selected model
 // callbacks, the suite's required normalizer, and the given plan.
-func publicExecutionOver(conversation, compact func(context.Context, model.Request) (model.Stream, error), tool func(context.Context, model.ToolCall) harness.PreparedTool) harness.Execution {
+func publicExecutionOver(conversation, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), tool func(context.Context, model.ToolCall) harness.PreparedTool) harness.Execution {
 	return harness.Execution{OpenInvocation: func(_ context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 		modelFn := conversation
 		if request.Purpose == harness.InvocationPurposeMaintenance {
@@ -216,7 +216,7 @@ func newScriptModel(attempts ...publicAttempt) *scriptModel {
 	return &scriptModel{arrived: make(chan struct{}, 16), attempts: attempts}
 }
 
-func (s *scriptModel) effect(_ context.Context, req model.Request) (model.Stream, error) {
+func (s *scriptModel) effect(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 	s.mu.Lock()
 	s.requests = append(s.requests, req)
 	gate := s.gate
@@ -296,14 +296,14 @@ type publicFixture struct {
 	defaultPrep harness.PreparedExecution
 }
 
-func newPublicFixture(t *testing.T, store harness.Storage, script *scriptModel, modelFn func(context.Context, model.Request) (model.Stream, error)) *publicFixture {
+func newPublicFixture(t *testing.T, store harness.Storage, script *scriptModel, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) *publicFixture {
 	return newPublicFixtureWithJobs(t, store, nil, script, modelFn, nil)
 }
 
 // newPublicFixtureWithJobs is the fixture's core builder: the same scripted
 // preparation over a Harness whose optional Jobs seam is installed. A nil
 // compact callback resolves to the conversation callback.
-func newPublicFixtureWithJobs(t *testing.T, store harness.Storage, stopper harness.JobStopper, script *scriptModel, modelFn, compactFn func(context.Context, model.Request) (model.Stream, error)) *publicFixture {
+func newPublicFixtureWithJobs(t *testing.T, store harness.Storage, stopper harness.JobStopper, script *scriptModel, modelFn, compactFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) *publicFixture {
 	t.Helper()
 	if modelFn == nil {
 		modelFn = script.effect
@@ -1565,7 +1565,7 @@ func TestPublicFinalBoundarySerialization(t *testing.T) {
 				first   = true
 			)
 			inner := script.effect
-			boundary := func(ctx context.Context, req model.Request) (model.Stream, error) {
+			boundary := func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 				if first { // submit at the model-result boundary, before the settlement returns
 					first = false
 					{
@@ -1573,7 +1573,7 @@ func TestPublicFinalBoundarySerialization(t *testing.T) {
 						testassert.Check(t, err == nil, "boundary submit: %v", err)
 					}
 				}
-				return inner(ctx, req)
+				return inner(ctx, req, parameters)
 			}
 			f = newPublicFixture(t, store, script, boundary)
 			defer f.close()
@@ -1618,7 +1618,7 @@ func TestPublicFinalBoundarySerialization(t *testing.T) {
 				first   = true
 			)
 			inner := script.effect
-			boundary := func(ctx context.Context, req model.Request) (model.Stream, error) {
+			boundary := func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 				if first { // defer one queued message at the final model-result boundary
 					first = false
 					{
@@ -1626,7 +1626,7 @@ func TestPublicFinalBoundarySerialization(t *testing.T) {
 						testassert.Check(t, err == nil, "boundary submit: %v", err)
 					}
 				}
-				return inner(ctx, req)
+				return inner(ctx, req, parameters)
 			}
 			f = newPublicFixture(t, store, script, boundary)
 			defer f.close()
@@ -1667,12 +1667,12 @@ func TestPublicSessionsExecuteConcurrently(t *testing.T) {
 			publicFail("second session settled"), // model-originated terminal: durable regardless of later cancellation
 		)
 		parkedEffect, finishedEffect := parked.effect, finished.effect
-		route := func(ctx context.Context, req model.Request) (model.Stream, error) {
+		route := func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 			got := texts(req)
 			if got[len(got)-1] == "first" {
-				return parkedEffect(ctx, req)
+				return parkedEffect(ctx, req, parameters)
 			}
-			return finishedEffect(ctx, req)
+			return finishedEffect(ctx, req, parameters)
 		}
 		f := newPublicFixture(t, store, parked, route)
 		defer f.close()
@@ -3328,7 +3328,7 @@ func rawAssistantEntryPayload(sessionID, entryID, operationID, boundaryID string
 	}
 	return fmt.Sprintf(
 		`{"session_id":%q,"entry_id":%q,"operation_id":%q,"status":"completed",`+
-			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":"done"}],"tool_calls":[%s],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":[]}}`,
+			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":"done"}],"tool_calls":[%s],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[]}}`,
 		sessionID, entryID, operationID, strings.Join(parts, ","), "request-a-"+entryID, boundaryID)
 }
 
@@ -3357,7 +3357,7 @@ func seedRunningOperationShape(t *testing.T, store harness.Storage, activeEffect
 	switch activeEffect {
 	case "model":
 		modelReserved = newRawSessionID(t)
-		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live","model":{"provider":"prov","model":"gpt-x"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]}}`, modelReserved, entryID)
+		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live","model":{"provider":"prov","model":"gpt-x"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]}}`, modelReserved, entryID)
 		requestJSON = fmt.Sprintf(`,"running_request":{"request_id":"request-live","purpose":"conversation","boundary_entry_id":%q,"hook_results":[]}`, entryID)
 	case "tool":
 		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"tool","result_entry_id":%q,"tool_call_id":%q,"final_arguments_base64":"eyJ4IjoxfQ==","implementation":{"id":"echo","extension_id":"ext.raw"}}`, reserved[0], calls[0])
@@ -3831,7 +3831,7 @@ func rawCopiedAssistantPayload(sessionID, entryID, boundaryID string, calls [][2
 	}
 	return fmt.Sprintf(
 		`{"session_id":%q,"entry_id":%q,"status":"completed",`+
-			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":"done"}],"tool_calls":[%s],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":[]}}`,
+			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":"done"}],"tool_calls":[%s],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[]}}`,
 		sessionID, entryID, strings.Join(parts, ","), "request-a-"+entryID, boundaryID)
 }
 
@@ -4577,11 +4577,11 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				input := snapEntryOf(snap, harness.EntryInput)
 				hookEntry := newRawSessionID(t)
 				snapAppendEntry(snap, sessionID, hookEntry, "op-1", harness.EntryHookResult, fmt.Sprintf(
-					`{"session_id":%q,"entry_id":%q,"operation_id":"op-1","hook_id":"cap.hook.one","extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","status":"success","evidence":"observed","input_evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]},"consequence":{}}`,
+					`{"session_id":%q,"entry_id":%q,"operation_id":"op-1","hook_id":"cap.hook.one","extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","status":"success","evidence":"observed","input_evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]},"consequence":{}}`,
 					sessionID, hookEntry, input.ID))
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.two","hook_extension_id":"ext.raw2","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]}}`, newRawSessionID(t), input.ID))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.two","hook_extension_id":"ext.raw2","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]}}`, newRawSessionID(t), input.ID))
 					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","boundary_entry_id":%q,"hook_results":[{"session_id":%q,"entry_id":%q}]}`, input.ID, sessionID, hookEntry))
 				})
 			},
@@ -4620,7 +4620,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				})
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"checkpoint_entry_id":%q,"prompt":"system","tool_names":["echo"]}}`, newRawSessionID(t), input.ID, comp))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"checkpoint_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]}}`, newRawSessionID(t), input.ID, comp))
 					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","checkpoint_entry_id":%q,"boundary_entry_id":%q}`, comp, input.ID))
 				})
 			},
@@ -4918,7 +4918,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 		detail    string
 	}{
 		{"missing prompt", "prompt", nil, `required member "prompt" is missing`},
-		{"null names", "tool_names", json.RawMessage(`null`), `member "tool_names" must not be null`},
+		{"null advertisement", "tools", json.RawMessage(`null`), `member "tools" must not be null`},
 	} {
 		rows = append(rows, corruptSiblingRow{
 			name:   "assistant evidence: " + mutation.name,
@@ -4939,12 +4939,12 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 		})
 	}
 	rows = append(rows, corruptSiblingRow{
-		name: "assistant evidence: foreign catalog name", seed: seedCorruptSiblingPendingCall,
-		detail: "evidence tool name \"foreign\" is outside the captured catalog",
+		name: "assistant evidence: malformed definition", seed: seedCorruptSiblingPendingCall,
+		detail: "tool definition",
 		mutate: func(t *testing.T, snap *sessionSnapshot) {
 			entry := snapEntryOf(snap, harness.EntryAssistant)
 			entry.Payload = editPayloadObject(t, entry.Payload, func(obj map[string]json.RawMessage) {
-				obj["evidence"] = editPayloadObject(t, obj["evidence"], func(ev map[string]json.RawMessage) { ev["tool_names"] = json.RawMessage(`["foreign"]`) })
+				obj["evidence"] = editPayloadObject(t, obj["evidence"], func(ev map[string]json.RawMessage) { ev["tools"] = json.RawMessage(`["foreign"]`) })
 			})
 		},
 	})
@@ -5005,7 +5005,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				input := snapEntryOf(snap, harness.EntryInput)
 				hook := newRawSessionID(t)
 				snapAppendEntry(snap, sessionID, hook, "op-1", harness.EntryHookResult, fmt.Sprintf(
-					`{"session_id":%q,"entry_id":%q,"operation_id":"op-1","hook_id":"cap.hook.one","extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","status":"success","evidence":"observed","input_evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]},"consequence":{},"input_arguments_base64":""}`,
+					`{"session_id":%q,"entry_id":%q,"operation_id":"op-1","hook_id":"cap.hook.one","extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","status":"success","evidence":"observed","input_evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]},"consequence":{},"input_arguments_base64":""}`,
 					sessionID, hook, input.ID))
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
@@ -5021,7 +5021,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				input := snapEntryOf(snap, harness.EntryInput)
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]},"input_arguments_base64":""}`, newRawSessionID(t), input.ID))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]},"input_arguments_base64":""}`, newRawSessionID(t), input.ID))
 					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","boundary_entry_id":%q}`, input.ID))
 				})
 			},
@@ -5034,7 +5034,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				input := snapEntryOf(snap, harness.EntryInput)
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"model","result_entry_id":%q,"request_id":"request-corrupt","model":{"provider":"prov","model":"m"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]},"input_arguments_base64":""}`, newRawSessionID(t), input.ID))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"model","result_entry_id":%q,"request_id":"request-corrupt","model":{"provider":"prov","model":"m"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]},"input_arguments_base64":""}`, newRawSessionID(t), input.ID))
 					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","boundary_entry_id":%q}`, input.ID))
 				})
 			},
@@ -6768,7 +6768,7 @@ func rawCompactionEntryPayload(sessionID, entryID, operationID, summary, boundar
 			`"messages":[{"role":"assistant","source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":%q}]}],`+
 			`"boundary_entry_id":%q,"configuration_revision":"rev-1",`+
 			`"facts":[{"request_id":%q,"model":{"provider":"prov","model":"gpt-x"},"input":[{"role":"user","content":[{"kind":"text","text":"transcript seed"}]}]}],`+
-			`"evidence":{"boundary_entry_id":%q,"prompt":"","tool_names":[]}}`,
+			`"evidence":{"boundary_entry_id":%q,"prompt":"","tools":[]}}`,
 		sessionID, entryID, operationID, "[Previous conversation summary]\n\n"+summary+"\n\n[End of summary. Continue from here.]", boundaryID, "maintainer-"+entryID, boundaryID)
 }
 
@@ -6785,7 +6785,7 @@ func rawSettledSuccessOperation(t *testing.T, store harness.Storage, sessionID, 
 			sessionID, inputID, operationID, inputText))
 	insertRawEntry(t, store, sessionID, assistantID, operationID, harness.EntryAssistant,
 		fmt.Sprintf(`{"session_id":%q,"entry_id":%q,"operation_id":%q,"status":"completed",`+
-			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":%q}],"tool_calls":[],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":[]}}`,
+			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":%q}],"tool_calls":[],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[]}}`,
 			sessionID, assistantID, operationID, assistantText, "request-a-"+assistantID, inputID))
 	insertRawEntry(t, store, sessionID, settlementID, operationID, harness.EntryOperationSettlement,
 		fmt.Sprintf(`{"session_id":%q,"entry_id":%q,"operation_id":%q,"status":"success"}`, sessionID, settlementID, operationID))
@@ -6820,8 +6820,8 @@ func TestPublicRecoverRunningCompactOperation(t *testing.T) {
 		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterOperation, OperationID: "compact-op"},
 			fmt.Sprintf(`{"admission":%s,"state":{"status":"running","started_at":%q,`+
 				`"running_request":{"request_id":"maintainer-live","purpose":"maintenance","checkpoint_entry_id":%q,"boundary_entry_id":%q,"hook_results":[]},`+
-				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"prov","model":"compact-x"},"purpose":"maintenance"},"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
-				rawCompactAdmission(sessionID, "compact-op"), now, compactionID, compactionID, reserved))
+				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"prov","model":"compact-x"},"purpose":"maintenance","evidence":{"boundary_entry_id":%q,"checkpoint_entry_id":%q,"prompt":"","tools":[],"summary_input":[{"role":"user","content":[{"kind":"text","text":"draft summary input"}]}]}},"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
+				rawCompactAdmission(sessionID, "compact-op"), now, compactionID, compactionID, reserved, compactionID, compactionID))
 
 		// The seeded shape: a running compact request with a live model intent.
 		state := recoverOpStateAt(t, store, sessionID, "compact-op")
@@ -6927,9 +6927,9 @@ func TestPublicRejectForgedPreviousVersionRunningRequest(t *testing.T) {
 		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterOperation, OperationID: "maint-op"},
 			fmt.Sprintf(`{"admission":%s,"state":{"status":"running","started_at":%q,`+
 				`"running_request":{"request_id":"request-suspended","boundary_entry_id":%q,"hook_results":[]},`+
-				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance"},`+
+				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance","evidence":{"boundary_entry_id":%q,"prompt":"","tools":[],"summary_input":[{"role":"user","content":[{"kind":"text","text":"draft summary input"}]}]}},`+
 				`"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
-				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved))
+				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved, entryID))
 		entriesBefore := recoverEntries(t, store, sessionID)
 		regBefore := operationRegister(t, store, sessionID, "maint-op")
 
@@ -6965,9 +6965,9 @@ func TestPublicRejectMismatchedRunningRequestProducer(t *testing.T) {
 		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterOperation, OperationID: "maint-op"},
 			fmt.Sprintf(`{"admission":%s,"state":{"status":"running","started_at":%q,`+
 				`"running_request":{"request_id":"request-suspended","purpose":"maintenance","boundary_entry_id":%q,"hook_results":[]},`+
-				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance"},`+
+				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance","evidence":{"boundary_entry_id":%q,"prompt":"","tools":[],"summary_input":[{"role":"user","content":[{"kind":"text","text":"draft summary input"}]}]}},`+
 				`"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
-				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved))
+				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved, entryID))
 		entriesBefore := recoverEntries(t, store, sessionID)
 		regBefore := operationRegister(t, store, sessionID, "maint-op")
 
@@ -7006,9 +7006,9 @@ func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T)
 		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterOperation, OperationID: "maint-op"},
 			fmt.Sprintf(`{"admission":%s,"state":{"status":"running","started_at":%q,`+
 				`"running_request":{"request_id":"maintainer-live","purpose":"maintenance","boundary_entry_id":%q,"hook_results":[]},`+
-				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance"},`+
+				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance","evidence":{"boundary_entry_id":%q,"prompt":"","tools":[],"summary_input":[{"role":"user","content":[{"kind":"text","text":"draft summary input"}]}]}},`+
 				`"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
-				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved))
+				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved, entryID))
 
 		pre := recoverEntries(t, store, sessionID)
 		{
@@ -7023,9 +7023,8 @@ func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T)
 
 		// The settlement recovers the producer from the maintenance intent:
 		// the witness is the same maintainer identity bound by the running
-		// request, and the Model is the effective compact model.
-		// The missing report stays missing; the recovery fabricates no Facts,
-		// evidence, or maintenance-provenance marker.
+		// request, and the fact copies its model and materialized input.
+		// The missing report stays missing.
 		entries := recoverEntries(t, store, sessionID)
 		settlement := entries[len(entries)-1]
 		testassert.Equal(t, settlement.Kind, harness.EntryOperationSettlement)
@@ -7039,8 +7038,15 @@ func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T)
 		}
 		testassert.NoError(t, json.Unmarshal(settlement.Payload, &wire))
 		testassert.Require(t, wire.RequestID == "maintainer-live", "recovered settlement witness = %q, want the maintenance producer identity", wire.RequestID)
-		testassert.Require(t, string(wire.Model) == `{"provider":"cprov","model":"compact-x"}`, "recovered settlement model = %s, want the effective compact model named from the maintenance intent", wire.Model)
-		testassert.Require(t, wire.Usage == nil && wire.Facts == nil && wire.Evidence == nil && !wire.CompactionUsage, "recovered settlement = %s, want no usage report, no Facts, no evidence, no maintenance provenance marker", settlement.Payload)
+		testassert.Require(t, wire.Model == nil && wire.Usage == nil && wire.Evidence == nil && !wire.CompactionUsage, "settlement = %s, want no conversation evidence or usage", settlement.Payload)
+		var facts []struct {
+			RequestID string              `json:"request_id"`
+			Model     json.RawMessage     `json:"model"`
+			Input     json.RawMessage     `json:"input"`
+			Usage     *harness.UsageCount `json:"usage"`
+		}
+		testassert.NoError(t, json.Unmarshal(wire.Facts, &facts))
+		testassert.Require(t, len(facts) == 1 && facts[0].RequestID == "maintainer-live" && string(facts[0].Model) == `{"provider":"cprov","model":"compact-x"}` && facts[0].Usage == nil && bytes.Contains(facts[0].Input, []byte(`"draft summary input"`)), "recovered facts = %s, want the active summary input without usage", wire.Facts)
 
 		// The integer token totals are unchanged and no estimate is persisted
 		// anywhere in the durable state.

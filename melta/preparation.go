@@ -452,7 +452,7 @@ func captureStrategy(snapshot *configuration, selected harness.StrategySelection
 	return capture, nil
 }
 
-func (p *preparation) bindModel(ctx context.Context, sel *selection) (*catalog.Model, *model.Transport, error) {
+func (p *preparation) bindModel(ctx context.Context, sel *selection) (*catalog.Model, preparedTransport, error) {
 	snapshot := sel.invocation.snapshot
 	chosen := sel.inputs.Model
 	refs := []model.ModelRef{chosen}
@@ -462,7 +462,7 @@ func (p *preparation) bindModel(ctx context.Context, sel *selection) (*catalog.M
 	var lastErr error
 	for _, ref := range refs {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, preparedTransport{}, err
 		}
 		if ref.IsZero() {
 			lastErr = fmt.Errorf("no model configured: %w", harness.ErrInvalid)
@@ -493,7 +493,7 @@ func (p *preparation) bindModel(ctx context.Context, sel *selection) (*catalog.M
 		sel.inputs.Model = ref
 		return entry, transport, nil
 	}
-	return nil, nil, lastErr
+	return nil, preparedTransport{}, lastErr
 }
 
 // concretePrepare is the one production preparation. It consumes only the captured snapshot's inputs — the
@@ -503,7 +503,7 @@ func (p *preparation) bindModel(ctx context.Context, sel *selection) (*catalog.M
 // configuration reloads and environment changes never reach a prepared
 // execution, and no transport input, secret, or warning is stored beyond the
 // durable capture fields.
-func (p *preparation) concretePrepare(ctx context.Context, req harness.PreparationRequest, sel selection, entry *catalog.Model, transport *model.Transport) (harness.ExecutionCapture, openInvocation, error) {
+func (p *preparation) concretePrepare(ctx context.Context, req harness.PreparationRequest, sel selection, entry *catalog.Model, transport preparedTransport) (harness.ExecutionCapture, openInvocation, error) {
 	snapshot := sel.invocation.snapshot
 	// The compact configuration is the top-level compaction section of the
 	// same one-revision snapshot; it is independent of the selectable compact
@@ -601,7 +601,7 @@ func (p *preparation) concretePrepare(ctx context.Context, req harness.Preparati
 		Implementations: implementationProvenance(snapshot.composition, sel),
 	}
 	workspace := req.Session.Identity.Workspace
-	return capture, p.concreteOpener(transport, compactTransport, req.Session.Identity, workspace, view.catalog, subprocessEnv), nil
+	return capture, p.concreteOpener(transport, compactTransport, req.Session.Identity, workspace, view.catalog, view.visible, subprocessEnv), nil
 }
 
 // projectedShell reads SHELL from the same child-environment projection the
@@ -659,18 +659,30 @@ func finiteRate(v *float64) *float64 {
 	return &copied
 }
 
-// concreteTransport converts the captured catalog provider/model entry and
-// the resolved key into the one fixed transport for the execution.
-func (p *preparation) concreteTransport(provider *catalog.Provider, entry *catalog.Model, ref model.ModelRef, apiKey string) (*model.Transport, error) {
+type preparedTransport struct {
+	transport  *model.Transport
+	parameters model.Extra
+}
+
+// concreteTransport constructs the fixed transport and its request-hook body defaults.
+func (p *preparation) concreteTransport(provider *catalog.Provider, entry *catalog.Model, ref model.ModelRef, apiKey string) (preparedTransport, error) {
 	resolved, err := p.resolveTransport(provider, entry, ref, apiKey)
 	if err != nil {
-		return nil, err
+		return preparedTransport{}, err
 	}
 	transport, err := model.NewTransport(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("build model transport for %s: %w", ref.String(), err)
+		return preparedTransport{}, fmt.Errorf("build model transport for %s: %w", ref.String(), err)
 	}
-	return transport, nil
+	parameters := make(model.Extra)
+	for _, layer := range []model.Extra{resolved.ProviderExtraBody, resolved.ModelExtraBody} {
+		for key, value := range layer {
+			if !strings.HasPrefix(key, "_melta_") {
+				parameters[key] = model.CloneRaw(value)
+			}
+		}
+	}
+	return preparedTransport{transport: transport, parameters: parameters}, nil
 }
 
 // resolveTransport builds the transport's resolved input from the captured
@@ -772,7 +784,7 @@ func wireDebugDir(location string) string {
 // producer and nil snapshot fail-closed shapes unchanged. The shared
 // advertisement gate rejects unknown names before dispatch; retry
 // classification and scope disposal belong to the shared machinery.
-func (p *preparation) concreteOpener(transport, compactTransport *model.Transport, session harness.SessionIdentity, workspace string, catalog []model.ToolDefinition, subprocessEnv func(context.Context) ([]string, error)) openInvocation {
+func (p *preparation) concreteOpener(transport, compactTransport preparedTransport, session harness.SessionIdentity, workspace string, catalog []model.ToolDefinition, visible []string, subprocessEnv func(context.Context) ([]string, error)) openInvocation {
 	return func(_ context.Context, admission harness.OperationAdmission, sel selection, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 		table := make(map[string]boundTool, len(catalog))
 		for _, definition := range catalog {
@@ -805,9 +817,13 @@ func (p *preparation) concreteOpener(transport, compactTransport *model.Transpor
 			attemptTransport = compactTransport
 		}
 		return harness.InvocationExecution{
-			BindLocation: locationBinder(workspace),
-			Model: func(ctx context.Context, req model.Request) (model.Stream, error) {
-				stream, warnings, err := attemptTransport.Stream(ctx, req, nil) // runtime extras are a later phase's channel
+			BindLocation:    locationBinder(workspace),
+			ModelParameters: attemptTransport.parameters.Clone(),
+			RequestStage: func() harness.RequestStage {
+				return harness.RequestStage{Catalog: catalog, InitialToolNames: visible, Hooks: requestHooks}
+			},
+			Model: func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
+				stream, warnings, err := attemptTransport.transport.Stream(ctx, req, parameters)
 				// The attempt's diagnostics are recorded under the admitted
 				// Session identity even when the physical request failed after
 				// encoding succeeded — a diagnostic is presentation only.
@@ -833,7 +849,6 @@ func (p *preparation) concreteOpener(transport, compactTransport *model.Transpor
 				}, true
 			},
 			ToolHooks:       hooks,
-			RequestHooks:    requestHooks,
 			ToolOutputHooks: outputHooks,
 		}, nil
 	}

@@ -19,8 +19,8 @@ import (
 )
 
 // quickModel is a physical model attempt that completes one turn immediately.
-func quickModel() func(context.Context, model.Request) (model.Stream, error) {
-	return func(context.Context, model.Request) (model.Stream, error) {
+func quickModel() func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return completedTurnStream(), nil
 	}
 }
@@ -29,8 +29,8 @@ func quickModel() func(context.Context, model.Request) (model.Stream, error) {
 // closes or its execution context is canceled, then answers accordingly: a
 // stop's cancel settles the parked Operation as interruption, a released
 // model completes the turn normally.
-func parkedModel(release chan struct{}) func(context.Context, model.Request) (model.Stream, error) {
-	return func(ctx context.Context, _ model.Request) (model.Stream, error) {
+func parkedModel(release chan struct{}) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		select {
 		case <-release:
 			return completedTurnStream(), nil

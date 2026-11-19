@@ -131,7 +131,7 @@ func TestReviewConsumedEvidenceNamesFrozenInput(t *testing.T) {
 // uncommitted facts accounted exactly once at the next checkpoint. An initial
 // none with no model work stays a clean non-event.
 func TestReviewNoneAfterModelWork(t *testing.T) {
-	onePass := func(ctx context.Context, req model.Request) (model.Stream, error) {
+	onePass := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "one pass"), usageDelta(model.Usage{InputTokens: 7, OutputTokens: 3})), nil
 	}
 
@@ -159,9 +159,9 @@ func TestReviewNoneAfterModelWork(t *testing.T) {
 
 	t.Run("automatic model work then none continues and the later checkpoint accounts the facts once", func(t *testing.T) {
 		strategy := &noneThenCheckpointStrategy{}
-		conversation := func() func(context.Context, model.Request) (model.Stream, error) {
+		conversation := func() func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds := 0
-			return func(context.Context, model.Request) (model.Stream, error) {
+			return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				rounds++
 				if rounds == 1 {
 					return streamOf(turnDelta("tool_calls", "work", testToolCall("call-1"))), nil
@@ -346,7 +346,7 @@ func TestReviewStripsOnlyInjectedPrompt(t *testing.T) {
 func TestReviewRetainAndContextSources(t *testing.T) {
 	t.Run("identical canonical and contribution values permit the canonical reference", func(t *testing.T) {
 		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{Messages: []model.Message{in.CanonicalMessages[0]}}, nil
+			return RequestConsequence{Edits: appendRequestFixture(in, in.CanonicalMessages[0])}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
 		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
@@ -363,7 +363,7 @@ func TestReviewRetainAndContextSources(t *testing.T) {
 
 	t.Run("explicit authored context equal to a contribution stays authored", func(t *testing.T) {
 		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{Messages: []model.Message{in.CanonicalMessages[0]}}, nil
+			return RequestConsequence{Edits: appendRequestFixture(in, in.CanonicalMessages[0])}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
 		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
@@ -379,8 +379,8 @@ func TestReviewRetainAndContextSources(t *testing.T) {
 	})
 
 	t.Run("a source position can never address a request-only contribution", func(t *testing.T) {
-		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{Messages: []model.Message{{Role: model.RoleUser, Content: admissionContent("steered addition")}}}, nil
+		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+			return RequestConsequence{Edits: appendRequestFixture(in, model.Message{Role: model.RoleUser, Content: admissionContent("steered addition")})}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
 		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
@@ -497,8 +497,8 @@ func TestReviewRetainResolution(t *testing.T) {
 	t.Run("a mutating callback cannot rewrite the frozen source copy", func(t *testing.T) {
 		strategy := &mutatingStrategy{}
 		addition := model.Message{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "addition", Extra: model.Extra{"raw": json.RawMessage(` { "n" : 1 } `)}}}}
-		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{Messages: []model.Message{addition}}, nil
+		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+			return RequestConsequence{Edits: appendRequestFixture(in, addition)}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
 		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(strategy))
@@ -516,7 +516,7 @@ func TestReviewRetainResolution(t *testing.T) {
 		testassert.Require(t, frozen[0].TextContent() == pristine,
 			"the frozen input copy was rewritten to %q", frozen[0].TextContent())
 		testassert.Require(t, comp.Evidence != nil && comp.Evidence.BoundaryEntryID != "" && comp.Evidence.Prompt == "" &&
-			len(comp.Evidence.ToolNames) == 0 && len(comp.Evidence.Messages) == 0 && len(comp.Evidence.HookIDs) == 0,
+			len(comp.Evidence.Tools) == 0 && len(comp.Evidence.Edits) == 0 && len(comp.Evidence.HookIDs) == 0,
 			"maintenance evidence = %+v, want only the frozen canonical references", comp.Evidence)
 	})
 }

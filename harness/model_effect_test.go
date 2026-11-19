@@ -27,8 +27,8 @@ import (
 // physical-request shape: exactly one physical attempt per invocation. The
 // protocol-warning return is dropped until its Phase 7 observation consumer
 // exists.
-func transportAttempt(tr *model.Transport) func(context.Context, model.Request) (model.Stream, error) {
-	return func(ctx context.Context, req model.Request) (model.Stream, error) {
+func transportAttempt(tr *model.Transport) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		stream, _, err := tr.Stream(ctx, req, nil)
 		return stream, err
 	}
@@ -262,7 +262,7 @@ func TestModelEffectAttemptFailureUnderCancellationSettlesInterruption(t *testin
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	attempts := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		attempts++
 		cancel()                                   // the execution context dies during the attempt
 		return nil, errors.New("provider dropped") // not cancellation-shaped
@@ -420,7 +420,7 @@ func TestModelEffectAcceptedStreamNeverRetries(t *testing.T) {
 func TestModelEffectOneAssemblyAndClose(t *testing.T) {
 	stream := completedTurnStream()
 	h, store, c, sessionID := newEffectHarness(t, nil)
-	exec := effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+	exec := effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return stream, nil
 	}, nil)
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
@@ -440,7 +440,7 @@ func TestModelEffectInvalidAttemptOutcomeSettlesBoundaryFailure(t *testing.T) {
 	t.Run("both a stream and an error", func(t *testing.T) {
 		stream := streamOf()
 		h, store, c, sessionID := newEffectHarness(t, nil)
-		exec := effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+		exec := effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return stream, errors.New("ambiguous outcome")
 		}, nil)
 		err := executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
@@ -456,7 +456,7 @@ func TestModelEffectInvalidAttemptOutcomeSettlesBoundaryFailure(t *testing.T) {
 
 	t.Run("neither a stream nor an error", func(t *testing.T) {
 		h, store, c, sessionID := newEffectHarness(t, nil)
-		exec := effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+		exec := effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return nil, nil
 		}, nil)
 		err := executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {

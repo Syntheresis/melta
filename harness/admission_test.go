@@ -150,7 +150,7 @@ func newTestHarness(t *testing.T, store Storage, prepare func(context.Context, P
 func validExecution() Execution {
 	return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
-			Model: func(context.Context, model.Request) (model.Stream, error) {
+			Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				select {} // the fixture owns the admitted Operation's state assertions
 			},
 			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
@@ -170,7 +170,7 @@ func preparedExecuting(exec Execution) PreparedExecution {
 // modelPrepared returns the fixtures' prepared execution whose opener yields
 // invocations carrying the given physical model request function over the
 // default tool function.
-func modelPrepared(modelFn func(context.Context, model.Request) (model.Stream, error)) PreparedExecution {
+func modelPrepared(modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) PreparedExecution {
 	exec := validExecution()
 	if modelFn != nil {
 		exec = Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {

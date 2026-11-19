@@ -42,7 +42,7 @@ func newAdmittedHarness(t *testing.T, hctx context.Context, prepared PreparedExe
 // newEffectHarness admits one running Operation ("op-1") with the given
 // prepared physical model request function and returns the pieces the effect
 // fixtures need.
-func newEffectHarness(t *testing.T, modelFn func(context.Context, model.Request) (model.Stream, error)) (*Harness, *graphStorage, *coordinator, string) {
+func newEffectHarness(t *testing.T, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) (*Harness, *graphStorage, *coordinator, string) {
 	t.Helper()
 	return newAdmittedHarness(t, context.Background(), modelPrepared(modelFn))
 }
@@ -90,14 +90,14 @@ var fixturePermission = []PermissionRequest{{Permission: PermissionCommandRun, T
 
 // invocationExecution supplies the fixtures' opened invocation: the given
 // model and tool callbacks over the shared ordinary invocation defaults.
-func invocationExecution(modelFn func(context.Context, model.Request) (model.Stream, error), toolFn func(context.Context, model.ToolCall) PreparedTool) InvocationExecution {
+func invocationExecution(modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error), toolFn func(context.Context, model.ToolCall) PreparedTool) InvocationExecution {
 	return defaultInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(toolFn, nil)})
 }
 
 // effectExecution supplies the normalizer every opened invocation requires,
 // answering every Engine request with the same model and tool callbacks; a
 // nil tool callback answers with the empty plan.
-func effectExecution(modelFn func(context.Context, model.Request) (model.Stream, error), toolFn func(context.Context, model.ToolCall) PreparedTool) Execution {
+func effectExecution(modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error), toolFn func(context.Context, model.ToolCall) PreparedTool) Execution {
 	return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return invocationExecution(modelFn, toolFn), nil
 	}}
@@ -107,7 +107,7 @@ func effectExecution(modelFn func(context.Context, model.Request) (model.Stream,
 // answers conversation Engine requests with the conversation callback and
 // maintenance requests with the maintenance callback, both over an empty-plan
 // tool function and the required normalizer.
-func purposeExecution(conversation, maintenance func(context.Context, model.Request) (model.Stream, error)) Execution {
+func purposeExecution(conversation, maintenance func(context.Context, model.Request, model.Extra) (model.Stream, error)) Execution {
 	return Execution{OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 		modelFn := conversation
 		if request.Purpose == InvocationPurposeMaintenance {
@@ -219,7 +219,7 @@ func TestModelEffectReadyRemainsRunning(t *testing.T) {
 		reservedID string
 	)
 	modelCalls := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		modelCalls++
 		reg, err := store.ReadRegister(context.Background(), RegisterKey{SessionID: sessionID, Kind: RegisterOperation, OperationID: testOpID})
 		if err != nil {
@@ -307,7 +307,7 @@ func TestModelEffectReadyRemainsRunning(t *testing.T) {
 // and the Operation stays running.
 func TestModelEffectContinueRemainsRunning(t *testing.T) {
 	modelCalls := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		modelCalls++
 		if modelCalls == 1 {
 			return erroredTurnStream(), nil
@@ -375,7 +375,7 @@ func TestModelEffectTerminalSettlement(t *testing.T) {
 		)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			reservedID = readReservedIntent(t, store, sessionID)
 			// The read failure is observed under the canceled execution
 			// context after the partial arrived: assembly classifies the
@@ -415,7 +415,7 @@ func TestModelEffectTerminalSettlement(t *testing.T) {
 			sessionID  string
 			reservedID string
 		)
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			reservedID = readReservedIntent(t, store, sessionID)
 			return nil, errors.New("model failure")
 		}
@@ -456,7 +456,7 @@ func TestModelEffectRepeatedCallIDSettlesFailure(t *testing.T) {
 		completedTurnStream(testToolCall("call-1")),
 	}
 	turn := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		s := turns[turn]
 		turn++
 		return s, nil
@@ -489,7 +489,7 @@ func TestModelEffectRepeatedCallIDSettlesFailure(t *testing.T) {
 // that reported usage without an eligible payload lands that usage on the
 // settlement entry and both totals.
 func TestModelEffectTerminalNoOutputUsageOnSettlement(t *testing.T) {
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return failStream(errors.New("empty failure"), usageDelta(model.Usage{InputTokens: 4, CachedInputTokens: 2, OutputTokens: 6})), nil
 	}
 	h, store, c, sessionID := newEffectHarness(t, modelFn)
@@ -555,7 +555,7 @@ func TestModelEffectPublicationFailureLeavesIntentState(t *testing.T) {
 		{"replace_register", 3}, // the result transaction's Session register
 	} {
 		t.Run(fmt.Sprintf("publication failure at %s #%d", fail.step, fail.nth), func(t *testing.T) {
-			modelFn := func(context.Context, model.Request) (model.Stream, error) {
+			modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
 			}
 			h, store, c, sessionID := newEffectHarness(t, modelFn)
@@ -644,7 +644,7 @@ func TestRequestSourceProjectsFullHistory(t *testing.T) {
 	testassert.Require(t, msgs[4].Role == model.RoleUser && msgs[4].TextContent() == want, "signal message = %+v, want the wrapped signal text %q", msgs[4], want)
 
 	t.Run("first projection ignores early pending steering", func(t *testing.T) {
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(testToolCall("call-1")), nil
 		}
 		h, _, c, sessionID := newEffectHarness(t, modelFn)
@@ -659,7 +659,7 @@ func TestRequestSourceProjectsFullHistory(t *testing.T) {
 
 	t.Run("late arrival selects the boundary at the next call", func(t *testing.T) {
 		modelCalls := 0
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			modelCalls++
 			if modelCalls == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -752,7 +752,7 @@ func foreignEffectRace(t *testing.T, store *graphStorage, sessionID, operationID
 // observes the foreign state instead of the stale view.
 func TestEffectTransactionsRematerializeOnRevisionRace(t *testing.T) {
 	t.Run("intent transaction", func(t *testing.T) {
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(), nil
 		}
 		h, store, c, sessionID := newEffectHarness(t, modelFn)
@@ -772,7 +772,7 @@ func TestEffectTransactionsRematerializeOnRevisionRace(t *testing.T) {
 			store     *graphStorage
 			sessionID string
 		)
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			foreignEffectRace(t, store, sessionID, testOpID, "foreign") // between the committed intent and the result transaction
 			return completedTurnStream(), nil
 		}
@@ -830,7 +830,7 @@ func TestEffectTransactionsPreconditionsOutrankRevisionRace(t *testing.T) {
 	t.Run("intent over a foreign terminal operation", func(t *testing.T) {
 		h, store, c, sessionID := newEffectHarness(t, nil)
 		foreignTerminalSettle(t, store, sessionID, testOpID)
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(), nil
 		}
 		prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
@@ -844,7 +844,7 @@ func TestEffectTransactionsPreconditionsOutrankRevisionRace(t *testing.T) {
 			store     *graphStorage
 			sessionID string
 		)
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			foreignTerminalSettle(t, store, sessionID, testOpID) // between the committed intent and the result transaction
 			return completedTurnStream(), nil
 		}
@@ -896,7 +896,7 @@ func newOpenerHarness(t *testing.T, open func(context.Context, OperationAdmissio
 // newExecutionHarness admits one running Operation ("op-1") under a cancelable
 // Harness context with both prepared effect functions, returning the pieces
 // the execution fixtures need.
-func newExecutionHarness(t *testing.T, modelFn func(context.Context, model.Request) (model.Stream, error), toolFn func(context.Context, model.ToolCall) PreparedTool) (*Harness, *graphStorage, *coordinator, string, PreparedExecution, context.CancelFunc) {
+func newExecutionHarness(t *testing.T, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error), toolFn func(context.Context, model.ToolCall) PreparedTool) (*Harness, *graphStorage, *coordinator, string, PreparedExecution, context.CancelFunc) {
 	t.Helper()
 	testassert.Require(t, toolFn != nil, "execution fixtures require a prepared tool function")
 	return newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
@@ -910,7 +910,7 @@ func newExecutionHarness(t *testing.T, modelFn func(context.Context, model.Reque
 // ever starting the callback.
 func TestModelEffectGateSkipsCallbackOnCancellation(t *testing.T) {
 	invoked := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		invoked++
 		return completedTurnStream(), nil
 	}
@@ -941,7 +941,7 @@ func TestModelEffectGateSkipsCallbackOnCancellation(t *testing.T) {
 // composition and the outer terminal settlement: a clean run settles success
 // through the common terminal helper with no detail.
 func TestExecuteSuccessSettlesOuterTerminal(t *testing.T) {
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return completedTurnStream(), nil
 	}
 	spy := &toolSpy{}
@@ -977,7 +977,7 @@ func TestExecuteOpensOnceWithCommittedAdmission(t *testing.T) {
 		adm  OperationAdmission
 	}
 	var opens []openRecord
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return completedTurnStream(), nil
 	}
 	spy := &toolSpy{}
@@ -1007,7 +1007,7 @@ func TestExecuteCanceledBeforeOpenSkipsOpener(t *testing.T) {
 	opens := 0
 	h, store, c, sessionID, prepared, cancel := newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
 		opens++
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(), nil
 		}
 		return effectExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
@@ -1038,7 +1038,7 @@ func TestExecuteOpenerErrorSettlesOrdinaryTerminals(t *testing.T) {
 		openErr := errors.New("open broke")
 		modelRuns := 0
 		h, store, c, sessionID, prepared, _ := newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
-			return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				modelRuns++
 				return nil, nil
 			}, nil), openErr
@@ -1130,7 +1130,7 @@ func TestExecuteInvalidOpenedExecutionClosesBeforeRejection(t *testing.T) {
 			var statusDuringClose OperationState
 			modelRuns := 0
 			open := func(_ context.Context, adm OperationAdmission) (Execution, error) {
-				exec := effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+				exec := effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					modelRuns++
 					return completedTurnStream(), nil
 				}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} })
@@ -1138,7 +1138,7 @@ func TestExecuteInvalidOpenedExecutionClosesBeforeRejection(t *testing.T) {
 					exec.OpenInvocation = nil
 				} else {
 					exec.OpenInvocation = func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
-						inv := invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+						inv := invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 							modelRuns++
 							return completedTurnStream(), nil
 						}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} })
@@ -1357,7 +1357,7 @@ func TestToolEffectPlansAndOutcomes(t *testing.T) {
 				return nil
 			}
 			rounds := 0
-			exec := effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+			exec := effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				rounds++
 				if rounds == 1 {
 					return completedTurnStream(testToolCall("call-1")), nil
@@ -2119,7 +2119,7 @@ func TestToolEffectDeniedSettlesOnlyItsCall(t *testing.T) {
 	}
 	rounds := 0
 	prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+		return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
@@ -2177,10 +2177,10 @@ func TestToolEffectAdvertisementGate(t *testing.T) {
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 		}
 		hide := RequestHook{ID: "req.hide.echo", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{ToolNames: []string{}}, nil // the admitted catalog has echo; the request advertises none
+			return RequestConsequence{Tools: fixtureDefinitions()}, nil // the admitted catalog has echo; the request advertises none
 		}}
 		testassert.Require(t, len(testCapture().Tools) == 1 && testCapture().Tools[0].Name == "echo", "fixture catalog = %+v, want the admitted echo tool", testCapture().Tools)
-		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize), RequestHooks: []RequestHook{hide}}, testToolCall("call-1"))
+		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize), RequestStage: fixtureRequestStage([]RequestHook{hide}...)}, testToolCall("call-1"))
 		testassert.NoError(t, err)
 		testassert.Require(t, result.Status == model.ResultError && result.Content == `Tool "echo" is not available.` && result.Evidence == ExecutionNotStarted,
 			"hidden-echo result = %+v, want the ordinary unavailable error with proven-unstarted knowledge", result)
@@ -2428,7 +2428,7 @@ func TestToolOutcomeMetadataRules(t *testing.T) {
 // result, and the run continues to the outer success settlement.
 func TestExecuteOrderedBatchSettlesExactlyOnce(t *testing.T) {
 	turn := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		turn++
 		if turn == 1 {
 			return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
@@ -2493,7 +2493,7 @@ func TestExecuteOrderedBatchSettlesExactlyOnce(t *testing.T) {
 func TestToolEffectRealOutcomeWinsCancellationRace(t *testing.T) {
 	var cancel context.CancelFunc
 	turn := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		turn++
 		if turn == 1 {
 			return completedTurnStream(testToolCall("call-1")), nil
@@ -2530,7 +2530,7 @@ func TestToolEffectRealOutcomeWinsCancellationRace(t *testing.T) {
 // interrupted result through the common terminal helper.
 func TestToolOriginatedInterruptionSettlesUnstartedCalls(t *testing.T) {
 	turn := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		turn++
 		if turn == 1 {
 			return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
@@ -2592,7 +2592,7 @@ func TestToolOriginatedInterruptionSettlesUnstartedCalls(t *testing.T) {
 func TestExecuteBetweenEffectCancellationSettlesInterruption(t *testing.T) {
 	turn := 0
 	var cancel context.CancelFunc
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		turn++
 		if turn == 2 {
 			// the execution context dies when assembly closes the accepted
@@ -2629,7 +2629,7 @@ func TestExecutePast25ModelEffectsSettlesSuccessAndDrainsSteering(t *testing.T) 
 		arrived30 = make(chan struct{})
 		gate30    = make(chan struct{})
 	)
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		mu.Lock()
 		modelRuns++
 		n := modelRuns
@@ -2710,7 +2710,7 @@ func TestToolResultAdoptsIntoView(t *testing.T) {
 		}
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran " + call.ID}}}
 	}
-	exec := effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+	exec := effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		rounds++
 		if rounds == 1 {
 			return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
@@ -3111,7 +3111,7 @@ func TestToolShapingPreservesUnknownOutcomeNotice(t *testing.T) {
 		var next model.Request
 		exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 			return InvocationExecution{
-				Model: func(_ context.Context, request model.Request) (model.Stream, error) {
+				Model: func(_ context.Context, request model.Request, _ model.Extra) (model.Stream, error) {
 					rounds++
 					if rounds == 1 {
 						return completedTurnStream(testToolCall("call-1")), nil
@@ -3157,7 +3157,9 @@ func TestToolShapingPreservesUnknownOutcomeNotice(t *testing.T) {
 // invocation validation: every hook requires a non-empty unique ID, a
 // non-empty extension identity and a non-nil Run, and carries no mode.
 func TestOpenedInvocationOutputHookRules(t *testing.T) {
-	modelFn := func(context.Context, model.Request) (model.Stream, error) { return completedTurnStream(), nil }
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+		return completedTurnStream(), nil
+	}
 	toolFn := func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
 	good := shapingHook("shaper.one", func(context.Context, ToolOutputInput) (string, error) { return "", nil })
 	for _, tc := range []struct {
@@ -3207,7 +3209,7 @@ func (w *reserveWaitContext) Done() <-chan struct{} {
 
 func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 	t.Run("storage failure leaves the running state for recovery", func(t *testing.T) {
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(testToolCall("call-1")), nil
 		}
 		spy := &toolSpy{}
@@ -3246,12 +3248,12 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 		// A cancellation-shaped run error never reaches this settlement: the
 		// Engine converts it to the typed interruption terminal, and the
 		// settlement consumes exactly the typed result with no run error.
-		h, store, c, sessionID := newEffectHarness(t, func(ctx context.Context, _ model.Request) (model.Stream, error) {
+		h, store, c, sessionID := newEffectHarness(t, func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 			<-ctx.Done() // the Engine's next boundary observes the interruption
 			return nil, ctx.Err()
 		})
 		runCtx, cancel := context.WithCancel(context.Background())
-		prepared := preparedExecuting(effectExecution(func(ctx context.Context, _ model.Request) (model.Stream, error) {
+		prepared := preparedExecuting(effectExecution(func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}, nil))
@@ -3279,7 +3281,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 	})
 	t.Run("non-storage protocol error still settles failure", func(t *testing.T) {
 		hookErr := errors.New("context source broke")
-		exec := requestHookFixtureExecution(func(context.Context, model.Request) (model.Stream, error) {
+		exec := requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			t.Error("a failed request hook dispatched a conversation request")
 			return nil, nil
 		}, nil, RequestHook{ID: "req.broke", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
@@ -3294,7 +3296,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 		testassert.Require(t, rec.State.Status == OperationFailure && rec.State.Terminal != nil && rec.State.Terminal.Detail == hookErr.Error(), "operation state = %+v, want terminal failure with the error text", rec.State)
 	})
 	t.Run("boundary token settles the quiet success", func(t *testing.T) {
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(testToolCall("call-1")), nil
 		}
 		h, store, c, sessionID := newEffectHarness(t, modelFn)
@@ -3345,7 +3347,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				wait := &reserveWaitContext{Context: context.Background(), consulted: make(chan struct{})}
 				modelRan := make(chan struct{}, 1)
-				prepared := preparedExecuting(effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+				prepared := preparedExecuting(effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					modelRan <- struct{}{}
 					return completedTurnStream(), nil
 				}, nil))
@@ -3416,7 +3418,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 	t.Run("one attempted success publication keeps its original error", func(t *testing.T) {
 		wait := &reserveWaitContext{Context: context.Background(), consulted: make(chan struct{})}
 		modelRan := make(chan struct{}, 1)
-		prepared := preparedExecuting(effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+		prepared := preparedExecuting(effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			modelRan <- struct{}{}
 			return completedTurnStream(), nil
 		}, nil))
@@ -3483,7 +3485,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 				hookErr := fmt.Errorf("hook transport: %w", ErrStorage)
 				started := make(chan struct{})
 				var once sync.Once
-				modelFn := func(ctx context.Context, _ model.Request) (model.Stream, error) {
+				modelFn := func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 					<-ctx.Done()
 					return nil, ctx.Err()
 				}
@@ -3495,8 +3497,8 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 					exec = effectExecution(modelFn, nil)
 					exec.OpenInvocation = func(ctx context.Context, request InvocationRequest) (InvocationExecution, error) {
 						once.Do(func() { close(started) })
-						inv := invocationExecution(func(ctx context.Context, req model.Request) (model.Stream, error) {
-							return modelFn(ctx, req)
+						inv := invocationExecution(func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
+							return modelFn(ctx, req, nil)
 						}, nil)
 						return inv, nil
 					}
@@ -3614,7 +3616,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				h, store, c, sessionID := newEffectHarness(t, nil)
 				tc.foreign(t, h, store, c, sessionID)
-				prepared := preparedExecuting(effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+				prepared := preparedExecuting(effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return completedTurnStream(), nil
 				}, nil))
 				_ = executeDirect(h, c, h.ctx, testOpID, prepared)
@@ -3664,7 +3666,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 			err := h.rematerialize(context.Background(), c, sessionID)
 			testassert.NoError(t, err)
 		}
-		prepared := preparedExecuting(effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+		prepared := preparedExecuting(effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(), nil
 		}, nil))
 		_ = executeDirect(h, c, h.ctx, testOpID, prepared)
@@ -3691,7 +3693,7 @@ func TestToolEffectGateBeforePreparation(t *testing.T) {
 	// lands before any concrete tool dispatch: the actual owner settles the
 	// run interrupted and its terminal helper interrupts every unstarted
 	// call without ever preparing one.
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		cancel()
 		return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
 	}
@@ -3795,7 +3797,7 @@ func TestModelEffectIntentPublicationUnderCancellationRetainsRunningState(t *tes
 	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
 		t.Run(cause.Error(), func(t *testing.T) {
 			calls := 0
-			modelFn := func(context.Context, model.Request) (model.Stream, error) {
+			modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				calls++
 				return completedTurnStream(), nil
 			}
@@ -3856,7 +3858,7 @@ func TestModelEffectIntentPublicationUnderCancellationRetainsRunningState(t *tes
 // even though the executor plan would have produced well-formed bounded
 // metadata.
 func TestToolEffectIntentCancellationSettlesInterrupted(t *testing.T) {
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
 	}
 	toolFn := func(ctx context.Context, call model.ToolCall) PreparedTool {

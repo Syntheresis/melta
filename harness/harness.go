@@ -174,18 +174,37 @@ type RequestHookInput struct {
 	Prompt            string                 // the effective prompt text
 	Catalog           []model.ToolDefinition // the full captured eligible catalog
 	Tools             []model.ToolDefinition // the currently visible tool view
+	MessagePositions  []*int                 // parallel to Messages; nil denotes a request-only message
+	Parameters        model.Extra
+}
+
+// RequestMessageEdit retains a frozen position, optionally replacing its
+// content, or supplies one request-only message.
+type RequestMessageEdit struct {
+	Position *int
+	Content  []model.ContentPart
+	Message  *model.Message
 }
 
 // RequestConsequence is one request hook's closed contribution: absent members
 // mean unchanged. A present Prompt replaces the complete prompt text (a
-// present-empty Prompt removes the prompt); Messages are complete request-only
-// messages appended to the conversation view; a present ToolNames replaces the
-// visible tool view with those names selected from the captured catalog
-// (present-empty advertises none).
+// present-empty Prompt removes the prompt). Edits replaces the visible
+// message list, Tools replaces the advertisement, and Parameters assigns
+// body fields over the effective values. A present empty list clears that
+// list.
 type RequestConsequence struct {
-	Prompt    *string
-	Messages  []model.Message
-	ToolNames []string
+	Prompt     *string
+	Edits      []RequestMessageEdit
+	Tools      []model.ToolDefinition
+	Parameters model.Extra
+}
+
+// RequestStage supplies the current catalog, initial advertisement and hooks
+// for one request. A nil initial selection advertises the whole catalog.
+type RequestStage struct {
+	Catalog          []model.ToolDefinition
+	InitialToolNames []string
+	Hooks            []RequestHook
 }
 
 // RequestHook is one selected request-boundary hook: it runs after steering
@@ -258,8 +277,13 @@ type InvocationExecution struct {
 	// Model is the one physical model-request callback. Each invocation of
 	// it makes exactly one physical attempt and returns its accepted stream
 	// or that attempt's failure; retry, assembly and settlement are
-	// Harness-owned.
-	Model func(context.Context, model.Request) (model.Stream, error)
+	// Harness-owned. It receives independent message, tool and parameter values.
+	Model func(context.Context, model.Request, model.Extra) (model.Stream, error)
+	// ModelParameters are the bound transport's effective configured defaults.
+	ModelParameters model.Extra
+	// RequestStage supplies the declarations before each request. When nil,
+	// the admitted catalog and advertisement are used without hooks.
+	RequestStage func() RequestStage
 	// LookupTool binds one implementation after argument hooks complete.
 	LookupTool func(string) (ToolBinding, bool)
 	// ToolHooks are the selected argument hooks in configured order. Each
@@ -277,12 +301,7 @@ type InvocationExecution struct {
 	// later one the preceding hook's return. They are pure and can never
 	// change the settled status, evidence, usage or metadata.
 	ToolOutputHooks []ToolOutputHook
-	// RequestHooks are the selected request-boundary hooks in configured
-	// order. They run inside the Operation's request source, after steering
-	// and before the automatic-maintenance orchestration and any model
-	// effect.
-	RequestHooks []RequestHook
-	Close        func() error
+	Close           func() error
 }
 
 // AuthorizationHook is a pure restriction on a prepared action. Bind returns

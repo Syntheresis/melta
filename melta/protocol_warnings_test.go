@@ -502,14 +502,14 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 				ToolCalls: []model.ToolCall{{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{}`)}}},
 		}}
 		{
-			_, err := inv.Model(context.Background(), diagnostic)
+			_, err := inv.Model(context.Background(), diagnostic, nil)
 			testassert.Require(t, err != nil, "compact transport request over the failing endpoint succeeded, want the transport failure")
 		}
 		revision, storeWarnings := r.warnings.hydrate(sessionID)
 		testassert.Require(t, warningOf(storeWarnings, "runtime:protocol", "protocol_must_preserve_missing", sessionID) != nil, "the compact closure dropped its post-encode diagnostics: %+v", storeWarnings)
 
 		// An identical attempt replaces with the same list: no advance.
-		_, _ = inv.Model(context.Background(), diagnostic)
+		_, _ = inv.Model(context.Background(), diagnostic, nil)
 		deduped, dedupedWarnings := r.warnings.hydrate(sessionID)
 		testassert.Require(t, deduped == revision && slices.Equal(warningBodies(dedupedWarnings), warningBodies(storeWarnings)), "an identical attempt advanced the store: revision %d → %d", revision, deduped)
 
@@ -519,7 +519,7 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 			{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "summarize"}}},
 		}}
 		{
-			_, err := inv.Model(context.Background(), clean)
+			_, err := inv.Model(context.Background(), clean, nil)
 			testassert.Require(t, err != nil, "diagnostic-free compact request over the failing endpoint succeeded, want the transport failure")
 		}
 		cleared, clearedWarnings := r.warnings.hydrate(sessionID)
@@ -537,14 +537,14 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		beforeLate, _ := r.warnings.snapshot()
-		_, _ = inv.Model(context.Background(), diagnostic)
+		_, _ = inv.Model(context.Background(), diagnostic, nil)
 		afterLate, lateWarnings := r.warnings.snapshot()
 		testassert.Equal(t, afterLate, beforeLate)
 		testassert.Require(t, warningOf(lateWarnings, "runtime:protocol", "protocol_must_preserve_missing", sessionID) == nil, "a late attempt resurrected the deleted subject's diagnostics: %+v", lateWarnings)
 
 		// Reports after the owner's warning-store closure are ignored.
 		r.warnings.close()
-		_, _ = inv.Model(context.Background(), diagnostic)
+		_, _ = inv.Model(context.Background(), diagnostic, nil)
 		closed, closedWarnings := r.warnings.snapshot()
 		testassert.Require(t, closed == afterLate && slices.Equal(warningBodies(closedWarnings), warningBodies(lateWarnings)), "a report after closure changed the store")
 	})

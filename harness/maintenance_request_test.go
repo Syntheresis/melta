@@ -99,7 +99,7 @@ func runAuthoredSummaryRound(t *testing.T, authored []model.Message, echo bool, 
 	seed := UsageCount{InputTokens: 13}
 	h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
 	var sent model.Request
-	exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
+	exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 	})
 	exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: IncludedStrategyID, RequiresContextWindow: true, Strategy: requestShapeStrategy{request: authored}})
@@ -109,14 +109,14 @@ func runAuthoredSummaryRound(t *testing.T, authored []model.Message, echo bool, 
 		if err != nil {
 			return inv, err
 		}
-		inv.Model = func(ctx context.Context, req model.Request) (model.Stream, error) {
+		inv.Model = func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				sent = req
 				return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 			}
 			return completedTurnStream(), nil
 		}
-		inv.RequestHooks = []RequestHook{{
+		inv.RequestStage = fixtureRequestStage([]RequestHook{{
 			ID: "req.inspect", ExtensionID: "req-ext", Mode: HookModePure,
 			Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 				if in.Purpose == InvocationPurposeMaintenance {
@@ -128,7 +128,7 @@ func runAuthoredSummaryRound(t *testing.T, authored []model.Message, echo bool, 
 				}
 				return RequestConsequence{}, nil
 			},
-		}}
+		}}...)
 		return inv, nil
 	}
 	testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
@@ -137,6 +137,31 @@ func runAuthoredSummaryRound(t *testing.T, authored []model.Message, echo bool, 
 	comp := compactedEntryOf(t, graph)
 	testassert.Require(t, len(comp.Facts) == 1, "checkpoint facts = %+v, want the one summary producer", comp.Facts)
 	checkRequest(t, sent, comp.Facts[0])
+}
+
+func TestRequestHookSummaryPositionDoesNotAddressPrompt(t *testing.T) {
+	authored := []model.Message{
+		{Role: model.RoleSystem, Content: admissionContent("authored")},
+		{Role: model.RoleUser, Content: admissionContent("body")},
+	}
+	for _, prompt := range []string{"authored", ""} {
+		t.Run(fmt.Sprintf("prompt=%q", prompt), func(t *testing.T) {
+			view := newStrategyRequestView(testCapture(), "", "", model.Request{Messages: authored})
+			position := 0
+			accepted, err := view.acceptConsequence(RequestConsequence{
+				Prompt: &prompt, Edits: []RequestMessageEdit{{Position: &position, Content: admissionContent("edited body")}},
+			})
+			testassert.NoError(t, err)
+			view.applyConsequence(accepted)
+			request, err := shapeStrategyRequest(view, model.Request{Messages: authored})
+			testassert.NoError(t, err)
+			want := []model.Message{{Role: model.RoleUser, Content: admissionContent("edited body")}}
+			if prompt != "" {
+				want = append([]model.Message{authored[0]}, want...)
+			}
+			requireAuthoredMessages(t, request.Messages, want)
+		})
+	}
 }
 
 // TestSummaryRunningRequestClearedBeforeConsume proves the one summary request
@@ -149,7 +174,7 @@ func TestSummaryRunningRequestClearedBeforeConsume(t *testing.T) {
 	h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
 	var dispatchedID, hookID string
 	var sawModelState, sawConsumeState OperationCurrentState
-	exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
+	exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 	})
 	exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: IncludedStrategyID, RequiresContextWindow: true, Strategy: &maintenanceObserveStrategy{
@@ -166,7 +191,7 @@ func TestSummaryRunningRequestClearedBeforeConsume(t *testing.T) {
 		if err != nil {
 			return inv, err
 		}
-		inv.Model = func(ctx context.Context, req model.Request) (model.Stream, error) {
+		inv.Model = func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				dispatchedID = request.ID
 				rec, rerr := h.ReadOperation(context.Background(), sessionID, testOpID)
@@ -177,13 +202,13 @@ func TestSummaryRunningRequestClearedBeforeConsume(t *testing.T) {
 			return completedTurnStream(), nil
 		}
 		if request.Purpose == InvocationPurposeMaintenance {
-			inv.RequestHooks = []RequestHook{{
+			inv.RequestStage = fixtureRequestStage([]RequestHook{{
 				ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful,
 				Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 					hookID = in.RequestID
 					return RequestConsequence{}, nil
 				},
-			}}
+			}}...)
 		}
 		return inv, nil
 	}
@@ -250,7 +275,7 @@ func TestStrategyReplacementBeforeProcedure(t *testing.T) {
 			exec := Execution{OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 				if request.Purpose == InvocationPurposeMaintenance {
 					modelCalls++
-					return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+					return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 					}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 				}
@@ -310,7 +335,7 @@ func TestMaintenanceSummaryLossRecovery(t *testing.T) {
 		h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
 		var summaryID string
 		modelCalls := 0
-		exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
+		exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			modelCalls++
 			return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 		})
@@ -324,13 +349,13 @@ func TestMaintenanceSummaryLossRecovery(t *testing.T) {
 				return inv, err
 			}
 			if request.Purpose == InvocationPurposeMaintenance {
-				inv.RequestHooks = []RequestHook{{
+				inv.RequestStage = fixtureRequestStage([]RequestHook{{
 					ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful,
 					Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 						summaryID = in.RequestID
 						return RequestConsequence{}, nil
 					},
-				}}
+				}}...)
 			}
 			return inv, nil
 		}
@@ -384,15 +409,19 @@ func TestMaintenanceSummaryLossRecovery(t *testing.T) {
 		seed := UsageCount{InputTokens: 13}
 		h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
 		var summaryID string
+		var sent model.Request
+		var parameters model.Extra
 		modelCalls, conversationCalls := 0, 0
-		exec := purposeExecution(func(context.Context, model.Request) (model.Stream, error) {
+		exec := purposeExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			conversationCalls++
 			return completedTurnStream(), nil
-		}, func(context.Context, model.Request) (model.Stream, error) {
+		}, func(_ context.Context, req model.Request, body model.Extra) (model.Stream, error) {
 			modelCalls++
+			sent, parameters = req, body
 			return summaryStream("summary", model.Usage{InputTokens: 7}), nil
 		})
 		exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: IncludedStrategyID, RequiresContextWindow: true, Strategy: requestShapeStrategy{request: []model.Message{
+			{Role: model.RoleSystem, Content: []model.ContentPart{{Kind: model.PartText, Text: "first"}, {Kind: model.PartText, Text: " second"}}, Extra: model.Extra{"custom": json.RawMessage(`1`)}},
 			{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "pass"}}},
 		}}})
 		opened := exec.OpenInvocation
@@ -403,6 +432,10 @@ func TestMaintenanceSummaryLossRecovery(t *testing.T) {
 			}
 			if request.Purpose == InvocationPurposeMaintenance {
 				summaryID = request.ID
+				inv.RequestStage = fixtureRequestStage([]RequestHook{{ID: "req.summary", ExtensionID: "req-ext", Mode: HookModePure,
+					Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+						return RequestConsequence{Prompt: &in.Prompt, Parameters: model.Extra{"temperature": json.RawMessage(`0.3`)}}, nil
+					}}}...)
 			}
 			return inv, nil
 		}
@@ -434,9 +467,12 @@ func TestMaintenanceSummaryLossRecovery(t *testing.T) {
 		settlement := settlementEntryOf(t, graph)
 		testassert.Require(t, settlement.Status == OperationInterruption && settlement.RequestID == summaryID &&
 			settlement.EntryID == reserved &&
-			settlement.Model != nil && *settlement.Model == testCompactCapture().Model && settlement.Usage == nil &&
-			len(settlement.Facts) == 0 && settlement.Evidence == nil,
-			"settlement = %+v, want the reserved result identity, no synthesized usage or facts", settlement)
+			settlement.Model == nil && settlement.Usage == nil && len(settlement.Facts) == 1 && settlement.Evidence == nil,
+			"settlement = %+v, want exact input under the reserved result with no synthesized usage", settlement)
+		fact := settlement.Facts[0]
+		requireAuthoredMessages(t, fact.Input, sent.Messages)
+		testassert.Require(t, fact.Model == testCompactCapture().Model && fact.Usage == nil && reflect.DeepEqual(fact.Parameters, parameters) &&
+			reflect.DeepEqual(fact.HookIDs, []HookIdentity{{ExtensionID: "req-ext", HookID: "req.summary"}}), "recovered fact = %+v", fact)
 		state := operationStateOf(t, graph, testOpID)
 		testassert.Require(t, state.Status == OperationInterruption && state.Request == nil && !state.UnreportedMaintenance, "recovered operation = %+v", state)
 		for _, modelUsage := range state.Usage.ByModel {
@@ -489,15 +525,15 @@ func requireAuthoredMessages(t *testing.T, got, want []model.Message) {
 	}
 }
 
-// TestSummaryRequestRejectsToolSelection proves the summary request advertises
+// TestSummaryRequestRejectsToolDefinitions proves the summary request advertises
 // nothing: a maintenance hook selecting any tool is rejected against the empty
 // catalogue before the summary is dispatched, and the operation settles its
 // strategy failure without a checkpoint.
-func TestSummaryRequestRejectsToolSelection(t *testing.T) {
+func TestSummaryRequestRejectsToolDefinitions(t *testing.T) {
 	seed := UsageCount{InputTokens: 13}
 	h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
 	modelCalls := 0
-	exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
+	exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		modelCalls++
 		return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 	})
@@ -511,17 +547,17 @@ func TestSummaryRequestRejectsToolSelection(t *testing.T) {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeMaintenance {
-			inv.RequestHooks = []RequestHook{{
+			inv.RequestStage = fixtureRequestStage([]RequestHook{{
 				ID: "req.tools", ExtensionID: "req-ext", Mode: HookModePure,
 				Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-					return RequestConsequence{ToolNames: []string{"echo"}}, nil
+					return RequestConsequence{Tools: fixtureDefinitions("echo")}, nil
 				},
-			}}
+			}}...)
 		}
 		return inv, nil
 	}
 	err := runAutomaticMaintenance(t, h, c, exec)
-	testassert.Require(t, err != nil && strings.Contains(err.Error(), "outside the captured tool catalog"), "run = %v, want the empty-catalog rejection", err)
+	testassert.Require(t, err != nil && strings.Contains(err.Error(), "outside the stage tool catalog"), "run = %v, want the empty-catalog rejection", err)
 	testassert.Equal(t, modelCalls, 0)
 	graph, gerr := validateFixture(t, store, sessionID)
 	testassert.NoError(t, gerr)
@@ -574,13 +610,13 @@ func TestStrategyLookupResolvedForEachMaintenanceProcedure(t *testing.T) {
 		},
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
-				return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+				return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 				}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 			}
 			opens++
 			round := 0
-			return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				round++
 				if round == 1 {
 					return completedTurnStream(testToolCall("call-1")), nil
@@ -611,7 +647,7 @@ func TestMaintenanceSummaryHookCancellationInterrupts(t *testing.T) {
 	seed := UsageCount{InputTokens: 13}
 	h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
 	modelCalls := 0
-	exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
+	exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		modelCalls++
 		return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 	})
@@ -632,7 +668,7 @@ func TestMaintenanceSummaryHookCancellationInterrupts(t *testing.T) {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeMaintenance {
-			inv.RequestHooks = []RequestHook{hook}
+			inv.RequestStage = fixtureRequestStage([]RequestHook{hook}...)
 		}
 		return inv, nil
 	}
@@ -673,7 +709,7 @@ func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
 		store := emptyStore(t)
 		var sawSlot OperationCurrentState
 		var sessionID string
-		exec := purposeExecution(forbiddenConversationModel(t), func(context.Context, model.Request) (model.Stream, error) {
+		exec := purposeExecution(forbiddenConversationModel(t), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 		})
 		exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: "test.empty/v1", Strategy: requestShapeStrategy{
@@ -690,13 +726,13 @@ func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
 				return inv, err
 			}
 			if request.Purpose == InvocationPurposeMaintenance {
-				inv.RequestHooks = []RequestHook{{
+				inv.RequestStage = fixtureRequestStage([]RequestHook{{
 					ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful,
 					Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 						return RequestConsequence{}, nil
 					},
-				}}
-				inv.Model = func(context.Context, model.Request) (model.Stream, error) {
+				}}...)
+				inv.Model = func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					rec, rerr := h.ReadOperation(context.Background(), sessionID, "compact-1")
 					testassert.NoError(t, rerr)
 					sawSlot = rec.State
@@ -733,7 +769,7 @@ func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
 	t.Run("active effectful hook on the empty base recovers", func(t *testing.T) {
 		store := emptyStore(t)
 		modelCalls := 0
-		exec := purposeExecution(forbiddenConversationModel(t), func(context.Context, model.Request) (model.Stream, error) {
+		exec := purposeExecution(forbiddenConversationModel(t), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			modelCalls++
 			return summaryStream("summary", model.Usage{InputTokens: 1}), nil
 		})
@@ -752,12 +788,12 @@ func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
 			}
 			if request.Purpose == InvocationPurposeMaintenance {
 				requestID = request.ID
-				inv.RequestHooks = []RequestHook{{
+				inv.RequestStage = fixtureRequestStage([]RequestHook{{
 					ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful,
 					Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 						return RequestConsequence{}, nil
 					},
-				}}
+				}}...)
 			}
 			return inv, nil
 		}
@@ -830,12 +866,12 @@ func TestCarriedFactsModelFreeTerminalSettlesOnce(t *testing.T) {
 		},
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
-				return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+				return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return summaryStream("summary", model.Usage{InputTokens: 5}), nil
 				}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 			}
 			round := 0
-			return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				round++
 				if round == 1 {
 					return completedTurnStream(testToolCall("call-1")), nil

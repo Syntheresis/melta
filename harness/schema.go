@@ -109,16 +109,19 @@ type HookIdentity struct {
 
 // RequestEvidence is the one closed request-evidence value: the canonical
 // boundary/checkpoint references of the projection actually consumed at that
-// boundary, concrete effective prompt and tool names, request-only additions,
-// and contributing hook identities in order. Unchanged history is referenced,
-// never copied.
+// boundary, effective prompt, ordered message edits and advertised definitions,
+// body parameters, and contributing hook identities. Unchanged conversation
+// history is referenced, never copied.
 type RequestEvidence struct {
-	CheckpointEntryID string          `json:"checkpoint_entry_id,omitempty"`
-	BoundaryEntryID   string          `json:"boundary_entry_id"`
-	Prompt            string          `json:"prompt"`
-	Messages          []model.Message `json:"messages,omitempty"`
-	ToolNames         []string        `json:"tool_names"`
-	HookIDs           []HookIdentity  `json:"hook_ids,omitempty"`
+	CheckpointEntryID string         `json:"checkpoint_entry_id,omitempty"`
+	BoundaryEntryID   string         `json:"boundary_entry_id"`
+	Prompt            string         `json:"prompt"`
+	HookIDs           []HookIdentity `json:"hook_ids,omitempty"`
+	Edits             []RequestMessageEdit
+	Tools             []model.ToolDefinition
+	Parameters        model.Extra
+	SummaryBase       []model.Message
+	SummaryInput      []model.Message
 }
 
 // RunningRequest is the one suspended request state: the request identity
@@ -566,10 +569,12 @@ type signalEntry struct {
 // settle once on the successful checkpoint or on the terminal settlement,
 // never both.
 type maintenanceFact struct {
-	RequestID string          `json:"request_id"`
-	Model     model.ModelRef  `json:"model"`
-	Input     []model.Message `json:"input"`
-	Usage     *UsageCount     `json:"usage,omitempty"`
+	RequestID  string          `json:"request_id"`
+	Model      model.ModelRef  `json:"model"`
+	Input      []model.Message `json:"input"`
+	Usage      *UsageCount     `json:"usage,omitempty"`
+	Parameters model.Extra
+	HookIDs    []HookIdentity
 }
 
 // operationSettlementEntry publishes one terminal Operation outcome. It is

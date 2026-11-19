@@ -342,11 +342,15 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 	}{
 		{"compact model override", `{"model":"prov/m2"}`, "m2"},
 		{"conversation model default", `{}`, "m"},
+		{"missing compact credential falls back", `{"model":"p2/m3"}`, "m"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newCompactRecordingServer(t)
-			captured, prep := compactPrepWith(t, compactAgentsDocument, compactPrepConfigDocumentWith(server.URL, tc.compaction), server.URL)
+			doc := compactPrepConfigDocumentWith(server.URL, tc.compaction)
+			doc = strings.Replace(doc, `"m":{"name":"M",`, `"m":{"name":"M","extra_body":{"bound_default":"conversation"},`, 1)
+			doc = strings.Replace(doc, `"m2":{"name":"M2",`, `"m2":{"name":"M2","extra_body":{"bound_default":"maintenance"},`, 1)
+			captured, prep := compactPrepWith(t, compactAgentsDocument, doc, server.URL)
 			sel := compactPrepSelection(t, captured, "solo")
 			capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), sel)
 			testassert.NoError(t, err)
@@ -364,12 +368,17 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 			})
 			testassert.NoError(t, err)
 			testassert.Require(t, inv.Model != nil, "opened maintenance invocation carries no Model callback")
+			wantDefault := `"conversation"`
+			if tc.wantCompactOn == "m2" {
+				wantDefault = `"maintenance"`
+			}
+			testassert.Equal(t, string(inv.ModelParameters["bound_default"]), wantDefault)
 			req, err := model.NewRequest(model.Request{Messages: []model.Message{{
 				Role:    "user",
 				Content: []model.ContentPart{{Kind: model.PartText, Text: "summarize"}},
 			}}})
 			testassert.NoError(t, err)
-			stream, err := inv.Model(context.Background(), req)
+			stream, err := inv.Model(context.Background(), req, nil)
 			testassert.NoError(t, err)
 			stream.Close()
 			testassert.Require(t, len(server.models) == 1 && server.models[0] == tc.wantCompactOn && len(server.auths) == 1 && server.auths[0] == "Bearer compact-secret", "maintenance Model wire models = %v, want exactly one request on %q; maintenance Model authorization = %v, want the compact transport's resolved credential", server.models, tc.wantCompactOn, server.auths)
@@ -384,7 +393,8 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 				Model:   capture.Model,
 			})
 			testassert.NoError(t, err)
-			stream, err = conv.Model(context.Background(), req)
+			testassert.Equal(t, string(conv.ModelParameters["bound_default"]), `"conversation"`)
+			stream, err = conv.Model(context.Background(), req, nil)
 			testassert.NoError(t, err)
 			stream.Close()
 			testassert.Require(t, len(server.models) == 2 && server.models[1] == "m", "conversation Model wire models = %v, want the conversation model second", server.models)

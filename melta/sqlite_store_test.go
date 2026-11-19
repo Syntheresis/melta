@@ -314,7 +314,7 @@ func seedRunningOperationCounted(t *testing.T, store harness.Storage, workspace 
 					Strategy: harness.StrategyCapture{ID: harness.IncludedStrategyID, RequiresContextWindow: true},
 				},
 				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-					modelFn := func(context.Context, model.Request) (model.Stream, error) {
+					modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						executions.Add(1)
 						select {
 						case arrived <- struct{}{}:

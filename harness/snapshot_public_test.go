@@ -886,8 +886,8 @@ func (s snapshotJobStopper) StopJob(sessionID, jobID string) {
 // parks until its gate closes or its execution context is canceled, then
 // answers accordingly: a released gate completes the turn, a stop's cancel
 // settles the interruption without any output.
-func parkingModelFn(gate, arrived chan struct{}) func(context.Context, model.Request) (model.Stream, error) {
-	return func(ctx context.Context, _ model.Request) (model.Stream, error) {
+func parkingModelFn(gate, arrived chan struct{}) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		select {
 		case arrived <- struct{}{}:
 		default:

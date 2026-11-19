@@ -952,7 +952,7 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 		testassert.NoError(t, err)
 		defer func() { testassert.NoError(t, inv.Close()) }()
 		before := server.requests()
-		stream, err := inv.Model(context.Background(), model.Request{})
+		stream, err := inv.Model(context.Background(), model.Request{}, nil)
 		testassert.NoError(t, err)
 		if stream != nil {
 			_ = stream.Close()

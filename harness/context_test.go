@@ -294,8 +294,11 @@ func TestRequestViewSeedsFromInitialToolNames(t *testing.T) {
 			capture := base
 			capture.InitialToolNames = row.input
 			view := newRequestView(capture, "", "", nil)
+			if err := view.captureStage(InvocationExecution{}); err != nil {
+				t.Fatal(err)
+			}
 			var got []string
-			for _, definition := range view.effectiveTools() {
+			for _, definition := range view.tools {
 				got = append(got, definition.Name)
 			}
 			if len(got) != len(row.want) {
@@ -306,7 +309,7 @@ func TestRequestViewSeedsFromInitialToolNames(t *testing.T) {
 					t.Fatalf("effective tools = %v, want %v", got, row.want)
 				}
 			}
-			names := view.evidenceFor().ToolNames
+			names := fixtureDefinitionNames(view.evidenceFor().Tools)
 			if len(names) != len(row.want) {
 				t.Fatalf("evidence names = %v, want %v", names, row.want)
 			}

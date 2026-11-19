@@ -433,7 +433,7 @@ func validateFixture(t *testing.T, store *graphStorage, sessionID string) (*sess
 	return validateSessionGraph(context.Background(), store, sessionID)
 }
 
-func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
+func TestEvidenceAdvertisementAndCopiedPrefix(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		names []string
@@ -441,7 +441,7 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 	}{
 		{"empty", []string{}, true},
 		{"ordered subset", []string{"echo", "other"}, true},
-		{"foreign", []string{"foreign"}, false},
+		{"stage-only definition", []string{"foreign"}, true},
 		{"reordered", []string{"other", "echo"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -449,7 +449,7 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 			tool := testToolDefinition()
 			tool.Name = "other"
 			fixture.ops[0].Admission.Execution.Tools = append(fixture.ops[0].Admission.Execution.Tools, tool)
-			fixture.entries[1].assistant.Evidence.ToolNames = tc.names
+			fixture.entries[1].assistant.Evidence.Tools = fixtureDefinitions(tc.names...)
 			_, err := validateFixture(t, fixture.storage(t), testSessionID)
 			if (err == nil) != tc.valid {
 				t.Fatalf("validate = %v, want valid %v", err, tc.valid)
@@ -461,13 +461,13 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 		names []string
 		valid bool
 	}{
-		{"active allowed", []string{"echo"}, true}, {"active foreign", []string{"foreign"}, false},
+		{"active allowed", []string{"echo"}, true}, {"active stage-only definition", []string{"foreign"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := validTestGraph()
 			fixture.entries = fixture.entries[:1]
 			effect, request := conversationModelEffect(hexID(9))
-			effect.Evidence.ToolNames = tc.names
+			effect.Evidence.Tools = fixtureDefinitions(tc.names...)
 			fixture.ops[0].State.ActiveEffect, fixture.ops[0].State.Request = effect, request
 			_, err := validateFixture(t, fixture.storage(t), testSessionID)
 			if (err == nil) != tc.valid {
@@ -483,7 +483,7 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 	fixture.entries[1].env.OperationID = ""
 	assistant := fixture.entries[1].assistant
 	assistant.OperationID = ""
-	assistant.Evidence.ToolNames = []string{"foreign"}
+	assistant.Evidence.Tools = fixtureDefinitions("foreign")
 	call := validToolCallRecord()
 	call.Name, call.ResultEntryID = "foreign", hexID(4)
 	assistant.ToolCalls = []toolCallRecord{call}
@@ -511,16 +511,18 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			obj := wireObject(t, stored)
 			evidence := wireObject(t, obj["evidence"])
-			evidence["tool_names"] = mustMarshal(tc.advertised)
+			raw, err := encodeRequestTools(fixtureDefinitions(tc.advertised...))
+			testassert.NoError(t, err)
+			evidence["tools"] = raw
 			obj["evidence"] = mustMarshal(evidence)
 			fixture.entries[1].rawOverride = mustMarshal(obj)
-			_, err := validateFixture(t, fixture.storage(t), testSessionID)
+			_, err = validateFixture(t, fixture.storage(t), testSessionID)
 			testassert.NoError(t, err)
 		})
 	}
 }
 
-func TestEvidenceCatalogForCommittedOwners(t *testing.T) {
+func TestEvidenceAdvertisementForCommittedOwners(t *testing.T) {
 	for _, owner := range []string{"hook", "settlement"} {
 		for _, foreign := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/foreign=%v", owner, foreign), func(t *testing.T) {
@@ -533,7 +535,7 @@ func TestEvidenceCatalogForCommittedOwners(t *testing.T) {
 				case "hook":
 					hook := validRequestBoundHookResult(hookSucceeded)
 					hook.EntryID, hook.RequestID = hexID(3), "request-one"
-					hook.InputEvidence.ToolNames = names
+					hook.InputEvidence.Tools = fixtureDefinitions(names...)
 					assistant := fixture.entries[1]
 					assistant.env.Sequence = 3
 					assistant.assistant.RequestID = "request-one"
@@ -543,20 +545,23 @@ func TestEvidenceCatalogForCommittedOwners(t *testing.T) {
 					settlement := validSettlementEntry()
 					settlement.EntryID = hexID(3)
 					settlement.RequestID = "settled-request"
-					settlement.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1), ToolNames: names}
+					settlement.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1), Tools: fixtureDefinitions(names...)}
 					fixture.entries = append(fixture.entries, testEntry{env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryOperationSettlement, Sequence: 3, CommittedAt: testTime}, settlement: &settlement})
 					stamp := testTime
 					fixture.ops[0].State.Status, fixture.ops[0].State.SettledAt = OperationSuccess, &stamp
 					fixture.ops[0].State.Terminal = &OperationTerminal{SettlementEntry: EntryRef{SessionID: testSessionID, EntryID: hexID(3)}}
 					fixture.session.State.CurrentOperationID = ""
 				}
-				_, err := validateFixture(t, fixture.storage(t), testSessionID)
-				if foreign && (err == nil || !strings.Contains(err.Error(), "evidence tool name")) {
-					t.Fatalf("foreign names: %v", err)
+				graph, err := validateFixture(t, fixture.storage(t), testSessionID)
+				testassert.NoError(t, err)
+				committed := graph.Entries[2]
+				var evidence *RequestEvidence
+				if owner == "hook" {
+					evidence = graph.Entries[1].HookResult.InputEvidence
+				} else {
+					evidence = committed.Settlement.Evidence
 				}
-				if !foreign && err != nil {
-					t.Fatalf("valid names: %v", err)
-				}
+				testassert.Equal(t, evidence.Tools[0].Name, names[0])
 			})
 		}
 	}

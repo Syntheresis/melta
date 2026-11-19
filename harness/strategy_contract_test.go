@@ -95,7 +95,7 @@ func fixtureStrategyCapture() StrategyCapture {
 // completes quietly after the maintenance stage.
 func twoPassExecution(t *testing.T, first model.Usage, strategy *StrategyBinding) (Execution, *int) {
 	calls := 0
-	compact := func(ctx context.Context, req model.Request) (model.Stream, error) {
+	compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		calls++
 		if calls == 1 {
 			return streamOf(turnDelta("stop", "first output"), usageDelta(first)), nil
@@ -149,16 +149,16 @@ func idleFixture(t *testing.T, fixture *testGraph, settlementID string) *graphSt
 // quietConversation answers the conversation model after the request source
 // with an empty completed stream: the automatic maintenance under test is the
 // only effect, and no conversation content or usage reaches the graph.
-func quietConversation() func(context.Context, model.Request) (model.Stream, error) {
-	return func(context.Context, model.Request) (model.Stream, error) {
+func quietConversation() func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "quiet")), nil
 	}
 }
 
 // forbiddenMaintenanceModel is the tripwire for rows whose strategy never
 // plans a maintenance model pass.
-func forbiddenMaintenanceModel(t *testing.T) func(context.Context, model.Request) (model.Stream, error) {
-	return func(context.Context, model.Request) (model.Stream, error) {
+func forbiddenMaintenanceModel(t *testing.T) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		t.Fatal("the strategy planned a maintenance model pass")
 		return nil, nil
 	}
@@ -695,7 +695,7 @@ func (malformedConsumeStrategy) Consume(_ ConsumeInput) (PlanOutput, error) {
 // facts and usage durable — while the invocation is still owned, and the
 // retained closer disposes it only after that settlement.
 func TestStrategyContractMalformedConsumeKeepsFinalInvocationThroughSettlement(t *testing.T) {
-	exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
+	exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "one pass"), usageDelta(model.Usage{InputTokens: 7, OutputTokens: 3})), nil
 	})
 	exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(malformedConsumeStrategy{}))
@@ -748,9 +748,9 @@ func TestStrategyContractMalformedConsumeKeepsFinalInvocationThroughSettlement(t
 // terminal usage on one settlement.
 func TestStrategyContractNoneThenOrdinaryTerminal(t *testing.T) {
 	ordinary := UsageCount{InputTokens: 2, OutputTokens: 1}
-	exec := purposeExecution(func(context.Context, model.Request) (model.Stream, error) {
+	exec := purposeExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return streamOf(usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1})), nil
-	}, func(context.Context, model.Request) (model.Stream, error) {
+	}, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "one pass"), usageDelta(model.Usage{InputTokens: 7, OutputTokens: 3})), nil
 	})
 	exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(noneAfterModelStrategy{}))
@@ -835,7 +835,7 @@ func TestStrategyContractOwnedCallbackValues(t *testing.T) {
 	strategy := &ownedValuesStrategy{}
 	capture := captureForHandoff()
 	capture.Strategy.Settings = json.RawMessage(`{"setting":1}`)
-	exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
+	exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "owned pass"), usageDelta(model.Usage{InputTokens: 1})), nil
 	})
 	exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(strategy))
@@ -968,7 +968,7 @@ func TestPublicationHandoffAcrossEngineContract(t *testing.T) {
 			if row.vehicle == "conversation" {
 				calls := 0
 				modelCalls = &calls
-				exec := purposeExecution(func(context.Context, model.Request) (model.Stream, error) {
+				exec := purposeExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					calls++
 					return streamOf(turnDelta("stop", "answer")), nil
 				}, forbiddenMaintenanceModel(t))
@@ -1051,7 +1051,7 @@ func TestPublicationHandoffRetainsCheckpointPublicationAcrossDoneContext(t *test
 	binding := fixtureStrategyBinding(&immediateCutStrategy{})
 	admitted.Open = func(ctx context.Context, admission OperationAdmission) (Execution, error) {
 		exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-			return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				t.Fatal("the conversation model must never run")
 				return nil, nil
 			}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
@@ -1143,7 +1143,7 @@ func TestMaintenanceRequestMessageDomain(t *testing.T) {
 		for _, outcome := range outcomes {
 			t.Run(shape.name+" on "+outcome, func(t *testing.T) {
 				var sent model.Request
-				captureModel := func(_ context.Context, req model.Request) (model.Stream, error) {
+				captureModel := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 					sent = req
 					return streamOf(turnDelta("stop", "one pass"), usageDelta(model.Usage{InputTokens: 4, OutputTokens: 2})), nil
 				}
@@ -1218,7 +1218,7 @@ func TestMaintenanceMalformedRequestAfterOpeningCancellation(t *testing.T) {
 				dispatches, closes := 0, 0
 				execCtx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				exec := purposeExecution(forbiddenConversationModel(t), func(context.Context, model.Request) (model.Stream, error) {
+				exec := purposeExecution(forbiddenConversationModel(t), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					dispatches++
 					return completedTurnStream(), nil
 				})
@@ -1581,7 +1581,7 @@ func requestHookExecution(exec Execution, hooks ...RequestHook) Execution {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeConversation {
-			inv.RequestHooks = hooks
+			inv.RequestStage = fixtureRequestStage(hooks...)
 		}
 		return inv, nil
 	}
@@ -1590,10 +1590,10 @@ func requestHookExecution(exec Execution, hooks ...RequestHook) Execution {
 
 // parkedConversation returns a conversation model that signals its arrival at
 // the real model barrier and waits for release before completing the turn.
-func parkedConversation(t *testing.T) (arrived chan struct{}, release chan struct{}, modelFn func(context.Context, model.Request) (model.Stream, error)) {
+func parkedConversation(t *testing.T) (arrived chan struct{}, release chan struct{}, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) {
 	t.Helper()
 	arrived, release = make(chan struct{}), make(chan struct{})
-	return arrived, release, func(context.Context, model.Request) (model.Stream, error) {
+	return arrived, release, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		close(arrived)
 		<-release
 		return streamOf(turnDelta("stop", "quiet")), nil
@@ -1642,7 +1642,7 @@ func TestStrategyContractAcceptedBindingValueSurvivesCallerMutation(t *testing.T
 			strategy := &bindingMutatingStrategy{replacement: row.replacement}
 			binding := fixtureStrategyBinding(strategy)
 			strategy.binding = binding
-			exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
+			exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return streamOf(turnDelta("stop", "binding snapshot pass")), nil
 			})
 			exec.ResolveStrategy = fixedStrategyResolver(binding)

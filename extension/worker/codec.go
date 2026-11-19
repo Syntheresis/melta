@@ -896,17 +896,23 @@ func DecodePrepareHookResult(raw json.RawMessage) (extension.PreparationConseque
 }
 
 type requestHookInputJSON struct {
-	RequestID         string               `json:"request_id"`
-	Purpose           string               `json:"purpose"`
-	Model             modelRefJSON         `json:"model"`
-	CanonicalMessages []messageJSON        `json:"canonical_messages"`
-	Messages          []messageJSON        `json:"messages"`
-	CheckpointEntryID string               `json:"checkpoint_entry_id,omitempty"`
-	BoundaryEntryID   string               `json:"boundary_entry_id,omitempty"`
-	CapturedPrompt    string               `json:"captured_prompt"`
-	Prompt            string               `json:"prompt"`
-	Catalog           []toolDefinitionJSON `json:"catalog"`
-	Tools             []toolDefinitionJSON `json:"tools"`
+	RequestID         string                `json:"request_id"`
+	Purpose           string                `json:"purpose"`
+	Model             modelRefJSON          `json:"model"`
+	CanonicalMessages []messageJSON         `json:"canonical_messages"`
+	Messages          []messageJSON         `json:"messages"`
+	CheckpointEntryID string                `json:"checkpoint_entry_id,omitempty"`
+	BoundaryEntryID   string                `json:"boundary_entry_id,omitempty"`
+	CapturedPrompt    string                `json:"captured_prompt"`
+	Prompt            string                `json:"prompt"`
+	Catalog           []toolDefinitionJSON  `json:"catalog"`
+	Tools             []toolDefinitionJSON  `json:"tools"`
+	MessagePositions  []requestPositionJSON `json:"message_positions"`
+	Parameters        []extraJSON           `json:"parameters,omitempty"`
+}
+
+type requestPositionJSON struct {
+	Position *int `json:"position,omitempty"`
 }
 
 // EncodeRequestHookParams encodes one request hook input.
@@ -923,6 +929,13 @@ func EncodeRequestHookParams(v harness.RequestHookInput) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
+	if len(v.MessagePositions) != len(v.Messages) {
+		return nil, fmt.Errorf("request positions do not match messages")
+	}
+	positions := make([]requestPositionJSON, len(v.MessagePositions))
+	for i, position := range v.MessagePositions {
+		positions[i].Position = position
+	}
 	return marshalValue(requestHookInputJSON{
 		RequestID:         v.RequestID,
 		Purpose:           string(v.Purpose),
@@ -935,6 +948,8 @@ func EncodeRequestHookParams(v harness.RequestHookInput) (json.RawMessage, error
 		Prompt:            v.Prompt,
 		Catalog:           toolDefinitionsFrom(v.Catalog),
 		Tools:             toolDefinitionsFrom(v.Tools),
+		MessagePositions:  positions,
+		Parameters:        extraFrom(v.Parameters),
 	})
 }
 
@@ -943,6 +958,16 @@ func DecodeRequestHookParams(raw json.RawMessage) (harness.RequestHookInput, err
 	var wire requestHookInputJSON
 	if err := unmarshalValue(raw, &wire); err != nil {
 		return harness.RequestHookInput{}, err
+	}
+	if wire.MessagePositions == nil || len(wire.MessagePositions) != len(wire.Messages) {
+		return harness.RequestHookInput{}, fmt.Errorf("request positions do not match messages")
+	}
+	positions := make([]*int, len(wire.MessagePositions))
+	for i, p := range wire.MessagePositions {
+		if p.Position != nil && *p.Position < 0 {
+			return harness.RequestHookInput{}, fmt.Errorf("request position must be nonnegative")
+		}
+		positions[i] = p.Position
 	}
 	return harness.RequestHookInput{
 		RequestID:         wire.RequestID,
@@ -956,27 +981,54 @@ func DecodeRequestHookParams(raw json.RawMessage) (harness.RequestHookInput, err
 		Prompt:            wire.Prompt,
 		Catalog:           toolDefinitionsValue(wire.Catalog),
 		Tools:             toolDefinitionsValue(wire.Tools),
+		MessagePositions:  positions,
+		Parameters:        extraValue(wire.Parameters),
 	}, nil
 }
 
 type requestConsequenceJSON struct {
-	Prompt    *string       `json:"prompt,omitempty"`
-	Messages  []messageJSON `json:"messages,omitempty"`
-	ToolNames *[]string     `json:"tool_names,omitempty"`
+	Prompt *string `json:"prompt,omitempty"`
+
+	Edits      *[]requestMessageEditJSON `json:"edits,omitempty"`
+	Tools      *[]toolDefinitionJSON     `json:"tools,omitempty"`
+	Parameters []extraJSON               `json:"parameters,omitempty"`
+}
+
+type requestMessageEditJSON struct {
+	Position *int               `json:"position,omitempty"`
+	Content  *[]contentPartJSON `json:"content,omitempty"`
+	Message  *messageJSON       `json:"message,omitempty"`
 }
 
 // EncodeRequestHookResult encodes one request consequence. An absent tool set
 // remains absent; a present empty set stays present and empty.
 func EncodeRequestHookResult(v harness.RequestConsequence) (json.RawMessage, error) {
-	messages, err := messagesFrom(v.Messages)
-	if err != nil {
-		return nil, err
+	out := requestConsequenceJSON{Prompt: v.Prompt, Parameters: extraFrom(v.Parameters)}
+	if v.Tools != nil {
+		tools := toolDefinitionsFrom(v.Tools)
+		out.Tools = &tools
 	}
-	out := requestConsequenceJSON{Prompt: v.Prompt, Messages: messages}
-	if v.ToolNames != nil {
-		toolNames := v.ToolNames
-		out.ToolNames = &toolNames
+	if v.Edits != nil {
+		edits := make([]requestMessageEditJSON, 0, len(v.Edits))
+		for _, edit := range v.Edits {
+			wire := requestMessageEditJSON{Position: edit.Position}
+
+			if edit.Content != nil {
+				content := contentFrom(edit.Content)
+				wire.Content = &content
+			}
+			if edit.Message != nil {
+				msg, err := messageFrom(*edit.Message)
+				if err != nil {
+					return nil, err
+				}
+				wire.Message = &msg
+			}
+			edits = append(edits, wire)
+		}
+		out.Edits = &edits
 	}
+
 	return marshalValue(out)
 }
 
@@ -986,10 +1038,31 @@ func DecodeRequestHookResult(raw json.RawMessage) (harness.RequestConsequence, e
 	if err := unmarshalValue(raw, &wire); err != nil {
 		return harness.RequestConsequence{}, err
 	}
-	out := harness.RequestConsequence{Prompt: wire.Prompt, Messages: messagesValue(wire.Messages)}
-	if wire.ToolNames != nil {
-		out.ToolNames = *wire.ToolNames
+	out := harness.RequestConsequence{Prompt: wire.Prompt, Parameters: extraValue(wire.Parameters)}
+	if wire.Tools != nil {
+		out.Tools = toolDefinitionsValue(*wire.Tools)
 	}
+	if wire.Edits != nil {
+		out.Edits = make([]harness.RequestMessageEdit, 0, len(*wire.Edits))
+		for _, item := range *wire.Edits {
+			edit := harness.RequestMessageEdit{Position: item.Position}
+			if edit.Position != nil && *edit.Position < 0 {
+				return harness.RequestConsequence{}, fmt.Errorf("edit position must be a nonnegative integer")
+			}
+			if item.Content != nil {
+				edit.Content = contentValue(*item.Content)
+			}
+			if item.Message != nil {
+				msg := messageValue(*item.Message)
+				edit.Message = &msg
+			}
+			if (edit.Position == nil) == (edit.Message == nil) || edit.Message != nil && edit.Content != nil {
+				return harness.RequestConsequence{}, fmt.Errorf("edit must retain a position or add a message")
+			}
+			out.Edits = append(out.Edits, edit)
+		}
+	}
+
 	return out, nil
 }
 

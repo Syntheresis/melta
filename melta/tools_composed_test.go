@@ -348,12 +348,12 @@ type toolsHarness struct {
 	admission harness.EntryRef
 }
 
-func newToolsHarness(t *testing.T, modelFn func(context.Context, model.Request) (model.Stream, error)) *toolsHarness {
+func newToolsHarness(t *testing.T, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) *toolsHarness {
 	t.Helper()
 	return newToolsHarnessWith(t, modelFn, toolsHarnessOpts{})
 }
 
-func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Request) (model.Stream, error), opts toolsHarnessOpts) *toolsHarness {
+func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error), opts toolsHarnessOpts) *toolsHarness {
 	t.Helper()
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -570,7 +570,7 @@ func (th *toolsHarness) readToolResults(sessionID string) map[string]model.ToolR
 func TestComposedToolsHarnessAllowDenyEffect(t *testing.T) {
 	attempt := 0
 	var mu sync.Mutex
-	modelFn := func(_ context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		mu.Lock()
 		attempt++
 		n := attempt
@@ -641,7 +641,7 @@ func TestComposedToolsHarnessRecovery(t *testing.T) {
 	arrived := make(chan struct{}, 1)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	modelFn := func(_ context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		select {
 		case arrived <- struct{}{}:
 		default:
@@ -1350,7 +1350,7 @@ func TestAuthorizationWitnessRecheckedAfterSnapshot(t *testing.T) {
 	for _, flip := range []bool{false, true} {
 		t.Run(fmt.Sprintf("flip=%v", flip), func(t *testing.T) {
 			var calls int
-			modelFn := func(context.Context, model.Request) (model.Stream, error) {
+			modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				calls++
 				if calls == 1 {
 					return toolCallStream("call-write", "write_file", `{"path":"target.txt","content":"after"}`), nil
@@ -1682,7 +1682,7 @@ func TestBackgroundStartRealProcessDeliversTruncatedSteeringCompletion(t *testin
 	var mu sync.Mutex
 	attempt := 0
 	completion := ""
-	modelFn := func(_ context.Context, req model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		if text := completionTextIn(req); text != "" {
 			mu.Lock()
 			completion = text
@@ -1896,7 +1896,7 @@ func TestComposedPermissionDenialSettlesOnlyTheCall(t *testing.T) {
 	]}`), nil)
 	attempt := 0
 	var mu sync.Mutex
-	modelFn := func(_ context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		mu.Lock()
 		attempt++
 		n := attempt

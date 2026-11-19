@@ -155,7 +155,7 @@ type modelEffectIntent struct {
 	resultID   string
 	compaction bool // true for the compact effect's intent: its usage is summary usage
 	requestID  string
-	evidence   *RequestEvidence // the adopted evidence the committed intent carries (conversation effects)
+	evidence   *RequestEvidence // the adopted evidence the committed intent carries
 }
 
 // hookEffectBinding is one settled hook execution's binding: its extension
@@ -280,7 +280,7 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 		// the cancellation checks, and an accepted stream never re-enters
 		// retry — assembly owns it, including closure.
 		var output model.Output
-		switch res := runModelAttempts(ctx, req, attempt, d.execution.Retry); res.kind {
+		switch res := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, d.execution.Retry); res.kind {
 		case attemptAccepted:
 			out, attemptErr := assemble(intent.expected, h.observeStream(intent.sessionID, d.operationID, res.stream)) // exactly one assembly after acceptance
 			if attemptErr != nil {
@@ -1056,27 +1056,21 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 		Detail:          detail,
 		CompactionUsage: compactionUsage,
 	}
-	// The settlement's request witness: a maintenance-family settlement
-	// names its own producer identity; recovery-included, an active
-	// maintenance intent no retained Fact witnesses still names that
-	// producer; otherwise the published running request; otherwise a live
-	// model intent's identity. Ordinary accumulated maintenance facts can
-	// ride any terminal kind without owning the settlement's own witness.
+	// Summary settlements name their producer. Other terminals witness the
+	// running request or active model intent, if any.
 	switch {
 	case compactionUsage && facts != nil && (facts.hasInput() || facts.hasConsumed()):
 		settlement.RequestID = maintenanceID // a real maintenance request identity, empty when none opened
 	case assistant == nil && activeEffect != nil && activeEffect.Kind == EffectModel &&
-		activeEffect.Purpose == InvocationPurposeMaintenance && activeEffect.RequestID != "":
-		// Recovery retains no process-local Facts: the live maintenance
-		// intent's own identity is the maintenance producer witness.
+		activeEffect.Purpose == InvocationPurposeMaintenance:
 		settlement.RequestID = activeEffect.RequestID
 	case currentOp.State.Request != nil:
 		settlement.RequestID = currentOp.State.Request.RequestID
-	case assistant == nil && activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.RequestID != "":
+	case assistant == nil && activeEffect != nil && activeEffect.Kind == EffectModel:
 		settlement.RequestID = activeEffect.RequestID
 	}
 	if assistant == nil {
-		if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Evidence != nil {
+		if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Purpose == InvocationPurposeConversation {
 			evidence := *activeEffect.Evidence
 			settlement.Evidence = &evidence
 		} else if compactionUsage && facts != nil && facts.hasConsumed() && settlement.RequestID != "" {
@@ -1089,21 +1083,16 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 		// exactly once beside any ordinary usage; their own reported usage
 		// never becomes the settlement's carried conversation usage.
 		settlement.Facts = cloneMaintenanceFacts(facts.facts)
+	} else if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Purpose == InvocationPurposeMaintenance {
+		settlement.Facts = []maintenanceFact{summaryFact(activeEffect.RequestID, *activeEffect.Model, activeEffect.Evidence)}
 	}
 	if assistant == nil {
 		if usage != nil { // terminal no-output model usage rides the settlement entry
 			modelRef := usageModel
 			settlement.Model = &modelRef
 			settlement.Usage = usage
-		} else if activeEffect != nil && activeEffect.Kind == EffectModel &&
-			activeEffect.Model != nil && !facts.witnessesRequest(activeEffect.RequestID) {
-			// A terminal model producer with no usage report still names its
-			// live model intent unless a retained maintenance fact already
-			// witnesses that request: a conversation intent directly, and a
-			// maintenance intent whose Facts process loss dropped — the
-			// absent report stays unknown instead of becoming a missing
-			// producer, and a fact-witnessed producer never repeats its
-			// model beside its Facts.
+		} else if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Purpose == InvocationPurposeConversation {
+			// Summary producers are witnessed by their facts instead.
 			modelRef := *activeEffect.Model
 			settlement.Model = &modelRef
 		}
@@ -1303,11 +1292,16 @@ func newAssistantEntry(sessionID, operationID, entryID string, out *model.Output
 // nested parts and extras, and the name and provenance lists.
 func copyRequestEvidence(v RequestEvidence) RequestEvidence {
 	out := v
-	out.Messages = cloneRequestMessages(v.Messages)
-	if v.ToolNames != nil {
-		names := make([]string, len(v.ToolNames))
-		copy(names, v.ToolNames)
-		out.ToolNames = names
+	out.Edits = cloneRequestEdits(v.Edits)
+	if v.Tools != nil {
+		out.Tools = append([]model.ToolDefinition{}, cloneToolDefinitions(v.Tools)...)
+	}
+	out.Parameters = v.Parameters.Clone()
+	if v.SummaryBase != nil {
+		out.SummaryBase = append([]model.Message{}, cloneRequestMessages(v.SummaryBase)...)
+	}
+	if v.SummaryInput != nil {
+		out.SummaryInput = append([]model.Message{}, cloneRequestMessages(v.SummaryInput)...)
 	}
 	if v.HookIDs != nil {
 		out.HookIDs = append([]HookIdentity(nil), v.HookIDs...)
@@ -2580,7 +2574,7 @@ func (h *Harness) commitHookResult(ctx context.Context, c *coordinator, operatio
 	return committed, nil
 }
 
-// runRequestHooks runs the opened invocation's selected request hooks in
+// runRequestHooks runs the request stage's selected hooks in
 // configured order over the live effective view: every accepted consequence
 // is validated before another hook consumes it. A pure consequence validates
 // and coalesces in memory with no effect transaction. An effectful hook runs
@@ -2592,7 +2586,7 @@ func (h *Harness) commitHookResult(ctx context.Context, c *coordinator, operatio
 // never dispatched, the failure returns for the ordinary terminal settlement,
 // and an effectful failure durably settles its error hook_result.
 func (d *executionDriver) runRequestHooks(ctx context.Context, inv *openedInvocation, requestID string, view *requestView) error {
-	for _, hook := range inv.callbacks.RequestHooks {
+	for _, hook := range view.hooks {
 		if ctx.Err() != nil { // cancellation stops the next hook before anything commits
 			return errExecutionInterrupted
 		}
@@ -2617,19 +2611,7 @@ func (d *executionDriver) runRequestHooks(ctx context.Context, inv *openedInvoca
 // identity, purpose and actual model, and the frozen canonical references
 // with deep-owned views.
 func (d *executionDriver) runOneRequestHookPure(ctx context.Context, inv *openedInvocation, requestID string, view *requestView, hook RequestHook) (RequestConsequence, error) {
-	input := RequestHookInput{
-		RequestID:         requestID,
-		Purpose:           inv.request.Purpose,
-		Model:             inv.request.Model,
-		CanonicalMessages: cloneRequestMessages(view.canonical),
-		Messages:          cloneRequestMessages(view.currentCanonical()),
-		CheckpointEntryID: view.checkpoint,
-		BoundaryEntryID:   view.boundary,
-		CapturedPrompt:    view.capture.SystemPrompt,
-		Prompt:            view.prompt,
-		Catalog:           cloneToolDefinitions(view.capture.Tools),
-		Tools:             view.effectiveTools(),
-	}
+	input := view.hookInput(inv.request, requestID)
 	consequence, err := hook.Run(WithCallbackIdentity(ctx, CallbackIdentity{RequestID: requestID}), input)
 	if err != nil {
 		if EffectInterrupted(err) {
@@ -2644,7 +2626,7 @@ func (d *executionDriver) runOneRequestHookPure(ctx context.Context, inv *opened
 		}
 		return RequestConsequence{}, err
 	}
-	return validateRequestConsequence(view.capture, consequence)
+	return view.acceptConsequence(consequence)
 }
 
 // runRequestHookEffect settles one effectful request hook as its own
@@ -2673,20 +2655,9 @@ func (d *executionDriver) runRequestHookEffect(ctx context.Context, inv *openedI
 		return errExecutionInterrupted
 	}
 	// The callback consumes the accepted view also published in the intent.
-	view.prompt, view.additions, view.names = consumed.Prompt, consumed.Messages, consumed.ToolNames
-	input := RequestHookInput{
-		RequestID:         requestID,
-		Purpose:           inv.request.Purpose,
-		Model:             inv.request.Model,
-		CanonicalMessages: cloneRequestMessages(view.canonical),
-		Messages:          cloneRequestMessages(view.currentCanonical()),
-		CheckpointEntryID: consumed.CheckpointEntryID,
-		BoundaryEntryID:   consumed.BoundaryEntryID,
-		CapturedPrompt:    view.capture.SystemPrompt,
-		Prompt:            view.prompt,
-		Catalog:           cloneToolDefinitions(view.capture.Tools),
-		Tools:             view.effectiveTools(),
-	}
+	view.prompt = consumed.Prompt
+	view.edits, view.tools, view.parameters = consumed.Edits, consumed.Tools, consumed.Parameters
+	input := view.hookInput(inv.request, requestID)
 	consequence, runErr := hook.Run(WithCallbackIdentity(ctx, CallbackIdentity{RequestID: requestID, EffectID: resultID}), input)
 	settleCtx := context.WithoutCancel(h.ctx)
 	if runErr != nil {
@@ -2706,7 +2677,7 @@ func (d *executionDriver) runRequestHookEffect(ctx context.Context, inv *openedI
 		}
 		return runErr
 	}
-	accepted, verr := validateRequestConsequence(view.capture, consequence)
+	accepted, verr := view.acceptConsequence(consequence)
 	if verr != nil { // an invalid consequence settles the hook effect as its error before any view advances
 		if _, cerr := h.commitHookResult(settleCtx, c, operationID,
 			hookEffectBinding{hookID: hook.ID, requestID: requestID}, resultID, hookResultEntry{
@@ -2753,12 +2724,10 @@ func executionCancellationResult(execCtx context.Context, err error) *agent.Term
 // modes, callbacks, or their configured order. A shallow element copy is
 // sufficient — every hook entry is a value.
 func ownOpenedInvocationDeclarations(inv *InvocationExecution) {
+	inv.ModelParameters = inv.ModelParameters.Clone()
 	inv.AuthorizationHooks = append([]AuthorizationHook(nil), inv.AuthorizationHooks...)
 	if inv.ToolHooks != nil {
 		inv.ToolHooks = append(inv.ToolHooks[:0:0], inv.ToolHooks...)
-	}
-	if inv.RequestHooks != nil {
-		inv.RequestHooks = append(inv.RequestHooks[:0:0], inv.RequestHooks...)
 	}
 	if inv.ToolOutputHooks != nil {
 		inv.ToolOutputHooks = append(inv.ToolOutputHooks[:0:0], inv.ToolOutputHooks...)
@@ -2766,8 +2735,8 @@ func ownOpenedInvocationDeclarations(inv *InvocationExecution) {
 }
 
 // validateOpenedInvocation is the opened invocation's contract: a successful
-// Model and LookupTool must be non-nil, every argument and
-// request hook requires a non-empty unique ID, a non-empty extension
+// Model and LookupTool must be non-nil, every argument
+// hook requires a non-empty unique ID, a non-empty extension
 // identity, a valid mode, and a non-nil Run, while every output hook — pure
 // by contract — requires the same identities and Run without a mode. The
 // selected strategy binding is accepted once at the maintenance entry, never
@@ -2796,10 +2765,14 @@ func validateOpenedInvocation(inv InvocationExecution) error {
 		}
 		seenOutputHooks[hook.ID] = true
 	}
-	seenRequestHooks := make(map[string]bool, len(inv.RequestHooks))
-	for _, hook := range inv.RequestHooks {
+	return nil
+}
+
+func validateRequestHooks(hooks []RequestHook) error {
+	seenRequestHooks := make(map[string]bool, len(hooks))
+	for _, hook := range hooks {
 		if hook.ID == "" || hook.Run == nil || hook.ExtensionID == "" || !validHookMode(hook.Mode) || seenRequestHooks[hook.ID] {
-			return invalidInput("opened invocation requires a non-empty unique ID, a non-empty extension identity, a valid mode, and a non-nil run function for every request hook")
+			return invalidInput("request stage requires a non-empty unique ID, a non-empty extension identity, a valid mode, and a non-nil run function for every request hook")
 		}
 		seenRequestHooks[hook.ID] = true
 	}

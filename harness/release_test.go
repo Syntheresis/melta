@@ -552,7 +552,7 @@ func TestAdoptedReservationReleasesOnceAfterClose(t *testing.T) {
 			Open: func(context.Context, OperationAdmission) (Execution, error) {
 				return Execution{
 					OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-						return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+						return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 							return completedTurnStream(), nil
 						}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 					},
@@ -616,7 +616,7 @@ func TestReservationReleaseFailureIsRetained(t *testing.T) {
 		prepared := PreparedExecution{
 			Capture: testCapture(),
 			Open: func(context.Context, OperationAdmission) (Execution, error) {
-				return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+				return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return completedTurnStream(), nil
 				}, nil), nil
 			},
@@ -654,7 +654,7 @@ func TestOpenedConversationInvocationOwnershipRows(t *testing.T) {
 				return Execution{OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 					opens.Add(1)
 					testassert.Require(t, request.Purpose == InvocationPurposeConversation, "conversation request purpose = %q, want conversation", request.Purpose)
-					return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+					return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return completedTurnStream(), nil
 					}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 				}}, nil

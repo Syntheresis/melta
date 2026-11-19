@@ -801,7 +801,7 @@ func TestHookActiveEffectCodecRules(t *testing.T) {
 		}{
 			{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", Purpose: InvocationPurposeConversation, HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
 			{"conversation model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "request-one", Model: &model.ModelRef{Provider: "prov", Model: "m"}, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
-			{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance}},
+			{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance, Evidence: &RequestEvidence{SummaryInput: []model.Message{}}}},
 			{"concrete tool intent", ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`), Implementation: &ToolImplementation{ID: "echo"}}},
 		}
 		for _, tc := range effects {
@@ -1745,7 +1745,7 @@ func TestAdoptedFormsAcrossInsertAndFork(t *testing.T) {
 		failed.ResultEntryID = hexID(5)
 		v := validAssistantEntry(testOpID)
 		v.EntryID = entryID
-		v.Evidence.ToolNames = []string{"echo"}
+		v.Evidence.Tools = fixtureDefinitions("echo")
 		v.Content = []model.ContentPart{
 			{Kind: model.PartText, Text: invalidText(), Extra: model.Extra{"raw": freshRaw(verbatimExtra), "utf8": invalidRawString()}},
 			{Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"nested": freshRaw(nestedExtra), "lexemes": freshRaw(lexemeExtra)}},
@@ -2472,7 +2472,7 @@ func TestCompactionEntryPayloadRules(t *testing.T) {
 	t.Run("round trips owned with and without fact usage", func(t *testing.T) {
 		for _, withUsage := range []bool{false, true} {
 			v := validCompactionEntry(testOpID)
-			v.Evidence.ToolNames = []string{}
+			v.Evidence.Tools = fixtureDefinitions()
 			if withUsage {
 				v.Facts[0].Usage = &UsageCount{InputTokens: 11, CachedInputTokens: 4, OutputTokens: 7}
 			}
@@ -2825,7 +2825,7 @@ func TestAssistantEntryRequestEvidenceRequiredMembers(t *testing.T) {
 	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Payload: raw}
 	decoded, err := decodeAssistantEntry(env)
 	testassert.NoError(t, err)
-	testassert.Require(t, decoded.RequestID != "" && decoded.Evidence != nil && decoded.Evidence.ToolNames != nil && len(decoded.Evidence.ToolNames) == 0 &&
+	testassert.Require(t, decoded.RequestID != "" && decoded.Evidence != nil && decoded.Evidence.Tools != nil && len(decoded.Evidence.Tools) == 0 &&
 		decoded.Evidence.BoundaryEntryID == hexID(1), "decoded assistant = %+v, want the request identity, the present-empty view, and the consumed evidence", decoded)
 	for _, name := range []string{"request_id", "evidence"} {
 		{
@@ -2840,13 +2840,13 @@ func TestAssistantEntryRequestEvidenceRequiredMembers(t *testing.T) {
 	// Present-empty prompt contribution survives the wire as present.
 	v := validAssistantEntry(testOpID)
 	v.Evidence.Prompt = ""
-	v.Evidence.ToolNames = []string{}
+	v.Evidence.Tools = fixtureDefinitions()
 	raw, err = encodeAssistantEntry(v)
 	testassert.NoError(t, err)
 	decoded, err = decodeAssistantEntry(Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Payload: raw})
 	testassert.NoError(t, err)
 	testassert.Require(t, decoded.Evidence.Prompt == "", "prompt contribution = %+v, want the empty prompt retained", decoded.Evidence.Prompt)
-	testassert.Require(t, decoded.Evidence.ToolNames != nil && len(decoded.Evidence.ToolNames) == 0, "tool view = %+v, want the present-empty view retained", decoded.Evidence.ToolNames)
+	testassert.Require(t, decoded.Evidence.Tools != nil && len(decoded.Evidence.Tools) == 0, "tool view = %+v, want the present-empty view retained", decoded.Evidence.Tools)
 	// Decoded evidence is deep-owned: mutating it cannot reach a later decode.
 	decoded.Evidence.BoundaryEntryID = hexID(9)
 	if len(decoded.Evidence.HookIDs) > 0 {
@@ -2860,7 +2860,7 @@ func TestAssistantEntryRequestEvidenceRequiredMembers(t *testing.T) {
 func TestAssistantEvidenceIsStoredAdvertisement(t *testing.T) {
 	for _, operationID := range []string{testOpID, ""} {
 		v := validAssistantEntry(operationID)
-		v.Evidence.ToolNames = []string{"echo"}
+		v.Evidence.Tools = fixtureDefinitions("echo")
 		call := validToolCallRecord()
 		v.ToolCalls = []toolCallRecord{call}
 		raw, err := encodeAssistantEntry(v)
@@ -2874,7 +2874,7 @@ func TestAssistantEvidenceIsStoredAdvertisement(t *testing.T) {
 			t.Errorf("operation %q: valid evidence-only assistant refused: %v", operationID, err)
 			continue
 		}
-		if !reflect.DeepEqual(decoded.Evidence.ToolNames, []string{"echo"}) {
+		if !reflect.DeepEqual(fixtureDefinitionNames(decoded.Evidence.Tools), []string{"echo"}) {
 			t.Fatalf("decoded = %+v", decoded)
 		}
 		env.Payload = setKey(raw, "advertised_names", json.RawMessage(`["echo"]`))
@@ -2902,15 +2902,15 @@ func TestRequestEvidenceContributionMessageDomain(t *testing.T) {
 	v := RequestEvidence{
 		BoundaryEntryID:   hexID(1),
 		CheckpointEntryID: hexID(2),
-		Messages:          []model.Message{owned},
+		Edits:             []RequestMessageEdit{{Message: &owned}},
 		HookIDs:           []HookIdentity{{ExtensionID: "ext.one", HookID: "hook.one"}},
 	}
 	raw, err := encodeRequestEvidence(v)
 	testassert.NoError(t, err)
 	decoded, err := decodeRequestEvidence(raw)
 	testassert.NoError(t, err)
-	testassert.Require(t, len(decoded.Messages) == 1, "decoded messages = %+v, want the recorded contribution", decoded.Messages)
-	m := decoded.Messages[0]
+	testassert.Require(t, len(decoded.Edits) == 1, "decoded edits = %+v, want the recorded contribution", decoded.Edits)
+	m := *decoded.Edits[0].Message
 	testassert.Require(t, m.Role == model.RoleAssistant && m.TextContent() == "carried" && m.Refusal == "declined part" &&
 		m.Name == "contributor" && m.Source == testModelRef() && string(m.Extra["note"]) == `{"kept":1}`,
 		"decoded contribution = %+v, want every permitted shared field retained", m)
@@ -2922,7 +2922,7 @@ func TestRequestEvidenceContributionMessageDomain(t *testing.T) {
 	})
 	testassert.Require(t, cerr == nil, "constructor: %v", cerr)
 	bad := v
-	bad.Messages = []model.Message{withCalls}
+	bad.Edits = []RequestMessageEdit{{Message: &withCalls}}
 	{
 		_, err := encodeRequestEvidence(bad)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "tool calls"), "encode-side tool-call contribution: %v", err)
@@ -2930,13 +2930,13 @@ func TestRequestEvidenceContributionMessageDomain(t *testing.T) {
 	withCallID, cerr := model.NewMessage(model.Message{Role: model.RoleTool, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}, ToolCallID: "call-1"})
 	testassert.Require(t, cerr == nil, "constructor: %v", cerr)
 	bad2 := v
-	bad2.Messages = []model.Message{withCallID}
+	bad2.Edits = []RequestMessageEdit{{Message: &withCallID}}
 	{
 		_, err := encodeRequestEvidence(bad2)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "call id"), "encode-side tool-result call id: %v", err)
 	}
 	{
-		badRaw := setKey(raw, "messages", json.RawMessage(`[{"role":"assistant","source":{"provider":"prov","model":"m"},"content":[{"kind":"text","text":"wire"}],"tool_calls":[{"id":"c","name":"echo","arguments_base64":"e30="}]}]`))
+		badRaw := setKey(raw, "edits", json.RawMessage(`[{"message":{"role":"assistant","source":{"provider":"prov","model":"m"},"content":[{"kind":"text","text":"wire"}],"tool_calls":[{"id":"c","name":"echo","arguments_base64":"e30="}]}}]`))
 		_, err := decodeRequestEvidence(badRaw)
 		testassert.Require(t, err != nil, "decode-side tool-call contribution must reject")
 	}
@@ -2949,13 +2949,13 @@ func TestRequestEvidenceContributionMessageDomain(t *testing.T) {
 func TestRequestConsequencePresenceDomain(t *testing.T) {
 	empty := ""
 	v := validRequestBoundHookResult(hookSucceeded)
-	v.Consequence = &RequestConsequence{Prompt: &empty, ToolNames: []string{}}
+	v.Consequence = &RequestConsequence{Prompt: &empty, Tools: fixtureDefinitions()}
 	raw, err := encodeHookResultEntry(v)
 	testassert.NoError(t, err)
 	decoded, err := decodeHookResultEntry(Entry{SessionID: testSessionID, ID: v.EntryID, OperationID: testOpID, Kind: EntryHookResult, Payload: raw})
 	testassert.NoError(t, err)
 	testassert.Require(t, decoded.Consequence != nil && decoded.Consequence.Prompt != nil && *decoded.Consequence.Prompt == "" &&
-		decoded.Consequence.ToolNames != nil && len(decoded.Consequence.ToolNames) == 0 && decoded.Consequence.Messages == nil,
+		decoded.Consequence.Tools != nil && len(decoded.Consequence.Tools) == 0 && decoded.Consequence.Edits == nil,
 		"decoded consequence = %+v, want present-empty prompt and present-empty selection retained", decoded.Consequence)
 	missing := v
 	missing.Consequence = nil
@@ -3031,7 +3031,7 @@ func TestForbiddenInputArgumentsMembershipReasonUniformity(t *testing.T) {
 	}{
 		{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", Purpose: InvocationPurposeConversation, HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
 		{"conversation model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "request-one", Model: &model.ModelRef{Provider: "prov", Model: "m"}, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
-		{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance}},
+		{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance, Evidence: &RequestEvidence{SummaryInput: []model.Message{}}}},
 		{"concrete tool intent", ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`), Implementation: &ToolImplementation{ID: "echo"}}},
 	}
 	for _, b := range bases {
@@ -3192,14 +3192,14 @@ func TestOpaqueFramesPreserveBytesAndRejectInvalidFrames(t *testing.T) {
 
 func TestRequestEvidenceRequiresConcretePromptAndNames(t *testing.T) {
 	for _, names := range [][]string{nil, {}} {
-		raw, err := encodeRequestEvidence(RequestEvidence{BoundaryEntryID: hexID(1), ToolNames: names})
+		raw, err := encodeRequestEvidence(RequestEvidence{BoundaryEntryID: hexID(1), Tools: fixtureDefinitions(names...)})
 		testassert.NoError(t, err)
 		got, err := decodeRequestEvidence(raw)
 		testassert.NoError(t, err)
-		if got.Prompt != "" || got.ToolNames == nil || len(got.ToolNames) != 0 {
+		if got.Prompt != "" || got.Tools == nil || len(got.Tools) != 0 {
 			t.Fatalf("evidence = %+v", got)
 		}
-		for _, key := range []string{"prompt", "tool_names"} {
+		for _, key := range []string{"prompt", "tools"} {
 			for _, broken := range []json.RawMessage{dropKey(raw, key), setKey(raw, key, json.RawMessage(`null`))} {
 				if _, err := decodeRequestEvidence(broken); err == nil {
 					t.Errorf("accepted malformed %s: %s", key, broken)
@@ -3208,11 +3208,11 @@ func TestRequestEvidenceRequiresConcretePromptAndNames(t *testing.T) {
 		}
 	}
 	assistant := validAssistantEntry(testOpID)
-	assistant.Evidence.ToolNames = []string{"echo"}
+	assistant.Evidence.Tools = fixtureDefinitions("echo")
 	if _, err := encodeAssistantEntry(assistant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := encodeRequestEvidence(RequestEvidence{BoundaryEntryID: hexID(1), ToolNames: []string{"echo", "echo"}}); err == nil {
+	if _, err := encodeRequestEvidence(RequestEvidence{BoundaryEntryID: hexID(1), Tools: fixtureDefinitions("echo", "echo")}); err == nil {
 		t.Fatal("duplicate evidence names accepted")
 	}
 }
@@ -3488,9 +3488,9 @@ func TestFrozenInputEvidenceShape(t *testing.T) {
 		}{
 			{"prompt", func(v *RequestEvidence) { v.Prompt = "leaked" }},
 			{"messages", func(v *RequestEvidence) {
-				v.Messages = []model.Message{{Role: model.RoleUser, Content: admissionContent("leaked")}}
+				v.Edits = []RequestMessageEdit{{Message: &model.Message{Role: model.RoleUser, Content: admissionContent("leaked")}}}
 			}},
-			{"tool names", func(v *RequestEvidence) { v.ToolNames = []string{"echo"} }},
+			{"tool names", func(v *RequestEvidence) { v.Tools = fixtureDefinitions("echo") }},
 			{"hook ids", func(v *RequestEvidence) { v.HookIDs = []HookIdentity{{ExtensionID: "ext", HookID: "hook"}} }},
 		} {
 			t.Run(row.name+" encode", func(t *testing.T) {
@@ -3532,9 +3532,9 @@ func TestFrozenInputEvidenceShape(t *testing.T) {
 			{"missing boundary", func(v *RequestEvidence) { v.BoundaryEntryID = "" }},
 			{"prompt", func(v *RequestEvidence) { v.Prompt = "leaked" }},
 			{"messages", func(v *RequestEvidence) {
-				v.Messages = []model.Message{{Role: model.RoleUser, Content: admissionContent("leaked")}}
+				v.Edits = []RequestMessageEdit{{Message: &model.Message{Role: model.RoleUser, Content: admissionContent("leaked")}}}
 			}},
-			{"tool names", func(v *RequestEvidence) { v.ToolNames = []string{"echo"} }},
+			{"tool names", func(v *RequestEvidence) { v.Tools = fixtureDefinitions("echo") }},
 			{"hook ids", func(v *RequestEvidence) { v.HookIDs = []HookIdentity{{ExtensionID: "ext", HookID: "hook"}} }},
 		} {
 			t.Run(row.name+" encode", func(t *testing.T) {
@@ -3575,6 +3575,57 @@ func TestRequestBoundHookResultPurposeRequired(t *testing.T) {
 	}
 }
 
+func TestRequestBoundHookSummaryEvidence(t *testing.T) {
+	evidence := &RequestEvidence{SummaryBase: []model.Message{}}
+	intent, err := encodeActiveEffect(ActiveEffect{
+		Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "summary", Purpose: InvocationPurposeMaintenance,
+		HookID: "request-hook", ExtensionID: "ext", Evidence: evidence,
+	})
+	testassert.NoError(t, err)
+	result := validRequestBoundHookResult(hookSucceeded)
+	result.Purpose, result.InputEvidence = InvocationPurposeMaintenance, evidence
+	resultRaw, err := encodeHookResultEntry(result)
+	testassert.NoError(t, err)
+	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryHookResult}
+	for _, owner := range []struct {
+		key    string
+		raw    json.RawMessage
+		decode func(json.RawMessage) (*RequestEvidence, error)
+	}{
+		{"evidence", intent, func(raw json.RawMessage) (*RequestEvidence, error) {
+			got, err := decodeActiveEffect(wireObject(t, raw))
+			return got.Evidence, err
+		}},
+		{"input_evidence", resultRaw, func(raw json.RawMessage) (*RequestEvidence, error) {
+			entry := env
+			entry.Payload = raw
+			got, err := decodeHookResultEntry(entry)
+			return got.InputEvidence, err
+		}},
+	} {
+		t.Run(owner.key, func(t *testing.T) {
+			got, err := owner.decode(owner.raw)
+			testassert.NoError(t, err)
+			testassert.Require(t, got.SummaryBase != nil && len(got.SummaryBase) == 0, "empty summary base not preserved: %+v", got)
+			raw := wireObject(t, owner.raw)[owner.key]
+			for _, tc := range []struct {
+				name string
+				raw  json.RawMessage
+			}{
+				{"missing base", dropKey(raw, "summary_base")},
+				{"model input instead of base", setKey(dropKey(raw, "summary_base"), "summary_input", json.RawMessage(`[]`))},
+				{"model input alongside base", setKey(raw, "summary_input", json.RawMessage(`[]`))},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if _, err := owner.decode(setKey(owner.raw, owner.key, tc.raw)); err == nil {
+						t.Fatal("accepted invalid summary hook evidence")
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestModelIntentRequiresRunningSlot proves every model intent, including a
 // maintenance summary on an empty base, requires its matching purpose-bound
 // running slot; the empty base permits no canonical boundary, not a missing
@@ -3593,6 +3644,8 @@ func TestModelIntentRequiresRunningSlot(t *testing.T) {
 			}
 			if purpose == InvocationPurposeConversation {
 				record.State.ActiveEffect.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1)}
+			} else {
+				record.State.ActiveEffect.Evidence = &RequestEvidence{SummaryInput: []model.Message{}}
 			}
 			record.State.Request = nil
 			_, err := encodeOperationRegister(record)

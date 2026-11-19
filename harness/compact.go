@@ -66,20 +66,6 @@ func (f *maintenanceFacts) hasInput() bool { return f != nil && len(f.facts) > 0
 
 func (f *maintenanceFacts) hasConsumed() bool { return f != nil && f.consumed.BoundaryEntryID != "" }
 
-// witnessesRequest reports whether one retained fact already witnesses the
-// named producing request, so its live producer is never repeated elsewhere.
-func (f *maintenanceFacts) witnessesRequest(requestID string) bool {
-	if f == nil || requestID == "" {
-		return false
-	}
-	for _, fact := range f.facts {
-		if fact.RequestID == requestID {
-			return true
-		}
-	}
-	return false
-}
-
 // factsList returns the carrier's ordered facts; a nil carrier holds none.
 func factsList(f *maintenanceFacts) []maintenanceFact {
 	if f == nil {
@@ -99,6 +85,8 @@ func cloneMaintenanceFacts(facts []maintenanceFact) []maintenanceFact {
 	for i, fact := range facts {
 		out[i] = fact
 		out[i].Input = cloneRequestMessages(fact.Input)
+		out[i].Parameters = fact.Parameters.Clone()
+		out[i].HookIDs = append([]HookIdentity(nil), fact.HookIDs...)
 		if fact.Usage != nil {
 			usage := *fact.Usage
 			out[i].Usage = &usage
@@ -259,22 +247,11 @@ func resolveCheckpointItems(frozen []model.Message, items []CheckpointItem, cove
 	// one assistant position associates with its exact matching result
 	// positions even when identical opaque call IDs recur across exchanges.
 	resultsOf := make(map[int][]int)
-	ownerOf := make(map[int]int)
-	open := make(map[string][]int)
-	for i := range frozen {
-		for _, call := range frozen[i].ToolCalls {
-			open[call.ID] = append(open[call.ID], i)
+	ownerOf := toolResultOwners(frozen)
+	for i, owner := range ownerOf {
+		if owner >= 0 {
+			resultsOf[owner] = append(resultsOf[owner], i)
 		}
-		if frozen[i].ToolCallID == "" {
-			continue
-		}
-		queue := open[frozen[i].ToolCallID]
-		if len(queue) == 0 {
-			continue // an unopened result is caught by the materialized pairing guard
-		}
-		resultsOf[queue[0]] = append(resultsOf[queue[0]], i)
-		ownerOf[i] = queue[0]
-		open[frozen[i].ToolCallID] = queue[1:]
 	}
 	for position := range retained {
 		if len(frozen[position].ToolCalls) > 0 {
@@ -285,8 +262,8 @@ func resolveCheckpointItems(frozen []model.Message, items []CheckpointItem, cove
 			}
 		}
 		if frozen[position].ToolCallID != "" {
-			owner, opened := ownerOf[position]
-			if !opened {
+			owner := ownerOf[position]
+			if owner < 0 {
 				return nil, fmt.Errorf("checkpoint retain position %d is a tool result no call opens in the frozen source", position)
 			}
 			if !retained[owner] {
@@ -329,15 +306,16 @@ func validateToolPairing(messages []model.Message) error {
 	return nil
 }
 
-// retainInput appends the actual logical maintenance request the effect
-// received to the ordered facts the moment it receives it; the per-plan
-// identity stays the fact's own producer, never the procedure's witness.
-func (f *maintenanceFacts) retainInput(maintenanceID string, produced model.ModelRef, request model.Request) {
-	f.facts = append(f.facts, maintenanceFact{
-		RequestID: maintenanceID,
-		Model:     produced,
-		Input:     cloneRequestMessages(request.Messages),
-	})
+// summaryFact records the committed summary input under its producer identity.
+// Usage is supplied separately, only when reported.
+func summaryFact(maintenanceID string, produced model.ModelRef, evidence *RequestEvidence) maintenanceFact {
+	return maintenanceFact{
+		RequestID:  maintenanceID,
+		Model:      produced,
+		Input:      evidence.SummaryInput,
+		Parameters: evidence.Parameters,
+		HookIDs:    evidence.HookIDs,
+	}
 }
 
 // retainUsage lands one assembled output's reported usage on the newest
@@ -386,8 +364,8 @@ func factsUsageContribution(facts []maintenanceFact) (UsageTotals, error) {
 // while the durable active-effect state is model-agnostic, and the intent is
 // marked as compaction so its terminal usage carries maintenance provenance.
 // The standard attempt-retry loop runs through the compact transport. The
-// actual tool-free logical maintenance request is retained on the carrier's
-// ordered facts the moment the effect receives it, and the assembled output's
+// committed intent supplies the actual tool-free request for dispatch and
+// the carrier's ordered fact; the assembled output's
 // reported usage — nil-preserving, a reported zero stays known zero — lands on
 // that fact before that output settles. A completed output settles by the
 // empty running result — no entry, the active effect cleared, the one summary
@@ -401,7 +379,7 @@ func factsUsageContribution(facts []maintenanceFact) (UsageTotals, error) {
 // while pre-assembly failures and cancellations return no output. The
 // invocation's callbacks come from the opened maintenance invocation; its
 // retry classifier is the enclosing Operation's.
-func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maintenanceFacts) agent.ModelEffect {
+func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maintenanceFacts, parameters model.Extra, hookIDs []HookIdentity) agent.ModelEffect {
 	h := d.harness
 	maintenanceID := inv.request.ID // the actual issued stage owns this request identity
 	c := d.coordinator
@@ -409,17 +387,17 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 	capture := d.capture
 	attempt := inv.callbacks.Model
 	return func(ctx context.Context, req model.Request, assemble agent.AssemblyCallback) (agent.ModelSettlement, error) {
-		// The actual tool-free logical maintenance request is retained on the
-		// carrier's ordered facts the moment the effect receives it,
-		// deep-owned.
-		facts.retainInput(maintenanceID, capture.Compact.Model, req)
+		evidence := facts.consumed
+		evidence.SummaryInput = req.Messages
+		evidence.Parameters = parameters
+		evidence.HookIDs = hookIDs
 		running := &RunningRequest{
 			RequestID:         maintenanceID,
 			Purpose:           InvocationPurposeMaintenance,
 			CheckpointEntryID: facts.consumed.CheckpointEntryID,
 			BoundaryEntryID:   facts.consumed.BoundaryEntryID,
 		}
-		intent, err := h.beginModelEffect(ctx, c, operationID, maintenanceID, InvocationPurposeMaintenance, capture.Compact.Model, nil, running)
+		intent, err := h.beginModelEffect(ctx, c, operationID, maintenanceID, InvocationPurposeMaintenance, capture.Compact.Model, &evidence, running)
 		if err != nil {
 			// A marked publication failure propagates before any cancellation
 			// rule, regardless of a concurrent cancellation. Only an unmarked
@@ -440,6 +418,8 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 			}
 			return agent.ModelSettlement{}, err
 		}
+		facts.facts = append(facts.facts, summaryFact(maintenanceID, capture.Compact.Model, intent.evidence))
+		req.Messages = intent.evidence.SummaryInput
 		// The durable intent transaction is the conversation model effect's
 		// own; only the in-memory intent's expected identity is the compact
 		// model's, and its provenance is compaction.
@@ -469,7 +449,7 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		// compact transport. The physical attempt carries the opened
 		// maintenance invocation and this producer's own reserved identity.
 		var output model.Output
-		switch res := runModelAttempts(ctx, req, attempt, d.execution.Retry); res.kind {
+		switch res := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, d.execution.Retry); res.kind {
 		case attemptAccepted:
 			out, attemptErr := assemble(intent.expected, h.observeStream(intent.sessionID, operationID, res.stream)) // exactly one assembly after acceptance; the enclosing Operation owns the deltas
 			if attemptErr != nil {
@@ -723,6 +703,9 @@ func (d *executionDriver) runMaintenanceModel(execCtx context.Context, plan *Mod
 	}
 	facts.requestID = stage.request.ID
 	view := newStrategyRequestView(d.capture, facts.consumed.CheckpointEntryID, facts.consumed.BoundaryEntryID, plan.Request)
+	if err := view.captureStage(stage.callbacks); err != nil {
+		return stage, model.Output{}, d.settleMaintenance(OperationFailure, err, facts)
+	}
 	if err := d.runRequestHooks(execCtx, stage, stage.request.ID, view); err != nil {
 		terminal := OperationFailure
 		if EffectInterrupted(err) || errors.Is(err, errExecutionInterrupted) {
@@ -737,20 +720,9 @@ func (d *executionDriver) runMaintenanceModel(execCtx context.Context, plan *Mod
 	res, runErr := agent.Run(execCtx, agent.Invocation{
 		ExpectedModel: d.capture.Compact.Model,
 		Request: func(context.Context) (agent.RequestResult, error) {
-			if err := model.ValidateRequest(request); err == nil {
-				raw, err := encodeMaintenanceInput(request.Messages)
-				if err != nil {
-					return agent.RequestResult{}, err
-				}
-				messages, err := decodeMaintenanceInput(raw)
-				if err != nil {
-					return agent.RequestResult{}, err
-				}
-				request.Messages = messages
-			}
 			return agent.RequestResult{Request: &request}, nil
 		},
-		ModelEffect: d.compactModelEffect(stage, facts),
+		ModelEffect: d.compactModelEffect(stage, facts, view.parameters, view.contributors),
 		ToolEffect: func(context.Context, model.ToolCall, []string) (model.ToolResult, error) {
 			return model.ToolResult{}, &agent.ProtocolError{Boundary: "tool", Detail: "compact agent has no tools"}
 		},

@@ -614,10 +614,18 @@ func TestServeHookErrorsCarryEffectKnowledge(t *testing.T) {
 		extension.SingleHook(extension.BoundaryBeforeTool, extension.HookModeEffectful))
 	pure := extension.HookCapability("hook-pure", extension.SingleHook(extension.BoundaryRequest, extension.HookModePure))
 	var mode atomic.Int32
-	requestConsequence := harness.RequestConsequence{Prompt: stringPointer("request prompt"), Messages: []model.Message{}}
-	requestHook := func(context.Context, extension.CallContext, harness.RequestHookInput) (harness.RequestConsequence, error) {
+	position := 0
+	requestConsequence := harness.RequestConsequence{
+		Prompt: stringPointer("request prompt"),
+		Edits:  []harness.RequestMessageEdit{{Position: &position, Content: []model.ContentPart{}}},
+		Tools:  []model.ToolDefinition{}, Parameters: model.Extra{"": json.RawMessage(" true ")},
+	}
+	requestHook := func(_ context.Context, _ extension.CallContext, input harness.RequestHookInput) (harness.RequestConsequence, error) {
 		switch mode.Load() {
 		case 0:
+			if !reflect.DeepEqual(input, testRequestHookInput()) {
+				return harness.RequestConsequence{}, fmt.Errorf("request hook input mismatch: %+v", input)
+			}
 			return requestConsequence, nil
 		case 1:
 			return harness.RequestConsequence{}, errors.New("plain hook failure")

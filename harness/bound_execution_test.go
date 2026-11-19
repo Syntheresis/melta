@@ -77,7 +77,7 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				return InvocationExecution{
-					Model: func(context.Context, model.Request) (model.Stream, error) {
+					Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return summaryStream("bound summary", model.Usage{InputTokens: 1}), nil
 					},
 					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
@@ -88,7 +88,7 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 				}, nil
 			}
 			return InvocationExecution{
-				Model: func(ctx context.Context, _ model.Request) (model.Stream, error) {
+				Model: func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 					closeOrder = append(closeOrder, "conversation-dispatch")
 					conversationRounds++
 					if conversationRounds == 1 {
@@ -139,9 +139,9 @@ func executing(callID string, status model.ToolResultStatus, content string, evi
 // result's shape, and that a supplied immediate plan's evidence is ignored in
 // favour of the fixed success/other-status derivation.
 func TestToolPlanEvidence(t *testing.T) {
-	modelFn := func() func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func() func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		rounds := 0
-		return func(context.Context, model.Request) (model.Stream, error) {
+		return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -323,7 +323,7 @@ func TestExecuteDirectOwnsCancellableChildContext(t *testing.T) {
 	var ctxDuringStream context.Context
 	exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
-			Model: func(ctx context.Context, _ model.Request) (model.Stream, error) {
+			Model: func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 				callbackCtx = ctx
 				testassert.Equal(t, ctx.Value(contextParentKey{}), "parent-value")
 				ctxDuringStream = ctx
@@ -376,7 +376,7 @@ func TestManualMaintenanceDisposalFollowsCompletionPublication(t *testing.T) {
 			h, store, c, sessionID := newCompactOperationFixture(t, capture)
 			var events []string
 			settledAtClose, failureAtClose := false, false
-			modelFn := func(context.Context, model.Request) (model.Stream, error) {
+			modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return summaryStream("manual summary", model.Usage{InputTokens: 2}), nil
 			}
 			exec := Execution{
@@ -455,7 +455,7 @@ func TestQuietCompletionSettlesUnmarkedStorageCallbackError(t *testing.T) {
 		hook := RequestHook{ID: "req.storage", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{}, hookErr
 		}}
-		exec := requestHookFixtureExecution(func(context.Context, model.Request) (model.Stream, error) {
+		exec := requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			t.Error("a failed request hook dispatched a conversation request")
 			return nil, nil
 		}, nil, hook)
@@ -486,7 +486,7 @@ func TestQuietCompletionSettlesUnmarkedStorageCallbackError(t *testing.T) {
 		exec := Execution{
 			ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.storage/v1", Strategy: &errStrategy{cause: planErr}}),
 			OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-				return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+				return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return completedTurnStream(), nil
 				}, nil), nil
 			},
@@ -735,7 +735,7 @@ func (c *testCause) Error() string { return c.text }
 // text base while the stored knowledge stays the producer's declared unknown.
 func TestToolOutputShapingCannotChangeKnowledge(t *testing.T) {
 	rounds := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		rounds++
 		if rounds == 1 {
 			return completedTurnStream(testToolCall("call-1")), nil
@@ -807,7 +807,7 @@ func TestExecutionAdoptsCommittedCapture(t *testing.T) {
 	mutated := false
 	exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
-			Model: func(_ context.Context, request model.Request) (model.Stream, error) {
+			Model: func(_ context.Context, request model.Request, _ model.Extra) (model.Stream, error) {
 				sent = request
 				return completedTurnStream(), nil
 			},
@@ -869,7 +869,7 @@ func assertOwnedCaptureProvenance(t *testing.T, capture ExecutionCapture) {
 func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
 	t.Run("permission pairs are frozen before evaluation", func(t *testing.T) {
 		rounds := 0
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -906,7 +906,7 @@ func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
 
 	t.Run("immediate content and metadata are frozen at acceptance", func(t *testing.T) {
 		rounds := 0
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -995,7 +995,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 	// The reported conversation measurement that triggers automatic
 	// maintenance.
 	{
-		seedPrepared := preparedExecuting(effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+		seedPrepared := preparedExecuting(effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return streamOf(turnDelta("stop", "seed"), usageDelta(model.Usage{InputTokens: 10, CachedInputTokens: 2, OutputTokens: 1})), nil
 		}, nil))
 		testassert.NoError(t, executeDirect(h, c, h.ctx, testOpID, seedPrepared))
@@ -1015,7 +1015,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 					usage = &model.Usage{InputTokens: 5}
 				}
 				return InvocationExecution{
-					Model: func(context.Context, model.Request) (model.Stream, error) {
+					Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						if usage != nil {
 							return streamOf(turnDelta("stop", fmt.Sprintf("pass %d", pass)), usageDelta(*usage)), nil
 						}
@@ -1029,7 +1029,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 				}, nil
 			}
 			return InvocationExecution{
-				Model: func(context.Context, model.Request) (model.Stream, error) {
+				Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					events = append(events, "conversation-dispatch")
 					return streamOf(turnDelta("stop", "final answer"), usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1})), nil
 				},
@@ -1121,7 +1121,7 @@ func TestWaitRetainsManualPublicationBeforeLaterExecution(t *testing.T) {
 		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}}),
 		OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 			return InvocationExecution{
-				Model: func(context.Context, model.Request) (model.Stream, error) {
+				Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return summaryStream("manual summary", model.Usage{InputTokens: 1}), nil
 				},
 				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
@@ -1178,7 +1178,7 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 			OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 				if request.Purpose == InvocationPurposeMaintenance {
 					return InvocationExecution{
-						Model: func(context.Context, model.Request) (model.Stream, error) {
+						Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 							return summaryStream("automatic summary", model.Usage{InputTokens: 1}), nil
 						},
 						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
@@ -1190,7 +1190,9 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 					}, nil
 				}
 				return InvocationExecution{
-					Model:      func(context.Context, model.Request) (model.Stream, error) { return completedTurnStream(), nil },
+					Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+						return completedTurnStream(), nil
+					},
 					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 				}, nil
 			},

@@ -167,7 +167,7 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 				return harness.PreparedExecution{
 					Capture: ownedCapture,
 					Open: func(_ context.Context, admission harness.OperationAdmission) (harness.Execution, error) {
-						conversationAttempt := func(_ context.Context, req model.Request) (model.Stream, error) {
+						conversationAttempt := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 							mu.Lock()
 							requests = append(requests, requestObservation{admission.SessionID, admission.OperationID, req})
 							mu.Unlock()
@@ -183,7 +183,7 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 							}
 							return summaryTurnStream("child answer", model.Usage{}), nil
 						}
-						compactAttempt := func(_ context.Context, req model.Request) (model.Stream, error) {
+						compactAttempt := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 							mu.Lock()
 							compactRequests = append(compactRequests, req)
 							first := len(compactRequests) == 1
