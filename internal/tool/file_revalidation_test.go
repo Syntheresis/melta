@@ -47,15 +47,15 @@ func TestFileToolsRefuseRepointedApprovedSymlink(t *testing.T) {
 	testassert.NoError(t, os.Symlink(secret, link))
 
 	{
-		_, err := readCall.Execute(context.Background())
+		_, err := readCall.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "read_file error = %v, want canonical change refusal", err)
 	}
 	{
-		_, err := writeCall.Execute(context.Background())
+		_, err := writeCall.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "write_file error = %v, want canonical change refusal", err)
 	}
 	{
-		_, err := editCall.Execute(context.Background())
+		_, err := editCall.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "edit_file error = %v, want canonical change refusal", err)
 	}
 
@@ -92,15 +92,15 @@ func TestFileToolsRefuseFinalTargetReplacedBySymlink(t *testing.T) {
 	testassert.NoError(t, os.Symlink(secret, target))
 
 	{
-		_, err := readCall.Execute(context.Background())
+		_, err := readCall.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "read_file error = %v, want canonical change refusal", err)
 	}
 	{
-		_, err := writeCall.Execute(context.Background())
+		_, err := writeCall.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "write_file error = %v, want canonical change refusal", err)
 	}
 	{
-		_, err := editCall.Execute(context.Background())
+		_, err := editCall.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "edit_file error = %v, want canonical change refusal", err)
 	}
 	assertFileContent(t, secret, "secret")

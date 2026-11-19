@@ -276,7 +276,7 @@ func TestPatchPreconditionsUseCurrentExistence(t *testing.T) {
 			} else {
 				testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
 			}
-			_, err = call.Execute(context.Background())
+			_, err = call.Execute(context.Background(), nil)
 			testassert.NoError(t, err)
 			if tc.missingAfter {
 				assertPathMissing(t, path)
@@ -302,7 +302,7 @@ func TestPatchPreconditionsUseCurrentExistence(t *testing.T) {
 		call, err := PreparePatchCall(root, "", "", CapabilityOptions{}, store, args)
 		testassert.NoError(t, err)
 		testassert.NoError(t, os.Remove(destination))
-		_, err = call.Execute(context.Background())
+		_, err = call.Execute(context.Background(), nil)
 		testassert.NoError(t, err)
 		assertPathMissing(t, source)
 		assertFileContent(t, destination, "after")
@@ -403,7 +403,7 @@ func TestPreparedEditAndWriteWithAppearedTarget(t *testing.T) {
 				testassert.NoError(t, err)
 			}
 			testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
-			_, err = call.Execute(context.Background())
+			_, err = call.Execute(context.Background(), nil)
 			testassert.NoError(t, err)
 			assertFileContent(t, path, "after")
 		})

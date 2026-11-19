@@ -51,7 +51,7 @@ func TestPrepareReadDisappearedLeafReturnsPlainNotFound(t *testing.T) {
 	// The leaf existed during preparation but disappears before opening:
 	// plain not-found, no undeclared fallback I/O, no suggestions.
 	testassert.NoError(t, os.Remove(path))
-	result, err := prepared.Execute(context.Background())
+	result, err := prepared.Execute(context.Background(), nil)
 	testassert.NoError(t, err)
 	testassert.Require(t, result == "read_file: file not found: "+filepath.Join(root, "gone.txt"), "Execute result = %q, want plain not-found without suggestions", result)
 }
@@ -298,7 +298,7 @@ func TestReadFileClampsHugeWindowsToRemainingLines(t *testing.T) {
 	testassert.NoError(t, err)
 	prepared, err := PrepareReadCall(root, rootCanonical, config.ToolsConfig{ReadMaxLines: 500}, args)
 	testassert.NoError(t, err)
-	result, err := prepared.Execute(context.Background())
+	result, err := prepared.Execute(context.Background(), nil)
 	testassert.NoError(t, err)
 	want := strings.Join([]string{"1\tone", "2\ttwo", "3\tthree"}, "\n")
 	testassert.Equal(t, result, want)
@@ -313,7 +313,7 @@ func TestReadFileClampsHugeWindowsToRemainingLines(t *testing.T) {
 	testassert.NoError(t, err)
 	prepared, err = PrepareReadCall(root, rootCanonical, config.ToolsConfig{ReadMaxLines: 500}, args)
 	testassert.NoError(t, err)
-	result, err = prepared.Execute(context.Background())
+	result, err = prepared.Execute(context.Background(), nil)
 	testassert.NoError(t, err)
 	want = strings.Join([]string{"2\ttwo", "3\tthree", "(Showing lines 2-3 of 3.)"}, "\n")
 	testassert.Equal(t, result, want)
@@ -396,7 +396,7 @@ func TestPrepareReadRevalidatesRepointedWorkspaceRoot(t *testing.T) {
 	testassert.NoError(t, err)
 	// Baseline: with the binding intact the read succeeds.
 	{
-		result, err := prepared.Execute(context.Background())
+		result, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err == nil && strings.Contains(result, "A-content"), "Execute = %q, %v; want A-content", result, err)
 	}
 
@@ -408,7 +408,7 @@ func TestPrepareReadRevalidatesRepointedWorkspaceRoot(t *testing.T) {
 	testassert.NoError(t, err)
 	repointWorkspaceRoot(t, root, realB)
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "workspace root changed"), "Execute error = %v, want workspace root change refusal", err)
 	}
 	assertFileContent(t, filepath.Join(realA, "f.txt"), "A-content")
@@ -425,7 +425,7 @@ func TestPrepareWriteRevalidatesRepointedWorkspaceRoot(t *testing.T) {
 	testassert.NoError(t, err)
 	repointWorkspaceRoot(t, root, realB)
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "workspace root changed"), "Execute error = %v, want workspace root change refusal", err)
 	}
 	// No mutation happened under either tree.
@@ -449,7 +449,7 @@ func TestPreparePatchRevalidatesRepointedWorkspaceRoot(t *testing.T) {
 	testassert.NoError(t, err)
 	repointWorkspaceRoot(t, root, realB)
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "workspace root changed"), "Execute error = %v, want workspace root change refusal", err)
 	}
 	assertFileContent(t, filepath.Join(realA, "f.txt"), "hi")
@@ -464,7 +464,7 @@ func TestPrepareTargetNilTrackerRepeatedReadsReturnContent(t *testing.T) {
 	prepared, err := PrepareReadCall(dir, "", config.ToolsConfig{ReadMaxLines: 500}, args)
 	testassert.NoError(t, err)
 	for i := 0; i < 2; i++ {
-		result, err := prepared.Execute(context.Background())
+		result, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err == nil, "read %d error = %v", i+1, err)
 		// Target reads never return a cached-read notice.
 		testassert.Require(t, strings.Contains(result, "1\tone") && !strings.Contains(result, "File unchanged"), "read %d result = %q, want full content", i+1, result)
@@ -494,7 +494,7 @@ func TestPrepareReadTargetsExpressParentAllowDeny(t *testing.T) {
 		}
 		testassert.Require(t, !allowed, "parent denial was not expressible through the prepared targets")
 		{
-			_, err := prepared.Execute(context.Background())
+			_, err := prepared.Execute(context.Background(), nil)
 			testassert.NoError(t, err)
 		}
 	})
@@ -507,7 +507,7 @@ func TestPrepareReadTargetsExpressParentAllowDeny(t *testing.T) {
 		prepared, err := PrepareReadCall(dir, "", config.ToolsConfig{ReadMaxLines: 500}, args)
 		testassert.NoError(t, err)
 		testassert.Require(t, len(prepared.Targets) == 1 && prepared.Targets[0].CanonicalPath == filepath.Join(dir, "config.json"), "targets = %+v, want only the file target (parent not required)", prepared.Targets)
-		result, err := prepared.Execute(context.Background())
+		result, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err == nil && strings.Contains(result, "{}"), "Execute = %q, %v; want file content (parent permission not required)", result, err)
 	})
 }
@@ -527,7 +527,7 @@ func TestPreparedEditAndWritePaths(t *testing.T) {
 	testassert.NoError(t, err)
 	testassert.Require(t, len(prepared.Targets) == 1 && prepared.Targets[0].CanonicalPath == path, "targets = %+v, want the single canonical write target", prepared.Targets)
 	{
-		result, err := prepared.Execute(context.Background())
+		result, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err == nil && result == "Wrote "+path+".", "Execute = %q, %v; want write result", result, err)
 	}
 	assertFileContent(t, path, "changed")
@@ -539,7 +539,7 @@ func TestPreparedEditAndWritePaths(t *testing.T) {
 	testassert.NoError(t, err)
 	testassert.Require(t, len(editPrepared.Targets) == 1 && editPrepared.Targets[0].CanonicalPath == path, "edit targets = %+v, want the single canonical edit target", editPrepared.Targets)
 	{
-		result, err := editPrepared.Execute(context.Background())
+		result, err := editPrepared.Execute(context.Background(), nil)
 		testassert.Require(t, err == nil && strings.Contains(result, "lines 1-"), "Execute = %q, %v; want edit summary", result, err)
 	}
 	assertFileContent(t, path, "final")
@@ -551,7 +551,7 @@ func TestPreparedEditAndWritePaths(t *testing.T) {
 	missingPrepared, err := PrepareEditCall(dir, "", "", CapabilityOptions{}, store, missing)
 	testassert.NoError(t, err)
 	{
-		_, err := missingPrepared.Execute(context.Background())
+		_, err := missingPrepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "not found"), "Execute error = %v, want missing match error", err)
 	}
 	assertFileContent(t, path, "final")
@@ -564,7 +564,7 @@ func TestPreparedEditAndWritePaths(t *testing.T) {
 	nestedPrepared, err := PrepareWriteCall(dir, "", "", CapabilityOptions{}, store, nestedArgs)
 	testassert.NoError(t, err)
 	{
-		_, err := nestedPrepared.Execute(context.Background())
+		_, err := nestedPrepared.Execute(context.Background(), nil)
 		testassert.NoError(t, err)
 	}
 	assertFileContent(t, nested, "made")
@@ -605,7 +605,7 @@ func TestPrepareWriteAndEditDiscardSnapshotClaimOnPostSnapshotRevalidationFailur
 	prepared, err := PrepareWriteCall(dir, "", "", CapabilityOptions{}, store, args)
 	testassert.NoError(t, err)
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "write Execute error = %v, want post-snapshot canonical change refusal", err)
 	}
 	testassert.Require(t, len(store.discards) == 1 && store.discards[0] == store.entryIDFor(real1), "write discards = %v, want the unmutated snapshot claim for %s discarded once", store.discards, real1)
@@ -626,7 +626,7 @@ func TestPrepareWriteAndEditDiscardSnapshotClaimOnPostSnapshotRevalidationFailur
 	editPrepared, err := PrepareEditCall(dir, "", "", CapabilityOptions{}, store2, editArgs)
 	testassert.NoError(t, err)
 	{
-		_, err := editPrepared.Execute(context.Background())
+		_, err := editPrepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "edit Execute error = %v, want post-snapshot canonical change refusal", err)
 	}
 	testassert.Require(t, len(store2.discards) == 1 && store2.discards[0] == store2.entryIDFor(real1), "edit discards = %v, want the unmutated snapshot claim for %s discarded once", store2.discards, real1)
@@ -651,7 +651,7 @@ func TestPreparePatchExecutesParsedPatchWithoutReparse(t *testing.T) {
 	// execution closure: the patch was parsed exactly once and the closure
 	// consumes that parsed plan without redecoding or reparsing.
 	args["input"] = applyPatchInput(t, "*** Update File: a.txt\n@@\n-hi\n+TAMPERED")
-	result, err := prepared.Execute(context.Background())
+	result, err := prepared.Execute(context.Background(), nil)
 	testassert.NoError(t, err)
 	testassert.Require(t, strings.Contains(result.Result, "Success. Updated the following files:"), "Execute result = %q, want success summary", result.Result)
 	// The structured result carries the captured preview data.
@@ -677,7 +677,7 @@ func TestPreparePatchClosureRevalidatesRepointedTarget(t *testing.T) {
 	testassert.NoError(t, os.Remove(link))
 	testassert.NoError(t, os.Symlink(real2, link))
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical path changed"), "Execute error = %v, want canonical change refusal", err)
 	}
 	assertFileContent(t, real1, "hi")
@@ -703,7 +703,7 @@ func TestPreparePatchPartialFailureReportsCommittedFiles(t *testing.T) {
 
 	prepared, err := PreparePatchCall(dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
 	testassert.NoError(t, err)
-	_, err = prepared.Execute(context.Background())
+	_, err = prepared.Execute(context.Background(), nil)
 	testassert.Require(t, err != nil, "Execute succeeded, want partial-failure error")
 	testassert.Require(t, strings.Contains(err.Error(), "M first.txt") && strings.Contains(err.Error(), "changed after validation"), "Execute error = %v, want committed-files summary plus validation failure", err)
 	assertFileContent(t, first, "ONE")
@@ -728,7 +728,7 @@ func TestPrepareWriteRevalidatesWriteDirWitness(t *testing.T) {
 	prepared, err := PrepareWriteCall(root, "", "", CapabilityOptions{WriteDir: wd}, store, args)
 	testassert.NoError(t, err)
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.NoError(t, err)
 	}
 	assertFileContent(t, filepath.Join(realA, "file.txt"), "x")
@@ -744,7 +744,7 @@ func TestPrepareWriteRevalidatesWriteDirWitness(t *testing.T) {
 	testassert.NoError(t, os.Remove(wd))
 	testassert.NoError(t, os.Symlink(realB, wd))
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical write_dir changed"), "Execute error = %v, want write-dir revalidation refusal", err)
 	}
 	assertFileContent(t, filepath.Join(realA, "file.txt"), "x")
@@ -767,7 +767,7 @@ func TestPrepareWriteRevalidatesWriteDirWitness(t *testing.T) {
 	testassert.NoError(t, os.Remove(wd))
 	testassert.NoError(t, os.Symlink(nested, wd))
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical write_dir changed"), "Execute error = %v, want write-dir canonical change refusal (target inside both boundaries)", err)
 	}
 	{
@@ -852,7 +852,7 @@ func TestPreparePatchRevalidatesWriteDirWitness(t *testing.T) {
 		testassert.NoError(t, err)
 		f.flip()
 		{
-			_, err := prepared.Execute(context.Background())
+			_, err := prepared.Execute(context.Background(), nil)
 			testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical write_dir changed"), "Execute error = %v, want write-dir canonical change refusal", err)
 		}
 		assertFileContent(t, f.target, "x")
@@ -902,7 +902,7 @@ func TestPreparePatchRejectsOutsideWriteDirAtPreparation(t *testing.T) {
 	prepared, err = PreparePatchCall(root, rootCanonical, writeDirCanonical, CapabilityOptions{WriteDir: inside}, newTempCodeGroupStore(t), args)
 	testassert.NoError(t, err)
 	{
-		_, err := prepared.Execute(context.Background())
+		_, err := prepared.Execute(context.Background(), nil)
 		testassert.NoError(t, err)
 	}
 	assertFileContent(t, filepath.Join(inside, "a.txt"), "fixed")

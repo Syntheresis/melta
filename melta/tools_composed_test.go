@@ -17,8 +17,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/atomicfs"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/jobs"
+	"github.com/Syntheresis/melta/internal/snapshot"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/internal/tool"
@@ -318,13 +320,14 @@ func toolsCapture(names []string) harness.ExecutionCapture {
 // policy, the background bridge, the captured invocation, and the call-time
 // subprocess environment producer.
 type toolsHarnessOpts struct {
-	jobsValue     jobs.Jobs // the tool-facing jobs provider; realJobs wins when set
-	realJobs      bool      // construct the real jobs service over the fixture data root
-	advertise     []string
-	permissions   harness.PermissionPolicy
-	background    BackgroundServices
-	invocation    Invocation
-	subprocessEnv func(context.Context) ([]string, error)
+	jobsValue          jobs.Jobs // the tool-facing jobs provider; realJobs wins when set
+	realJobs           bool      // construct the real jobs service over the fixture data root
+	advertise          []string
+	permissions        harness.PermissionPolicy
+	background         BackgroundServices
+	invocation         Invocation
+	subprocessEnv      func(context.Context) ([]string, error)
+	authorizationHooks []harness.AuthorizationHook
 	// store, when non-nil, is the durable store behind the fixture's
 	// Harness; the zero value opens a temporary SQLite store.
 	store harness.Storage
@@ -408,7 +411,9 @@ func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Reque
 						Permissions: opts.permissions,
 						OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 							return harness.InvocationExecution{
-								Model: modelFn,
+								Model:              modelFn,
+								AuthorizationHooks: opts.authorizationHooks,
+								BindLocation:       locationBinder(workspace),
 								LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) harness.PreparedTool {
 									return byID[call.Name].Prepare(ctx, tc, call)
 								}, func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
@@ -1338,6 +1343,74 @@ func TestExecutedPlanRejectsPostAuthorizationBindingChange(t *testing.T) {
 	testassert.Require(t, err == nil && string(data) == "do not touch\n", "repointed leaf = (%q, %v), want it unmutated", data, err)
 	if _, err := os.Stat(filepath.Join(dataDir, "code")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed pre-mutation call left %s: %v", filepath.Join(dataDir, "code"), err)
+	}
+}
+
+func TestAuthorizationWitnessRecheckedAfterSnapshot(t *testing.T) {
+	for _, flip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("flip=%v", flip), func(t *testing.T) {
+			var calls int
+			modelFn := func(context.Context, model.Request) (model.Stream, error) {
+				calls++
+				if calls == 1 {
+					return toolCallStream("call-write", "write_file", `{"path":"target.txt","content":"after"}`), nil
+				}
+				return stopStream("done"), nil
+			}
+			hook := harness.AuthorizationHook{Run: func(_ context.Context, _ harness.PreparedAction, bind func(string) (string, error)) (*string, error) {
+				_, err := bind("guard")
+				return nil, err
+			}}
+			th := newToolsHarnessWith(t, modelFn, toolsHarnessOpts{advertise: []string{"write_file"}, authorizationHooks: []harness.AuthorizationHook{hook}})
+			first, second := t.TempDir(), t.TempDir()
+			link := filepath.Join(th.workspace, "guard")
+			testassert.NoError(t, os.Symlink(first, link))
+			target := filepath.Join(th.workspace, "target.txt")
+			testassert.NoError(t, os.WriteFile(target, []byte("before"), 0o600))
+			session := th.createSession()
+			previous := atomicfs.SyncFileFunc
+			flipped := false
+			atomicfs.SyncFileFunc = func(f *os.File) error {
+				if flip && !flipped && strings.HasPrefix(filepath.Base(f.Name()), "meta.json.tmp-") {
+					flipped = true
+					if err := os.Remove(link); err != nil {
+						return err
+					}
+					if err := os.Symlink(second, link); err != nil {
+						return err
+					}
+				}
+				if previous != nil {
+					return previous(f)
+				}
+				return f.Sync()
+			}
+			t.Cleanup(func() { atomicfs.SyncFileFunc = previous })
+			th.submit(session, "op-1", "write")
+			th.awaitSettled(session, "op-1")
+			result := th.readToolResults(session)["call-write"]
+			data, err := os.ReadFile(target)
+			testassert.NoError(t, err)
+			th.mu.Lock()
+			admitted := th.admission
+			th.mu.Unlock()
+			codeStore, err := snapshot.OpenCodeStore(groupDir(th.dataDir, session, admitted.EntryID))
+			testassert.NoError(t, err)
+			entries, err := codeStore.ListEntries()
+			testassert.NoError(t, err)
+			if flip {
+				testassert.Require(t, flipped && result.Status == model.ResultError && string(data) == "before" && len(entries) == 0, "flipped=%v result=%+v target=%q snapshots=%+v", flipped, result, data, entries)
+			} else {
+				testassert.Require(t, result.Status == model.ResultSuccess && string(data) == "after" && len(entries) == 1 && entries[0].LastWrite != nil, "result=%+v target=%q snapshots=%+v", result, data, entries)
+			}
+			reverted, err := snapshot.RevertCodeGroups([]string{groupDir(th.dataDir, session, admitted.EntryID)})
+			testassert.NoError(t, err)
+			data, err = os.ReadFile(target)
+			testassert.NoError(t, err)
+			if string(data) != "before" || len(reverted.Skipped) != 0 || len(reverted.Restored) != len(entries) {
+				t.Fatalf("revert=%+v target=%q", reverted, data)
+			}
+		})
 	}
 }
 

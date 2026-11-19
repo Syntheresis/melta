@@ -48,10 +48,11 @@ const (
 	PermissionDeny  PermissionDecision = "deny"
 )
 
-// PreparedAction is one prepared call handed to a PermissionEvaluator: the
-// actual prepared canonical Workspace root and write root, plus the complete
-// ordered permission/target pairs as an evaluator-owned copy.
+// PreparedAction is one prepared call handed to the evaluator or an
+// authorization hook. Arguments and permission pairs are independently owned.
 type PreparedAction struct {
+	ToolName           string
+	Arguments          json.RawMessage
 	CanonicalWorkspace string
 	CanonicalWriteDir  string
 	Permissions        []PermissionRequest

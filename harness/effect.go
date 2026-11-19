@@ -11,6 +11,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Syntheresis/melta/agent"
@@ -1372,7 +1373,7 @@ func authorizationRequired(p PreparedTool) bool {
 // action, and the plan is allowed exactly when it returns allow without
 // error: a deny, a decision outside the closed set, or an error denies the
 // call alike. A nil evaluator selects the included built-in policy.
-func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, capture ExecutionCapture, plan PreparedTool) bool {
+func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, capture ExecutionCapture, plan PreparedTool, name string, args json.RawMessage) bool {
 	if len(plan.Permissions) == 0 {
 		return false
 	}
@@ -1413,11 +1414,102 @@ func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, capture
 		evaluator = PermissionPolicy{}
 	}
 	decision, err := evaluator.Evaluate(ctx, PreparedAction{
+		ToolName:           name,
+		Arguments:          append(json.RawMessage(nil), args...),
 		CanonicalWorkspace: plan.CanonicalWorkspace,
 		CanonicalWriteDir:  plan.CanonicalWriteDir,
 		Permissions:        append([]PermissionRequest(nil), plan.Permissions...),
 	})
 	return err == nil && decision == PermissionAllow
+}
+
+func authorizationFailure(ctx context.Context, callID string, err error) model.ToolResult {
+	var declared *EffectError
+	if EffectInterrupted(err) || (!errors.As(err, &declared) && ctx.Err() != nil && isExecutionCancellation(err)) {
+		return interruptedToolResult(callID)
+	}
+	return validationToolResult(callID, err)
+}
+
+// authorizeHooks runs pure restrictions after policy, retaining only locations
+// explicitly bound by the hooks, not the Workspace fact itself.
+func authorizeHooks(ctx context.Context, inv InvocationExecution, callID, name string, args json.RawMessage, plan PreparedTool) (func() error, *model.ToolResult) {
+	if len(inv.AuthorizationHooks) == 0 {
+		return nil, nil
+	}
+	fail := func(err error) (func() error, *model.ToolResult) {
+		result := authorizationFailure(ctx, callID, err)
+		return nil, &result
+	}
+	if ctx.Err() != nil {
+		return fail(ctx.Err())
+	}
+	if inv.BindLocation == nil {
+		return fail(fmt.Errorf("location binding unavailable"))
+	}
+	root, rootCheck, err := inv.BindLocation(".")
+	if err != nil {
+		return fail(err)
+	}
+	if !canonicalPathValue(root) || rootCheck == nil {
+		return fail(fmt.Errorf("invalid location binding"))
+	}
+	var checks []func() error
+	for _, hook := range inv.AuthorizationHooks {
+		if ctx.Err() != nil {
+			return fail(ctx.Err())
+		}
+		var mu sync.Mutex
+		open := true
+		bind := func(path string) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if !open {
+				return "", fmt.Errorf("authorization callback has ended")
+			}
+			canonical, check, err := inv.BindLocation(path)
+			if err != nil {
+				return "", err
+			}
+			if !canonicalPathValue(canonical) || check == nil {
+				return "", fmt.Errorf("invalid location binding")
+			}
+			checks = append(checks, check)
+			return canonical, nil
+		}
+		action := PreparedAction{ToolName: name, Arguments: append(json.RawMessage(nil), args...), CanonicalWorkspace: root, CanonicalWriteDir: plan.CanonicalWriteDir, Permissions: append([]PermissionRequest(nil), plan.Permissions...)}
+		reason, err := hook.Run(ctx, action, bind)
+		mu.Lock()
+		open = false
+		mu.Unlock()
+		if err != nil {
+			return fail(err)
+		}
+		if reason != nil {
+			if *reason == "" {
+				result := invalidToolResult(callID)
+				return nil, &result
+			}
+			content := boundedToolDiagnostic(errors.New(strings.ToValidUTF8(*reason, "\uFFFD")))
+			result := model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: content}
+			return nil, &result
+		}
+	}
+	if ctx.Err() != nil {
+		return fail(ctx.Err())
+	}
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	frozen := append([]func() error(nil), checks...)
+	return func() error {
+		for _, check := range frozen {
+			if err := check(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil
 }
 
 // canonicalPathValue reports whether one prepared canonical target or root is
@@ -1610,10 +1702,23 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		if !validToolPlan(plan) {
 			return settle(ToolOutcome{Result: invalidToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
 		}
-		if authorizationRequired(plan) && !toolCallAllowed(ctx, d.execution.Permissions, capture, plan) {
-			return settle(ToolOutcome{Result: permissionDeniedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+		var recheck func() error
+		if authorizationRequired(plan) {
+			if !toolCallAllowed(ctx, d.execution.Permissions, capture, plan, record.Name, selection.arguments) {
+				return settle(ToolOutcome{Result: permissionDeniedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+			}
+			var result *model.ToolResult
+			recheck, result = authorizeHooks(prepareCtx, inv.callbacks, call.ID, record.Name, selection.arguments, plan)
+			if result != nil {
+				return settle(ToolOutcome{Result: *result, Evidence: ExecutionNotStarted}, nil, false, selection, false)
+			}
 		}
 		if plan.Immediate != nil {
+			if recheck != nil {
+				if err := recheck(); err != nil {
+					return settle(ToolOutcome{Result: authorizationFailure(ctx, call.ID, err), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+				}
+			}
 			outcome := acceptedImmediateOutcome(call.ID, *plan.Immediate)
 			// Pure output shaping over the tool-produced outcome (the
 			// invalid-replacement content included), before the final commit.
@@ -1638,10 +1743,21 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		if ctx.Err() != nil { // cancellation before start commits interrupted-before-execution carrying the intent's accepted selection
 			return settle(ToolOutcome{Result: interruptedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, true, toolSelection{}, false)
 		}
+		if recheck != nil {
+			if err := recheck(); err != nil {
+				return settle(ToolOutcome{Result: authorizationFailure(ctx, call.ID, err), Evidence: ExecutionNotStarted}, nil, true, toolSelection{}, false)
+			}
+			if ctx.Err() != nil {
+				return settle(ToolOutcome{Result: interruptedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, true, toolSelection{}, false)
+			}
+		}
 		// Execute receives the committed concrete-tool reservation's context;
 		// this is the only callback with action authority, and the reserved
 		// result identity is carried immutably for the native adapter.
 		executeCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: call.ID, EffectID: pending.ResultEntryID})
+		if recheck != nil {
+			executeCtx = context.WithValue(executeCtx, locationChecksKey{}, recheck)
+		}
 		outcome := ownToolOutcome(plan.Execute(executeCtx))
 		if outcome.Evidence == "" { // a valid returned result is itself the observation
 			outcome.Evidence = ExecutionObserved
@@ -2627,6 +2743,7 @@ func executionCancellationResult(execCtx context.Context, err error) *agent.Term
 // modes, callbacks, or their configured order. A shallow element copy is
 // sufficient — every hook entry is a value.
 func ownOpenedInvocationDeclarations(inv *InvocationExecution) {
+	inv.AuthorizationHooks = append([]AuthorizationHook(nil), inv.AuthorizationHooks...)
 	if inv.ToolHooks != nil {
 		inv.ToolHooks = append(inv.ToolHooks[:0:0], inv.ToolHooks...)
 	}
@@ -2649,6 +2766,11 @@ func ownOpenedInvocationDeclarations(inv *InvocationExecution) {
 func validateOpenedInvocation(inv InvocationExecution) error {
 	if inv.Model == nil || inv.LookupTool == nil {
 		return invalidInput("opened invocation requires non-nil model and tool lookup functions")
+	}
+	for _, hook := range inv.AuthorizationHooks {
+		if hook.Run == nil {
+			return invalidInput("opened invocation requires a non-nil run function for every authorization hook")
+		}
 	}
 	seenHooks := make(map[string]bool, len(inv.ToolHooks))
 	for _, hook := range inv.ToolHooks {

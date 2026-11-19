@@ -15,6 +15,7 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
+	"github.com/Syntheresis/melta/internal/pathutil"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/prompt"
 	"github.com/Syntheresis/melta/protocol"
@@ -26,6 +27,25 @@ import (
 // there is no intermediate execution-plan type and no independently
 // configured opener.
 type openInvocation func(context.Context, harness.OperationAdmission, selection, harness.InvocationRequest) (harness.InvocationExecution, error)
+
+func locationBinder(workspace string) func(string) (string, func() error, error) {
+	return func(path string) (string, func() error, error) {
+		resolved, err := pathutil.ResolveFilePathFrom(workspace, path)
+		if err != nil {
+			return "", nil, err
+		}
+		return resolved.CanonicalPath, func() error {
+			current, err := pathutil.ResolveFilePathFrom(workspace, path)
+			if err != nil {
+				return err
+			}
+			if current.CanonicalPath != resolved.CanonicalPath {
+				return fmt.Errorf("approved canonical location changed: %s to %s", resolved.CanonicalPath, current.CanonicalPath)
+			}
+			return nil
+		}, nil
+	}
+}
 
 // selection is one immutable preparation or execution input set: owned Agent
 // data, the selected capability bindings currently supplied by the scopes
@@ -791,6 +811,7 @@ func (p *preparation) concreteOpener(transport, compactTransport *model.Transpor
 			attemptTransport = compactTransport
 		}
 		return harness.InvocationExecution{
+			BindLocation: locationBinder(workspace),
 			Model: func(ctx context.Context, req model.Request) (model.Stream, error) {
 				stream, warnings, err := attemptTransport.Stream(ctx, req, nil) // runtime extras are a later phase's channel
 				// The attempt's diagnostics are recorded under the admitted

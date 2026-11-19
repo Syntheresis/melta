@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
@@ -1399,6 +1400,300 @@ func TestToolEffectPlansAndOutcomes(t *testing.T) {
 // constraints are decided before the evaluator and cannot be delegated away;
 // a nil evaluator selects the included built-in policy.
 func TestToolEffectPermissionBoundary(t *testing.T) {
+	t.Run("authorization callback shape", func(t *testing.T) {
+		inv := defaultInvocation(InvocationExecution{AuthorizationHooks: []AuthorizationHook{{}}})
+		if err := validateOpenedInvocation(inv); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("nil callback validation = %v", err)
+		}
+		run := func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) { return nil, nil }
+		inv.AuthorizationHooks = []AuthorizationHook{{Run: run}, {Run: run}}
+		if err := validateOpenedInvocation(inv); err != nil {
+			t.Fatalf("ordered callbacks without binder = %v", err)
+		}
+	})
+	t.Run("policy denial ignores missing binder", func(t *testing.T) {
+		inv := InvocationExecution{
+			LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) PreparedTool {
+				return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
+					t.Fatal("denied executor ran")
+					return ToolOutcome{}
+				}}
+			}, objectNormalize),
+			AuthorizationHooks: []AuthorizationHook{{Run: func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) {
+				t.Fatal("hook ran after policy denial")
+				return nil, nil
+			}}},
+		}
+		exec := executionForInvocation(inv)
+		exec.Permissions = permissionEvaluatorFunc(func(context.Context, PreparedAction) (PermissionDecision, error) { return PermissionDeny, nil })
+		_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, testToolCall("call-1"))
+		if err != nil || results[0].Status != model.ResultDenied {
+			t.Fatalf("result=%+v err=%v", results, err)
+		}
+	})
+	t.Run("immediate success survives cancellation without hooks", func(t *testing.T) {
+		for _, stage := range []string{"prepare", "policy"} {
+			t.Run(stage, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				capture := testCapture()
+				admission := preparedExecutionFor(capture, func(context.Context, OperationAdmission) (Execution, error) { return Execution{}, nil })
+				h, store, c, sessionID := newAdmittedHarness(t, context.Background(), admission)
+				plan := func(_ context.Context, call model.ToolCall) PreparedTool {
+					if stage == "prepare" {
+						cancel()
+					}
+					return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "produced"}}}
+				}
+				exec := executionForInvocation(InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize)})
+				exec.Permissions = permissionEvaluatorFunc(func(context.Context, PreparedAction) (PermissionDecision, error) {
+					if stage == "policy" {
+						cancel()
+					}
+					return PermissionAllow, nil
+				})
+				results, _ := runToolCalls(t, h, c, store, sessionID, ctx, testOpID, exec, capture, []model.ToolCall{testToolCall("call-1")})
+				if results[0].Status != model.ResultSuccess || results[0].Content != "produced" || results[0].Evidence != ExecutionObserved {
+					t.Fatalf("immediate result = %+v", results[0])
+				}
+			})
+		}
+	})
+	t.Run("policy action is independent of hooks", func(t *testing.T) {
+		for _, decision := range []PermissionDecision{PermissionAllow, PermissionDeny} {
+			var actions []PreparedAction
+			for _, withHook := range []bool{false, true} {
+				binds, hooks, executes := 0, 0, 0
+				plan := func(_ context.Context, call model.ToolCall) PreparedTool {
+					return PreparedTool{CanonicalWorkspace: "/prepared", Permissions: []PermissionRequest{{Permission: PermissionFileWrite, Target: "/prepared/a"}}, Execute: func(context.Context) ToolOutcome {
+						executes++
+						return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
+					}}
+				}
+				inv := InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize), BindLocation: func(string) (string, func() error, error) {
+					binds++
+					return "/actual", func() error { return nil }, nil
+				}}
+				if withHook {
+					inv.AuthorizationHooks = []AuthorizationHook{{Run: func(_ context.Context, action PreparedAction, _ func(string) (string, error)) (*string, error) {
+						hooks++
+						if action.CanonicalWorkspace != "/actual" {
+							t.Fatalf("hook workspace = %q", action.CanonicalWorkspace)
+						}
+						return nil, nil
+					}}}
+				}
+				exec := executionForInvocation(inv)
+				exec.Permissions = permissionEvaluatorFunc(func(_ context.Context, action PreparedAction) (PermissionDecision, error) {
+					actions = append(actions, action)
+					return decision, nil
+				})
+				_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, testToolCall("call-1"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !withHook && binds != 0 {
+					t.Fatalf("no-hook path performed %d bindings", binds)
+				}
+				if decision == PermissionDeny && (binds != 0 || hooks != 0 || executes != 0 || results[0].Status != model.ResultDenied) {
+					t.Fatalf("denial: binds=%d hooks=%d executes=%d result=%+v", binds, hooks, executes, results[0])
+				}
+			}
+			if len(actions) != 2 || !reflect.DeepEqual(actions[0], actions[1]) || actions[0].CanonicalWorkspace != "/prepared" {
+				t.Fatalf("policy actions = %+v", actions)
+			}
+		}
+	})
+	t.Run("authorization outcomes", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, mode    string
+			immediate     bool
+			want          model.ToolResultStatus
+			checks, hooks int
+		}{
+			{"abstain", "abstain", false, model.ResultSuccess, 0, 2},
+			{"deny", "deny", false, model.ResultDenied, 0, 1},
+			{"empty reason", "empty", false, model.ResultError, 0, 1},
+			{"bounded reason", "long", false, model.ResultDenied, 0, 1},
+			{"invalid UTF-8 reason", "invalid-utf8", false, model.ResultDenied, 0, 1},
+			{"callback error", "error", false, model.ResultError, 0, 1},
+			{"missing file root", "missing-file-root", false, model.ResultDenied, 0, 0},
+			{"root relative", "root-relative", false, model.ResultError, 0, 0},
+			{"root missing recheck", "root-nil", false, model.ResultError, 0, 0},
+			{"root binding failure", "root-error", false, model.ResultError, 0, 0},
+			{"binder missing", "binder-nil", false, model.ResultError, 0, 0},
+			{"location relative", "location-relative", false, model.ResultError, 0, 1},
+			{"location missing recheck", "location-nil", false, model.ResultError, 0, 1},
+			{"location failure", "location-error", false, model.ResultError, 0, 1},
+			{"immediate changed", "changed", true, model.ResultError, 1, 2},
+			{"executor changed", "changed", false, model.ResultError, 1, 2},
+			{"immediate cancellation", "check-cancel", true, model.ResultInterrupted, 1, 2},
+			{"executor cancellation", "check-cancel", false, model.ResultInterrupted, 1, 2},
+			{"executor cancelled during successful recheck", "check-cancel-success", false, model.ResultInterrupted, 1, 2},
+			{"immediate validation beats cancellation", "check-error-cancel", true, model.ResultError, 1, 2},
+			{"executor validation beats cancellation", "check-error-cancel", false, model.ResultError, 1, 2},
+			{"validation beats cancellation", "error-cancel", false, model.ResultError, 0, 1},
+			{"callback cancellation", "hook-cancel", false, model.ResultInterrupted, 0, 1},
+			{"live cancellation-shaped failure", "live-cancel", false, model.ResultError, 0, 1},
+			{"declared error after cancellation", "declared-error-cancel", false, model.ResultError, 0, 1},
+			{"declared interruption", "declared-interruption", false, model.ResultInterrupted, 0, 1},
+			{"cancellation stops chain", "cancel", false, model.ResultInterrupted, 0, 1},
+			{"expired binding", "expired", false, model.ResultSuccess, 0, 2},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				capture := testCapture()
+				admission := preparedExecutionFor(capture, func(context.Context, OperationAdmission) (Execution, error) { return Execution{}, nil })
+				h, store, c, sessionID := newAdmittedHarness(t, context.Background(), admission)
+				checks, hooks, executes := 0, 0, 0
+				var escaped func(string) (string, error)
+				plan := func(_ context.Context, call model.ToolCall) PreparedTool {
+					p := PreparedTool{Permissions: fixturePermission}
+					if tc.mode == "deny" {
+						p.CanonicalWorkspace = "/actual"
+						p.Permissions = []PermissionRequest{{Permission: PermissionFileWrite, Target: "/actual/a"}}
+					}
+					if tc.mode == "missing-file-root" {
+						p.Permissions = []PermissionRequest{{Permission: PermissionFileWrite, Target: "/actual/a"}}
+					}
+					outcome := ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
+					if tc.immediate {
+						p.Immediate = &outcome
+					} else {
+						p.Execute = func(context.Context) ToolOutcome { executes++; return outcome }
+					}
+					return p
+				}
+				inv := InvocationExecution{
+					LookupTool: fixtureToolLookup(plan, objectNormalize),
+					BindLocation: func(path string) (string, func() error, error) {
+						if tc.mode == "missing-file-root" {
+							t.Fatal("malformed file plan attempted binding")
+						}
+						if path == "." {
+							if tc.mode == "root-error" {
+								return "", nil, errors.New("root failed")
+							}
+							if tc.mode == "root-relative" {
+								return "relative", func() error { return nil }, nil
+							}
+							if tc.mode == "root-nil" {
+								return "/actual", nil, nil
+							}
+							return "/actual", func() error { t.Fatal("workspace fact was rechecked"); return nil }, nil
+						}
+						if tc.mode == "location-relative" {
+							return "relative", func() error { return nil }, nil
+						}
+						if tc.mode == "location-nil" {
+							return "/guard", nil, nil
+						}
+						if tc.mode == "location-error" {
+							return "", nil, errors.New("bind failed")
+						}
+						return "/guard", func() error {
+							checks++
+							c.mu.Lock()
+							op, _ := c.graph.Operation(testOpID)
+							active := op.State.ActiveEffect != nil
+							c.mu.Unlock()
+							if active == tc.immediate {
+								t.Fatalf("active effect = %v, immediate = %v", active, tc.immediate)
+							}
+							if tc.mode == "check-cancel" {
+								cancel()
+								return context.Canceled
+							}
+							if tc.mode == "check-cancel-success" {
+								cancel()
+								return nil
+							}
+							if tc.mode == "check-error-cancel" {
+								cancel()
+								return errors.New("changed")
+							}
+							return errors.New("changed")
+						}, nil
+					},
+					AuthorizationHooks: []AuthorizationHook{
+						{Run: func(_ context.Context, action PreparedAction, bind func(string) (string, error)) (*string, error) {
+							hooks++
+							switch tc.mode {
+							case "expired":
+								escaped = bind
+								return nil, nil
+							case "deny":
+								if len(action.Permissions) != 1 || action.Permissions[0].Permission != PermissionFileWrite {
+									t.Fatalf("denied action = %+v", action)
+								}
+								reason := "restricted"
+								return &reason, nil
+							case "empty":
+								reason := ""
+								return &reason, nil
+							case "long":
+								reason := strings.Repeat("é", 300) + "\xff"
+								return &reason, nil
+							case "invalid-utf8":
+								reason := "\xff"
+								return &reason, nil
+							case "error":
+								return nil, errors.New("broken")
+							case "error-cancel":
+								cancel()
+								return nil, errors.New("broken")
+							case "hook-cancel":
+								cancel()
+								return nil, context.Canceled
+							case "live-cancel":
+								return nil, context.Canceled
+							case "declared-error-cancel":
+								cancel()
+								return nil, &EffectError{Err: context.Canceled}
+							case "declared-interruption":
+								return nil, &EffectError{Err: errors.New("stopped"), Interrupted: true}
+							case "cancel":
+								cancel()
+								return nil, nil
+							case "changed", "check-cancel", "check-cancel-success", "check-error-cancel", "location-relative", "location-nil", "location-error":
+								_, err := bind("guard")
+								return nil, err
+							}
+							return nil, nil
+						}},
+						{Run: func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) {
+							hooks++
+							if tc.mode == "expired" {
+								if _, err := escaped("guard"); err == nil {
+									t.Fatal("expired callback bound a location")
+								}
+							}
+							return nil, nil
+						}},
+					},
+				}
+				if tc.mode == "binder-nil" {
+					inv.BindLocation = nil
+				}
+				exec := executionForInvocation(inv)
+				if tc.mode == "missing-file-root" {
+					exec.Permissions = permissionEvaluatorFunc(func(context.Context, PreparedAction) (PermissionDecision, error) {
+						t.Fatal("malformed file plan reached policy")
+						return PermissionAllow, nil
+					})
+				}
+				results, _ := runToolCalls(t, h, c, store, sessionID, ctx, testOpID, exec, capture, []model.ToolCall{testToolCall("call-1")})
+				got := results[0]
+				if got.Status != tc.want || hooks != tc.hooks || checks != tc.checks || (got.Status != model.ResultSuccess && executes != 0) {
+					t.Fatalf("result=%+v hooks=%d checks=%d executes=%d", got, hooks, checks, executes)
+				}
+				if (tc.mode == "long" || tc.mode == "invalid-utf8") && (len(got.Content) > maxToolDiagnosticBytes || !utf8.ValidString(got.Content) || got.Content == "") {
+					t.Fatalf("reason is not bounded valid UTF-8: %q", got.Content)
+				}
+			})
+		}
+	})
 	allowAllWrites := ResolvePermissionPolicy(json.RawMessage(`{"rules":[{"permission":"file.write","target":"*","access":"allow"}]}`), nil)
 	filePlanRoots := func(workspace, writeDir string, permissions ...PermissionRequest) func(ctx context.Context, call model.ToolCall) PreparedTool {
 		return func(ctx context.Context, call model.ToolCall) PreparedTool {
@@ -1632,6 +1927,8 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 			evaluator: &recordingEvaluator{decision: PermissionAllow},
 			plan:      filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
 			wantAction: &PreparedAction{
+				ToolName:           "echo",
+				Arguments:          json.RawMessage(`{"x":1}`),
 				CanonicalWorkspace: "/w",
 				CanonicalWriteDir:  "/w/sub",
 				Permissions:        []PermissionRequest{{Permission: PermissionFileRead, Target: "/w/a.txt"}},
@@ -1679,6 +1976,8 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 				PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/dst.txt"},
 			),
 			wantAction: &PreparedAction{
+				ToolName:           "echo",
+				Arguments:          json.RawMessage(`{"x":1}`),
 				CanonicalWorkspace: "/w",
 				CanonicalWriteDir:  "/w/sub",
 				Permissions: []PermissionRequest{

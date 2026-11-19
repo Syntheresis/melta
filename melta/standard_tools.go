@@ -196,7 +196,7 @@ func permissionPairs(permission string, targets []tool.PreparedTarget) []harness
 // well-formedness marshal drops the optional metadata; the result itself
 // always commits.
 func stringOutcome(ctx context.Context, callID string, call *tool.PreparedCall, args string, metadata func(args, result string) map[string]any) harness.ToolOutcome {
-	result, err := call.Execute(ctx)
+	result, err := call.Execute(ctx, harness.LocationRecheckFromContext(ctx))
 	if err != nil {
 		return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
 	}
@@ -216,7 +216,7 @@ func stringOutcome(ctx context.Context, callID string, call *tool.PreparedCall, 
 // per-file previews convert into the edit_preview_files metadata shape with
 // their full preview content retained.
 func patchOutcome(ctx context.Context, callID string, call *tool.PreparedPatchCall) harness.ToolOutcome {
-	result, err := call.Execute(ctx)
+	result, err := call.Execute(ctx, harness.LocationRecheckFromContext(ctx))
 	if err != nil {
 		return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
 	}

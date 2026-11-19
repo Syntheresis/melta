@@ -262,6 +262,10 @@ type InvocationExecution struct {
 	// first receives the original raw call arguments, every later one the
 	// preceding committed value.
 	ToolHooks []ToolArgumentsHook
+	// AuthorizationHooks run in order after policy allows the prepared action.
+	AuthorizationHooks []AuthorizationHook
+	// BindLocation binds a location relative to the actual Session Workspace.
+	BindLocation func(string) (canonical string, recheck func() error, err error)
 	// ToolOutputHooks are the selected output-shaping hooks in configured
 	// order. They run over one settled tool outcome before its result
 	// commits: the first receives the producer's original content, every
@@ -274,6 +278,22 @@ type InvocationExecution struct {
 	// effect.
 	RequestHooks []RequestHook
 	Close        func() error
+}
+
+// AuthorizationHook is a pure restriction on a prepared action. Bind returns
+// a canonical location without granting access; the host revalidates it. A
+// nil reason abstains; a nonempty reason denies.
+type AuthorizationHook struct {
+	Run func(context.Context, PreparedAction, func(string) (string, error)) (*string, error)
+}
+
+type locationChecksKey struct{}
+
+// LocationRecheckFromContext returns the call's frozen host location checker,
+// or nil when no locations were bound.
+func LocationRecheckFromContext(ctx context.Context) func() error {
+	check, _ := ctx.Value(locationChecksKey{}).(func() error)
+	return check
 }
 
 // ToolBinding holds one implementation for normalization and preparation.

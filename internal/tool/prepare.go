@@ -33,7 +33,7 @@ type PreparedTarget struct {
 // canonical path.
 type PreparedCall struct {
 	Targets []PreparedTarget
-	Execute func(context.Context) (string, error)
+	Execute func(context.Context, func() error) (string, error)
 }
 
 // PreparedPatchResult is the structured execution result of one prepared
@@ -51,7 +51,7 @@ type PreparedPatchResult struct {
 // before content access.
 type PreparedPatchCall struct {
 	Targets []PreparedTarget
-	Execute func(context.Context) (PreparedPatchResult, error)
+	Execute func(context.Context, func() error) (PreparedPatchResult, error)
 }
 
 // readTarget is the private per-target binding read preparation tracks;
@@ -171,9 +171,15 @@ type boundCall struct {
 	writeDirCanonical string // canonical write-dir boundary bound at preparation
 	displayAbs        string
 	leafExists        bool
+	recheck           func() error
 }
 
 func (b boundCall) revalidate() error {
+	if b.recheck != nil {
+		if err := b.recheck(); err != nil {
+			return err
+		}
+	}
 	if err := revalidateWorkspaceRoot(b.root, b.rootCanonical); err != nil {
 		return err
 	}
@@ -243,8 +249,10 @@ func prepareRead(root string, cfg config.ToolsConfig, args map[string]any, appro
 		targets = append(targets, PreparedTarget{CanonicalPath: parent.canonicalPath})
 	}
 
-	execute := func(_ context.Context) (string, error) {
-		if err := bound.revalidate(); err != nil {
+	execute := func(_ context.Context, check func() error) (string, error) {
+		current := bound
+		current.recheck = check
+		if err := current.revalidate(); err != nil {
 			return "", fmt.Errorf("read_file: resolve path: %w", err)
 		}
 		if _, err := ensureRegularExistingTarget(bound.canonical); err != nil {
@@ -364,8 +372,10 @@ func prepareWrite(root string, store SnapshotStore, args map[string]any, approve
 	if err != nil {
 		return nil, err
 	}
-	execute := func(_ context.Context) (string, error) {
-		_, err := writeBound(bound, store, []byte(content), false)
+	execute := func(_ context.Context, check func() error) (string, error) {
+		current := bound
+		current.recheck = check
+		_, err := writeBound(current, store, []byte(content), false)
 		if err != nil {
 			return "", err
 		}
@@ -406,9 +416,11 @@ func prepareEdit(root string, store SnapshotStore, args map[string]any, approved
 	if err != nil {
 		return nil, err
 	}
-	execute := func(_ context.Context) (string, error) {
+	execute := func(_ context.Context, check func() error) (string, error) {
+		current := bound
+		current.recheck = check
 		var result *editResult
-		_, err := mutateBound(bound, store, func() error {
+		_, err := mutateBound(current, store, func() error {
 			return preflightEditSnapshotTarget(bound.canonical)
 		}, func() (mutationOutcome, []byte, bool, error) {
 			res, produced, outcome, err := editMutation(bound.canonical, path, oldString, newString, replaceAll)
@@ -535,8 +547,12 @@ func PreparePatchCall(root, rootCanonical, writeDirCanonical string, opts Capabi
 	for _, t := range targets {
 		displayTargets = append(displayTargets, PreparedTarget{CanonicalPath: t.canonical})
 	}
-	execute := func(_ context.Context) (PreparedPatchResult, error) {
-		result, previews, err := executeParsedPatch(store, p, targets)
+	execute := func(_ context.Context, check func() error) (PreparedPatchResult, error) {
+		bound := append([]boundCall(nil), targets...)
+		for i := range bound {
+			bound[i].recheck = check
+		}
+		result, previews, err := executeParsedPatch(store, p, bound)
 		return PreparedPatchResult{Result: result, Previews: previews}, err
 	}
 	return &PreparedPatchCall{Targets: displayTargets, Execute: execute}, nil

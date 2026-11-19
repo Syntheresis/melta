@@ -57,7 +57,7 @@ func execPatch(t *testing.T, root, rootCanonical, writeDirCanonical string, opts
 	if err != nil {
 		return PreparedPatchResult{}, err
 	}
-	return call.Execute(context.Background())
+	return call.Execute(context.Background(), nil)
 }
 
 type snapshotCall struct {

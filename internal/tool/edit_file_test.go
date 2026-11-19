@@ -29,7 +29,7 @@ func execEdit(t *testing.T, root, rootCanonical, writeDirCanonical string, opts 
 	if err != nil {
 		return "", err
 	}
-	return call.Execute(context.Background())
+	return call.Execute(context.Background(), nil)
 }
 
 func TestPreparedEditReplacesUniqueStringAndReportsLineRange(t *testing.T) {
