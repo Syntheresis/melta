@@ -267,7 +267,7 @@ func startBridge(t *testing.T, f *fixture, workspace string) *bridge {
 func startBridgeWith(t *testing.T, f *fixture, workspace string, writer io.Writer) *bridge {
 	t.Helper()
 	dataDir := t.TempDir()
-	record := fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"17","credential":%q}`,
+	record := fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"18","credential":%q}`,
 		f.server.URL, testInstance, testCredential)
 	testassert.NoError(t, os.WriteFile(filepath.Join(dataDir, "runtime.json"), []byte(record), 0o600))
 	return startRunner(t, clienthost.Options{
@@ -494,7 +494,7 @@ func sseFrame(document string) string {
 }
 
 func healthBody() string {
-	return fmt.Sprintf(`{"instance_id":%q,"protocol_version":"17"}`, testInstance)
+	return fmt.Sprintf(`{"instance_id":%q,"protocol_version":"18"}`, testInstance)
 }
 
 func hydrationBody(sessionID, workspace string) string {
@@ -844,13 +844,19 @@ func TestACPSelection(t *testing.T) {
 			fmt.Fprint(w, "["+
 				acpclient.SessionHeader("s-old", "/ws", "2026-10-01T00:00:00Z")+","+
 				acpclient.SessionHeader("s-b", "/ws", "2026-10-02T00:00:00Z")+","+
-				`{"session_id":"s-child","workspace":"/ws","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"}},"lifecycle":"open","parent_session_id":"s-old","created_at":"2026-10-01T00:00:00Z","last_activity":"2026-10-03T00:00:00Z","session_revision":{"durable_revision":"1","local_revision":"0","instance_id":"`+testInstance+`"}}`+","+
+				`{"session_id":"s-child","workspace":"/ws","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"}},"lifecycle":"open","owner_session_id":"s-old","created_at":"2026-10-01T00:00:00Z","last_activity":"2026-10-03T00:00:00Z","session_revision":{"durable_revision":"1","local_revision":"0","instance_id":"`+testInstance+`"}}`+","+
 				acpclient.SessionHeader("s-a", "/ws", "2026-10-02T00:00:00Z")+"]")
 		},
-		"/v1/sessions/s-a/hydration": jsonHandler(200, hydrationBody("s-a", "/ws")),
-		"/v1/sessions/s1/hydration":  jsonHandler(200, hydrationBody("s1", "/ws/s1")),
-		"/v1/sessions/s2/hydration":  jsonHandler(200, hydrationBody("s2", "/ws/s2")),
-		"/v1/sessions/s3/hydration":  jsonHandler(404, `{"code":"not_found","message":"no such session"}`),
+		"/v1/sessions/s-a/hydration":     jsonHandler(200, hydrationBody("s-a", "/ws")),
+		"/v1/sessions/s-child/hydration": jsonHandler(200, hydrationBody("s-child", "/ws")),
+		"/v1/sessions/s-child/submit": func(w http.ResponseWriter, r *http.Request) {
+			testassert.Equal(t, r.Method, http.MethodPost)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"disposition":"steering"}`)
+		},
+		"/v1/sessions/s1/hydration": jsonHandler(200, hydrationBody("s1", "/ws/s1")),
+		"/v1/sessions/s2/hydration": jsonHandler(200, hydrationBody("s2", "/ws/s2")),
+		"/v1/sessions/s3/hydration": jsonHandler(404, `{"code":"not_found","message":"no such session"}`),
 	})
 	b := startBridge(t, f, "/ws")
 	b.call(t, "1", "initialize", "")
@@ -862,6 +868,10 @@ func TestACPSelection(t *testing.T) {
 		result := resultOf(t, b.call(t, "2", "session/current", ""))
 		testassert.Require(t, result == hydrationBody("s-a", "/ws"), "startup selection = %s, want the newest root's fresh hydration", result)
 	}
+	testassert.Equal(t, resultOf(t, b.call(t, "21", "session/select", `{"session_id":"s-child"}`)), hydrationBody("s-child", "/ws"))
+	result := b.call(t, "22", "runtime/SubmitSession", `{"session_id":"s-child","body":{"operation_id":"owned-op","mode":"regular","content":[{"kind":"text","text":"follow up"}]}}`)
+	testassert.Require(t, strings.Contains(resultOf(t, result), `"steering"`), "owned Session submit = %v", result)
+	testassert.Equal(t, f.count("/v1/sessions/s-child/submit"), 1)
 	// The local workspace operation clears the selection so the null result is
 	// observable.
 	testassert.Equal(t, resultOf(t, b.call(t, "3", "workspace/select", `{"workspace":"/ws"}`)), `"/ws"`)
@@ -971,7 +981,7 @@ func TestACPEventsAndRepair(t *testing.T) {
 	connected := b.awaitFrame(t, methodFrame("runtime/connected"))
 	var health map[string]any
 	testassert.NoError(t, json.Unmarshal(connected["params"], &health))
-	testassert.Require(t, health["instance_id"] == testInstance && health["protocol_version"] == "17", "runtime/connected params = %v, want the generated Health", health)
+	testassert.Require(t, health["instance_id"] == testInstance && health["protocol_version"] == "18", "runtime/connected params = %v, want the generated Health", health)
 	resync := b.awaitFrame(t, methodFrame("runtime/resync_required"))
 	{
 		params, ok := resync["params"]

@@ -23,7 +23,7 @@ export function session(id: string, lastActivity: string, parent?: string): Sess
   return {
     session_id: id,
     workspace: '/ws',
-    ...(parent ? { parent_session_id: parent } : {}),
+    ...(parent ? { owner_session_id: parent } : {}),
     lifecycle: 'open',
     agent_selection: definitionSelection('primary'),
     created_at: '0',

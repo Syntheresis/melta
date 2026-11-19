@@ -202,7 +202,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '17';
+    protocol_version: '18';
 };
 
 /**
@@ -331,7 +331,7 @@ export type UsageProjection = {
 export type Session = {
     session_id: string;
     workspace: string;
-    parent_session_id?: string;
+    owner_session_id?: string;
     source_session_id?: string;
     lifecycle: SessionLifecycle;
     agent_selection: AgentSelection;
@@ -372,7 +372,7 @@ export type PendingQueues = {
 };
 
 export type BackgroundMember = {
-    kind: 'child' | 'job';
+    kind: 'session' | 'job';
     id: string;
 };
 

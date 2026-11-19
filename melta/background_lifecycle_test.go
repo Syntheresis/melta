@@ -337,7 +337,7 @@ func seedLifecycleChild(t *testing.T, store harness.Storage, parentID, childID, 
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	sessionPayload := fmt.Sprintf(
-		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q,"parent_session_id":%q},`+
+		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q,"owner_session_id":%q},`+
 			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"worker"}},"current_operation_id":%q,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		childID, now, parentID, operationID, now)
 	entryID := newLifecycleID(t)

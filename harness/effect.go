@@ -608,7 +608,7 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 	operationID := d.operationID
 	c.mu.Lock()
 	if res.successContext != nil { // the shared success guard: one hold with the publication, before the transaction
-		if res.successContext.Err() != nil || c.interruptOp == operationID || c.bgState == bgClosed {
+		if res.successContext.Err() != nil || c.interruptOp == operationID || memberStopping(c) {
 			// Interrupt winning this hold cannot be missed; a foreign
 			// marker or a root stop's stopping state never converts the
 			// success, and an Interrupt after the committed success cannot

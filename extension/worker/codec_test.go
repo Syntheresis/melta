@@ -21,9 +21,10 @@ import (
 
 func testSession() harness.SessionIdentity {
 	return harness.SessionIdentity{
-		SessionID: "session-1",
-		Workspace: "/workspace",
-		CreatedAt: time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC),
+		SessionID:      "session-1",
+		Workspace:      "/workspace",
+		CreatedAt:      time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC),
+		OwnerSessionID: "owner-1",
 	}
 }
 

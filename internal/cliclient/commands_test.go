@@ -454,7 +454,7 @@ func TestChildrenListsAndNavigationTaskMenusSuperseded(t *testing.T) {
 			if fail {
 				old.reject(404, protocol.Error{Code: "not_found", Message: "stale child error"})
 			} else {
-				old.respond([]protocol.Session{{SessionId: childA, ParentSessionId: pointer(rootA)}})
+				old.respond([]protocol.Session{{SessionId: childA, OwnerSessionId: pointer(rootA)}})
 			}
 			settleTasks(t, c)
 			c.mu.Lock()
@@ -463,7 +463,7 @@ func TestChildrenListsAndNavigationTaskMenusSuperseded(t *testing.T) {
 			testassert.Require(t, !strings.Contains(outputs(c), "stale child error"), "stale task error published")
 			c.command("/children")
 			open := receive(t, transport.requests)
-			open.respond([]protocol.Session{{SessionId: childA, ParentSessionId: pointer(rootA)}, {SessionId: rootA, ParentSessionId: pointer(rootB)}})
+			open.respond([]protocol.Session{{SessionId: childA, OwnerSessionId: pointer(rootA)}, {SessionId: rootA, OwnerSessionId: pointer(rootB)}})
 			receive(t, transport.requests).respond([]protocol.Session{})
 			settleTasks(t, c)
 			c.mu.Lock()

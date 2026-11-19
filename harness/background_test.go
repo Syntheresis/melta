@@ -50,11 +50,10 @@ func TestDependenciesAcceptJobStopper(t *testing.T) {
 func TestAdmitBackgroundMemberInitializesGroup(t *testing.T) {
 	h := newTestHarness(t, freshSessionStore(t), nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	testassert.Equal(t, c.bgState, bgOpen)
-	first, err := admitLocked(h, c, memberChild, "child-1", 0)
+	first, err := admitLocked(h, c, memberSession, "child-1", 0)
 	testassert.NoError(t, err)
 	testassert.Require(t, c.group != nil && len(c.group.members) == 1, "first admission did not initialize the group: %+v", c.group)
-	testassert.Require(t, first.kind == memberChild && first.id == "child-1", "member = %+v", first)
+	testassert.Require(t, first.kind == memberSession && first.id == "child-1", "member = %+v", first)
 	testassert.Require(t, completionIDShape.MatchString(first.completionID) && !first.claimed, "completion id %q is not 32 lowercase hex; fresh member is claimed", first.completionID)
 	select {
 	case <-first.done:
@@ -72,11 +71,9 @@ func TestCreateSessionStartsOpenLifecycle(t *testing.T) {
 	h := newTestHarness(t, emptyStore(t), nil)
 	rec, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
 	testassert.NoError(t, err)
-	h.mu.Lock()
-	c := h.sessions[rec.Identity.SessionID]
-	h.mu.Unlock()
-	testassert.Require(t, c != nil, "CreateSession did not cache a coordinator")
-	testassert.Equal(t, c.bgState, bgOpen)
+	c := leaseCoordinator(t, h, rec.Identity.SessionID)
+	_, err = admitLocked(h, c, memberJob, "job-1", 0)
+	testassert.NoError(t, err)
 }
 
 // TestAdmitBackgroundMemberCapRejection proves the child concurrency cap: with
@@ -87,11 +84,11 @@ func TestAdmitBackgroundMemberCapRejection(t *testing.T) {
 	c := leaseCoordinator(t, h, testSessionID)
 	for i := 0; i < 2; i++ {
 		{
-			_, err := admitLocked(h, c, memberChild, "child", 2)
+			_, err := admitLocked(h, c, memberSession, "child", 2)
 			testassert.Require(t, err == nil, "admission %d: %v", i+1, err)
 		}
 	}
-	_, err := admitLocked(h, c, memberChild, "child", 2)
+	_, err := admitLocked(h, c, memberSession, "child", 2)
 	testassert.Require(t, errors.Is(err, ErrInvalid), "third admission = %v, want ErrInvalid", err)
 	want := "background group is full (2/2). Wait for a background member to complete, then retry"
 	testassert.Require(t, err != nil && err.Error() == "harness: invalid storage request: "+want, "third admission error = %q, want %q", err, want)
@@ -108,7 +105,7 @@ func TestAdmitBackgroundMemberClosedAndArchivedRejection(t *testing.T) {
 	archived.State.ArchivedAt = &now
 	h := newTestHarness(t, (&testGraph{session: archived}).storage(t), nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	for _, kind := range []memberKind{memberChild, memberJob} {
+	for _, kind := range []memberKind{memberSession, memberJob} {
 		_, err := admitLocked(h, c, kind, "member", 0)
 		want := invalidInput("session %q is archived; admission requires an open Session", testSessionID)
 		testassert.Require(t, err != nil && err.Error() == want.Error(), "%s admission on archived session = %v, want %v", kind, err, want)
@@ -117,14 +114,12 @@ func TestAdmitBackgroundMemberClosedAndArchivedRejection(t *testing.T) {
 
 	h2 := newTestHarness(t, freshSessionStore(t), nil)
 	c2 := leaseCoordinator(t, h2, testSessionID)
-	for _, state := range []bgState{bgStopping, bgClosed} {
-		c2.mu.Lock()
-		c2.bgState = state
-		c2.mu.Unlock()
-		_, err := admitLocked(h2, c2, memberChild, "child", 0)
-		testassert.Require(t, err != nil && err.Error() == "harness: invalid storage request: background group is closed or stopping", "admission in state %q = %v, want the closed-or-stopping rejection", state, err)
-		testassert.Require(t, c2.group == nil, "rejected admission created a group")
-	}
+	c2.mu.Lock()
+	c2.stop = &stopInterval{done: make(chan struct{})}
+	c2.mu.Unlock()
+	_, err := admitLocked(h2, c2, memberSession, "child", 0)
+	testassert.Require(t, err != nil && err.Error() == "harness: invalid storage request: background group is closed or stopping", "stopping group admission = %v", err)
+	testassert.Require(t, c2.group == nil, "rejected admission created a group")
 }
 
 // TestAdmitBackgroundMemberAfterHarnessCancellation proves a start after
@@ -142,7 +137,7 @@ func TestAdmitBackgroundMemberAfterHarnessCancellation(t *testing.T) {
 	cancel()
 	c := leaseCoordinator(t, h, testSessionID)
 	c.mu.Lock()
-	_, admitErr := h.admitBackgroundMember(c, memberChild, "child", 0)
+	_, admitErr := h.admitBackgroundMember(c, memberSession, "child", 0)
 	c.mu.Unlock()
 	testassert.Require(t, errors.Is(admitErr, context.Canceled) && admitErr.Error() == "context canceled", "admission after cancellation = %v, want the raw context.Canceled", admitErr)
 	testassert.Require(t, c.group == nil, "rejected admission created a member")
@@ -178,7 +173,7 @@ func TestClaimBackgroundMember(t *testing.T) {
 func TestFinishBackgroundMember(t *testing.T) {
 	h := newTestHarness(t, freshSessionStore(t), nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	m, err := admitLocked(h, c, memberChild, "child-1", 0)
+	m, err := admitLocked(h, c, memberSession, "child-1", 0)
 	testassert.NoError(t, err)
 	h.finishBackgroundMember(c, m)
 	select {

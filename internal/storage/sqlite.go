@@ -33,9 +33,10 @@ const (
 	// 15 records selected Agent inputs in Session and Operation payloads;
 	// version 17 adds the strict external-data owner list to the Session
 	// payload; version 18 adds extension provenance to input payloads. Version
-	// 19 records bound tool identity and moves effective arguments to results.
-	// The SQL tables are unchanged.
-	sqliteSchemaVersion = 19
+	// 19 records bound tool identity and moves effective arguments to results;
+	// 20 renames Session ownership lineage and member kinds. The SQL tables
+	// are unchanged.
+	sqliteSchemaVersion = 20
 
 	// sqlitePoolDSN configures every physical connection of the long-lived
 	// pool: write-ahead logging, full synchronous durability, immediate

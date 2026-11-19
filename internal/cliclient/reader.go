@@ -200,16 +200,6 @@ func (c *CLI) readSession(r *sessionReader, chain *readChain) {
 			c.mu.Unlock()
 			return
 		}
-		if err == nil && !older && r == c.root && next.Session.ParentSessionId != nil {
-			c.navigationLocked()
-			c.resetReadersLocked()
-			c.rootID = ""
-			c.childID = ""
-			fresh := c.stampLocked()
-			c.mu.Unlock()
-			c.report(fresh, terminal.RenderErrorMsg("Children are inspection-only; select a root Session."), false)
-			return
-		}
 		if err == nil && !older {
 			config = nil
 			warnings = nil

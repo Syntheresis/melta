@@ -634,6 +634,31 @@ describe('provisional activity', () => {
 });
 
 describe('composer', () => {
+  it('selects and submits to an ordinary Session with owner lineage', async () => {
+    const connection = fakeConnection();
+    basicMocks(connection);
+    const owned = { ...session('owned', NEWER), owner_session_id: 'root1' };
+    vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, [session('root1', OLDER), owned]));
+    vi.mocked(sdk.GetSessionHydration).mockImplementation(async (options) => {
+      const id = (JSON.parse(options) as { session_id: string }).session_id;
+      return json(200, hydration({ session: id === 'owned' ? owned : session('root1', OLDER) }));
+    });
+    vi.mocked(sdk.SubmitSession).mockResolvedValue(json(200, { disposition: 'admitted' }));
+    const { target } = await mountApp(connection);
+    await vi.waitFor(() => expect(vi.mocked(sdk.GetSessionHydration)).toHaveBeenCalledWith('{"session_id":"root1"}'));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true }));
+    await vi.waitFor(() => expect(target.querySelectorAll('dialog .row').length).toBeGreaterThan(0));
+    ([...target.querySelectorAll('dialog .row')].find((row) => row.textContent?.includes('owned')) as HTMLElement).click();
+    await vi.waitFor(() => expect(vi.mocked(sdk.GetSessionHydration)).toHaveBeenCalledWith('{"session_id":"owned"}'));
+    typeInto(target, 'ordinary follow-up');
+    await settle();
+    (target.querySelector('.send') as HTMLElement).click();
+    await vi.waitFor(() => expect(vi.mocked(sdk.SubmitSession)).toHaveBeenCalled());
+    const call = JSON.parse(vi.mocked(sdk.SubmitSession).mock.calls[0][0]) as { session_id: string; body: { content: unknown[] } };
+    expect(call.session_id).toBe('owned');
+    expect(call.body.content).toEqual([{ kind: 'text', text: 'ordinary follow-up' }]);
+  });
+
   it('captures generated submit requests with a minted ID and clears only the matching draft', async () => {
     vi.mocked(sdk.SubmitSession).mockResolvedValue(json(200, { disposition: 'admitted' }));
     const { target } = await mountBasic();
@@ -1066,7 +1091,7 @@ describe('child inspection and background', () => {
     return {
       session_id: id,
       workspace: '/ws',
-      parent_session_id: 'root1',
+      owner_session_id: 'root1',
       lifecycle,
       agent_selection: definitionSelection('secondary'),
       created_at: '0',
@@ -1079,7 +1104,7 @@ describe('child inspection and background', () => {
     const connection = fakeConnection();
     basicMocks(connection);
     vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({
-      background: [{ kind: 'child', id: 'child-open' }, { kind: 'child', id: 'child-live-only' }, { kind: 'job', id: 'job1' }],
+      background: [{ kind: 'session', id: 'child-open' }, { kind: 'session', id: 'child-live-only' }, { kind: 'job', id: 'job1' }],
     })));
     vi.mocked(sdk.ListSessions).mockImplementation(async (options) => {
       const lifecycle = (JSON.parse(options) as { query: { lifecycle: string } }).query.lifecycle;
@@ -1088,7 +1113,7 @@ describe('child inspection and background', () => {
           session('root1', NEWER),
           childSession('child-open', 'open'),
           childSession('child-both', 'open'),
-          { ...childSession('child-other-root', NEWER), parent_session_id: 'other-root' },
+          { ...childSession('child-other-root', NEWER), owner_session_id: 'other-root' },
         ]);
       }
       return json(200, [childSession('child-arch', 'archived'), childSession('child-both', 'archived')]);
@@ -1146,7 +1171,7 @@ describe('child inspection and background', () => {
       }
       return json(200, hydration({
         conversation: { items: rootItems as Hydration['conversation']['items'] },
-        background: [{ kind: 'child', id: 'child1' }],
+        background: [{ kind: 'session', id: 'child1' }],
       }));
     });
     const { target } = await mountApp(connection);
@@ -1181,7 +1206,7 @@ describe('child inspection and background', () => {
     basicMocks(connection);
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, [
       session('root1', NEWER),
-      { ...session('kid', OLDER), parent_session_id: 'root1' },
+      { ...session('kid', OLDER), owner_session_id: 'root1' },
     ]));
     vi.mocked(sdk.GetSessionHydration).mockImplementation(async (options) => {
       const id = (JSON.parse(options) as { session_id: string }).session_id;
@@ -1230,7 +1255,7 @@ describe('child inspection and background', () => {
     basicMocks(connection);
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, [
       session('root1', NEWER),
-      { ...session('kid', OLDER), parent_session_id: 'root1' },
+      { ...session('kid', OLDER), owner_session_id: 'root1' },
     ]));
     vi.mocked(sdk.GetSessionHydration).mockImplementation(async (options) => {
       const id = (JSON.parse(options) as { session_id: string }).session_id;
@@ -1277,7 +1302,7 @@ describe('child inspection and background', () => {
     vi.mocked(sdk.ListSessions).mockImplementation(async (options) => {
       const query = (JSON.parse(options) as { query: { lifecycle: string } }).query;
       if (query.lifecycle === 'open') {
-        return json(200, [session('root1', NEWER), { ...session('kid', NEWER), parent_session_id: 'root1' }]);
+        return json(200, [session('root1', NEWER), { ...session('kid', OLDER), owner_session_id: 'root1' }]);
       }
       return json(200, []);
     });
@@ -4106,7 +4131,7 @@ describe('replacement Fork and ordered rewind', () => {
       if (id === 'child1') {
         return json(200, hydration({ conversation: { items: [{ ...inputItem('child-owned', 'user', 'op-child'), content: [{ kind: 'text' as const, text: 'hi' }, { kind: 'opaque' as const, opaque_wire_type: 'w', extra: { big: JSON.rawJSON('9007199254740993') } }] }] } }));
       }
-      return json(200, hydration({ background: [{ kind: 'child', id: 'child1' }] }));
+      return json(200, hydration({ background: [{ kind: 'session', id: 'child1' }] }));
     });
     const { target } = await mountApp(connection);
     (target.querySelector('[aria-label="Background sessions"]') as HTMLElement).click();

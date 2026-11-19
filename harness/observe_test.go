@@ -444,7 +444,7 @@ func TestObserveBackgroundClocks(t *testing.T) {
 		var member *backgroundMember
 		rootC.mu.Lock()
 		for _, candidate := range rootC.group.members {
-			if candidate.kind == memberChild && candidate.id == child {
+			if candidate.kind == memberSession && candidate.id == child {
 				member = candidate
 			}
 		}

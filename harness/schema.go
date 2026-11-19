@@ -281,14 +281,14 @@ type CompactCapture struct {
 
 // SessionIdentity is the immutable identity section of one Session register.
 // A root omits every lineage field; a fork requires both source fields; a
-// child carries parent_session_id and neither source field.
+// an owned Session carries owner_session_id and neither source field.
 type SessionIdentity struct {
 	SessionID             string    `json:"session_id"`
 	Workspace             string    `json:"workspace"`
 	CreatedAt             time.Time `json:"created_at"`
 	SourceSessionID       string    `json:"source_session_id,omitempty"`
 	SourceBoundaryEntryID string    `json:"source_boundary_entry_id,omitempty"`
-	ParentSessionID       string    `json:"parent_session_id,omitempty"`
+	OwnerSessionID        string    `json:"owner_session_id,omitempty"`
 }
 
 // SessionState is the mutable state section of one Session register.

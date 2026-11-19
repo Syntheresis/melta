@@ -165,7 +165,7 @@ func validBackgroundCompletionEntry() signalEntry {
 		SessionID:     testSessionID,
 		EntryID:       testEntryID,
 		Signal:        SignalBackgroundCompletion,
-		RelatedMember: &relatedMember{Kind: "child", ID: otherSession()},
+		RelatedMember: &relatedMember{Kind: "session", ID: otherSession()},
 		Content:       "Task completed.",
 	}
 }
@@ -2259,32 +2259,32 @@ func TestOperationSettlementCompactionUsageMarker(t *testing.T) {
 	}
 }
 
-// TestSessionIdentityParentLineage proves the child lineage member's wire
-// shape: parent_session_id encodes by omission, round-trips on a child, is
+// TestSessionIdentityParentLineage proves the owner lineage member's wire
+// shape: owner_session_id encodes by omission, round-trips on a Session, is
 // absent on a root and on a fork, and every invalid shape is rejected on both
 // the encode and decode paths with the existing classes.
 func TestSessionIdentityParentLineage(t *testing.T) {
 	child := validSessionRecord()
-	child.Identity.ParentSessionID = otherSession()
+	child.Identity.OwnerSessionID = otherSession()
 	childRaw, err := encodeSessionRegister(child)
 	testassert.NoError(t, err)
-	testassert.Require(t, strings.Contains(string(childRaw), `"parent_session_id":"`+otherSession()+`"`), "child identity payload lacks parent_session_id: %s", childRaw)
+	testassert.Require(t, strings.Contains(string(childRaw), `"owner_session_id":"`+otherSession()+`"`), "child identity payload lacks owner_session_id: %s", childRaw)
 	decoded, err := decodeSessionRegister(Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterSession}, Payload: childRaw})
 	testassert.NoError(t, err)
-	if decoded.Identity.ParentSessionID != otherSession() {
-		t.Fatalf("decoded parent session id = %q, want %q", decoded.Identity.ParentSessionID, otherSession())
+	if decoded.Identity.OwnerSessionID != otherSession() {
+		t.Fatalf("decoded owner session id = %q, want %q", decoded.Identity.OwnerSessionID, otherSession())
 	}
 
 	rootRaw, err := encodeSessionRegister(validSessionRecord())
 	testassert.NoError(t, err)
-	testassert.Require(t, !strings.Contains(string(rootRaw), "parent_session_id"), "root identity carries parent_session_id: %s", rootRaw)
+	testassert.Require(t, !strings.Contains(string(rootRaw), "owner_session_id"), "root identity carries owner_session_id: %s", rootRaw)
 
 	fork := validSessionRecord()
 	fork.Identity.SourceSessionID = otherSession()
 	fork.Identity.SourceBoundaryEntryID = otherEntry()
 	forkRaw, err := encodeSessionRegister(fork)
 	testassert.NoError(t, err)
-	testassert.Require(t, !strings.Contains(string(forkRaw), "parent_session_id"), "fork identity carries parent_session_id: %s", forkRaw)
+	testassert.Require(t, !strings.Contains(string(forkRaw), "owner_session_id"), "fork identity carries owner_session_id: %s", forkRaw)
 	{
 		_, err := decodeSessionRegister(Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterSession}, Payload: forkRaw})
 		testassert.NoError(t, err)
@@ -2295,10 +2295,10 @@ func TestSessionIdentityParentLineage(t *testing.T) {
 		name  string
 		value SessionIdentity
 	}{
-		{"non-hex parent", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, ParentSessionID: "not-hex"}},
-		{"parent with fork lineage", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, ParentSessionID: otherSession(), SourceSessionID: otherSession(), SourceBoundaryEntryID: otherEntry()}},
-		{"parent with source session only", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, ParentSessionID: otherSession(), SourceSessionID: otherSession()}},
-		{"parent with boundary only", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, ParentSessionID: otherSession(), SourceBoundaryEntryID: otherEntry()}},
+		{"non-hex parent", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, OwnerSessionID: "not-hex"}},
+		{"parent with fork lineage", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, OwnerSessionID: otherSession(), SourceSessionID: otherSession(), SourceBoundaryEntryID: otherEntry()}},
+		{"parent with source session only", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, OwnerSessionID: otherSession(), SourceSessionID: otherSession()}},
+		{"parent with boundary only", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, OwnerSessionID: otherSession(), SourceBoundaryEntryID: otherEntry()}},
 	}
 	for _, tc := range encodeRejections {
 		t.Run("encode/"+tc.name, func(t *testing.T) {
@@ -2314,14 +2314,17 @@ func TestSessionIdentityParentLineage(t *testing.T) {
 		name   string
 		mutate func(map[string]json.RawMessage)
 	}{
-		{"empty parent", func(m map[string]json.RawMessage) { m["parent_session_id"] = json.RawMessage(`""`) }},
-		{"null parent", func(m map[string]json.RawMessage) { m["parent_session_id"] = json.RawMessage(`null`) }},
-		{"wrong container parent", func(m map[string]json.RawMessage) { m["parent_session_id"] = json.RawMessage(`5`) }},
+		{"empty parent", func(m map[string]json.RawMessage) { m["owner_session_id"] = json.RawMessage(`""`) }},
+		{"old parent spelling", func(m map[string]json.RawMessage) {
+			m["parent_session_id"] = json.RawMessage(`"` + otherSession() + `"`)
+		}},
+		{"null parent", func(m map[string]json.RawMessage) { m["owner_session_id"] = json.RawMessage(`null`) }},
+		{"wrong container parent", func(m map[string]json.RawMessage) { m["owner_session_id"] = json.RawMessage(`5`) }},
 		{"non-hex parent", func(m map[string]json.RawMessage) {
-			m["parent_session_id"] = json.RawMessage(`"0123456789abcdef0123456789abcdef0"`)
+			m["owner_session_id"] = json.RawMessage(`"0123456789abcdef0123456789abcdef0"`)
 		}},
 		{"uppercase parent", func(m map[string]json.RawMessage) {
-			m["parent_session_id"] = json.RawMessage(`"` + strings.Repeat("F", 32) + `"`)
+			m["owner_session_id"] = json.RawMessage(`"` + strings.Repeat("F", 32) + `"`)
 		}},
 		{"parent with source session", func(m map[string]json.RawMessage) {
 			m["source_session_id"] = json.RawMessage(`"` + otherSession() + `"`)
@@ -2363,7 +2366,7 @@ func TestBackgroundCompletionSignalRules(t *testing.T) {
 	env.Payload = raw
 	decoded, err := decodeSignalEntry(env)
 	testassert.NoError(t, err)
-	testassert.Require(t, decoded.OperationID == "" && decoded.RelatedOperation == nil && (decoded.RelatedMember != nil && decoded.RelatedMember.Kind == "child" && decoded.RelatedMember.ID == childID), "completion signal is not operationless: %+v; decoded related member = %+v, want child %q", decoded, decoded.RelatedMember, childID)
+	testassert.Require(t, decoded.OperationID == "" && decoded.RelatedOperation == nil && (decoded.RelatedMember != nil && decoded.RelatedMember.Kind == "session" && decoded.RelatedMember.ID == childID), "completion signal is not operationless: %+v; decoded related member = %+v, want child %q", decoded, decoded.RelatedMember, childID)
 	{
 		_, present := wireObject(t, raw)["related_operation"]
 		testassert.Require(t, !present, "completion signal carries related_operation: %s", raw)
@@ -2385,7 +2388,7 @@ func TestBackgroundCompletionSignalRules(t *testing.T) {
 	fixedRaw, err := encodeSignalEntry(validSignalEntry(testOpID))
 	testassert.NoError(t, err)
 	fixedEnv := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntrySignal, Sequence: 1, CommittedAt: testTime}
-	fixedEnv.Payload = setKey(fixedRaw, "related_member", json.RawMessage(`{"kind":"child","id":"`+childID+`"}`))
+	fixedEnv.Payload = setKey(fixedRaw, "related_member", json.RawMessage(`{"kind":"session","id":"`+childID+`"}`))
 	{
 		_, err := decodeSignalEntry(fixedEnv)
 		testassert.Require(t, err != nil, "fixed signal with related_member must be rejected")
@@ -2439,12 +2442,13 @@ func TestBackgroundCompletionSignalRules(t *testing.T) {
 		{"null related member", setKey(raw, "related_member", json.RawMessage(`null`))},
 		{"wrong container related member", setKey(raw, "related_member", json.RawMessage(`[]`))},
 		{"wrong kind", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("team", childID)))},
-		{"missing id", setKey(raw, "related_member", json.RawMessage(`{"kind":"child"}`))},
-		{"empty id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("child", "")))},
-		{"non-hex child id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("child", "ghost")))},
-		{"job-length child id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("child", jobID)))},
+		{"old child kind", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("child", childID)))},
+		{"missing id", setKey(raw, "related_member", json.RawMessage(`{"kind":"session"}`))},
+		{"empty id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("session", "")))},
+		{"non-hex child id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("session", "ghost")))},
+		{"job-length child id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("session", jobID)))},
 		{"child-length job id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("job", childID)))},
-		{"unknown member inside related member", setKey(raw, "related_member", json.RawMessage(`{"kind":"child","id":"`+childID+`","bogus":1}`))},
+		{"unknown member inside related member", setKey(raw, "related_member", json.RawMessage(`{"kind":"session","id":"`+childID+`","bogus":1}`))},
 		{"related operation present", setKey(raw, "related_operation", json.RawMessage(`{"session_id":"`+testSessionID+`","operation_id":"`+testOpID+`"}`))},
 		{"operation owned", setKey(raw, "operation_id", json.RawMessage(`"`+testOpID+`"`))},
 		{"empty content", setKey(raw, "content", json.RawMessage(`""`))},

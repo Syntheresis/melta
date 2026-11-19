@@ -11,8 +11,8 @@ import (
 	"io"
 )
 
-// The fixed contract identities. Contract notation name/v1 is the pair
-// contract_id=name, contract_version="1".
+// Fixed contract IDs are independent of the current ContractVersion. The
+// notation name/v2 denotes contract_id=name and contract_version="2".
 const (
 	ContractTool             = "melta.tool"
 	ContractHook             = "melta.hook"
@@ -26,7 +26,7 @@ const (
 	ContractCommands         = "melta.commands"
 
 	// ContractVersion is the one accepted version of every fixed contract.
-	ContractVersion = "1"
+	ContractVersion = "2"
 
 	// HostProvider identifies the host as a binding provider. It is reserved:
 	// no extension identity may use it.
@@ -365,7 +365,7 @@ func (m Method) owned() Method {
 	return out
 }
 
-// contractName renders the fixed notation name/v1 for diagnostics.
+// contractName renders the contract ID and version for diagnostics.
 func contractName(id, version string) string {
 	return id + "/v" + version
 }

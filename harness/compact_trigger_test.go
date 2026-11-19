@@ -993,7 +993,7 @@ func TestModelEffectCompactBoundaryExcludesPostFreezeAppends(t *testing.T) {
 	// The controlled stimulus: the admitted fixture member's canonical
 	// background_completion signal is injected through the closed-delivery
 	// producer while the summary is parked, then the member finishes.
-	member, err := admitLocked(h, c, memberChild, completionChildID, 0)
+	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
 	testassert.NoError(t, err)
 	{
 		err := h.deliverClosedCompletion(c, member, "Task completed.")
@@ -1002,7 +1002,7 @@ func TestModelEffectCompactBoundaryExcludesPostFreezeAppends(t *testing.T) {
 	}
 	signals := storedSignals(t, store, sessionID)
 	testassert.Equal(t, len(signals), 1)
-	testassert.Require(t, signals[0].OperationID == "" && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "child" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "Task completed.", "committed signal = %+v, want the operationless child-member completion", signals[0])
+	testassert.Require(t, signals[0].OperationID == "" && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "Task completed.", "committed signal = %+v, want the operationless child-member completion", signals[0])
 	close(release)
 	testassert.NoError(t, <-done)
 	graph, err := validateFixture(t, store, sessionID)

@@ -1285,7 +1285,7 @@ func validateSignalEntry(v signalEntry) error {
 			return fmt.Errorf("background_completion signal requires related_member")
 		}
 		switch v.RelatedMember.Kind {
-		case "child":
+		case "session":
 			if err := validateHexID(v.RelatedMember.ID, "related member id"); err != nil {
 				return err
 			}
@@ -1294,7 +1294,7 @@ func validateSignalEntry(v signalEntry) error {
 				return err
 			}
 		default:
-			return fmt.Errorf("related member kind %q is not one of child or job", v.RelatedMember.Kind)
+			return fmt.Errorf("related member kind %q is not one of session or job", v.RelatedMember.Kind)
 		}
 		if v.Content == "" {
 			return errors.New("background_completion signal requires non-empty content")
@@ -2024,14 +2024,14 @@ func encodeSessionIdentity(v SessionIdentity) (json.RawMessage, error) {
 		CreatedAt             string `json:"created_at"`
 		SourceSessionID       string `json:"source_session_id,omitempty"`
 		SourceBoundaryEntryID string `json:"source_boundary_entry_id,omitempty"`
-		ParentSessionID       string `json:"parent_session_id,omitempty"`
+		OwnerSessionID        string `json:"owner_session_id,omitempty"`
 	}{
 		SessionID:             v.SessionID,
 		Workspace:             v.Workspace,
 		CreatedAt:             createdAt,
 		SourceSessionID:       v.SourceSessionID,
 		SourceBoundaryEntryID: v.SourceBoundaryEntryID,
-		ParentSessionID:       v.ParentSessionID,
+		OwnerSessionID:        v.OwnerSessionID,
 	})
 	if err != nil {
 		return nil, err
@@ -2128,7 +2128,7 @@ func decodeSessionRegister(reg Register) (SessionRecord, error) {
 
 // decodeSessionIdentity reads the identity section with exact keys.
 func decodeSessionIdentity(obj map[string]json.RawMessage) (SessionIdentity, error) {
-	if err := rejectUnknownMembers(obj, "session_id", "workspace", "created_at", "source_session_id", "source_boundary_entry_id", "parent_session_id"); err != nil {
+	if err := rejectUnknownMembers(obj, "session_id", "workspace", "created_at", "source_session_id", "source_boundary_entry_id", "owner_session_id"); err != nil {
 		return SessionIdentity{}, err
 	}
 	sessionID, err := stringMember(obj, "session_id", true)
@@ -2151,7 +2151,7 @@ func decodeSessionIdentity(obj map[string]json.RawMessage) (SessionIdentity, err
 	if err != nil {
 		return SessionIdentity{}, err
 	}
-	parentSessionID, err := optionalNonEmptyString(obj, "parent_session_id")
+	ownerSessionID, err := optionalNonEmptyString(obj, "owner_session_id")
 	if err != nil {
 		return SessionIdentity{}, err
 	}
@@ -2165,7 +2165,7 @@ func decodeSessionIdentity(obj map[string]json.RawMessage) (SessionIdentity, err
 		CreatedAt:             stamped,
 		SourceSessionID:       sourceSessionID,
 		SourceBoundaryEntryID: sourceBoundaryEntryID,
-		ParentSessionID:       parentSessionID,
+		OwnerSessionID:        ownerSessionID,
 	}
 	if err := validateSessionIdentity(v); err != nil {
 		return SessionIdentity{}, err
@@ -2176,7 +2176,7 @@ func decodeSessionIdentity(obj map[string]json.RawMessage) (SessionIdentity, err
 // validateSessionIdentity enforces the closed identity shape: durable
 // identities, caller-normalized workspace, the root/fork lineage rule (a root
 // omits both source fields; a fork requires both), and the child lineage rule
-// (parent_session_id is exclusive with both source fields).
+// (owner_session_id is exclusive with both source fields).
 func validateSessionIdentity(v SessionIdentity) error {
 	if err := validateHexID(v.SessionID, "session id"); err != nil {
 		return err
@@ -2198,11 +2198,11 @@ func validateSessionIdentity(v SessionIdentity) error {
 			return err
 		}
 	}
-	if v.ParentSessionID != "" {
+	if v.OwnerSessionID != "" {
 		if v.SourceSessionID != "" || v.SourceBoundaryEntryID != "" {
-			return errors.New("parent_session_id is mutually exclusive with source_session_id and source_boundary_entry_id")
+			return errors.New("owner_session_id is mutually exclusive with source_session_id and source_boundary_entry_id")
 		}
-		if err := validateHexID(v.ParentSessionID, "parent session id"); err != nil {
+		if err := validateHexID(v.OwnerSessionID, "owner session id"); err != nil {
 			return err
 		}
 	}

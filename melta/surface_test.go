@@ -49,7 +49,7 @@ func failingToolSpec(id string) toolDeclaration {
 // availability on the parent lineage.
 func lineageToolSpec(id string) toolDeclaration {
 	return toolDeclaration{id: id, standardDescribe: func(_ Invocation, _ ToolConstraints, identity harness.SessionIdentity) (ToolDescription, error) {
-		return toolDescriptionFor(id, id+" description", identity.ParentSessionID == "")
+		return toolDescriptionFor(id, id+" description", identity.OwnerSessionID == "")
 	}}
 }
 
@@ -241,7 +241,7 @@ func TestComposeSurfaceExcludesLineageUnavailableTools(t *testing.T) {
 	}
 
 	childReq := req
-	childReq.identity = harness.SessionIdentity{SessionID: "child-session", ParentSessionID: "root-session"}
+	childReq.identity = harness.SessionIdentity{SessionID: "child-session", OwnerSessionID: "root-session"}
 	_, child, err := composeSurface(context.Background(), childReq)
 	testassert.NoError(t, err)
 	{

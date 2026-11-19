@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -199,10 +200,6 @@ func (c *CLI) selectRootWith(s stamp, id string) {
 		c.navigationReport(s, terminal.RenderErrorMsg("Session read answered for a different Session"))
 		return
 	}
-	if hydration.Session.ParentSessionId != nil {
-		c.navigationReport(s, terminal.RenderErrorMsg("Select a root Session; children are inspection-only"))
-		return
-	}
 	if hydration.Session.Lifecycle == protocol.Archived {
 		// The reopen is a work mutation: an already-superseded resolution must
 		// not issue one.
@@ -231,12 +228,12 @@ func (c *CLI) resumeNewest(s stamp) {
 		c.navigationReport(s, terminal.RenderErrorMsg(err.Error()))
 		return
 	}
-	roots := rootSessions(list)
-	if len(roots) == 0 {
+	root := firstRoot(sortedSessions(list))
+	if root == nil {
 		c.navigationReport(s, terminal.RenderErrorMsg("no active sessions"))
 		return
 	}
-	c.adoptRoot(s, roots[0].Workspace, roots[0].SessionId)
+	c.adoptRoot(s, root.Workspace, root.SessionId)
 }
 func (c *CLI) inspectChild(id string) {
 	c.mu.Lock()
@@ -274,21 +271,26 @@ func (c *CLI) selectWorkspace(workspace string) {
 	c.task(func() { c.compose(s) })
 }
 
-func rootSessions(list []protocol.Session) []protocol.Session {
-	filtered := make([]protocol.Session, 0, len(list))
-	for _, session := range list {
-		if session.ParentSessionId == nil {
-			filtered = append(filtered, session)
+func sortedSessions(list []protocol.Session) []protocol.Session {
+	sorted := slices.Clone(list)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].LastActivity.Equal(sorted[j].LastActivity) {
+			return sorted[i].SessionId < sorted[j].SessionId
+		}
+		return sorted[i].LastActivity.After(sorted[j].LastActivity)
+	})
+	return sorted
+}
+
+func firstRoot(list []protocol.Session) *protocol.Session {
+	for i := range list {
+		if list[i].OwnerSessionId == nil {
+			return &list[i]
 		}
 	}
-	sort.Slice(filtered, func(i, j int) bool {
-		if filtered[i].LastActivity.Equal(filtered[j].LastActivity) {
-			return filtered[i].SessionId < filtered[j].SessionId
-		}
-		return filtered[i].LastActivity.After(filtered[j].LastActivity)
-	})
-	return filtered
+	return nil
 }
+
 func (c *CLI) compose(s stamp) {
 	c.mu.Lock()
 	if !c.currentLocked(s) {
@@ -310,10 +312,10 @@ func (c *CLI) compose(s stamp) {
 		c.report(s, terminal.RenderErrorMsg(err.Error()), false)
 		return
 	}
-	list = rootSessions(list)
+	list = sortedSessions(list)
 	c.sessions = list
-	if len(list) != 0 {
-		c.rootID = list[0].SessionId
+	if candidate := firstRoot(list); candidate != nil {
+		c.rootID = candidate.SessionId
 		c.root = c.newReaderLocked(c.rootID)
 		c.kickReaderLocked(c.root)
 		c.notifyLocked()
@@ -384,7 +386,7 @@ func (c *CLI) refreshList(s stamp, lifecycle string, show bool) {
 		c.taskLocked(func() { c.reportList(s, generation, terminal.RenderErrorMsg(err.Error())) })
 		return
 	}
-	list = rootSessions(list)
+	list = sortedSessions(list)
 	c.sessions = list
 	if show {
 		items := make([]terminal.MenuItem, 0, len(list)+1)
@@ -462,7 +464,7 @@ func operationID() string {
 }
 
 func (c *CLI) formAttemptLocked(operation, id string) (*attempt, error) {
-	if c.conn == nil || c.rootID == "" || c.childID != "" || c.root == nil || c.root.hydration == nil || c.root.hydration.Session.ParentSessionId != nil {
+	if c.conn == nil || c.rootID == "" || c.childID != "" || c.root == nil || c.root.hydration == nil {
 		return nil, errors.New("Return to a selected root Session to send work")
 	}
 	a := &attempt{id: id, operation: operation, session: c.rootID, content: textParts(c.draft.String()), mode: protocol.SubmitRequestModeRegular, draftRevision: c.draftRevision, stamp: c.stampLocked(), inflight: true}

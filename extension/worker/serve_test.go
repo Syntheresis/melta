@@ -910,7 +910,7 @@ func TestServeFrameBounds(t *testing.T) {
 func TestServeHandshakeFailures(t *testing.T) {
 	t.Run("version mismatch", func(t *testing.T) {
 		p := startPeer(t, singleNative(baseDeclaration(), nil, nil))
-		params, _ := json.Marshal(worker.ActivateParams{ContractVersion: "2"})
+		params, _ := json.Marshal(worker.ActivateParams{ContractVersion: "1"})
 		p.send(worker.Frame{Kind: worker.KindRequest, ID: "activate", Method: worker.MethodActivate, Params: params})
 		response := p.readResponse("activate")
 		if response.Error == nil || response.Error.Class != worker.ClassIncompatible {
@@ -1225,7 +1225,7 @@ func TestServeHostcallPartialDecodesCallError(t *testing.T) {
 	hostcall := p.readRequest(worker.MethodHostcall)
 	partial := json.RawMessage("{\n  \"restored\": [\"a.go\"],\n  \"big\": 9007199254740993\n}")
 	p.send(worker.Frame{Kind: worker.KindResponse, ID: hostcall.ID, Error: &worker.Error{
-		Class: worker.ClassConflict, Message: "partial failure", Partial: worker.JSONBytes(partial),
+		Class: worker.ClassStorage, Message: "partial failure", Partial: worker.JSONBytes(partial),
 	}})
 	response := p.readResponse("call-1")
 	if response.Error != nil {
@@ -1234,8 +1234,8 @@ func TestServeHostcallPartialDecodesCallError(t *testing.T) {
 	var callErr *extension.CallError
 	if err := <-received; !errors.As(err, &callErr) {
 		t.Fatalf("author error = %v, want extension.CallError", err)
-	} else if !errors.Is(callErr, harness.ErrConflict) {
-		t.Fatalf("author error cause = %v, want the conflict class", callErr.Err)
+	} else if !errors.Is(callErr, harness.ErrStorage) {
+		t.Fatalf("author error cause = %v, want the storage class", callErr.Err)
 	} else if !bytes.Equal(callErr.Partial, partial) {
 		t.Fatalf("author partial = %q, want %q", callErr.Partial, partial)
 	}

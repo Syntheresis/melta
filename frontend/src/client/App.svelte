@@ -10,7 +10,7 @@
   import { classifyRestore, restoreLines } from './restore';
   import { composeForkBody, composeObjectPatch, parseExactJSON, presentNumber } from './exactjson';
   import { SessionReader, okRead, failRead, sameStamp } from './reader';
-  import { sortOpenRoots } from './sessions';
+  import { sortSessions } from './sessions';
   import { compareConfigurationRevision, compareWarningsRevision } from './projection';
   import Conversation from './Conversation.svelte';
   import Composer from './Composer.svelte';
@@ -458,7 +458,7 @@
       return;
     }
     if (!sameStamp(cap, stampFor('', 'root')())) return;
-    const roots = sortOpenRoots(classified.data);
+    const roots = sortSessions(classified.data.filter((session) => !session.owner_session_id));
     if (roots.length > 0) {
       outcomeNote = '';
       resetRoot(roots[0].session_id);
@@ -808,8 +808,8 @@
         return;
       }
       const row = (session) => ({ id: session.session_id, agentType: session.agent_selection?.definition?.definition_id || '', lastActivity: session.last_activity });
-      pickerOpen = sortOpenRoots(lists.open).map(row);
-      pickerArchived = sortOpenRoots(lists.archived).map(row);
+      pickerOpen = sortSessions(lists.open).map(row);
+      pickerArchived = sortSessions(lists.archived).map(row);
     } finally {
       if (token === listToken) pickerLoading = false;
     }
@@ -1001,7 +1001,7 @@
     const hydration = rootReader ? rootReader.getHydration() : null;
     const byId = new Map();
     for (const header of [...lists.open, ...lists.archived]) {
-      if (header.parent_session_id !== rootID) continue;
+      if (header.owner_session_id !== rootID) continue;
       const existing = byId.get(header.session_id);
       if (existing) {
         // Overlapping captions merge into one ID-keyed row.
@@ -1018,7 +1018,7 @@
       });
     }
     for (const member of hydration ? hydration.background : []) {
-      if (member.kind !== 'child') continue;
+      if (member.kind !== 'session') continue;
       const existing = byId.get(member.id);
       if (existing) {
         existing.live = true;

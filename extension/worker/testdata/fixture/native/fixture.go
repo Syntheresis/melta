@@ -382,7 +382,7 @@ func (s *serviceState) useRetainedHandler(ctx context.Context, _ extension.CallC
 	return retained(ctx, "prompt", "assemble", json.RawMessage(`{"identity":"fixture","instructions":"","mode":"none"}`))
 }
 
-// commandHandlers expose the fixed melta.commands/v1 bridge through one
+// commandHandlers expose the fixed melta.commands bridge through one
 // ordinary named service. The request names a fixed command method and passes
 // its generated arguments; the host-issued CallContext alone supplies the
 // Session and request identity.

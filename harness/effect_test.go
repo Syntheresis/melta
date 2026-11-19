@@ -3331,14 +3331,15 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 			name   string
 			marker string
 			cancel bool
-			group  bgState
+			group  bool
+			member bool
 			want   OperationState
 		}{
-			{"matching interrupt marker becomes interruption", testOpID, false, bgOpen, OperationInterruption},
-			{"canceled execution becomes interruption", "", true, bgOpen, OperationInterruption},
-			{"permanently closed group becomes interruption", "", false, bgClosed, OperationInterruption},
-			{"foreign interrupt marker keeps success", "op-other", false, bgOpen, OperationSuccess},
-			{"root stop's stopping state keeps success", "", false, bgStopping, OperationSuccess},
+			{"matching interrupt marker becomes interruption", testOpID, false, false, false, OperationInterruption},
+			{"canceled execution becomes interruption", "", true, false, false, OperationInterruption},
+			{"member stop becomes interruption", "", false, true, true, OperationInterruption},
+			{"foreign interrupt marker keeps success", "op-other", false, false, false, OperationSuccess},
+			{"root stop's stopping state keeps success", "", false, true, false, OperationSuccess},
 		}
 		for _, tc := range rows {
 			t.Run(tc.name, func(t *testing.T) {
@@ -3377,7 +3378,12 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 				}
 				c.mu.Lock()
 				c.interruptOp = tc.marker
-				c.bgState = tc.group
+				if tc.group {
+					c.stop = &stopInterval{done: make(chan struct{})}
+				}
+				if tc.member {
+					c.memberStop = &backgroundMember{done: make(chan struct{})}
+				}
 				c.mu.Unlock()
 				if tc.cancel {
 					cancelRun() // only the supplied execution parent dies; the Harness reservation owner stays live

@@ -289,7 +289,7 @@ func TestCompileComparesMethodsBySetAndIgnoresParticipationMetadata(t *testing.T
 	provider := ServiceCapability("provider", "test.provider", providerMethods...)
 	consumer := ServiceCapability("consumer", "test.consumer", PureMethod("call", `{}`, `{}`))
 	reversed := []Method{providerMethods[1], providerMethods[0]}
-	binding := Binding{Name: "dep", Provider: "ext/provider-c", CapabilityID: "provider", Definition: CapabilityDefinition{ContractID: "test.provider", ContractVersion: "1", Kind: KindService, Methods: reversed}}
+	binding := Binding{Name: "dep", Provider: "ext/provider-c", CapabilityID: "provider", Definition: CapabilityDefinition{ContractID: "test.provider", ContractVersion: ContractVersion, Kind: KindService, Methods: reversed}}
 	native := Native{
 		Declaration: Declaration{
 			ID:           "ext",
@@ -652,22 +652,22 @@ func extensionServiceCapability(id string) Capability {
 }
 
 // TestFixedContractIdentityIsEnforcedBothWays proves known fixed contract IDs
-// retain their v1/kind/method definitions and cannot be reclassified as
+// retain their version/kind/method definitions and cannot be reclassified as
 // arbitrary services, while fixed kinds cannot use custom service contracts.
 func TestFixedContractIdentityIsEnforcedBothWays(t *testing.T) {
 	rejected := []Native{
-		testNative("service-as-tool", LifetimeHarness, []Capability{customService("bad", ContractTool, "1", PureMethod("read", `{}`, `{}`))}, nil, nil),
-		testNative("tool-as-service", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: "author.tool", ContractVersion: "1", Kind: KindTool, Methods: toolMethods()}}, nil, nil),
-		testNative("hook-as-service", LifetimeHarness, []Capability{customService("bad", ContractHook, "1", PureMethod("read", `{}`, `{}`))}, nil, nil),
-		testNative("strategy-as-service", LifetimeHarness, []Capability{customService("bad", ContractContextStrategy, "1", PureMethod("read", `{}`, `{}`))}, nil, nil),
-		testNative("fixed-version", LifetimeHarness, []Capability{customService("bad", "melta.prompt", "2", PureMethod("read", `{}`, `{}`))}, nil, nil),
+		testNative("service-as-tool", LifetimeHarness, []Capability{customService("bad", ContractTool, ContractVersion, PureMethod("read", `{}`, `{}`))}, nil, nil),
+		testNative("tool-as-service", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: "author.tool", ContractVersion: ContractVersion, Kind: KindTool, Methods: toolMethods()}}, nil, nil),
+		testNative("hook-as-service", LifetimeHarness, []Capability{customService("bad", ContractHook, ContractVersion, PureMethod("read", `{}`, `{}`))}, nil, nil),
+		testNative("strategy-as-service", LifetimeHarness, []Capability{customService("bad", ContractContextStrategy, ContractVersion, PureMethod("read", `{}`, `{}`))}, nil, nil),
+		testNative("fixed-version", LifetimeHarness, []Capability{customService("bad", "melta.prompt", "1", PureMethod("read", `{}`, `{}`))}, nil, nil),
 		testNative("wrong-methods", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: ContractTool, ContractVersion: ContractVersion, Kind: KindTool, Methods: []Method{method("describe", ModePure, `{}`, `{}`, "", "")}}}, nil, nil),
 		testNative("hook-wrong-boundary", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: ContractHook, ContractVersion: ContractVersion, Kind: KindHook, Hooks: []Hook{{Boundary: BoundaryPrepare, Mode: HookModePure}}, Methods: hookMethods([]Hook{{Boundary: BoundaryRequest, Mode: HookModePure}})}}, nil, nil),
 		testNative("definitions-wrong-kind", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: ContractAgentDefinitions, ContractVersion: ContractVersion, Kind: KindTool, Methods: agentDefinitionMethods()}}, nil, nil),
-		testNative("definitions-wrong-version", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: ContractAgentDefinitions, ContractVersion: "2", Kind: KindService, Methods: agentDefinitionMethods()}}, nil, nil),
+		testNative("definitions-wrong-version", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: ContractAgentDefinitions, ContractVersion: "1", Kind: KindService, Methods: agentDefinitionMethods()}}, nil, nil),
 		testNative("definitions-wrong-methods", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: ContractAgentDefinitions, ContractVersion: ContractVersion, Kind: KindService, Methods: agentDefinitionMethods()[:1]}}, nil, nil),
 		testNative("definitions-shorter-lifetime", LifetimeWorkspace, []Capability{AgentDefinitionsCapability("bad")}, nil, nil),
-		testNative("credentials-wrong-version", LifetimeHarness, []Capability{customService("bad", ContractCredentials, "2", hostCredentialsDefinition().Methods...)}, nil, nil),
+		testNative("credentials-wrong-version", LifetimeHarness, []Capability{customService("bad", ContractCredentials, "1", hostCredentialsDefinition().Methods...)}, nil, nil),
 		testNative("credentials-wrong-kind", LifetimeHarness, []Capability{Capability{ID: "bad", ContractID: ContractCredentials, ContractVersion: ContractVersion, Kind: KindTool, Methods: hostCredentialsDefinition().Methods}}, nil, nil),
 		testNative("credentials-wrong-methods", LifetimeHarness, []Capability{customService("bad", ContractCredentials, ContractVersion, PureMethod("read", `{}`, `{}`))}, nil, nil),
 	}

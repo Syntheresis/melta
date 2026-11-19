@@ -31,7 +31,7 @@ func (r *Melta) Health(ctx context.Context, c Caller) (protocol.Health, error) {
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return protocol.Health{}, err
 	}
-	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N17}, nil
+	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N18}, nil
 }
 
 // ListSessions projects Session headers under one required workspace and
@@ -136,9 +136,9 @@ func projectSession(header harness.SessionHeader, instance string) protocol.Sess
 		current := header.CurrentOperationID
 		out.CurrentOperationId = &current
 	}
-	if header.Identity.ParentSessionID != "" {
-		parent := header.Identity.ParentSessionID
-		out.ParentSessionId = &parent
+	if header.Identity.OwnerSessionID != "" {
+		parent := header.Identity.OwnerSessionID
+		out.OwnerSessionId = &parent
 	}
 	if header.Identity.SourceSessionID != "" {
 		source := header.Identity.SourceSessionID

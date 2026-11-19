@@ -793,7 +793,7 @@ func TestSessionCommandInterruptStop(t *testing.T) {
 			testassert.NoError(t, bg.r.InterruptSession(ctx, testCaller(bg.r), root))
 		})
 
-		t.Run("child stop converges and permanently closes admission", func(t *testing.T) {
+		t.Run("member stop converges and reopens admission", func(t *testing.T) {
 			bg := openBackgroundRuntime(t, store, newLifecycleStopper())
 			defer func() { _ = bg.r.Close(ctx) }()
 			root := bg.session("child-stop-root")
@@ -811,11 +811,11 @@ func TestSessionCommandInterruptStop(t *testing.T) {
 			})
 			child := bg.launchChild(root, "child work", "op-child", 5)
 			<-childStarted // the child's execution is open before the stop races it
-			testassert.NoError(t, bg.r.StopSession(ctx, testCaller(bg.r), child))
+			testassert.NoError(t, bg.r.StopSession(ctx, testCaller(bg.r), root))
 			awaitOperation(t, bg.r, child, "op-child", harness.OperationInterruption)
 			{
 				_, err := bg.r.SubmitSession(ctx, testCaller(bg.r), child, commandSubmitRequest(t, "op-after", "late"))
-				testassert.Require(t, errors.Is(err, harness.ErrInvalid), "submit to stopped child = %v, want the permanent closure", err)
+				testassert.NoError(t, err)
 			}
 		})
 

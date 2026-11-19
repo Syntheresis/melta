@@ -65,8 +65,8 @@ func (h *Harness) runExecution(c *coordinator, control *activeExecution, operati
 	if retired {
 		h.observeInvalidation(c)
 	}
-	control.cancel() // the context dies only after the drain: a drain-installed successor owns a distinct context
-	h.childCompletionSettled(c, operationID)
+	control.cancel()                             // the context dies only after the drain: a drain-installed successor owns a distinct context
+	_ = h.childCompletionSettled(c, operationID) // asynchronous retirement; settlement latches storage failures before releasing the member
 	if releaseGraph != nil {
 		releaseGraph()
 	}
@@ -137,7 +137,7 @@ func (d *executionDriver) execute(execCtx context.Context) (agent.TerminalResult
 	// mutates its retained containers after publication can never change what
 	// this execution dispatches.
 	d.capture = ownCapture(admission.Execution)
-	guard := c.bgState == bgClosed || c.interruptOp == d.operationID
+	guard := memberStopping(c) || c.interruptOp == d.operationID
 	if c.interruptOp == d.operationID {
 		c.interruptOp = "" // consumed: the marker reaches exactly the execution it names
 	}

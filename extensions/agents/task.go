@@ -124,7 +124,7 @@ func (taskTool) describe(_ context.Context, input extension.DescribeInput) (exte
 			Description: b.String(),
 			Parameters:  json.RawMessage(taskParameters),
 		},
-		Available: input.Session.ParentSessionID == "",
+		Available: input.Session.OwnerSessionID == "",
 	}, nil
 }
 
@@ -239,7 +239,17 @@ func resolveSubagent(name string, roster []protocol.Agent) (harness.DefinitionRe
 // launchOutcome renders one launch failure through the uniform tool-error
 // path: the harness's rejection details are model-facing and arrive unwrapped.
 func launchOutcome(callID string, err error) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
+	content := err.Error()
+	var callErr *extension.CallError
+	if errors.As(err, &callErr) && len(callErr.Partial) != 0 {
+		var partial struct {
+			ChildSessionID string `json:"child_session_id"`
+		}
+		if json.Unmarshal(callErr.Partial, &partial) == nil && partial.ChildSessionID != "" {
+			content += "\nSession ID: " + partial.ChildSessionID
+		}
+	}
+	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: content}}
 }
 
 // immediateError is the normalization-class immediate outcome: status error

@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -12,6 +13,28 @@ import (
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
+
+func TestLaunchOutcomePreservesPartialSession(t *testing.T) {
+	outcome := launchOutcome("call", &extension.CallError{
+		Err:     errors.New("storage failure"),
+		Partial: json.RawMessage(`{"child_session_id":"session123"}`),
+	})
+	testassert.Equal(t, outcome.Result.Status, model.ResultError)
+	testassert.Require(t, strings.Contains(outcome.Result.Content, "storage failure") && strings.Contains(outcome.Result.Content, "session123"), "outcome lost failure or Session identity: %q", outcome.Result.Content)
+}
+
+func TestTaskAvailabilityUsesOwnerLineage(t *testing.T) {
+	for _, row := range []struct {
+		owner     string
+		available bool
+	}{{"", true}, {"owner", false}} {
+		desc, err := (taskTool{}).describe(context.Background(), extension.DescribeInput{
+			Session: harness.SessionIdentity{OwnerSessionID: row.owner},
+		})
+		testassert.NoError(t, err)
+		testassert.Equal(t, desc.Available, row.available)
+	}
+}
 
 // TestDecodeSettingsRangesAndShapes proves the settings decoder the tool's
 // preparation owns: absent/blank/null input and null members keep the

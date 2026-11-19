@@ -299,7 +299,7 @@ func TestChildListOldConnectionSuccessAndErrorAreSuperseded(t *testing.T) {
 			if fail {
 				parked.reject(404, protocol.Error{Code: "not_found", Message: "old owner child error"})
 			} else {
-				parked.respond([]protocol.Session{{SessionId: childA, ParentSessionId: pointer(rootA)}})
+				parked.respond([]protocol.Session{{SessionId: childA, OwnerSessionId: pointer(rootA)}})
 			}
 			barrier(t, oldDone)
 			c.mu.Lock()
@@ -442,9 +442,8 @@ func TestCreateFailureCapturedAddressAndExplicitWorkspaceIntent(t *testing.T) {
 	c.selectWorkspace("/workspace/../different")
 	list := receive(t, transport.requests)
 	testassert.Require(t, list.req.URL.Query().Get("workspace") == "/different", "Workspace did not use lexical Abs")
-	// A child-only header list leaves no eligible root: the next request is
-	// still the Create for the captured Workspace.
-	list.respond([]protocol.Session{{SessionId: childA, ParentSessionId: pointer(rootB)}})
+	// An owned-only list still creates a root for the captured Workspace.
+	list.respond([]protocol.Session{{SessionId: childA, OwnerSessionId: pointer(rootB)}})
 	newCreate := receive(t, transport.requests)
 	var sent protocol.CreateSessionRequest
 	{
@@ -464,38 +463,34 @@ func TestCreateFailureCapturedAddressAndExplicitWorkspaceIntent(t *testing.T) {
 	testassert.Require(t, !strings.Contains(outputs(c), "Outcome unknown"), "an old-Workspace completion published a stale local error")
 }
 
-func TestExplicitResumeCannotPromoteChildOrSubmitToItBeforeAdoption(t *testing.T) {
+func TestExplicitResumeAdoptsOwnedSession(t *testing.T) {
 	c, transport := fixture(t)
 	settledReader(t, c, transport)
-	// A live writer admits the explicit follow-up typed while the destination is
-	// resolved.
 	go c.writer(io.Discard)
-	c.mu.Lock()
-	source, sourceID := c.root, c.rootID
-	c.mu.Unlock()
 	c.command("/resume " + childA)
 	destination := receive(t, transport.requests)
 	testassert.Require(t, strings.HasSuffix(destination.req.URL.Path, "/hydration"), "named resume did not read its destination globally")
-	// The retained source keeps accepting explicit work while the destination is
-	// resolved, and nothing is addressed to the unadopted child.
-	setDraft(c, "forged child follow up")
+	setDraft(c, "source while destination is pending")
 	press(c, terminal.KeyMsg{Special: terminal.KeyEnter})
-	submit := receive(t, transport.requests)
-	testassert.Require(t, strings.Contains(submit.req.URL.Path, sourceID), "follow-up addressed outside the accepted source: %s", submit.req.URL.Path)
-	submit.respond(protocol.SubmitResult{Disposition: "admitted", Operation: &protocol.Operation{OperationId: "forged"}})
-	// The destination read's own Session record is the eligibility authority.
+	source := receive(t, transport.requests)
+	testassert.Require(t, strings.Contains(source.req.URL.Path, rootA+"/submit"), "pending-selection submit addressed %s, want the accepted source", source.req.URL.Path)
 	child := hydration(childA, "1", nil, nil)
-	child.Session.ParentSessionId = pointer(rootA)
+	child.Session.OwnerSessionId = pointer(rootA)
 	destination.respond(child)
-	settleAnswering(t, c, transport)
+	fresh := receive(t, transport.requests)
+	testassert.Require(t, strings.Contains(fresh.req.URL.Path, childA+"/hydration"), "adopted reader addressed %s", fresh.req.URL.Path)
+	fresh.respond(child)
+	source.respond(protocol.SubmitResult{Disposition: "admitted", Operation: &protocol.Operation{OperationId: "source"}})
+	settleAnsweringRequested(t, c, transport)
 	c.mu.Lock()
-	testassert.Require(t, c.rootID == sourceID && c.root == source && c.childID == "", "child resume promoted the child or erased the source")
+	testassert.Require(t, c.rootID == childA && c.childID == "", "owned Session was not adopted")
 	c.mu.Unlock()
-	transport.mu.Lock()
-	defer transport.mu.Unlock()
-	for _, route := range transport.calls {
-		testassert.Require(t, !strings.Contains(route, "/reopen") && !strings.Contains(route, childA+"/submit"), "child root bypass %s", route)
-	}
+	setDraft(c, "follow up")
+	press(c, terminal.KeyMsg{Special: terminal.KeyEnter})
+	followup := receive(t, transport.requests)
+	testassert.Require(t, strings.Contains(followup.req.URL.Path, childA+"/submit"), "follow-up addressed outside adopted Session: %s", followup.req.URL.Path)
+	followup.respond(protocol.SubmitResult{Disposition: "admitted", Operation: &protocol.Operation{OperationId: "followup"}})
+	settleAnsweringRequested(t, c, transport)
 }
 
 func TestNamedResumeAdoptsCrossWorkspaceRootAndReopensArchived(t *testing.T) {
@@ -536,7 +531,7 @@ func TestBareResumeSelectsNewestOpenRootAndKeepsSelectionWithoutAny(t *testing.T
 	// The newest open root wins; archived and child headers never appear.
 	c.command("/resume")
 	receive(t, transport.requests).respond([]protocol.Session{
-		{SessionId: childA, ParentSessionId: pointer(rootA), Workspace: "/workspace", LastActivity: time.Unix(9, 0)},
+		{SessionId: childA, OwnerSessionId: pointer(rootA), Workspace: "/workspace", LastActivity: time.Unix(9, 0)},
 		{SessionId: rootA, Workspace: "/workspace", LastActivity: time.Unix(1, 0)},
 		{SessionId: rootB, Workspace: "/workspace", LastActivity: time.Unix(5, 0)},
 	})

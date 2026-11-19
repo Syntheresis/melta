@@ -133,7 +133,7 @@ func TestExtensionCatalogAndAddressingParity(t *testing.T) {
 			switch capability.CapabilityId {
 			case fixtureService:
 				sawService = true
-				testassert.Require(t, capability.ContractId == "fixture.service/v1" && capability.ContractVersion == "1" && capability.Kind == protocol.ExtensionCapabilityKindService, "service capability = %+v", capability)
+				testassert.Require(t, capability.ContractId == "fixture.service/v1" && capability.ContractVersion == extension.ContractVersion && capability.Kind == protocol.ExtensionCapabilityKindService, "service capability = %+v", capability)
 				var sawHidden bool
 				for _, method := range capability.Methods {
 					sawHidden = sawHidden || method.Name == "retain"
@@ -196,7 +196,7 @@ func TestExtensionCatalogAndAddressingParity(t *testing.T) {
 	})
 }
 
-// TestExtensionSessionCommandsParity proves the fixed melta.commands/v1 bridge
+// TestExtensionSessionCommandsParity proves the fixed melta.commands bridge
 // uses ordinary admission and attribution for every command route, derives the
 // Session only from the host-issued context, rejects malformed generated
 // arguments before mutation, and gives pure/management callbacks no command

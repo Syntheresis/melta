@@ -481,8 +481,8 @@ type coordinator struct {
 	run      *activeExecution  // non-nil while one execution is in flight
 
 	group             *backgroundGroup // nil until the first member
-	bgState           bgState          // starts as bgOpen at every construction site; the zero value is never observed
 	stop              *stopInterval
+	memberStop        *backgroundMember
 	pendingCompletion *launchInfo
 	interruptOp       string
 
@@ -548,7 +548,7 @@ func (h *Harness) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 	// The committed creation installs the stable cell with its committed graph
 	// and a call-owned pin; the release clears the graph and retains the cell.
-	created := &coordinator{sessionID: sessionID, graph: &sessionGraph{Session: record}, bgState: bgOpen}
+	created := &coordinator{sessionID: sessionID, graph: &sessionGraph{Session: record}}
 	created.identity = record.Identity
 	created.everLoaded = true
 	created.uses = 1
@@ -826,7 +826,7 @@ func (h *Harness) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, 
 		c.mu.Unlock()
 		return SubmitResult{}, invalidInput("session %q is archived; admission requires an open Session", req.SessionID)
 	}
-	if c.bgState == bgClosed { // a permanently closed background group rejects agent work beside the lifecycle gate
+	if memberStopping(c) {
 		c.mu.Unlock()
 		return SubmitResult{}, invalidInput("session is closed to agent work")
 	}
@@ -1437,7 +1437,7 @@ func (h *Harness) claimCell(sessionID string) *coordinator {
 	defer h.mu.Unlock()
 	c := h.sessions[sessionID]
 	if c == nil {
-		c = &coordinator{sessionID: sessionID, bgState: bgOpen}
+		c = &coordinator{sessionID: sessionID}
 		h.sessions[sessionID] = c
 	}
 	c.uses++
@@ -1672,7 +1672,7 @@ func (h *Harness) admitReserved(ctx context.Context, c *coordinator, req admissi
 		c.mu.Unlock()
 		return OperationRecord{}, nil, "", invalidInput("session %q is archived; admission requires an open Session", req.SessionID)
 	}
-	if c.bgState == bgClosed { // a permanently closed background group rejects agent work beside the lifecycle gate
+	if memberStopping(c) {
 		c.mu.Unlock()
 		return OperationRecord{}, nil, "", invalidInput("session is closed to agent work")
 	}

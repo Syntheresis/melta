@@ -637,13 +637,16 @@ func (c *composition) childLaunchHandler(ctx context.Context, call extension.Cal
 		MaxConcurrent:   request.MaxConcurrent,
 		OutputLimit:     request.OutputLimit,
 	})
-	if err != nil {
-		return extension.Result{}, err
-	}
-	value, err := json.Marshal(struct {
+	value, marshalErr := json.Marshal(struct {
 		ChildSessionID string `json:"child_session_id"`
 	}{ChildSessionID: result.ChildSessionID})
+	if marshalErr != nil {
+		return extension.Result{}, marshalErr
+	}
 	if err != nil {
+		if result.ChildSessionID != "" {
+			return extension.Result{}, &extension.CallError{Err: err, Partial: value}
+		}
 		return extension.Result{}, err
 	}
 	return extension.Result{Value: value}, nil

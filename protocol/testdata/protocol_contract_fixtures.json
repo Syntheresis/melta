@@ -88,10 +88,15 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"kind\":\"child\",\"id\":\"fixture\"}"
+     "json": "{\"kind\":\"session\",\"id\":\"fixture\"}"
     }
    ],
-   "reject": []
+   "reject": [
+    {
+     "name": "legacy-child-kind",
+     "json": "{\"kind\":\"child\",\"id\":\"fixture\"}"
+    }
+   ]
   },
   {
    "schema": "CleanupFailure",
@@ -396,7 +401,7 @@
     },
     {
      "name": "signal",
-     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"background_completion\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"child\",\"id\":\"child-1\"}}"
+     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"background_completion\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"session\",\"id\":\"child-1\"}}"
     },
     {
      "name": "context_checkpoint",
@@ -713,7 +718,7 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"17\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"18\"}"
     }
    ],
    "reject": [
@@ -722,17 +727,21 @@
      "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"1\"}"
     },
     {
+     "name": "previous-version",
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"17\"}"
+    },
+    {
      "name": "bad-instance-pattern",
-     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"17\"}",
+     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"18\"}",
      "typescript": false
     },
     {
      "name": "missing-instance",
-     "json": "{\"protocol_version\":\"17\"}"
+     "json": "{\"protocol_version\":\"18\"}"
     },
     {
      "name": "unknown-member",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"17\",\"extra\":true}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"18\",\"extra\":true}"
     }
    ]
   },
@@ -759,7 +768,7 @@
     },
     {
      "name": "with-active-operation",
-     "json": "{\"session\":{\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"workspace\":\"/workspace\",\"lifecycle\":\"open\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"created_at\":\"2026-01-02T03:04:05.123456789Z\",\"last_activity\":\"2026-01-02T03:04:06Z\",\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"12\",\"local_revision\":\"3\"}},\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"12\",\"local_revision\":\"3\"},\"configuration_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"generation\":\"7\"},\"warnings_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"revision\":\"4\"},\"operations\":[{\"operation_id\":\"op-1\",\"request_kind\":\"message\",\"status\":\"success\",\"admitted_at\":\"2026-01-02T03:04:05Z\",\"settled_at\":\"2026-01-02T03:04:09Z\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"model\":\"prov/m\",\"detail\":\"done\",\"usage\":{\"by_model\":[{\"model\":\"prov/m\",\"usage\":{\"input_tokens\":\"120\",\"cached_input_tokens\":\"12\",\"output_tokens\":\"34\"}}]}}],\"active_operation\":{\"operation_id\":\"op-1\",\"request_kind\":\"message\",\"status\":\"running\",\"admitted_at\":\"2026-01-02T03:04:05Z\",\"settled_at\":\"2026-01-02T03:04:09Z\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"model\":\"prov/m\",\"detail\":\"done\",\"usage\":{\"by_model\":[{\"model\":\"prov/m\",\"usage\":{\"input_tokens\":\"120\",\"cached_input_tokens\":\"12\",\"output_tokens\":\"34\"}}]}},\"pending\":{\"steering\":[{\"operation_id\":\"op-1\",\"origin\":\"user\",\"content\":[{\"kind\":\"text\",\"text\":\"hello\"}]}],\"queued\":[]},\"conversation\":{\"items\":[{\"item_id\":\"input-item\",\"kind\":\"input\",\"committed_at\":\"2026-01-02T03:04:05Z\",\"operation_id\":\"op-1\",\"origin\":\"user\",\"content\":[{\"kind\":\"text\",\"text\":\"hello\"}]},{\"item_id\":\"assistant-item\",\"kind\":\"assistant\",\"committed_at\":\"2026-01-02T03:04:07Z\",\"operation_id\":\"op-1\",\"status\":\"completed\",\"source\":\"prov/m\",\"content\":[{\"kind\":\"text\",\"text\":\"hello\"},{\"kind\":\"image_url\",\"url\":\"https://example.invalid/image.png\"},{\"kind\":\"opaque\",\"opaque_wire_type\":\"vendor/wire\"}],\"refusal\":\"declined\",\"tool_calls\":[{\"id\":\"call-1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"}\",\"normalized_arguments\":{\"n\":9007199254740993,\"big\":1e1000},\"status\":\"success\",\"content\":\"ok\",\"metadata\":{\"n\":9007199254740993,\"big\":1e1000,\"list\":[null,false,0],\"text\":\"x\"},\"extra\":{\"origin\":\"provider\"}}],\"extra\":{\"reasoning\":\"completed\"}},{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"background_completion\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"child\",\"id\":\"child-1\"}},{\"item_id\":\"compaction-item\",\"kind\":\"context_checkpoint\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-2\",\"strategy\":\"melta.summary/v1\",\"model\":\"prov/m\",\"messages\":[{\"role\":\"assistant\",\"source\":\"prov/m\",\"content\":[{\"kind\":\"text\",\"text\":\"condensed\"}]}]},{\"item_id\":\"end-item\",\"kind\":\"operation_end\",\"committed_at\":\"2026-01-02T03:04:09Z\",\"operation_id\":\"op-1\",\"status\":\"success\",\"detail\":\"done\"}],\"older_cursor\":\"eyJ2ZXJzaW9uIjoxfQ\"},\"usage\":{\"totals\":{\"by_model\":[{\"model\":\"prov/m\",\"usage\":{\"input_tokens\":\"120\",\"cached_input_tokens\":\"12\",\"output_tokens\":\"34\"}}]},\"context\":{\"used_tokens\":\"154\",\"context_window\":8192}},\"warnings\":[{\"source\":\"runtime:catalog\",\"kind\":\"unusable_model\",\"message\":\"no key\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"}],\"background\":[{\"kind\":\"child\",\"id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"}],\"selected_model\":\"prov/m\"}"
+     "json": "{\"session\":{\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"workspace\":\"/workspace\",\"lifecycle\":\"open\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"created_at\":\"2026-01-02T03:04:05.123456789Z\",\"last_activity\":\"2026-01-02T03:04:06Z\",\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"12\",\"local_revision\":\"3\"}},\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"12\",\"local_revision\":\"3\"},\"configuration_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"generation\":\"7\"},\"warnings_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"revision\":\"4\"},\"operations\":[{\"operation_id\":\"op-1\",\"request_kind\":\"message\",\"status\":\"success\",\"admitted_at\":\"2026-01-02T03:04:05Z\",\"settled_at\":\"2026-01-02T03:04:09Z\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"model\":\"prov/m\",\"detail\":\"done\",\"usage\":{\"by_model\":[{\"model\":\"prov/m\",\"usage\":{\"input_tokens\":\"120\",\"cached_input_tokens\":\"12\",\"output_tokens\":\"34\"}}]}}],\"active_operation\":{\"operation_id\":\"op-1\",\"request_kind\":\"message\",\"status\":\"running\",\"admitted_at\":\"2026-01-02T03:04:05Z\",\"settled_at\":\"2026-01-02T03:04:09Z\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"model\":\"prov/m\",\"detail\":\"done\",\"usage\":{\"by_model\":[{\"model\":\"prov/m\",\"usage\":{\"input_tokens\":\"120\",\"cached_input_tokens\":\"12\",\"output_tokens\":\"34\"}}]}},\"pending\":{\"steering\":[{\"operation_id\":\"op-1\",\"origin\":\"user\",\"content\":[{\"kind\":\"text\",\"text\":\"hello\"}]}],\"queued\":[]},\"conversation\":{\"items\":[{\"item_id\":\"input-item\",\"kind\":\"input\",\"committed_at\":\"2026-01-02T03:04:05Z\",\"operation_id\":\"op-1\",\"origin\":\"user\",\"content\":[{\"kind\":\"text\",\"text\":\"hello\"}]},{\"item_id\":\"assistant-item\",\"kind\":\"assistant\",\"committed_at\":\"2026-01-02T03:04:07Z\",\"operation_id\":\"op-1\",\"status\":\"completed\",\"source\":\"prov/m\",\"content\":[{\"kind\":\"text\",\"text\":\"hello\"},{\"kind\":\"image_url\",\"url\":\"https://example.invalid/image.png\"},{\"kind\":\"opaque\",\"opaque_wire_type\":\"vendor/wire\"}],\"refusal\":\"declined\",\"tool_calls\":[{\"id\":\"call-1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"}\",\"normalized_arguments\":{\"n\":9007199254740993,\"big\":1e1000},\"status\":\"success\",\"content\":\"ok\",\"metadata\":{\"n\":9007199254740993,\"big\":1e1000,\"list\":[null,false,0],\"text\":\"x\"},\"extra\":{\"origin\":\"provider\"}}],\"extra\":{\"reasoning\":\"completed\"}},{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"background_completion\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"session\",\"id\":\"child-1\"}},{\"item_id\":\"compaction-item\",\"kind\":\"context_checkpoint\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-2\",\"strategy\":\"melta.summary/v1\",\"model\":\"prov/m\",\"messages\":[{\"role\":\"assistant\",\"source\":\"prov/m\",\"content\":[{\"kind\":\"text\",\"text\":\"condensed\"}]}]},{\"item_id\":\"end-item\",\"kind\":\"operation_end\",\"committed_at\":\"2026-01-02T03:04:09Z\",\"operation_id\":\"op-1\",\"status\":\"success\",\"detail\":\"done\"}],\"older_cursor\":\"eyJ2ZXJzaW9uIjoxfQ\"},\"usage\":{\"totals\":{\"by_model\":[{\"model\":\"prov/m\",\"usage\":{\"input_tokens\":\"120\",\"cached_input_tokens\":\"12\",\"output_tokens\":\"34\"}}]},\"context\":{\"used_tokens\":\"154\",\"context_window\":8192}},\"warnings\":[{\"source\":\"runtime:catalog\",\"kind\":\"unusable_model\",\"message\":\"no key\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"}],\"background\":[{\"kind\":\"session\",\"id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"}],\"selected_model\":\"prov/m\"}"
     }
    ],
    "reject": [
@@ -1594,7 +1603,7 @@
     },
     {
      "name": "full",
-     "json": "{\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"workspace\":\"/workspace\",\"lifecycle\":\"open\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"created_at\":\"2026-01-02T03:04:05.123456789Z\",\"last_activity\":\"2026-01-02T03:04:06Z\",\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"12\",\"local_revision\":\"3\"},\"parent_session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"source_session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"current_operation_id\":\"op-1\",\"archived_at\":\"2026-01-02T04:00:00Z\"}"
+     "json": "{\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"workspace\":\"/workspace\",\"lifecycle\":\"open\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"created_at\":\"2026-01-02T03:04:05.123456789Z\",\"last_activity\":\"2026-01-02T03:04:06Z\",\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"12\",\"local_revision\":\"3\"},\"owner_session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"source_session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"current_operation_id\":\"op-1\",\"archived_at\":\"2026-01-02T04:00:00Z\"}"
     }
    ],
    "reject": [
@@ -1613,7 +1622,11 @@
     },
     {
      "name": "null-optional",
-     "json": "{\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"workspace\":\"/workspace\",\"lifecycle\":\"open\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"created_at\":\"2026-01-02T03:04:05.123456789Z\",\"last_activity\":\"2026-01-02T03:04:06Z\",\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"12\",\"local_revision\":\"3\"},\"parent_session_id\":null}"
+     "json": "{\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"workspace\":\"/workspace\",\"lifecycle\":\"open\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"solo\"}},\"created_at\":\"2026-01-02T03:04:05.123456789Z\",\"last_activity\":\"2026-01-02T03:04:06Z\",\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"12\",\"local_revision\":\"3\"},\"owner_session_id\":null}"
+    },
+    {
+     "name": "legacy-parent-spelling",
+     "json": "{\"session_id\":\"0123456789abcdef0123456789abcdef\",\"workspace\":\"fixture\",\"lifecycle\":\"open\",\"agent_selection\":{\"definition\":{\"extension_id\":\"agents\",\"capability_id\":\"agents.definitions\",\"definition_id\":\"fixture\"}},\"created_at\":\"2026-01-02T03:04:05Z\",\"last_activity\":\"2026-01-02T03:04:05Z\",\"session_revision\":{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"durable_revision\":\"1\",\"local_revision\":\"0\"},\"parent_session_id\":\"0123456789abcdef0123456789abcdef\"}"
     },
     {
      "name": "unknown-member",
@@ -1824,7 +1837,7 @@
     },
     {
      "name": "interruption",
-     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"interruption\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"child\",\"id\":\"child-1\"}}"
+     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"interruption\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"session\",\"id\":\"child-1\"}}"
     },
     {
      "name": "model-failure-continuation",
@@ -1834,11 +1847,11 @@
    "reject": [
     {
      "name": "unknown-subtype",
-     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"finished\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"child\",\"id\":\"child-1\"}}"
+     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"finished\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"session\",\"id\":\"child-1\"}}"
     },
     {
      "name": "missing-content",
-     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"background_completion\",\"content\":null,\"related_member\":{\"kind\":\"child\",\"id\":\"child-1\"}}"
+     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"background_completion\",\"content\":null,\"related_member\":{\"kind\":\"session\",\"id\":\"child-1\"}}"
     }
    ]
   },
@@ -2343,8 +2356,8 @@
   {
    "schema": "ExtensionCapability",
    "accept": [{"name":"minimal","json":"{\"capability_id\":\"fixture.service\",\"contract_id\":\"fixture.service/v1\",\"contract_version\":\"1\",\"kind\":\"service\",\"methods\":[{\"name\":\"echo\",\"mode\":\"service_io\",\"input\":\"{\\\"type\\\":\\\"object\\\"}\",\"success\":\"{\\\"type\\\":\\\"object\\\"}\"}]}"},
-    {"name":"hook","json":"{\"capability_id\":\"fixture.hook\",\"contract_id\":\"melta.hook/v1\",\"contract_version\":\"1\",\"kind\":\"hook\",\"methods\":[],\"hooks\":[{\"boundary\":\"prepare\",\"mode\":\"pure\"}]}"},
-    {"name":"strategy","json":"{\"capability_id\":\"fixture.strategy\",\"contract_id\":\"melta.context_strategy/v1\",\"contract_version\":\"1\",\"kind\":\"strategy\",\"methods\":[],\"strategy\":{\"requires_context_window\":true}}"}],
+    {"name":"hook","json":"{\"capability_id\":\"fixture.hook\",\"contract_id\":\"melta.hook\",\"contract_version\":\"2\",\"kind\":\"hook\",\"methods\":[],\"hooks\":[{\"boundary\":\"prepare\",\"mode\":\"pure\"}]}"},
+    {"name":"strategy","json":"{\"capability_id\":\"fixture.strategy\",\"contract_id\":\"melta.context_strategy\",\"contract_version\":\"2\",\"kind\":\"strategy\",\"methods\":[],\"strategy\":{\"requires_context_window\":true}}"}],
    "reject": [{"name":"wrong-kind","json":"{\"capability_id\":\"x\",\"contract_id\":\"x/v1\",\"contract_version\":\"1\",\"kind\":\"other\",\"methods\":[]}"}]
   },
   {

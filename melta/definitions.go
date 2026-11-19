@@ -22,7 +22,7 @@ type agentDefinition struct {
 }
 
 // projectDefinitions builds the immutable roster projection from every active
-// melta.agent_definitions/v1 provider in the captured composition. It runs
+// melta.agent_definitions provider in the captured composition. It runs
 // after resource preparation on every publication and mutation path; the
 // contract's schema validation and the shared semantic decoders own each
 // accepted value, and the owner stamps each full reference from the supplying

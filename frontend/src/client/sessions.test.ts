@@ -3,12 +3,12 @@
 // variable, zero-trimmed fractional second. The tests pin plain-vs-fraction,
 // .1-vs-.11, sub-millisecond and exact-tie ordering, plus the newest-root pick.
 import { describe, expect, it } from 'vitest';
-import { compareSessionActivity, normalizeInstant, sortOpenRoots } from './sessions';
+import { compareSessionActivity, normalizeInstant, sortSessions } from './sessions';
 
-type Session = { session_id: string; last_activity: string; parent_session_id?: string };
+type Session = { session_id: string; last_activity: string; owner_session_id?: string };
 
-function s(session_id: string, last_activity: string, parent_session_id?: string): Session {
-  return { session_id, last_activity, parent_session_id };
+function s(session_id: string, last_activity: string, owner_session_id?: string): Session {
+  return { session_id, last_activity, owner_session_id };
 }
 
 describe('normalizeInstant', () => {
@@ -57,15 +57,15 @@ describe('compareSessionActivity', () => {
   });
 });
 
-describe('sortOpenRoots', () => {
-  it('excludes child headers and picks the newest root first', () => {
-    const roots = sortOpenRoots([
+describe('sortSessions', () => {
+  it('includes owned Sessions and sorts by activity', () => {
+    const sessions = sortSessions([
       s('kid', '2026-10-05T00:00:00Z', 'parent'),
       s('old', '2026-10-01T10:00:00Z'),
       s('new', '2026-10-02T10:00:00.5Z'),
       s('whole', '2026-10-02T10:00:00Z'),
     ]);
-    // new (.5 of the 2nd) is the latest; whole is earlier the same second.
-    expect(roots.map((r) => r.session_id)).toEqual(['new', 'whole', 'old']);
+    // The owned Session is newest; new follows before whole.
+    expect(sessions.map((r) => r.session_id)).toEqual(['kid', 'new', 'whole', 'old']);
   });
 });

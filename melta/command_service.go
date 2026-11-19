@@ -10,7 +10,7 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
-// commandsHandler returns the fixed melta.commands/v1 host service method. The
+// commandsHandler returns the fixed melta.commands host service method. The
 // bound Session, target Workspace and request identity come only from the
 // host-issued CallContext; the arguments carry the method's ordinary generated
 // protocol value. Only a session_work call holds the command grant.

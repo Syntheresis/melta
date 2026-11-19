@@ -122,7 +122,7 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 			EntryID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa06", Sequence: 5, CommittedAt: convTime, Kind: harness.EntrySignal,
 			Signal: &harness.SignalEntry{
 				SessionID: convSessionID, EntryID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa06", Signal: harness.SignalBackgroundCompletion,
-				RelatedMember: &harness.RelatedMember{Kind: "child", ID: "dddddddddddddddddddddddddddddd07"},
+				RelatedMember: &harness.RelatedMember{Kind: "session", ID: "dddddddddddddddddddddddddddddd07"},
 				Content:       "the child finished",
 			},
 		},
@@ -199,7 +199,7 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 	testassert.Require(t, err == nil && interruption.Subtype == protocol.SignalItemSubtypeInterruption && interruption.Content == "Operation interrupted." && interruption.OperationId != nil, "interruption item = %+v err %v, want the typed interruption signal", interruption, err)
 	testassert.Require(t, interruption.ItemId == projectItemID(convSessionID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa05"), "interruption item_id = %q, want the fixture entry's namespace identity", interruption.ItemId)
 	completion, err := items[3].AsSignalItem()
-	testassert.Require(t, err == nil && completion.Subtype == protocol.SignalItemSubtypeBackgroundCompletion && completion.Content == "the child finished" && completion.OperationId == nil && completion.RelatedMember != nil && completion.RelatedMember.Kind == protocol.BackgroundMemberKindChild && completion.RelatedMember.Id == "dddddddddddddddddddddddddddddd07", "background completion item = %+v err %v, want the operationless typed signal with its member", completion, err)
+	testassert.Require(t, err == nil && completion.Subtype == protocol.SignalItemSubtypeBackgroundCompletion && completion.Content == "the child finished" && completion.OperationId == nil && completion.RelatedMember != nil && completion.RelatedMember.Kind == protocol.BackgroundMemberKindSession && completion.RelatedMember.Id == "dddddddddddddddddddddddddddddd07", "background completion item = %+v err %v, want the operationless typed signal with its member", completion, err)
 	testassert.Require(t, completion.ItemId == projectItemID(convSessionID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa06"), "completion item_id = %q, want the fixture entry's namespace identity", completion.ItemId)
 
 	// The compaction and terminal outcomes, each at its own entry's identity.
@@ -959,27 +959,19 @@ func TestConversationProjectionChildAndBackgroundCompletion(t *testing.T) {
 		})
 		child := launchChildThroughRuntime(t, bg.r, root, "child-op-1")
 		awaitOperation(t, bg.r, child, "child-op-1", harness.OperationSuccess)
+		eventually(t, "child ownership handoff", func() bool {
+			view, err := bg.r.harness.ReadSessionView(context.Background(), root)
+			return err == nil && len(view.Background) == 0
+		})
 
 		completionID := bg.startJob(child, "cc000003")
 		stopper.addDelivery(child, completionID, "job report")
 		testassert.NoError(t, bg.r.StopSession(context.Background(), testCaller(bg.r), child))
 
-		// The child's conversation: its own turn plus the typed completion
-		// signal naming the job member.
+		// After handoff, a direct group-only stop leaves the Session able to
+		// receive the job completion through ordinary runtime input.
 		childItems := projectSessionItems(t, bg.r, child)
-		var sawSignal bool
-		for _, item := range childItems {
-			if itemKind(t, item) != "signal" {
-				continue
-			}
-			signal, err := item.AsSignalItem()
-			testassert.NoError(t, err)
-			testassert.Require(t, signal.Subtype == protocol.SignalItemSubtypeBackgroundCompletion && signal.Content == "job report" && signal.RelatedMember != nil && signal.RelatedMember.Kind == protocol.BackgroundMemberKindJob && signal.RelatedMember.Id == "cc000003", "completion signal = %+v, want the job member's typed record", signal)
-			sawSignal = true
-		}
-		if !sawSignal {
-			t.Fatalf("child items = %s, want the background_completion signal item", itemKinds(t, childItems))
-		}
+		testassert.Require(t, hasRuntimeOriginInput(t, childItems, "job report"), "child items = %s, want the job report as runtime input", itemKinds(t, childItems))
 
 		// The parent's conversation gains the child's completion as a
 		// runtime-origin input under the completion identity; the delivery

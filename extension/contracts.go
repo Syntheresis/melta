@@ -32,7 +32,7 @@ const fixedDefs = `
 "permission":{"type":"object","required":["permission","target"],"properties":{"permission":{"type":"string","minLength":1},"target":{"type":"string","minLength":1}},"additionalProperties":false},
 "toolPlan":{"type":"object","required":["permissions"],"properties":{"permissions":{"type":"array","items":{"$ref":"#/$defs/permission"}},"canonical_workspace":{"type":"string"},"canonical_write_dir":{"type":"string"},"immediate":{"$ref":"#/$defs/toolOutcome"},"data":{"$ref":"#/$defs/jsonBytes"}},"additionalProperties":false},
 "entryRef":{"type":"object","required":["session_id","entry_id"],"properties":{"session_id":{"type":"string","minLength":1},"entry_id":{"type":"string","minLength":1}},"additionalProperties":false},
-"sessionIdentity":{"type":"object","required":["session_id","workspace"],"properties":{"session_id":{"type":"string","minLength":1},"workspace":{"type":"string"},"created_at":{"type":"string"},"source_session_id":{"type":"string"},"source_boundary_entry_id":{"type":"string"},"parent_session_id":{"type":"string"}},"additionalProperties":false},
+"sessionIdentity":{"type":"object","required":["session_id","workspace"],"properties":{"session_id":{"type":"string","minLength":1},"workspace":{"type":"string"},"created_at":{"type":"string"},"source_session_id":{"type":"string"},"source_boundary_entry_id":{"type":"string"},"owner_session_id":{"type":"string"}},"additionalProperties":false},
 "constraints":{"type":"object","required":["readonly","write_dir"],"properties":{"readonly":{"type":"boolean"},"write_dir":{"type":"string"}},"additionalProperties":false},
 "definitionRef":{"type":"object","required":["extension_id","capability_id","definition_id"],"properties":{"extension_id":{"type":"string","minLength":1},"capability_id":{"type":"string","minLength":1},"definition_id":{"type":"string","minLength":1}},"additionalProperties":false},
 "callerIdentity":{"type":"object","required":["extension_id","component_id","instance_id"],"properties":{"extension_id":{"type":"string","minLength":1},"component_id":{"type":"string","minLength":1},"instance_id":{"type":"string","minLength":1}},"additionalProperties":false},
@@ -76,7 +76,7 @@ func method(name string, mode Mode, input, success, failure, partial string) Met
 	return out
 }
 
-// toolMethods is the fixed melta.tool/v1 method set shared by native and
+// toolMethods is the fixed melta.tool contract method set shared by native and
 // worker implementations.
 func toolMethods() []Method {
 	return []Method{
@@ -138,13 +138,13 @@ func strategyMethods() []Method {
 	}
 }
 
-// ToolCapability constructs the fixed melta.tool/v1 capability with the one
+// ToolCapability constructs the fixed melta.tool capability with the one
 // model-visible tool identity.
 func ToolCapability(id string) Capability {
 	return Capability{ID: id, ContractID: ContractTool, ContractVersion: ContractVersion, Kind: KindTool, Methods: toolMethods()}
 }
 
-// HookCapability constructs the fixed melta.hook/v1 capability for one or more
+// HookCapability constructs the fixed melta.hook capability for one or more
 // declared boundaries. At most one hook per boundary is allowed; prepare and
 // after_tool must use HookModePure.
 func HookCapability(id string, hooks ...Hook) Capability {
@@ -156,7 +156,7 @@ func SingleHook(boundary HookBoundary, mode HookMode) Hook {
 	return Hook{Boundary: boundary, Mode: mode}
 }
 
-// StrategyCapability constructs the fixed melta.context_strategy/v1 capability
+// StrategyCapability constructs the fixed melta.context_strategy capability
 // with its pre-admission metadata.
 func StrategyCapability(id string, requiresContextWindow bool) Capability {
 	return Capability{ID: id, ContractID: ContractContextStrategy, ContractVersion: ContractVersion, Kind: KindStrategy, Methods: strategyMethods(), Strategy: &StrategyDecl{RequiresContextWindow: requiresContextWindow}}
@@ -182,7 +182,7 @@ func ServiceIOMethod(name, input, success string) Method {
 	return method(name, ModeServiceIO, input, success, "", "")
 }
 
-// cleanupMethods is the fixed melta.session_cleanup/v1 method set: one
+// cleanupMethods is the fixed melta.session_cleanup method set: one
 // idempotent service call over the deleted Session identity.
 func cleanupMethods() []Method {
 	return []Method{method("cleanup", ModeServiceIO,
@@ -190,13 +190,13 @@ func cleanupMethods() []Method {
 		`{"type":"null"}`, "", "")}
 }
 
-// CleanupCapability constructs the fixed melta.session_cleanup/v1 capability.
+// CleanupCapability constructs the fixed melta.session_cleanup capability.
 // It is the one cleanup declaration a claiming extension supplies.
 func CleanupCapability(id string) Capability {
 	return Capability{ID: id, ContractID: ContractSessionCleanup, ContractVersion: ContractVersion, Kind: KindService, Methods: cleanupMethods()}
 }
 
-// hostDataDefinition is the fixed melta.data/v1 host service: the extension's
+// hostDataDefinition is the fixed melta.data host service: the extension's
 // own Session and cache namespaces plus the durable external-data claim.
 func hostDataDefinition() CapabilityDefinition {
 	return CapabilityDefinition{
@@ -214,7 +214,7 @@ func hostDataDefinition() CapabilityDefinition {
 	}
 }
 
-// hostPromptDefinition is the fixed melta.prompt/v1 host service: one pure
+// hostPromptDefinition is the fixed melta.prompt host service: one pure
 // assembler over captured values.
 func hostPromptDefinition() CapabilityDefinition {
 	return CapabilityDefinition{
@@ -227,7 +227,7 @@ func hostPromptDefinition() CapabilityDefinition {
 	}
 }
 
-// hostCredentialsDefinition is the fixed melta.credentials/v1 host service:
+// hostCredentialsDefinition is the fixed melta.credentials host service:
 // one declared credential value addressed by its declared section field.
 func hostCredentialsDefinition() CapabilityDefinition {
 	return CapabilityDefinition{
@@ -240,7 +240,7 @@ func hostCredentialsDefinition() CapabilityDefinition {
 	}
 }
 
-// hostChildLaunchDefinition is the fixed melta.child_launch/v1 host service:
+// hostChildLaunchDefinition is the fixed melta.child_launch host service:
 // data-only child launch whose parent and permission pairs come from the
 // host-issued CallContext, never from arguments.
 func hostChildLaunchDefinition() CapabilityDefinition {
@@ -250,11 +250,12 @@ func hostChildLaunchDefinition() CapabilityDefinition {
 		Kind:            KindService,
 		Methods: []Method{method("launch", ModeServiceIO,
 			string(defsSchema(`{"type":"object","required":["definition","prompt","operation_id","max_concurrent","output_limit"],"properties":{"definition":{"$ref":"#/$defs/definitionRef"},"prompt":{"type":"string"},"operation_id":{"type":"string","minLength":1},"max_concurrent":{"type":"integer","minimum":1},"output_limit":{"type":"integer","minimum":1}},"additionalProperties":false}`)),
-			`{"type":"object","required":["child_session_id"],"properties":{"child_session_id":{"type":"string","minLength":1}},"additionalProperties":false}`, "", "")},
+			`{"type":"object","required":["child_session_id"],"properties":{"child_session_id":{"type":"string","minLength":1}},"additionalProperties":false}`, "",
+			`{"type":"object","required":["child_session_id"],"properties":{"child_session_id":{"type":"string","minLength":1}},"additionalProperties":false}`)},
 	}
 }
 
-// hostCommandsDefinition is the fixed melta.commands/v1 host service: one
+// hostCommandsDefinition is the fixed melta.commands host service: one
 // method per ordinary command producer. Request and result schemas remain
 // object-shaped because the accepting handler decodes and validates the exact
 // generated protocol value itself; controls take one closed empty object and

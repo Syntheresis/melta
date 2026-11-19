@@ -80,7 +80,7 @@ func (c *CLI) childrenMenu(s stamp) {
 			return
 		}
 		for _, child := range list {
-			if child.ParentSessionId != nil && *child.ParentSessionId == s.root {
+			if child.OwnerSessionId != nil && *child.OwnerSessionId == s.root {
 				children = append(children, child)
 			}
 		}
@@ -98,7 +98,7 @@ func (c *CLI) childrenMenu(s stamp) {
 	}
 	if c.root != nil && c.root.hydration != nil {
 		for _, member := range c.root.hydration.Background {
-			if member.Kind == protocol.BackgroundMemberKindChild && !seen[member.Id] {
+			if member.Kind == protocol.BackgroundMemberKindSession && !seen[member.Id] {
 				items = append(items, terminal.MenuItem{Label: member.Id, Detail: "live child — inspect only", Selectable: true, Extra: member.Id})
 			}
 			if member.Kind == protocol.BackgroundMemberKindJob {

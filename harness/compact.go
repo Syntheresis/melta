@@ -969,7 +969,7 @@ func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanIn
 	// The maintenance completion guard: one hold with the publication, before
 	// the transaction, under the shared success predicate. A foreign marker
 	// and a root stop's stopping state never veto the prospective success.
-	interrupted := execCtx.Err() != nil || c.interruptOp == operationID || c.bgState == bgClosed
+	interrupted := execCtx.Err() != nil || c.interruptOp == operationID || memberStopping(c)
 	// The active execution's accumulated uncommitted facts — incurred by
 	// earlier procedures that settled at none — merge once, in incurred order
 	// in front of this procedure's own facts, into the carrier this checkpoint

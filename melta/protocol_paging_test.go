@@ -817,7 +817,7 @@ func TestHydrationRootChildCoherence(t *testing.T) {
 		awaitOperation(t, bg.r, child, "child-op-1", harness.OperationSuccess)
 		awaitIdleSession(t, bg.r, child)
 		stopper.addDelivery(child, completionID, "job report")
-		testassert.NoError(t, bg.r.StopSession(context.Background(), testCaller(bg.r), child))
+		testassert.NoError(t, bg.r.StopSession(context.Background(), testCaller(bg.r), root))
 		deadline := time.Now().Add(10 * time.Second)
 		for {
 			rootHydration, err = bg.r.GetHydration(context.Background(), testCaller(bg.r), root)

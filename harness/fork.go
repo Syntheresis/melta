@@ -120,7 +120,7 @@ func (h *Harness) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	// The committed destination installs as a stable cell with its committed
 	// graph and a call-owned pin; the destination execution retains its own
 	// use, so the destination graph stays live across the call's release.
-	dest := &coordinator{sessionID: destID, graph: &sessionGraph{Session: commit.session, Operations: []OperationRecord{commit.operation}, Entries: commit.entries}, bgState: bgOpen}
+	dest := &coordinator{sessionID: destID, graph: &sessionGraph{Session: commit.session, Operations: []OperationRecord{commit.operation}, Entries: commit.entries}}
 	dest.identity = commit.session.Identity
 	dest.everLoaded = true
 	dest.uses = 1

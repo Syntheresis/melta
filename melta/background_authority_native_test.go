@@ -102,7 +102,7 @@ func bridgeChildCount(t *testing.T, r *Melta, store harness.Storage) int {
 	children := 0
 	for _, id := range ids {
 		header, err := r.harness.ReadSessionHeader(context.Background(), id)
-		if err == nil && header.Identity.ParentSessionID != "" {
+		if err == nil && header.Identity.OwnerSessionID != "" {
 			children++
 		}
 	}
@@ -211,7 +211,7 @@ func TestNativeChildBridgeRetainsCommittedChildren(t *testing.T) {
 				testassert.Require(t, len(probe.childID) == 32, "child id = %q, want the committed child identity (launch error %v)", probe.childID, probe.launchErr)
 				childHeader, err := r.harness.ReadSessionHeader(context.Background(), probe.childID)
 				testassert.NoError(t, err)
-				testassert.Equal(t, childHeader.Identity.ParentSessionID, session.Identity.SessionID)
+				testassert.Equal(t, childHeader.Identity.OwnerSessionID, session.Identity.SessionID)
 				childOp, err := r.harness.ReadOperation(context.Background(), probe.childID, "probe-child-op")
 				testassert.NoError(t, err)
 				testassert.Equal(t, childOp.State.Status, harness.OperationRunning)
@@ -238,7 +238,7 @@ func TestNativeChildBridgeRetainsCommittedChildren(t *testing.T) {
 				testassert.Equal(t, bridgeChildCount(t, r, store), 1)
 				childHeader, err = r.harness.ReadSessionHeader(context.Background(), probe.childID)
 				testassert.NoError(t, err)
-				testassert.Equal(t, childHeader.Identity.ParentSessionID, session.Identity.SessionID)
+				testassert.Equal(t, childHeader.Identity.OwnerSessionID, session.Identity.SessionID)
 			})
 		})
 	}

@@ -1018,8 +1018,8 @@ func TestPublicSnapshotJobMemberRevisions(t *testing.T) {
 	})
 }
 
-// TestPublicSnapshotChildStopRevisions proves the child-closure rows: the
-// permanent closure and its buffer discard are one publication, the canceled
+// TestPublicSnapshotChildStopRevisions proves the owner-stop rows: the
+// member gate and its buffer discard are one publication, the canceled
 // run's retirement and drain follow, a delivered completion steers into the
 // active parent, and a repeated stop is a no-op publication.
 func TestPublicSnapshotChildStopRevisions(t *testing.T) {
@@ -1055,7 +1055,7 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 		<-arrived // the child's Operation is parked at its boundary
 		parent, err := h.ReadSessionView(ctx, root)
 		testassert.NoError(t, err)
-		testassert.Require(t, len(parent.Background) == 1 && parent.Background[0] == (harness.BackgroundMemberView{Kind: "child", ID: res.ChildSessionID}) && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+1, "parent background = %+v; got %v, want %v", parent.Background, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+1)
+		testassert.Require(t, len(parent.Background) == 1 && parent.Background[0] == (harness.BackgroundMemberView{Kind: "session", ID: res.ChildSessionID}) && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+1, "parent background = %+v; got %v, want %v", parent.Background, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+1)
 		child, err := h.ReadSessionView(ctx, res.ChildSessionID)
 		testassert.NoError(t, err)
 		testassert.Require(t, child.History.ExecutionBusy && child.History.Revision.LocalRevision == 1 && len(child.Operations) == 1 && child.Operations[0].OperationID == "child-op-1", "child read = busy %v rev %d ops %+v", child.History.ExecutionBusy, child.History.Revision.LocalRevision, child.Operations)
@@ -1070,13 +1070,13 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 		testassert.Require(t, err == nil && len(buffered.Steering) == 1 && buffered.History.Revision.LocalRevision == child.History.Revision.LocalRevision+3, "child buffered read = %+v err %v", buffered, err)
 
 		{
-			err := h.Stop(ctx, res.ChildSessionID)
+			err := h.Stop(ctx, root)
 			testassert.NoError(t, err)
 		}
 		closed, err := h.ReadSessionView(ctx, res.ChildSessionID)
 		testassert.NoError(t, err)
-		// the closure publication plus the canceled run's retirement drain
-		testassert.Require(t, len(closed.Steering) == 0 && !closed.History.ExecutionBusy && closed.History.Revision.LocalRevision == buffered.History.Revision.LocalRevision+4, "closed child = steering %d busy %v; got %v, want %v", len(closed.Steering), closed.History.ExecutionBusy, closed.History.Revision.LocalRevision, buffered.History.Revision.LocalRevision+4)
+		// The stop and reopen publications surround the canceled run's retirement.
+		testassert.Require(t, len(closed.Steering) == 0 && !closed.History.ExecutionBusy && closed.History.Revision.LocalRevision == buffered.History.Revision.LocalRevision+5, "stopped child = steering %d busy %v; got %v, want %v", len(closed.Steering), closed.History.ExecutionBusy, closed.History.Revision.LocalRevision, buffered.History.Revision.LocalRevision+5)
 		closedFacts := closed.History.HistoryFacts(historyIDsOf(closed.History.HistoryHeaders()))
 		testassert.Require(t, len(closedFacts) == 3 && closedFacts[0].Kind == harness.EntryInput && closedFacts[1].Kind == harness.EntrySignal && closedFacts[2].Kind == harness.EntryOperationSettlement && closedFacts[2].Settlement.Status == harness.OperationInterruption, "closed child facts = %+v", closedFacts)
 		// the repeat stop is a no-op
@@ -1091,8 +1091,8 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 		// the parent's member.
 		parent, err = h.ReadSessionView(ctx, root)
 		testassert.NoError(t, err)
-		// admit, enqueue, finish
-		testassert.Require(t, len(parent.Background) == 0 && (len(parent.Steering) == 1 && parent.Steering[0].Origin == harness.InputOriginRuntime && parent.Steering[0].Content[0].Text == "Task interrupted.") && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+3, "parent background after the finish = %+v; parent steering after the delivery = %+v; got %v, want %v", parent.Background, parent.Steering, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+3)
+		// admit, stop, enqueue, finish, reopen
+		testassert.Require(t, len(parent.Background) == 0 && (len(parent.Steering) == 1 && parent.Steering[0].Origin == harness.InputOriginRuntime && parent.Steering[0].Content[0].Text == "Task interrupted.") && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+5, "parent background after the finish = %+v; parent steering after the delivery = %+v; got %v, want %v", parent.Background, parent.Steering, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+5)
 
 		f.cancel()
 		go close(parentGate)

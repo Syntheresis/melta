@@ -2378,7 +2378,7 @@ func TestGraphValidatorBackgroundCompletionOwnership(t *testing.T) {
 
 	t.Run("child with operationless completion validates", func(t *testing.T) {
 		fixture := &testGraph{session: validSessionRecord()}
-		fixture.session.Identity.ParentSessionID = otherSession()
+		fixture.session.Identity.OwnerSessionID = otherSession()
 		fixture.entries = []testEntry{completion(hexID(9), 1)}
 		{
 			_, err := validateFixture(t, fixture.storage(t), testSessionID)
@@ -2399,7 +2399,7 @@ func TestGraphValidatorBackgroundCompletionOwnership(t *testing.T) {
 
 	t.Run("operationless fixed-kind signal on a child corrupts", func(t *testing.T) {
 		fixture := &testGraph{session: validSessionRecord()}
-		fixture.session.Identity.ParentSessionID = otherSession()
+		fixture.session.Identity.OwnerSessionID = otherSession()
 		copied := validSignalEntry("")
 		copied.EntryID = hexID(9)
 		fixture.entries = []testEntry{

@@ -24,7 +24,7 @@ func TestLaunchChildCommitPointOwnsAdmittedChild(t *testing.T) {
 	}{
 		{name: "caller canceled before commit", cancelBefore: true, wantErr: true},
 		{name: "caller canceled after commit", wantChild: true, wantStatus: harness.OperationFailure},
-		{name: "caller and harness canceled after commit", cancelHarness: true, wantErr: true, wantChild: true, wantStatus: harness.OperationInterruption},
+		{name: "caller and harness canceled after commit", cancelHarness: true, wantChild: true, wantStatus: harness.OperationInterruption},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -53,7 +53,7 @@ func TestLaunchChildCommitPointOwnsAdmittedChild(t *testing.T) {
 			}
 			res, lerr := f.h.LaunchChildSession(launchCtx, harness.LaunchChildRequest{ParentSessionID: session.Identity.SessionID, AgentSelection: publicSelection("child-agent"), Content: []model.ContentPart{{Kind: model.PartText, Text: "child task"}}, OperationID: "child-op", ExtensionID: "test.extension", MaxConcurrent: 4, OutputLimit: 4096})
 			testassert.Equal(t, lerr != nil, row.wantErr)
-			testassert.Equal(t, res.ChildSessionID != "", row.wantChild && !row.wantErr)
+			testassert.Equal(t, res.ChildSessionID != "", row.wantChild)
 			ids, err := inner.ListSessionIDs(ctx)
 			testassert.NoError(t, err)
 			child := ""
@@ -66,6 +66,7 @@ func TestLaunchChildCommitPointOwnsAdmittedChild(t *testing.T) {
 			if !row.wantChild {
 				return
 			}
+			testassert.Equal(t, res.ChildSessionID, child)
 			deadline := time.Now().Add(5 * time.Second)
 			for {
 				op, err := f.h.ReadOperation(ctx, child, "child-op")

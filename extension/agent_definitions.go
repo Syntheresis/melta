@@ -24,7 +24,7 @@ type AgentDefinitionResolution struct {
 	Subagent    bool                `json:"subagent"`
 }
 
-// agentDefinitionMethods is the fixed melta.agent_definitions/v1 service
+// agentDefinitionMethods is the fixed melta.agent_definitions service
 // method set: one pure listing and one pure resolution. A read-only resolver
 // supplies exactly these methods and no configuration edit.
 func agentDefinitionMethods() []Method {
@@ -38,7 +38,7 @@ func agentDefinitionMethods() []Method {
 	}
 }
 
-// AgentDefinitionsCapability constructs the fixed melta.agent_definitions/v1
+// AgentDefinitionsCapability constructs the fixed melta.agent_definitions
 // named-service capability under one concrete capability ID.
 func AgentDefinitionsCapability(id string) Capability {
 	return Capability{

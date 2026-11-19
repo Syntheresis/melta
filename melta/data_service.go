@@ -1,6 +1,6 @@
 package melta
 
-// This file owns the fixed melta.data/v1 host service: the host-assigned
+// This file owns the fixed melta.data host service: the host-assigned
 // Session and cache directories for one open extension callback, and the
 // durable external-data claim. Session access runs under the enclosing
 // callback tree's Session artifact lease; cache access belongs only to the
@@ -37,7 +37,7 @@ func extensionCacheDir(dataDir, extensionID string) string {
 	return filepath.Join(dataDir, "extensions", extensionDataHash(extensionID), "cache")
 }
 
-// dataHandler resolves one fixed melta.data/v1 method to its handler.
+// dataHandler resolves one fixed melta.data method to its handler.
 func (c *composition) dataHandler(method string) (extension.Handler, bool) {
 	switch method {
 	case "session_namespace":

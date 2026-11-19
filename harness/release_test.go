@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -342,7 +341,7 @@ func TestPreparationReservationReleasesOnDiscards(t *testing.T) {
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
 		{
-			_, err := admitLocked(h, c, memberChild, "existing-child", 0)
+			_, err := admitLocked(h, c, memberSession, "existing-child", 0)
 			testassert.NoError(t, err)
 		}
 		req := launchRequest()
@@ -402,13 +401,14 @@ func TestPreparationReservationReleasesOnDiscards(t *testing.T) {
 		c := leaseCoordinator(t, h, testSessionID)
 		store.txHook = func(string) error { // the group closes between the launch commit and the handoff
 			c.mu.Lock()
-			c.bgState = bgStopping
+			c.stop = &stopInterval{done: make(chan struct{})}
 			c.mu.Unlock()
 			return nil
 		}
-		_, err := h.LaunchChildSession(context.Background(), launchRequest())
+		result, err := h.LaunchChildSession(context.Background(), launchRequest())
 		store.txHook = nil
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "closed or stopping"), "rejected handoff launch = %v, want the closed-or-stopping rejection", err)
+		testassert.NoError(t, err)
+		testassert.Require(t, result.ChildSessionID != "", "committed launch did not return its session ID")
 		testassert.Equal(t, counters.releases.Load(), int64(1))
 		testassert.Equal(t, opens, 0) // no adoption: the rejected launch never starts the child execution
 	})

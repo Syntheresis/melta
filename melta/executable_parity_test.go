@@ -13,15 +13,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
 	workerfixture "github.com/Syntheresis/melta/extension/worker/testdata/fixture/native"
+	"github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
@@ -723,6 +726,142 @@ func TestExecutableParityChildLaunchThroughAdmission(t *testing.T) {
 		testassert.Equal(t, countEvent(events, "child:"), 1)
 		return observation
 	})
+}
+
+type failChildReadStore struct {
+	harness.Storage
+	mu    sync.Mutex
+	root  string
+	child string
+	fail  bool
+}
+
+type observeChildTransaction struct {
+	harness.Transaction
+	root  string
+	child string
+}
+
+func (tx *observeChildTransaction) InsertRegister(d harness.RegisterDraft) (harness.Register, error) {
+	reg, err := tx.Transaction.InsertRegister(d)
+	if err == nil && d.Key.Kind == harness.RegisterSession && d.Key.SessionID != tx.root {
+		tx.child = d.Key.SessionID
+	}
+	return reg, err
+}
+
+func (s *failChildReadStore) Transact(ctx context.Context, fn func(harness.Transaction) error) error {
+	s.mu.Lock()
+	root := s.root
+	s.mu.Unlock()
+	tx := &observeChildTransaction{root: root}
+	err := s.Storage.Transact(ctx, func(inner harness.Transaction) error {
+		tx.Transaction = inner
+		return fn(tx)
+	})
+	if err == nil && root != "" && tx.child != "" {
+		s.mu.Lock()
+		s.child, s.fail = tx.child, true
+		s.mu.Unlock()
+	}
+	return err
+}
+
+func (s *failChildReadStore) ReadRegisters(ctx context.Context, id string) ([]harness.Register, error) {
+	s.mu.Lock()
+	fail := s.fail && s.child == id
+	if fail {
+		s.fail = false
+	}
+	s.mu.Unlock()
+	if fail {
+		return nil, fmt.Errorf("%w: injected child materialization failure", harness.ErrStorage)
+	}
+	return s.Storage.ReadRegisters(ctx, id)
+}
+
+// The shipped Agents tool reports the committed Session on both transports.
+func TestExecutableParityTaskCommittedLaunchFailure(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agents-worker")
+	command := exec.Command("go", "build", "-o", binary, "./testdata/agentsprobe")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("building Agents worker: %v\n%s", err, output)
+	}
+	for _, worker := range []bool{false, true} {
+		name := "native"
+		if worker {
+			name = "worker"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := &failChildReadStore{Storage: storage.NewMemory()}
+			e := newProductionEnv(t, store)
+			writeAgentDefinitions(t, e.configPath, `{"parent":{"model":"prov/m","system_prompt":"simple","tools":["task"]},"child_agent":{"model":"prov/m","system_prompt":"simple","subagent":true,"tools":[]}}`)
+			e.server.setScript(parityScript([]parityStep{{name: "task", arguments: `{"prompt":"child task","subagent_type":"child_agent"}`}}))
+			ctx := context.Background()
+			native := agents.Native(agents.Options{CapabilityIDs: agents.StandardTools, ToolIDs: agents.StandardTools})
+			var r *Melta
+			var err error
+			if worker {
+				installExecutablePackage(t, e.dataDir, executableExtension{Declaration: native.Declaration, EntryPoint: binary})
+				useFixtureStore(t, store)
+				r, err = open(ctx, options{
+					DataDir: e.dataDir, Configuration: NewFileConfigurationSource(e.configPath),
+					Credentials: NewEnvironmentCredentialSource(filepath.Join(e.home, ".melta", ".env")),
+					Locations:   e.locations(),
+				})
+			} else {
+				r, err = e.openPlugins(ctx, native)
+			}
+			testassert.NoError(t, err)
+			defer func() {
+				testassert.Require(t, errors.Is(r.Close(ctx), harness.ErrStorage), "Close must retain the storage failure")
+			}()
+			parent, err := r.createSession(ctx, e.workspace("task-failure"), "parent")
+			testassert.NoError(t, err)
+			store.mu.Lock()
+			store.root = parent.Identity.SessionID
+			store.mu.Unlock()
+			submitThroughRuntime(t, r, parent.Identity.SessionID, "op-parent", "parent")
+			awaitOperation(t, r, parent.Identity.SessionID, "op-parent", harness.OperationSuccess)
+
+			ids, err := store.ListSessionIDs(ctx)
+			testassert.NoError(t, err)
+			testassert.Require(t, len(ids) == 2 && slices.Contains(ids, parent.Identity.SessionID), "committed Session IDs = %v", ids)
+			childID := ids[0]
+			if childID == parent.Identity.SessionID {
+				childID = ids[1]
+			}
+			registers, err := store.ReadRegisters(ctx, childID)
+			testassert.NoError(t, err)
+			testassert.Equal(t, len(registers), 2)
+			testassert.Equal(t, registers[1].Key.Kind, harness.RegisterOperation)
+			childOperation, err := r.harness.ReadOperation(ctx, childID, registers[1].Key.OperationID)
+			testassert.NoError(t, err)
+			testassert.Equal(t, childOperation.State.Status, harness.OperationRunning)
+			view, err := r.harness.ReadSessionView(ctx, parent.Identity.SessionID)
+			testassert.NoError(t, err)
+			testassert.Equal(t, len(view.Background), 0)
+			var entryIDs []string
+			for _, header := range view.History.HistoryHeaders() {
+				entryIDs = append(entryIDs, header.EntryID)
+			}
+			taskFailure := false
+			for _, fact := range view.History.HistoryFacts(entryIDs) {
+				if fact.ToolResult != nil && fact.ToolResult.ToolCallID == "parity-call-0" {
+					taskFailure = fact.ToolResult.Status == model.ResultError && strings.Contains(fact.ToolResult.Content, childID)
+				}
+			}
+			testassert.Require(t, taskFailure, "the shipped task did not persist an error naming the Session")
+			found := false
+			for i := 0; i < e.server.requests(); i++ {
+				body := e.server.bodyAt(i)
+				if strings.Contains(body, "Session ID: "+childID) && strings.Contains(body, "injected child materialization failure") {
+					found = true
+				}
+			}
+			testassert.Require(t, found, "the shipped task did not report the failure with its committed Session ID")
+		})
+	}
 }
 
 // TestExecutableParityCooperativeCancellation proves an admitted execution

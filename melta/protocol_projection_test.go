@@ -270,7 +270,7 @@ func TestProjectionSessionHeaderRootForkChild(t *testing.T) {
 		rootHeader := projectSession(headerThroughRuntime(t, r, root.Identity.SessionID), r.instance)
 		assertStableHeader(t, rootHeader, headerThroughRuntime(t, r, root.Identity.SessionID),
 			root.Identity.SessionID, workspace, "solo", "", r.instance)
-		testassert.Require(t, rootHeader.ParentSessionId == nil && rootHeader.SourceSessionId == nil, "root lineage pointers = (%v, %v), want none", rootHeader.ParentSessionId, rootHeader.SourceSessionId)
+		testassert.Require(t, rootHeader.OwnerSessionId == nil && rootHeader.SourceSessionId == nil, "root lineage pointers = (%v, %v), want none", rootHeader.OwnerSessionId, rootHeader.SourceSessionId)
 
 		// One settled admission gives the fork its committed input boundary;
 		// its terminal cleanup proves the settled idle source Fork requires.
@@ -290,14 +290,14 @@ func TestProjectionSessionHeaderRootForkChild(t *testing.T) {
 		forkHeader := projectSession(headerThroughRuntime(t, r, forked), r.instance)
 		assertStableHeader(t, forkHeader, headerThroughRuntime(t, r, forked),
 			forked, workspace, "solo", "fork-op-1", r.instance)
-		testassert.Require(t, forkHeader.SourceSessionId != nil && *forkHeader.SourceSessionId == root.Identity.SessionID && forkHeader.ParentSessionId == nil, "fork source = %v, want %s; fork parent pointer = %v, want none", forkHeader.SourceSessionId, root.Identity.SessionID, forkHeader.ParentSessionId)
+		testassert.Require(t, forkHeader.SourceSessionId != nil && *forkHeader.SourceSessionId == root.Identity.SessionID && forkHeader.OwnerSessionId == nil, "fork source = %v, want %s; fork parent pointer = %v, want none", forkHeader.SourceSessionId, root.Identity.SessionID, forkHeader.OwnerSessionId)
 
 		child := launchChildThroughRuntime(t, r, root.Identity.SessionID, "child-op-1")
 		awaitModelArrival(t, e)
 		childHeader := projectSession(headerThroughRuntime(t, r, child), r.instance)
 		assertStableHeader(t, childHeader, headerThroughRuntime(t, r, child),
 			child, workspace, "worker", "child-op-1", r.instance)
-		testassert.Require(t, childHeader.ParentSessionId != nil && *childHeader.ParentSessionId == root.Identity.SessionID && childHeader.SourceSessionId == nil, "child parent = %v, want %s; child source pointer = %v, want none", childHeader.ParentSessionId, root.Identity.SessionID, childHeader.SourceSessionId)
+		testassert.Require(t, childHeader.OwnerSessionId != nil && *childHeader.OwnerSessionId == root.Identity.SessionID && childHeader.SourceSessionId == nil, "child parent = %v, want %s; child source pointer = %v, want none", childHeader.OwnerSessionId, root.Identity.SessionID, childHeader.SourceSessionId)
 
 		release()
 		awaitOperation(t, r, forked, "fork-op-1", harness.OperationSuccess)

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,12 +46,16 @@ func parkedModel(release chan struct{}) func(context.Context, model.Request) (mo
 // stop that issued it has returned.
 type gatedJobStopper struct {
 	gate    chan struct{}
+	arrived chan struct{}
 	stopped []string
 	deliver func(sessionID, jobID string)
 }
 
 func (s *gatedJobStopper) StopJob(sessionID, jobID string) {
 	s.stopped = append(s.stopped, sessionID+"/"+jobID)
+	if s.arrived != nil {
+		close(s.arrived)
+	}
 	if s.gate != nil {
 		<-s.gate
 	}
@@ -143,6 +148,26 @@ func awaitStopInterval(t *testing.T, c *coordinator, done <-chan error) {
 	}
 }
 
+func awaitMemberStop(t *testing.T, c *coordinator, done <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("Stop returned before member convergence: %v", err)
+		default:
+		}
+		c.mu.Lock()
+		stopping := c.memberStop != nil
+		c.mu.Unlock()
+		if stopping {
+			return
+		}
+		testassert.Require(t, !time.Now().After(deadline), "member stop never began")
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // stopResult joins one Stop call with a generous timeout.
 func stopResult(t *testing.T, done <-chan error) error {
 	t.Helper()
@@ -197,7 +222,7 @@ func stopJoinerStack(stack, testName string) bool {
 	if !strings.Contains(lines[1], "(*Harness).stopCoordinator") { // the top application frame
 		return false
 	}
-	return strings.Contains(stack, testName) // this test's wrapper, not another Stop stack
+	return strings.Contains(stack, strings.Split(testName, "/")[0]) // this test's wrapper, not another Stop stack
 }
 
 // waitStopCallers bounds the cleanup join of every started Stop caller: the
@@ -326,7 +351,7 @@ func newStopTree(t *testing.T) *stopTree {
 	rootC := cachedCoordinator(t, h, root)
 	rootC.mu.Lock()
 	for _, m := range rootC.group.members {
-		if m.kind == memberChild && m.id == res.ChildSessionID {
+		if m.kind == memberSession && m.id == res.ChildSessionID {
 			childMember = m
 		}
 		if m.kind == memberJob {
@@ -385,22 +410,14 @@ func TestStopRootStopsMembersAndReopens(t *testing.T) {
 	}
 	rootC := cachedCoordinator(t, tree.h, tree.root)
 	rootC.mu.Lock()
-	reopened := rootC.bgState == bgOpen
 	groupEmpty := rootC.group == nil || len(rootC.group.members) == 0
 	queued := len(rootC.queued)
 	current := rootC.graph.Session.State.CurrentOperationID
 	running := rootC.run != nil
 	rootC.mu.Unlock()
-	testassert.Require(t, reopened && groupEmpty, "after Stop: reopened=%v groupEmpty=%v, want the group reopened and empty", reopened, groupEmpty)
+	testassert.Require(t, groupEmpty, "after Stop: group is not empty")
 	testassert.Equal(t, queued, 1)
 	testassert.Require(t, current == "op-1" && running, "root operation after Stop = %q (run %v), want op-1 still running", current, running)
-	childC := cachedCoordinator(t, tree.h, tree.child)
-	childC.mu.Lock()
-	closed := childC.bgState == bgClosed
-	childC.mu.Unlock()
-	if !closed {
-		t.Fatalf("stopped child bgState = %q, want permanently closed", childC.bgState)
-	}
 
 	close(tree.release) // the parked root Operation completes; the steered completions drain as successors
 	watch.next()        // the child's interruption, committed during the stop
@@ -444,10 +461,9 @@ func TestStopRootStopsMembersAndReopens(t *testing.T) {
 	}
 }
 
-// TestStopChildClosesPermanently proves the leaf-closure row: a child stop
-// discards its buffers, interrupts its run, delivers its completion, and
-// stays closed — Submit is rejected afterwards.
-func TestStopChildClosesPermanently(t *testing.T) {
+// Direct stop controls only the addressed group; the owner's stop controls
+// the live member's own run and buffers.
+func TestDirectStopPreservesOwnedSessionWork(t *testing.T) {
 	store := emptyStore(t)
 	release := make(chan struct{})
 	stub := newPrepareStub(modelPrepared(parkedModel(release)))
@@ -471,6 +487,16 @@ func TestStopChildClosesPermanently(t *testing.T) {
 		err := h.Stop(context.Background(), child)
 		testassert.NoError(t, err)
 	}
+	childC.mu.Lock()
+	buffered := len(childC.steering)
+	childC.mu.Unlock()
+	testassert.Equal(t, buffered, 1)
+	select {
+	case <-run.execCtx.Done():
+		t.Fatal("direct stop canceled the owned Session's own run")
+	default:
+	}
+	testassert.NoError(t, h.Stop(context.Background(), root))
 
 	{
 		rec := settledOperation(t, store, child, "child-op-1")
@@ -482,17 +508,13 @@ func TestStopChildClosesPermanently(t *testing.T) {
 		t.Fatalf("the child run did not converge")
 	}
 	childC.mu.Lock()
-	closed := childC.bgState == bgClosed
 	buffers := len(childC.steering) + len(childC.queued)
 	childC.mu.Unlock()
-	if !closed {
-		t.Fatalf("child bgState after Stop = %q, want permanently closed", childC.bgState)
-	}
 	testassert.Equal(t, buffers, 0)
-	testassert.Require(t, !storedOperationExists(store, child, "op-2"), "the closed child's discarded head admitted a successor")
+	testassert.Require(t, !storedOperationExists(store, child, "op-2"), "the stopped member's discarded head admitted a successor")
 	{
-		_, err := submitText(t, h, child, "op-3", MessageModeRegular, "nope")
-		testassert.Require(t, errors.Is(err, ErrInvalid) && strings.Contains(err.Error(), "session is closed to agent work"), "Submit on the closed child = %v, want the closed-to-agent-work rejection", err)
+		_, err := submitText(t, h, child, "op-3", MessageModeRegular, "new work")
+		testassert.NoError(t, err)
 	}
 	{
 		got := runtimeInputTextRaw(t, store, root)
@@ -500,26 +522,57 @@ func TestStopChildClosesPermanently(t *testing.T) {
 	}
 }
 
+func TestStaleMemberStopDoesNotStopNewWork(t *testing.T) {
+	tree := newStopTree(t)
+	defer tree.cancel()
+	defer close(tree.release)
+	testassert.NoError(t, tree.h.Stop(context.Background(), tree.root))
+	waitMemberDone(t, tree.childMember)
+	_, err := submitText(t, tree.h, tree.child, "new-op", MessageModeRegular, "new work")
+	testassert.NoError(t, err)
+	child := cachedCoordinator(t, tree.h, tree.child)
+	child.mu.Lock()
+	run := child.run
+	child.mu.Unlock()
+	testassert.Require(t, run != nil, "new work has no execution")
+	testassert.NoError(t, tree.h.stopMember(context.Background(), child, tree.childMember))
+	testassert.NoError(t, tree.h.Stop(context.Background(), tree.child))
+	select {
+	case <-run.execCtx.Done():
+		t.Fatal("stale stop cancelled the new execution")
+	default:
+	}
+}
+
 // TestSubmitRejectsClosedActiveChild proves Submit's own closed-group gate on
-// the active branch: a closed child with a durably running Operation rejects
+// the active branch: a stopping member with a durably running Operation rejects
 // before any buffering.
 func TestSubmitRejectsClosedActiveChild(t *testing.T) {
 	store := completionChildGraph(completionParentID, true, OperationRunning, "", "").storage(t)
 	addRootSession(t, store, completionParentID)
 	h := newTestHarness(t, store, nil)
 	childC := leaseCoordinator(t, h, completionChildID)
-	closeBackgroundMode(childC)
+	parentC := leaseCoordinator(t, h, completionParentID)
+	parentC.mu.Lock()
+	member, err := h.admitBackgroundMember(parentC, memberSession, completionChildID, 0)
+	parentC.mu.Unlock()
+	testassert.NoError(t, err)
+	stopped := make(chan error, 1)
+	go func() { stopped <- h.Stop(context.Background(), completionParentID) }()
+	awaitMemberStop(t, childC, stopped)
 	{
 		_, err := submitText(t, h, completionChildID, "op-x", MessageModeRegular, "hi")
 		testassert.Require(t, errors.Is(err, ErrInvalid) && strings.Contains(err.Error(), "session is closed to agent work"), "Submit on the closed active child = %v, want the closed-to-agent-work rejection", err)
 	}
+	h.claimFinishBackgroundMember(parentC, member.completionID)
+	testassert.NoError(t, stopResult(t, stopped))
 }
 
 // TestStopGatedLaunchWaitsForMaterialization proves the materialization-window
-// row under the stable-cell protocol: a child Stop that lands while the
+// row under the stable-cell protocol: an owner Stop that lands while the
 // launch's child load is parked shares the child's one stable cell and waits
 // for that load — it neither skips the addressed child nor adds more than its
-// own one reload — and once released the child is permanently closed, its
+// own one reload — and once released the member is stopped, its
 // Operation reaches a terminal, and the parent receives the completion before
 // the stop returns. The closed-entry interruption outcome itself is pinned by
 // TestStopRacingStartSettlesWithoutStarting, whose stop completes before the
@@ -540,10 +593,7 @@ func TestStopGatedLaunchWaitsForMaterialization(t *testing.T) {
 	launchDone := make(chan error, 1)
 	var childID string
 	go func() {
-		res, err := h.LaunchChildSession(context.Background(), launchRequest())
-		if err == nil {
-			childID = res.ChildSessionID
-		}
+		_, err := h.LaunchChildSession(context.Background(), launchRequest())
 		launchDone <- err
 	}()
 	<-gate.readArrived // the launch committed and parks at its materialization read
@@ -555,10 +605,10 @@ func TestStopGatedLaunchWaitsForMaterialization(t *testing.T) {
 	testassert.Require(t, childID != "", "the committed child register is missing")
 
 	stopDone := make(chan error, 1)
-	go func() { stopDone <- h.Stop(context.Background(), childID) }()
+	go func() { stopDone <- h.Stop(context.Background(), testSessionID) }()
 	select {
 	case err := <-stopDone:
-		t.Fatalf("Stop(child) = %v, want it held behind the parked materialization", err)
+		t.Fatalf("Stop(owner) = %v, want it held behind the parked materialization", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 	sharedLoads := gate.readCount() // the parent's load plus the parked child's: the stop must not add a third
@@ -591,20 +641,11 @@ func TestStopGatedLaunchWaitsForMaterialization(t *testing.T) {
 	if len(storedSignals(t, store, testSessionID)) != 0 {
 		t.Fatalf("parent signals = %+v, want the idle parent's admission delivery, not a signal", storedSignals(t, store, testSessionID))
 	}
-	childC := cachedCoordinator(t, h, childID)
-	childC.mu.Lock()
-	closed := childC.bgState == bgClosed
-	childC.mu.Unlock()
-	if !closed {
-		t.Fatalf("stopped child bgState = %q, want permanently closed", childC.bgState)
-	}
 }
 
 // TestStopRacingStartSettlesWithoutStarting proves the racing-start row: a
-// child stop that lands between the launch's commit and its installation
-// lets the launch's handoff pass (the parent group is untouched) and settles
-// the committed child's Operation at the closed entry — without starting it —
-// before the delivery completes and releases the stop.
+// owner stop that lands between commit and installation settles the committed
+// child without opening it and delivers the requested completion.
 func TestStopRacingStartSettlesWithoutStarting(t *testing.T) {
 	store := freshSessionStore(t)
 	gate := newLaunchGate(store, "tx")
@@ -625,10 +666,16 @@ func TestStopRacingStartSettlesWithoutStarting(t *testing.T) {
 	h, cancel := newCancelableHarness(t, gate, PreparedExecution{}, stub.prepare)
 	defer cancel()
 
-	launchDone := make(chan error, 1)
+	launchDone := make(chan struct {
+		result LaunchChildResult
+		err    error
+	}, 1)
 	go func() {
-		_, err := h.LaunchChildSession(context.Background(), launchRequest())
-		launchDone <- err
+		result, err := h.LaunchChildSession(context.Background(), launchRequest())
+		launchDone <- struct {
+			result LaunchChildResult
+			err    error
+		}{result, err}
 	}()
 	<-gate.txArrived // the launch committed and parks before its handoff check
 	var childID string
@@ -641,8 +688,8 @@ func TestStopRacingStartSettlesWithoutStarting(t *testing.T) {
 
 	childC := leaseCoordinator(t, h, childID)
 	stopDone := make(chan error, 1)
-	go func() { stopDone <- h.Stop(context.Background(), childID) }()
-	awaitStopInterval(t, childC, stopDone) // the parent membership holds the stop
+	go func() { stopDone <- h.Stop(context.Background(), testSessionID) }()
+	awaitMemberStop(t, childC, stopDone)
 
 	close(gate.txRelease)
 	{
@@ -650,8 +697,9 @@ func TestStopRacingStartSettlesWithoutStarting(t *testing.T) {
 		testassert.NoError(t, err)
 	}
 	{
-		err := <-launchDone
-		testassert.NoError(t, err)
+		launch := <-launchDone
+		testassert.NoError(t, launch.err)
+		testassert.Equal(t, launch.result.ChildSessionID, childID)
 	}
 	mu.Lock()
 	childOpened := false
@@ -672,6 +720,176 @@ func TestStopRacingStartSettlesWithoutStarting(t *testing.T) {
 	}
 }
 
+func TestOwnerStopAfterHandoffBeforeFirstInstallation(t *testing.T) {
+	store := freshSessionStore(t)
+	var opened atomic.Int32
+	stub := newPrepareStub(PreparedExecution{
+		Capture: testCapture(),
+		Open: func(_ context.Context, admission OperationAdmission) (Execution, error) {
+			if admission.SessionID != testSessionID {
+				opened.Add(1)
+			}
+			return effectExecution(quickModel(), nil), nil
+		},
+	})
+	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
+	defer cancel()
+	arrived := make(chan string, 1)
+	release := make(chan struct{})
+	var held atomic.Bool
+	h.deps.Observe = func(f HarnessFact) {
+		if f.Kind == FactInvalidation && f.SessionID != testSessionID && held.CompareAndSwap(false, true) {
+			arrived <- f.SessionID
+			<-release
+		}
+	}
+	launchDone := make(chan error, 1)
+	go func() {
+		_, err := h.LaunchChildSession(context.Background(), launchRequest())
+		launchDone <- err
+	}()
+	childID := <-arrived
+	child := cachedCoordinator(t, h, childID)
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- h.Stop(context.Background(), testSessionID) }()
+	awaitMemberStop(t, child, stopDone)
+	close(release)
+	testassert.NoError(t, <-launchDone)
+	testassert.NoError(t, stopResult(t, stopDone))
+	testassert.Equal(t, opened.Load(), int32(0))
+	testassert.Equal(t, settledOperation(t, store, childID, "child-op-1").State.Status, OperationInterruption)
+	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Task interrupted.")
+}
+
+func TestRejectedLaunchCompletionWaitsForLiveDescendant(t *testing.T) {
+	store := freshSessionStore(t)
+	gate := newLaunchGate(store, "tx")
+	stub := newPrepareStub(modelPrepared(quickModel()))
+	h, cancel := newCancelableHarness(t, gate, PreparedExecution{}, stub.prepare)
+	defer cancel()
+	launchDone := make(chan struct {
+		result LaunchChildResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := h.LaunchChildSession(context.Background(), launchRequest())
+		launchDone <- struct {
+			result LaunchChildResult
+			err    error
+		}{result, err}
+	}()
+	<-gate.txArrived
+	var childID string
+	for id := range store.registers {
+		if id != testSessionID {
+			childID = id
+		}
+	}
+	testassert.Require(t, childID != "", "committed Session missing")
+	jobGate, arrived := make(chan struct{}), make(chan struct{})
+	var completion string
+	h.deps.Jobs = &gatedJobStopper{gate: jobGate, arrived: arrived, deliver: func(sessionID, _ string) {
+		_ = h.DeliverBackgroundCompletion(context.Background(), sessionID, completion, "job done")
+	}}
+	testassert.NoError(t, h.StartJob(context.Background(), childID, jobFixtureID, func(_ context.Context, id string) error {
+		completion = id
+		return nil
+	}))
+	stopped := make(chan error, 1)
+	go func() { stopped <- h.Stop(context.Background(), testSessionID) }()
+	<-arrived
+	close(gate.txRelease)
+	launch := <-launchDone
+	testassert.NoError(t, launch.err)
+	testassert.Equal(t, launch.result.ChildSessionID, childID)
+	testassert.Equal(t, storedEntryCount(store, testSessionID), 0)
+	root := cachedCoordinator(t, h, testSessionID)
+	root.mu.Lock()
+	live := liveBackground(root)
+	root.mu.Unlock()
+	testassert.Require(t, live, "member ended before its descendant")
+	close(jobGate)
+	testassert.NoError(t, stopResult(t, stopped))
+	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Task interrupted.")
+}
+
+func TestDirectGroupAndOwnerMemberStopsOverlap(t *testing.T) {
+	for _, directFirst := range []bool{true, false} {
+		name := "owner-first"
+		if directFirst {
+			name = "direct-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := emptyStore(t)
+			release := make(chan struct{})
+			stub := newPrepareStub(modelPrepared(parkedModel(release)))
+			h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
+			defer cancel()
+			defer close(release)
+			root := createSession(t, h)
+			launch, err := h.LaunchChildSession(context.Background(), launchRequestFor(root))
+			testassert.NoError(t, err)
+			child := launch.ChildSessionID
+			childC := leaseCoordinator(t, h, child)
+			_, err = submitText(t, h, child, "steering", MessageModeRegular, "steering")
+			testassert.NoError(t, err)
+			_, err = submitText(t, h, child, "queued", MessageModeQueued, "queued")
+			testassert.NoError(t, err)
+			childC.mu.Lock()
+			run := childC.run
+			childC.mu.Unlock()
+			gate := make(chan struct{})
+			arrived := make(chan struct{})
+			var completion string
+			h.deps.Jobs = &gatedJobStopper{gate: gate, arrived: arrived, deliver: func(sessionID, _ string) {
+				_ = h.DeliverBackgroundCompletion(context.Background(), sessionID, completion, "job done")
+			}}
+			testassert.NoError(t, h.StartJob(context.Background(), child, jobFixtureID, func(_ context.Context, id string) error {
+				completion = id
+				return nil
+			}))
+			direct, owner := make(chan error, 1), make(chan error, 1)
+			if directFirst {
+				go func() { direct <- h.Stop(context.Background(), child) }()
+				<-arrived
+				select {
+				case <-run.execCtx.Done():
+					t.Fatal("direct group stop canceled its Session")
+				default:
+				}
+				childC.mu.Lock()
+				buffered := len(childC.steering) + len(childC.queued)
+				childC.mu.Unlock()
+				testassert.Equal(t, buffered, 2)
+				go func() { owner <- h.Stop(context.Background(), root) }()
+			} else {
+				go func() { owner <- h.Stop(context.Background(), root) }()
+				<-arrived
+				go func() { direct <- h.Stop(context.Background(), child) }()
+			}
+			awaitMemberStop(t, childC, owner)
+			select {
+			case <-run.execCtx.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("owner did not cancel the member while the job was gated")
+			}
+			awaitStopJoiners(t, 1)
+			for _, done := range []chan error{direct, owner} {
+				select {
+				case err := <-done:
+					t.Fatalf("stop returned before descendant convergence: %v", err)
+				default:
+				}
+			}
+			close(gate)
+			testassert.NoError(t, stopResult(t, direct))
+			testassert.NoError(t, stopResult(t, owner))
+			testassert.Equal(t, settledOperation(t, store, child, "child-op-1").State.Status, OperationInterruption)
+			testassert.Require(t, !storedOperationExists(store, child, "steering") && !storedOperationExists(store, child, "queued"), "owner stop did not discard member buffers")
+		})
+	}
+}
+
 // TestStopChildJoinsReservationAndRun proves the reservation/run join: a stop
 // capturing a held admission reservation cannot return until it closes, and
 // the installed execution settles at the closed entry.
@@ -682,6 +900,14 @@ func TestStopChildJoinsReservationAndRun(t *testing.T) {
 	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
 	defer cancel()
 	childC := leaseCoordinator(t, h, completionChildID)
+	parentC := leaseCoordinator(t, h, testSessionID)
+	parentC.mu.Lock()
+	member, err := h.admitBackgroundMember(parentC, memberSession, completionChildID, 0)
+	parentC.mu.Unlock()
+	testassert.NoError(t, err)
+	childC.mu.Lock()
+	childC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+	childC.mu.Unlock()
 	release, err := h.reserve(context.Background(), childC)
 	testassert.NoError(t, err)
 	rec, prepared, _, err := h.admitReserved(context.Background(), childC, admissionRequest{
@@ -694,8 +920,8 @@ func TestStopChildJoinsReservationAndRun(t *testing.T) {
 	testassert.Require(t, err == nil && prepared != nil, "admission = (%+v, %+v, %v), want a published new Operation", rec, prepared, err)
 
 	stopDone := make(chan error, 1)
-	go func() { stopDone <- h.Stop(context.Background(), completionChildID) }()
-	awaitStopInterval(t, childC, stopDone) // the held reservation holds the stop
+	go func() { stopDone <- h.Stop(context.Background(), testSessionID) }()
+	awaitMemberStop(t, childC, stopDone) // the held reservation holds the stop
 
 	h.startExecution(childC, "op-2", *prepared) // the ordinary admission installs before releasing
 	release()
@@ -708,8 +934,8 @@ func TestStopChildJoinsReservationAndRun(t *testing.T) {
 		testassert.Require(t, settled.State.Status == OperationInterruption && settled.State.Terminal != nil && settled.State.Terminal.Detail == executionInterruptedDetail, "installed operation state = %+v, want the closed-entry interruption", settled.State)
 	}
 	{
-		_, err := submitText(t, h, completionChildID, "op-3", MessageModeRegular, "nope")
-		testassert.Require(t, errors.Is(err, ErrInvalid) && strings.Contains(err.Error(), "session is closed to agent work"), "Submit on the closed child = %v, want the closed-to-agent-work rejection", err)
+		_, err := submitText(t, h, completionChildID, "op-3", MessageModeRegular, "new work")
+		testassert.NoError(t, err)
 	}
 }
 
@@ -745,7 +971,7 @@ func TestStopChildWaitsForLiveJobDelivery(t *testing.T) {
 	rootC.mu.Lock()
 	var membership chan struct{}
 	for _, m := range rootC.group.members {
-		if m.kind == memberChild && m.id == child {
+		if m.kind == memberSession && m.id == child {
 			membership = m.done
 		}
 	}
@@ -753,7 +979,7 @@ func TestStopChildWaitsForLiveJobDelivery(t *testing.T) {
 	testassert.Require(t, membership != nil, "the child's parent membership is missing")
 
 	stopDone := make(chan error, 1)
-	go func() { stopDone <- h.Stop(context.Background(), child) }()
+	go func() { stopDone <- h.Stop(context.Background(), root) }()
 	awaitStopInterval(t, cachedCoordinator(t, h, child), stopDone)
 	{
 		signals := storedSignals(t, store, root)
@@ -823,7 +1049,7 @@ func TestStopConcurrentCallersJoinSameError(t *testing.T) {
 	h, cancel := newCancelableHarness(t, store, modelPrepared(quickModel()), nil)
 	defer cancel()
 	c := leaseCoordinator(t, h, testSessionID)
-	member, err := admitLocked(h, c, memberChild, childID, 0)
+	member, err := admitLocked(h, c, memberSession, childID, 0)
 	testassert.NoError(t, err)
 	corruptKey := RegisterKey{SessionID: childID, Kind: RegisterSession}
 	corruptBefore, err := store.ReadRegister(context.Background(), corruptKey)
@@ -896,12 +1122,6 @@ func TestStopConcurrentCallersJoinSameError(t *testing.T) {
 		signals := storedSignals(t, store, testSessionID)
 		testassert.Require(t, len(signals) == 0, "root signals = %+v, want no delivery from the claim-finished child", signals)
 	}
-	c.mu.Lock()
-	reopened := c.bgState == bgOpen
-	c.mu.Unlock()
-	if !reopened {
-		t.Fatalf("root bgState after Stop = %q, want reopened", c.bgState)
-	}
 	{
 		stopped := stopper.stopped
 		testassert.Require(t, len(stopped) == 1 && stopped[0] == testSessionID+"/"+jobFixtureID, "StopJob calls = %q, want exactly the one job member's stop", stopped)
@@ -932,7 +1152,7 @@ func TestStopReportsChildErrorAndWaitsForNaturalDelivery(t *testing.T) {
 		insertMalformedChildSession(t, store, childID)
 		h := newTestHarness(t, store, nil)
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberChild, childID, 0)
+		member, err := admitLocked(h, c, memberSession, childID, 0)
 		testassert.NoError(t, err)
 		err = h.Stop(context.Background(), testSessionID)
 		var corrupt *CorruptionError
@@ -951,7 +1171,7 @@ func TestStopReportsChildErrorAndWaitsForNaturalDelivery(t *testing.T) {
 		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberChild, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
 		testassert.NoError(t, err)
 
 		store.mu.Lock()
@@ -980,12 +1200,6 @@ func TestStopReportsChildErrorAndWaitsForNaturalDelivery(t *testing.T) {
 		{
 			got := runtimeInputTextRaw(t, store, testSessionID)
 			testassert.Equal(t, got, "Task completed.")
-		}
-		c.mu.Lock()
-		reopened := c.bgState == bgOpen
-		c.mu.Unlock()
-		if !reopened {
-			t.Fatalf("root bgState after Stop = %q, want reopened", c.bgState)
 		}
 	})
 }
@@ -1035,12 +1249,6 @@ func TestStopRootRejectsStartWhileStopping(t *testing.T) {
 		testassert.NoError(t, err)
 	}
 	c := cachedCoordinator(t, h, root)
-	c.mu.Lock()
-	reopened := c.bgState == bgOpen
-	c.mu.Unlock()
-	if !reopened {
-		t.Fatalf("root bgState after Stop = %q, want reopened", c.bgState)
-	}
 	watch.next() // the first kill-completion admission settled
 
 	var completion2 string
@@ -1076,7 +1284,7 @@ func TestStopHeldPreparationRegistersAfterReopen(t *testing.T) {
 		release = make(chan struct{})
 	)
 	prepare := func(ctx context.Context, req PreparationRequest) (PreparedExecution, error) {
-		if req.Session.Identity.ParentSessionID != "" { // the launch's preparation parks; the root's does not
+		if req.Session.Identity.OwnerSessionID != "" { // the launch's preparation parks; the root's does not
 			<-hold
 			return modelPrepared(quickModel()), nil
 		}
@@ -1132,12 +1340,8 @@ func TestStopHeldPreparationRegistersAfterReopen(t *testing.T) {
 	}
 	c := cachedCoordinator(t, h, root)
 	c.mu.Lock()
-	reopened := c.bgState == bgOpen
 	current := c.graph.Session.State.CurrentOperationID
 	c.mu.Unlock()
-	if !reopened {
-		t.Fatalf("root bgState after the held registration = %q, want reopened", c.bgState)
-	}
 	testassert.Equal(t, current, "op-1")
 }
 
@@ -1194,17 +1398,12 @@ func TestStopAllMixedTree(t *testing.T) {
 		rec := settledOperation(t, tree.store, tree.child, "child-op-1")
 		testassert.Equal(t, rec.State.Status, OperationInterruption)
 	}
-	childC := cachedCoordinator(t, tree.h, tree.child)
-	childC.mu.Lock()
-	childClosed := childC.bgState == bgClosed
-	childC.mu.Unlock()
 	rootC := cachedCoordinator(t, tree.h, tree.root)
 	rootC.mu.Lock()
-	rootOpen := rootC.bgState == bgOpen
 	rootEmpty := rootC.group == nil || len(rootC.group.members) == 0
 	extraOpen := tree.h.sessions[extra] != nil
 	rootC.mu.Unlock()
-	testassert.Require(t, childClosed && rootOpen && rootEmpty, "after StopAll: childClosed=%v rootOpen=%v rootEmpty=%v", childClosed, rootOpen, rootEmpty)
+	testassert.Require(t, rootEmpty, "after StopAll: root group is not empty")
 	testassert.Require(t, extraOpen, "the idle root vanished from the registry")
 
 	// idempotent

@@ -433,7 +433,7 @@ func (r *Runner) composeSelection(conn *connection) *rpcError {
 	var newest *protocol.Session
 	for i := range list {
 		candidate := &list[i]
-		if candidate.ParentSessionId != nil {
+		if candidate.OwnerSessionId != nil {
 			continue
 		}
 		if newest == nil || candidate.LastActivity.After(newest.LastActivity) ||

@@ -436,7 +436,7 @@ func TestCoordinatedHostsNativeWorkDepartureAndOwnerRepair(t *testing.T) {
 		childID = ""
 		jobID := ""
 		for _, member := range h.Background {
-			if member.Kind == protocol.BackgroundMemberKindChild {
+			if member.Kind == protocol.BackgroundMemberKindSession {
 				childID = member.Id
 			}
 			if member.Kind == protocol.BackgroundMemberKindJob {
@@ -445,7 +445,7 @@ func TestCoordinatedHostsNativeWorkDepartureAndOwnerRepair(t *testing.T) {
 		}
 		testassert.Require(t, childID != "" && jobID != "", "native members: %+v", h.Background)
 		child := desktopHydrate(t, host, info, childID)
-		testassert.Require(t, child.ActiveOperation != nil && child.Session.ParentSessionId != nil && *child.Session.ParentSessionId == root.SessionId, "native child not active or not owned by root")
+		testassert.Require(t, child.ActiveOperation != nil && child.Session.OwnerSessionId != nil && *child.Session.OwnerSessionId == root.SessionId, "native child not active or not owned by root")
 		testassert.Require(t, reflect.DeepEqual(h, acp.hydrate(t, root.SessionId)) && reflect.DeepEqual(child, acp.hydrate(t, childID)), "desktop/ACP gated native facts differ")
 		return fifo, h, child
 	}

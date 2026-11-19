@@ -79,16 +79,16 @@ func (e AssistantItemStatus) Valid() bool {
 
 // Defines values for BackgroundMemberKind.
 const (
-	BackgroundMemberKindChild BackgroundMemberKind = "child"
-	BackgroundMemberKindJob   BackgroundMemberKind = "job"
+	BackgroundMemberKindJob     BackgroundMemberKind = "job"
+	BackgroundMemberKindSession BackgroundMemberKind = "session"
 )
 
 // Valid indicates whether the value is a known member of the BackgroundMemberKind enum.
 func (e BackgroundMemberKind) Valid() bool {
 	switch e {
-	case BackgroundMemberKindChild:
-		return true
 	case BackgroundMemberKindJob:
+		return true
+	case BackgroundMemberKindSession:
 		return true
 	default:
 		return false
@@ -394,13 +394,13 @@ func (e ExtensionSuccessKind) Valid() bool {
 
 // Defines values for HealthProtocolVersion.
 const (
-	N17 HealthProtocolVersion = "17"
+	N18 HealthProtocolVersion = "18"
 )
 
 // Valid indicates whether the value is a known member of the HealthProtocolVersion enum.
 func (e HealthProtocolVersion) Valid() bool {
 	switch e {
-	case N17:
+	case N18:
 		return true
 	default:
 		return false
@@ -1957,7 +1957,7 @@ type Session struct {
 	CurrentOperationId *string          `json:"current_operation_id,omitempty"`
 	LastActivity       time.Time        `json:"last_activity"`
 	Lifecycle          SessionLifecycle `json:"lifecycle"`
-	ParentSessionId    *string          `json:"parent_session_id,omitempty"`
+	OwnerSessionId     *string          `json:"owner_session_id,omitempty"`
 	SessionId          string           `json:"session_id"`
 	SessionRevision    SessionRevision  `json:"session_revision"`
 	SourceSessionId    *string          `json:"source_session_id,omitempty"`
