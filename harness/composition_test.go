@@ -53,7 +53,7 @@ func TestRequestHookPurePromptRemoval(t *testing.T) {
 	remover := RequestHook{ID: "req.prompt.remove", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Prompt: emptyText()}, nil
 	}}
-	inv := InvocationExecution{NormalizeTool: objectNormalize, RequestHooks: []RequestHook{remover}}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestHooks: []RequestHook{remover}}
 	sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 	testassert.NoError(t, err)
 	testassert.Require(t, len(sent.Messages) > 0 && sent.Messages[0].Role != model.RoleSystem, "dispatch request = %+v, want no system prompt message after a present-empty prompt", sent.Messages)
@@ -81,7 +81,7 @@ func TestRequestHookPureToolView(t *testing.T) {
 		empty := RequestHook{ID: "req.tools.empty", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{ToolNames: []string{}}, nil
 		}}
-		inv := InvocationExecution{NormalizeTool: objectNormalize, RequestHooks: []RequestHook{empty}}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestHooks: []RequestHook{empty}}
 		sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 		testassert.NoError(t, err)
 		testassert.Require(t, len(sent.Tools) == 0, "dispatch tools = %+v, want the actual request narrowed to the empty advertised view", sent.Tools)
@@ -95,7 +95,7 @@ func TestRequestHookPureToolView(t *testing.T) {
 		bad := RequestHook{ID: "req.tools.bad", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{ToolNames: []string{"not-captured"}}, nil
 		}}
-		inv := InvocationExecution{NormalizeTool: objectNormalize, RequestHooks: []RequestHook{bad}}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestHooks: []RequestHook{bad}}
 		inv.Model = func(context.Context, model.Request) (model.Stream, error) {
 			calls++
 			return completedTurnStream(), nil
@@ -112,7 +112,7 @@ func TestRequestHookPureToolView(t *testing.T) {
 		restore := RequestHook{ID: "req.tools.restore", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{ToolNames: []string{"echo"}}, nil // a selection covering the captured catalog restores the full view
 		}}
-		inv := InvocationExecution{NormalizeTool: objectNormalize, RequestHooks: []RequestHook{narrow, restore}}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestHooks: []RequestHook{narrow, restore}}
 		sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 		testassert.NoError(t, err)
 		testassert.Require(t, len(sent.Tools) == 1 && sent.Tools[0].Name == "echo", "dispatch tools = %+v, want the restored full catalog", sent.Tools)
@@ -140,7 +140,7 @@ func TestRequestHookFrozenInputOwnership(t *testing.T) {
 		in.Prompt += " mutated"
 		return RequestConsequence{}, nil
 	}}
-	inv := InvocationExecution{NormalizeTool: objectNormalize, RequestHooks: []RequestHook{observer}}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestHooks: []RequestHook{observer}}
 	sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 	testassert.NoError(t, err)
 	testassert.Require(t, saw.RequestID != "" && saw.BoundaryEntryID != "", "hook input = %+v, want the bound request identity and canonical boundary", saw)
@@ -174,8 +174,7 @@ func TestHookFamiliesDisjointForSameIdentity(t *testing.T) {
 				}
 				return completedTurnStream(), nil
 			},
-			Tool:          spy.tool,
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(spy.tool, objectNormalize),
 			RequestHooks: []RequestHook{{ID: sharedID, ExtensionID: sharedExt, Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 				return RequestConsequence{Prompt: &prompt}, nil
 			}}},
@@ -351,9 +350,9 @@ func TestMaintenanceFactsSettleOnce(t *testing.T) {
 				return inv, err
 			}
 			if request.Purpose == InvocationPurposeConversation {
-				inv.Tool = func(ctx context.Context, call model.ToolCall) PreparedTool {
+				inv.LookupTool = fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
 					return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
-				}
+				}, objectNormalize)
 			}
 			return inv, nil
 		}
@@ -431,7 +430,7 @@ func TestRunningRequestSuspendAndClear(t *testing.T) {
 				}
 				return completedTurnStream(), nil
 			},
-			Tool: func(ctx context.Context, call model.ToolCall) PreparedTool {
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
 				saw := observe()
 				toolSaw = append(toolSaw, saw)
 				testassert.Require(t, saw.requestID != "", "tool prepare observed no producing request")
@@ -455,8 +454,7 @@ func TestRunningRequestSuspendAndClear(t *testing.T) {
 				}
 				testassert.Require(t, found, "no committed assistant carries the preparing call %q", call.ID)
 				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
-			},
-			NormalizeTool: objectNormalize,
+			}, objectNormalize),
 			RequestHooks: []RequestHook{{ID: "req.observe", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 				hookSaw = append(hookSaw, observe())
 				return RequestConsequence{}, nil
@@ -510,7 +508,7 @@ func TestModelAttemptDeepOwnedRequestCopies(t *testing.T) {
 		return completedTurnStream(), nil
 	}
 	h, store, c, sessionID := newEffectHarness(t, nil)
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, NormalizeTool: objectNormalize, RequestHooks: []RequestHook{{ID: "req.copy", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil, objectNormalize), RequestHooks: []RequestHook{{ID: "req.copy", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Messages: []model.Message{{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "extra", Extra: model.Extra{"raw": json.RawMessage(` { "x" : "<" } `)}}}}}}, nil
 	}}}})
 	exec.Retry = (&retrySpy{limit: 1}).retry
@@ -549,7 +547,7 @@ func TestPhysicalDispatchMatchesSourceRequest(t *testing.T) {
 		c.mu.Unlock()
 		return completedTurnStream(), nil
 	}
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, NormalizeTool: objectNormalize, RequestHooks: []RequestHook{hook}})
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil, objectNormalize), RequestHooks: []RequestHook{hook}})
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	})))
@@ -584,7 +582,7 @@ func TestUnadvertisedCallSettlesUnavailable(t *testing.T) {
 		return objectNormalize(ctx, call)
 	}
 	prepare := func(context.Context, model.ToolCall) PreparedTool { prepareCalls++; return PreparedTool{} }
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, NormalizeTool: normalize, Tool: prepare})
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(prepare, normalize)})
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	})))
@@ -603,7 +601,7 @@ func TestUnadvertisedCallSettlesUnavailable(t *testing.T) {
 			toolResult = entry.ToolResult
 		}
 	}
-	testassert.Require(t, call != nil && len(call.NormalizedArguments) == 0 && call.NormalizationFailure == "" && toolResult != nil && toolResult.Status == model.ResultError && toolResult.Content == `Tool "ghost" is not available.`, "call=%+v result=%+v", call, toolResult)
+	testassert.Require(t, call != nil && toolResult != nil && toolResult.Status == model.ResultError && toolResult.Content == `Tool "ghost" is not available.`, "call=%+v result=%+v", call, toolResult)
 }
 
 // TestRequestHookConsequenceToolMembersRejectBeforeDispatch proves the shared
@@ -615,7 +613,7 @@ func TestRequestHookConsequenceToolMembersRejectBeforeDispatch(t *testing.T) {
 	hook := RequestHook{ID: "req.bad", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Messages: []model.Message{{Role: model.RoleAssistant, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}, ToolCalls: []model.ToolCall{sneaky}}}}, nil
 	}}
-	inv := InvocationExecution{NormalizeTool: objectNormalize, RequestHooks: []RequestHook{hook}}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestHooks: []RequestHook{hook}}
 	calls := 0
 	inv.Model = func(context.Context, model.Request) (model.Stream, error) {
 		calls++
@@ -725,7 +723,7 @@ func TestFinalArgumentHookCancellationPreventsPreparation(t *testing.T) {
 	testassert.NoError(t, gerr)
 	for _, entry := range graph.Entries {
 		if entry.ToolResult != nil {
-			testassert.Require(t, string(entry.ToolResult.NormalizedArguments) == `{"x":9}`, "accepted repair was discarded")
+			testassert.Require(t, len(entry.ToolResult.NormalizedArguments) == 0, "interrupted before normalization carried effective arguments")
 		}
 	}
 }
@@ -841,10 +839,9 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 	roundA := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
 			Model: func(context.Context, model.Request) (model.Stream, error) { return pairStream, nil },
-			Tool: func(ctx context.Context, call model.ToolCall) PreparedTool {
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
 				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "tool done"}}}
-			},
-			NormalizeTool: objectNormalize,
+			}, objectNormalize),
 		}, nil
 	}}
 
@@ -876,9 +873,8 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 				dispatchView = historicalProbe(r.Messages)
 				return streamOf(turnDelta("stop", "mid"), usageDelta(model.Usage{InputTokens: 13})), nil
 			},
-			Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-			NormalizeTool: objectNormalize,
-			RequestHooks:  []RequestHook{mutator, checker},
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			RequestHooks: []RequestHook{mutator, checker},
 		}, nil
 	}}
 	roundC := compactionExecution(t, func(_ context.Context, r model.Request) (model.Stream, error) {
@@ -1045,10 +1041,9 @@ func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 			}
 		}
 		return InvocationExecution{
-			Model:         modelFn,
-			Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-			NormalizeTool: objectNormalize,
-			RequestHooks:  []RequestHook{pure, noop},
+			Model:        modelFn,
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			RequestHooks: []RequestHook{pure, noop},
 		}, nil
 	}}
 	testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
@@ -1138,10 +1133,9 @@ func maintenanceHookedRound(t *testing.T, summaryErr, openerErr error) (*Harness
 			}
 		}
 		return InvocationExecution{
-			Model:         modelFn,
-			Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-			NormalizeTool: objectNormalize,
-			RequestHooks:  []RequestHook{e1, e2},
+			Model:        modelFn,
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			RequestHooks: []RequestHook{e1, e2},
 		}, nil
 	}}
 	_ = runAutomaticMaintenance(t, h, c, exec)

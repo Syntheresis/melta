@@ -200,9 +200,8 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 									attempt = compactAttempt
 								}
 								return harness.InvocationExecution{
-									Model:         attempt,
-									Tool:          publicImmediateTool,
-									NormalizeTool: publicNormalize,
+									Model:      attempt,
+									LookupTool: fixtureToolLookup(publicImmediateTool, publicNormalize),
 								}, nil
 							},
 							Close: func() error {

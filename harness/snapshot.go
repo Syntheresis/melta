@@ -572,7 +572,6 @@ func ownAssistantPayload(v assistantEntry) *assistantEntry {
 		for i, call := range v.ToolCalls {
 			out.ToolCalls[i] = call
 			out.ToolCalls[i].Extra = call.Extra.Clone()
-			out.ToolCalls[i].NormalizedArguments = model.CloneRaw(call.NormalizedArguments)
 		}
 	}
 	if v.Usage != nil {
@@ -587,6 +586,10 @@ func ownToolResultPayload(v toolResultEntry) *toolResultEntry {
 	out := v
 	out.Metadata = model.CloneRaw(v.Metadata)
 	out.NormalizedArguments = model.CloneRaw(v.NormalizedArguments)
+	if v.Implementation != nil {
+		identity := *v.Implementation
+		out.Implementation = &identity
+	}
 	if v.HookIDs != nil {
 		out.HookIDs = append([]HookIdentity(nil), v.HookIDs...)
 	}

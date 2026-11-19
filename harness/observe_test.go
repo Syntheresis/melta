@@ -1485,7 +1485,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 					return completedTurnStream(testToolCall("call-1")), nil
 				}
 				return completedTurnStream(), nil
-			}, Tool: toolFn, NormalizeTool: objectNormalize, ToolHooks: hooks}, nil
+			}, LookupTool: fixtureToolLookup(toolFn, objectNormalize), ToolHooks: hooks}, nil
 		}}
 		col := observeHarness(h)
 		testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {

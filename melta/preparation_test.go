@@ -1537,8 +1537,8 @@ func TestPreparationCapturesPermissionConstraints(t *testing.T) {
 // TestPreparationForwardsCapturedPolicyAndNormalizer proves the opened
 // execution's permission capture and required normalizer reach the shared
 // Harness boundary through the concrete opener on both stores: the
-// advertised call's normalization commits at the assistant producer and runs
-// exactly once, the configured policy denies the declared file.write pair so
+// advertised call's bound normalization runs exactly once at dispatch, the
+// configured policy denies the declared file.write pair so
 // the call settles the fixed denial without starting the concrete effect, the
 // denial is visible in the next model projection on the wire, and the
 // Operation still reaches terminal success.
@@ -1592,9 +1592,14 @@ func TestPreparationForwardsCapturedPolicyAndNormalizer(t *testing.T) {
 				}
 				published++
 				testassert.Require(t, len(calls) == 1 && calls[0].ID == "call-1", "assistant tool calls = %s, want the one published call", obj["tool_calls"])
-				testassert.Require(t, string(calls[0].NormalizedArguments) == `{"x":1}`, "committed normalized_arguments = %s, want the producer's compacted object", calls[0].NormalizedArguments)
+				testassert.Require(t, len(calls[0].NormalizedArguments) == 0, "assistant recorded speculative arguments: %s", calls[0].NormalizedArguments)
 			case harness.EntryToolResult:
 				testassert.Require(t, string(obj["status"]) == `"denied"` && string(obj["content"]) == `"Permission denied."`, "tool result = %s, want the fixed denial", entry.Payload)
+				var args []byte
+				testassert.NoError(t, json.Unmarshal(obj["normalized_arguments_base64"], &args))
+				var implementation harness.ToolImplementation
+				testassert.NoError(t, json.Unmarshal(obj["implementation"], &implementation))
+				testassert.Require(t, string(args) == `{"x":1}` && implementation.ID == "echo" && implementation.ExtensionID == "hooks", "denial lost binding or effective arguments: %s", entry.Payload)
 				{
 					_, present := obj["metadata_base64"]
 					testassert.Require(t, !present, "denied result carries a metadata member")

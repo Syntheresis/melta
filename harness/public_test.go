@@ -79,11 +79,10 @@ func publicExecution(conversation, compact func(context.Context, model.Request) 
 			modelFn = compact
 		}
 		return harness.InvocationExecution{
-			Model:         modelFn,
-			NormalizeTool: publicNormalize,
-			Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+			Model: modelFn,
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 				return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-			},
+			}, publicNormalize),
 		}, nil
 	}}
 }
@@ -97,7 +96,7 @@ func publicExecutionOver(conversation, compact func(context.Context, model.Reque
 		if request.Purpose == harness.InvocationPurposeMaintenance {
 			modelFn = compact
 		}
-		return harness.InvocationExecution{Model: modelFn, NormalizeTool: publicNormalize, Tool: tool}, nil
+		return harness.InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(tool, publicNormalize)}, nil
 	}}
 }
 
@@ -1389,11 +1388,10 @@ func TestPublicOpenerInputMutationKeepsAdmittedExecution(t *testing.T) {
 							return harness.Execution{
 								OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 									return harness.InvocationExecution{
-										Model:         script.effect,
-										NormalizeTool: publicNormalize,
-										Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+										Model: script.effect,
+										LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 											return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-										},
+										}, publicNormalize),
 									}, nil
 								},
 								Close: func() error { // runs after the terminal settlement commits
@@ -1913,10 +1911,9 @@ func TestPublicToolMetadataPersistsOpaqueAcrossStores(t *testing.T) {
 
 // TestPublicPreparedPermissionBoundarySurvivesRestart proves the prepared
 // permission boundary through the public surface on both stores: the
-// committed capture
-// carries the durable permission capability members; the advertised call's
-// original normalization commits at the assistant producer and the allowed
-// executor consumes those committed bytes; an immediate-success plan that
+// committed capture carries the durable permission capability members; the
+// advertised call is normalized at dispatch and the allowed executor consumes
+// the intent's committed bytes; an immediate-success plan that
 // omits its declarations is denied through the public path with the fixed
 // bounded content and no metadata; and recovery revalidates the whole result
 // with the capture and normalization unchanged.
@@ -1980,21 +1977,12 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 				testassert.Require(t, err == nil, "decode %s payload: %v", entry.ID, err)
 			}
 			switch entry.Kind {
-			case harness.EntryAssistant:
-				var calls []struct {
-					ID                  string `json:"id"`
-					NormalizedArguments []byte `json:"normalized_arguments_base64"`
-				}
-				{
-					err := json.Unmarshal(wire["tool_calls"], &calls)
-					testassert.NoError(t, err)
-				}
-				for _, call := range calls {
-					testassert.Require(t, string(call.NormalizedArguments) == `{"x":1}`, "%s normalized_arguments = %s, want the producer's committed object", call.ID, call.NormalizedArguments)
-					normalized++
-				}
 			case harness.EntryToolResult:
 				settled++
+				var args []byte
+				testassert.NoError(t, json.Unmarshal(wire["normalized_arguments_base64"], &args))
+				testassert.Require(t, string(args) == `{"x":1}` && len(wire["implementation"]) > 0, "tool result missing bound implementation or effective arguments: %s", entry.Payload)
+				normalized++
 				var callID, status string
 				{
 					err := json.Unmarshal(wire["tool_call_id"], &callID)
@@ -3364,7 +3352,7 @@ func seedRunningOperationShape(t *testing.T, store harness.Storage, activeEffect
 		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live","model":{"provider":"prov","model":"gpt-x"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]}}`, modelReserved, entryID)
 		requestJSON = fmt.Sprintf(`,"running_request":{"request_id":"request-live","boundary_entry_id":%q,"hook_results":[]}`, entryID)
 	case "tool":
-		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"tool","result_entry_id":%q,"tool_call_id":%q,"final_arguments_base64":"eyJ4IjoxfQ=="}`, reserved[0], calls[0])
+		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"tool","result_entry_id":%q,"tool_call_id":%q,"final_arguments_base64":"eyJ4IjoxfQ==","implementation":{"id":"echo","extension_id":"ext.raw"}}`, reserved[0], calls[0])
 	case "hook":
 		modelReserved = newRawSessionID(t) // the hook effect's own reserved result identity
 		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"hook","result_entry_id":%q,"tool_call_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","input_arguments_base64":""}`, modelReserved, calls[0])
@@ -3636,6 +3624,21 @@ func TestPublicRecoverRunningOperationShapes(t *testing.T) {
 					testassert.NoError(t, err)
 				}
 				assertRecoveredOperation(t, store, sessionID, "op-1", pre, modelReserved, wantResults)
+				for _, entry := range recoverEntries(t, store, sessionID) {
+					if entry.Kind != harness.EntryToolResult {
+						continue
+					}
+					var wire struct {
+						Implementation *harness.ToolImplementation `json:"implementation"`
+						Arguments      []byte                      `json:"normalized_arguments_base64"`
+					}
+					testassert.NoError(t, json.Unmarshal(entry.Payload, &wire))
+					if shape.activeEffect == "tool" && entry.ID == pendingResultIDs[0] {
+						testassert.Require(t, wire.Implementation != nil && wire.Implementation.ID == "echo" && wire.Implementation.ExtensionID == "ext.raw" && string(wire.Arguments) == `{"x":1}`, "recovered active tool binding = %+v arguments = %q", wire.Implementation, wire.Arguments)
+					} else {
+						testassert.Require(t, wire.Implementation == nil && len(wire.Arguments) == 0, "unstarted tool acquired binding = %+v arguments = %q", wire.Implementation, wire.Arguments)
+					}
+				}
 				assertRecoverIdempotent(t, store, sessionID, "op-1")
 
 				h := harnessOver(t, store) // one Harness after recovery: materialization verification only
@@ -3735,7 +3738,7 @@ const (
 // answering the given assistant entry's call under the reserved identity.
 func rawToolResultPayload(sessionID, entryID, operationID, assistantEntryID, callID string) string {
 	return fmt.Sprintf(
-		`{"session_id":%q,"entry_id":%q,"operation_id":%q,"assistant_entry":{"session_id":%q,"entry_id":%q},"tool_call_id":%q,"status":"success","content":"done","original_content":"done","evidence":"observed"}`,
+		`{"session_id":%q,"entry_id":%q,"operation_id":%q,"assistant_entry":{"session_id":%q,"entry_id":%q},"tool_call_id":%q,"status":"success","content":"done","original_content":"done","evidence":"observed","normalized_arguments_base64":"e30=","implementation":{"id":"echo"}}`,
 		sessionID, entryID, operationID, sessionID, assistantEntryID, callID)
 }
 
@@ -3828,7 +3831,7 @@ func rawCopiedAssistantPayload(sessionID, entryID, boundaryID string, calls [][2
 // payload answering the given copied assistant entry's call.
 func rawCopiedResultPayload(sessionID, entryID, assistantEntryID, callID string) string {
 	return fmt.Sprintf(
-		`{"session_id":%q,"entry_id":%q,"assistant_entry":{"session_id":%q,"entry_id":%q},"tool_call_id":%q,"status":"success","content":"done","original_content":"done","evidence":"observed"}`,
+		`{"session_id":%q,"entry_id":%q,"assistant_entry":{"session_id":%q,"entry_id":%q},"tool_call_id":%q,"status":"success","content":"done","original_content":"done","evidence":"observed","normalized_arguments_base64":"e30=","implementation":{"id":"echo"}}`,
 		sessionID, entryID, sessionID, assistantEntryID, callID)
 }
 
@@ -4625,7 +4628,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 					rawHookResultPayload(sessionID, hook, "op-1", "cap.hook.one", "call-1"))
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"tool","result_entry_id":%q,"tool_call_id":"call-1","final_arguments_base64":"eyJ4IjoxfQ=="}`, snapReservedResultID(t, snap)))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"tool","result_entry_id":%q,"tool_call_id":"call-1","final_arguments_base64":"eyJ4IjoxfQ==","implementation":{"id":"echo"}}`, snapReservedResultID(t, snap)))
 				})
 			},
 		},
@@ -4966,31 +4969,19 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 		})
 	}
 
-	// The assistant normalized_arguments member inventory: the producer only
-	// ever writes one complete JSON object, so a persisted non-object member
-	// (an array representative — every wrong kind fails the same object check)
-	// is codec corruption: it isolates its Session at decode and can never
-	// reach the tool boundary as executable input.
-	normalizedKinds := []struct {
-		name  string
-		wrong json.RawMessage
-	}{
-		{"array kind", json.RawMessage(`[1,2]`)},
-	}
-	for _, mutation := range normalizedKinds {
-		rows = append(rows, corruptSiblingRow{
-			name: "assistant normalized_arguments wire: " + mutation.name,
-			seed: seedCorruptSiblingPendingCall,
-			mutate: func(t *testing.T, snap *sessionSnapshot) {
-				entry := snapEntryOf(snap, harness.EntryAssistant)
-				entry.Payload = editPayloadObject(t, entry.Payload, func(obj map[string]json.RawMessage) {
-					obj["tool_calls"] = editJSONArray(t, obj["tool_calls"], func(items []map[string]json.RawMessage) {
-						items[0]["normalized_arguments_base64"], _ = json.Marshal(base64.StdEncoding.EncodeToString(mutation.wrong))
-					})
+	// Assistant records no longer accept a speculative normalization member.
+	rows = append(rows, corruptSiblingRow{
+		name: "assistant normalized_arguments wire: array kind",
+		seed: seedCorruptSiblingPendingCall,
+		mutate: func(t *testing.T, snap *sessionSnapshot) {
+			entry := snapEntryOf(snap, harness.EntryAssistant)
+			entry.Payload = editPayloadObject(t, entry.Payload, func(obj map[string]json.RawMessage) {
+				obj["tool_calls"] = editJSONArray(t, obj["tool_calls"], func(items []map[string]json.RawMessage) {
+					items[0]["normalized_arguments_base64"], _ = json.Marshal(base64.StdEncoding.EncodeToString([]byte(`[1,2]`)))
 				})
-			},
-		})
-	}
+			})
+		},
+	})
 
 	// The forbidden input_arguments_base64 membership inventory: a member its
 	// binding never permits corrupts the Session at the shared decode before
@@ -5555,20 +5546,23 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		}
 		testassert.Require(t, copiedAssistant.Usage == nil, "copied assistant carries source usage")
 		testassert.Require(t, len(copiedAssistant.ToolCalls) == 1 && copiedAssistant.ToolCalls[0].ID == "call-1" && copiedAssistant.ToolCalls[0].ResultEntryID == entries[2].ID, "copied call reservation = %+v, want it rewritten to the copied result entry %s", copiedAssistant.ToolCalls, entries[2].ID)
-		testassert.Require(t, string(copiedAssistant.ToolCalls[0].NormalizedArguments) == `{"x":1}`, "copied assistant normalized arguments = %s, want the source's committed normalization preserved verbatim", copiedAssistant.ToolCalls[0].NormalizedArguments)
 		var copiedResult struct {
 			AssistantEntry struct {
 				SessionID string `json:"session_id"`
 				EntryID   string `json:"entry_id"`
 			} `json:"assistant_entry"`
-			ToolCallID string `json:"tool_call_id"`
-			Metadata   []byte `json:"metadata_base64"`
+			ToolCallID          string                      `json:"tool_call_id"`
+			Metadata            []byte                      `json:"metadata_base64"`
+			NormalizedArguments []byte                      `json:"normalized_arguments_base64"`
+			Implementation      *harness.ToolImplementation `json:"implementation"`
 		}
 		{
 			err := json.Unmarshal(entries[2].Payload, &copiedResult)
 			testassert.NoError(t, err)
 		}
 		testassert.Require(t, copiedResult.AssistantEntry.SessionID == dest && copiedResult.AssistantEntry.EntryID == entries[1].ID && copiedResult.ToolCallID == "call-1" && string(copiedResult.Metadata) == `{ "n" : [1, 1.0, 1e0, 9007199254740993], "s" : "<>&" }`, "copied result reference = %+v, want it rewritten inside the copied prefix; copied result metadata = %s, want the source metadata preserved verbatim", copiedResult.AssistantEntry, copiedResult.Metadata)
+		testassert.Require(t, string(copiedResult.NormalizedArguments) == `{"x":1}`, "copied result arguments = %s", copiedResult.NormalizedArguments)
+		testassert.Require(t, copiedResult.Implementation != nil && copiedResult.Implementation.ID == "echo", "copied implementation = %+v", copiedResult.Implementation)
 		var copiedSignal struct {
 			RelatedOperation struct {
 				SessionID   string `json:"session_id"`
@@ -6283,11 +6277,10 @@ func TestPublicExecutionResourceLifetime(t *testing.T) {
 							openMu.Unlock()
 							events <- fmt.Sprintf("invocation:%s:%s", adm.OperationID, request.Purpose)
 							return harness.InvocationExecution{
-								Model:         script.effect,
-								NormalizeTool: publicNormalize,
-								Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+								Model: script.effect,
+								LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 									return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-								},
+								}, publicNormalize),
 								Close: func() error {
 									events <- fmt.Sprintf("invocation-close:%s:%s", adm.OperationID, request.Purpose)
 									return nil
@@ -6411,12 +6404,13 @@ func TestPublicRecoverHookShapes(t *testing.T) {
 				ToolCallID string `json:"tool_call_id"`
 				Status     string `json:"status"`
 				Error      string `json:"error"`
+				Evidence   string `json:"evidence"`
 			}
 			{
 				err := json.Unmarshal(hook.Payload, &hookWire)
 				testassert.NoError(t, err)
 			}
-			testassert.Require(t, hookWire.HookID == "cap.hook.one" && hookWire.ToolCallID == "call-1" && hookWire.Status == "interrupted" && hookWire.Error == recoveredInterruptionDetail, "interrupted hook result = %+v, want the recovery-settled interrupted evidence", hookWire)
+			testassert.Require(t, hookWire.HookID == "cap.hook.one" && hookWire.ToolCallID == "call-1" && hookWire.Status == "interrupted" && hookWire.Error == recoveredInterruptionDetail && hookWire.Evidence == "unknown", "interrupted hook result = %+v, want the recovery-settled unknown evidence", hookWire)
 			// The call under the active hook effect is proven unstarted but
 			// uncertain: the hook may have taken effect.
 			assertRecoveredOperation(t, store, sessionID, "op-1", append(pre, hook), "", []recoveredToolResult{{
@@ -6424,6 +6418,9 @@ func TestPublicRecoverHookShapes(t *testing.T) {
 				Content:  "Pre-tool hook outcome unknown; the hook may have taken effect. The tool was not executed.\n\nTool call interrupted.",
 				Evidence: "not_started",
 			}})
+			var toolWire map[string]json.RawMessage
+			testassert.NoError(t, json.Unmarshal(entries[len(pre)+1].Payload, &toolWire))
+			testassert.Require(t, toolWire["implementation"] == nil && toolWire["normalized_arguments_base64"] == nil, "active hook recovery fabricated a tool binding: %s", entries[len(pre)+1].Payload)
 			assertRecoverIdempotent(t, store, sessionID, "op-1")
 
 			h := harnessOver(t, store)

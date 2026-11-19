@@ -763,14 +763,15 @@ func (v *graphValidation) collectToolResults(opID string, published []publishedC
 // permits the error or interrupted result (cancellation or recovery settles
 // the interrupted one); a running quiet gap before tool settlement stays valid
 // and recoverable. The accepted tool selection — a settled tool result's
-// normalized arguments with its provenance, or a concrete tool effect's
+// effective arguments with its provenance, or a concrete tool effect's
 // committed contribution identities — reconciles with the call's committed
 // successful tool-bound hook results in entry order through the same
 // shared order rule as request evidence; a settlement without an accepted
-// selection (a quiet-gap recovery) carries nothing to reconcile and stays
-// valid. It returns the settled hook-execution set, each executed call's last
-// hook status, and each call's successful hook results for the active-effect
-// checks.
+// selection (a quiet-gap recovery or a pre-normalization settlement) carries
+// nothing to reconcile and stays valid. Hook consequences remain raw and are
+// not compared with the bound tool's normalized output. It returns the settled
+// hook-execution set, each executed call's last hook status, and each call's
+// successful hook results for the active-effect checks.
 func (v *graphValidation) collectHookResults(opID string, published []publishedCall) (map[hookExecution]bool, map[string]hookResultStatus, map[string][]graphEntry, error) {
 	byCall := make(map[string]*publishedCall, len(published))
 	for i := range published {

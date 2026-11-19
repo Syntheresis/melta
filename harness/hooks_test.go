@@ -80,7 +80,7 @@ func hookFixtureExecution(toolFn func(context.Context, model.ToolCall) PreparedT
 			Model: func(context.Context, model.Request) (model.Stream, error) {
 				return completedTurnStream(), nil
 			},
-			Tool: toolFn, NormalizeTool: normalize, ToolHooks: hooks,
+			LookupTool: fixtureToolLookup(toolFn, normalize), ToolHooks: hooks,
 		}, nil
 	}}
 }
@@ -102,12 +102,10 @@ func hookGraphHookResults(t *testing.T, store *graphStorage, sessionID string) [
 
 // TestToolArgumentHookChainSettlement proves the complete ordered hook chain:
 // the first hook receives the original raw call arguments and every later one
-// the preceding committed replacement bytes; each successful replacement is
-// normalized exactly once and its committed consequence feeds the next hook
-// and then the preparer byte-identically; call identity and tool name stay
-// bound; the assistant entry keeps its original raw bytes and committed
-// normalization untouched; and the committed hook_result entries are the
-// durable evidence the projector never projects as conversation.
+// the preceding replacement bytes. The final value is normalized once before
+// preparation; call identity and tool name stay bound, and the assistant entry
+// keeps its original raw bytes. Committed hook_result entries are durable
+// evidence, not conversation.
 func TestToolArgumentHookChainSettlement(t *testing.T) {
 	var (
 		mu             sync.Mutex
@@ -140,12 +138,11 @@ func TestToolArgumentHookChainSettlement(t *testing.T) {
 	testassert.NoError(t, err)
 	got := model.ToolResult{CallID: results[0].ToolCallID, Status: results[0].Status, Content: results[0].Content}
 	testassert.Equal(t, got, (model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}))
-	// Callback counts: one normalization for the valid original at the
-	// producer plus exactly one per hook replacement.
+	// The bound tool normalizes the final hook consequence exactly once.
 	mu.Lock()
 	count, chain := normalizations, append([]string{}, received...)
 	mu.Unlock()
-	testassert.Equal(t, count, 3)
+	testassert.Equal(t, count, 1)
 	testassert.Require(t, len(chain) == 2 && chain[0] == ` {"x": 1} ` && chain[1] == `{ "x": "<" }`, "hook chain received %q, want the raw arguments then the committed replacement bytes", chain)
 	prepared := spy.received()
 	testassert.Require(t, len(prepared) == 1 && prepared[0].ID == "call-1" && prepared[0].Name == "echo" && string(prepared[0].Arguments) == `{"y":"&>"}`, "preparer received %+v, want the final committed replacement bytes under the bound identity", prepared)
@@ -157,8 +154,7 @@ func TestToolArgumentHookChainSettlement(t *testing.T) {
 	testassert.Require(t, committed[0].HookID == "cap.hook.one" && committed[0].Status == hookSucceeded && string(committed[0].Arguments) == `{ "x": "<" }` && committed[0].Error == "", "first hook result = %+v, want the committed replacement", committed[0])
 	testassert.Require(t, committed[1].HookID == "cap.hook.two" && committed[1].Status == hookSucceeded && string(committed[1].Arguments) == `{"y":"&>"}`, "second hook result = %+v, want the committed replacement", committed[1])
 
-	// The assistant entry never mutated: original raw bytes retained, the
-	// producer's own committed normalization untouched.
+	// The assistant entry retains the original raw bytes.
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
 	for _, entry := range graph.Entries {
@@ -170,7 +166,6 @@ func TestToolArgumentHookChainSettlement(t *testing.T) {
 			raw, derr := base64.StdEncoding.DecodeString(record.ArgumentsBase64)
 			testassert.Require(t, derr == nil && string(raw) == ` {"x": 1} `, "assistant raw arguments = %q err %v, want the original bytes retained", raw, derr)
 		}
-		testassert.Require(t, string(record.NormalizedArguments) == ` {"x": 1} `, "assistant normalized_arguments = %q, want the producer's committed value unchanged", record.NormalizedArguments)
 	}
 
 	// Hook results are execution evidence, not conversation messages.
@@ -189,7 +184,7 @@ func TestToolArgumentHookChainSettlement(t *testing.T) {
 // TestToolArgumentHookInterruptionRules proves the interruption rows fixed
 // for every hook: an explicitly interrupted callback and cancellation between
 // the committed intent and Run interrupt, while a
-// successful normalized output is a real result even when cancellation
+// successful hook output is a real result even when cancellation
 // arrives before its commit — interruption then appears at the next boundary.
 func TestToolArgumentHookInterruptionRules(t *testing.T) {
 	t.Run("explicit interruption during run interrupts", func(t *testing.T) {
@@ -302,11 +297,9 @@ func TestToolArgumentHookInterruptionRules(t *testing.T) {
 	})
 }
 
-// TestToolArgumentHookFailureRules proves the hook-error rows fixed for every
-// hook: a returned error settles the ordinary validation-error result carrying
-// the bounded diagnostic; an invalid returned value and a malformed
-// normalizer outcome settle the fixed internal-validation error; remaining
-// hooks are skipped; and later tool calls continue.
+// TestToolArgumentHookFailureRules checks hook errors and invalid replacements
+// stop the chain, while normalizer failures happen after successful hooks.
+// Both settle only the affected call and leave later calls eligible.
 func TestToolArgumentHookFailureRules(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -356,15 +349,14 @@ func TestToolArgumentHookFailureRules(t *testing.T) {
 				return nil, errors.New("no default for a")
 			},
 			want:       model.ToolResult{CallID: "call-1", Status: model.ResultError, Content: "no default for a"},
-			wantStatus: hookFailed,
-			wantError:  "no default for a",
+			wantStatus: hookSucceeded,
 		},
 		{
 			name:       "malformed normalizer outcome is the internal-validation error",
 			run:        func(context.Context, model.ToolCall) (json.RawMessage, error) { return json.RawMessage(`{"a":1}`), nil },
 			normalize:  func(context.Context, model.ToolCall) (json.RawMessage, error) { return json.RawMessage(`[1,2]`), nil },
 			want:       model.ToolResult{CallID: "call-1", Status: model.ResultError, Content: invalidToolResultContent},
-			wantStatus: hookFailed,
+			wantStatus: hookSucceeded,
 		},
 	}
 	for _, tc := range cases {
@@ -397,7 +389,6 @@ func TestToolArgumentHookFailureRules(t *testing.T) {
 			testassert.NoError(t, err)
 			first := model.ToolResult{CallID: results[0].ToolCallID, Status: results[0].Status, Content: results[0].Content}
 			testassert.Equal(t, first, tc.want)
-			testassert.Equal(t, later, 0)
 			committed := hookGraphHookResults(t, store, sessionID)
 			var firstResults []hookResultEntry
 			for _, hook := range committed {
@@ -405,8 +396,13 @@ func TestToolArgumentHookFailureRules(t *testing.T) {
 					firstResults = append(firstResults, hook)
 				}
 			}
-			testassert.Require(t, len(firstResults) == 1 && firstResults[0].Status == tc.wantStatus && firstResults[0].HookID == "cap.hook.one" && len(firstResults[0].Arguments) == 0 && firstResults[0].Error != "", "hook results = %+v, want one %s result with a non-empty diagnostic", firstResults, tc.wantStatus)
-			testassert.Require(t, tc.wantError == "" || firstResults[0].Error == tc.wantError, "hook result error = %q, want %q", firstResults[0].Error, tc.wantError)
+			if tc.wantStatus == hookSucceeded {
+				testassert.Require(t, later == 1 && len(firstResults) == 2 && firstResults[0].Status == hookSucceeded && firstResults[1].Status == hookSucceeded, "hook results = %+v, later = %d", firstResults, later)
+			} else {
+				testassert.Equal(t, later, 0)
+				testassert.Require(t, len(firstResults) == 1 && firstResults[0].Status == tc.wantStatus && firstResults[0].HookID == "cap.hook.one" && len(firstResults[0].Arguments) == 0 && firstResults[0].Error != "", "hook results = %+v, want one %s result with a non-empty diagnostic", firstResults, tc.wantStatus)
+				testassert.Require(t, tc.wantError == "" || firstResults[0].Error == tc.wantError, "hook result error = %q, want %q", firstResults[0].Error, tc.wantError)
+			}
 			// Later calls still run: call-2 executes after the failed chain.
 			laterResult := model.ToolResult{CallID: results[1].ToolCallID, Status: results[1].Status, Content: results[1].Content}
 			testassert.Require(t, laterResult.Status == model.ResultSuccess, "later call result = %+v, want success", laterResult)
@@ -621,10 +617,9 @@ func TestToolArgumentHookInvalidOpenedExecutionRejectsHooks(t *testing.T) {
 				}
 				return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 					return InvocationExecution{
-						Model:         modelFn,
-						Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-						NormalizeTool: objectNormalize,
-						ToolHooks:     tc.hooks,
+						Model:      modelFn,
+						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+						ToolHooks:  tc.hooks,
 						Close: func() error {
 							closed++
 							return nil
@@ -698,7 +693,7 @@ func requestHookFixtureExecution(modelFn func(context.Context, model.Request) (m
 		toolFn = func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
 	}
 	return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-		return InvocationExecution{Model: modelFn, Tool: toolFn, NormalizeTool: objectNormalize, RequestHooks: hooks}, nil
+		return InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(toolFn, objectNormalize), RequestHooks: hooks}, nil
 	}}
 }
 
@@ -1010,18 +1005,15 @@ func TestRequestHookDeclaredKnowledgeRows(t *testing.T) {
 
 // TestArgumentHookPureChainRepairRestoreAndRefusal proves the argument family's
 // pure rows through the real tool effect: a pure repair followed by an exact
-// restore adds zero hook transactions and dispatches the assistant's committed
-// normalization unchanged while keeping every accepted identity, a pure refusal
+// restore adds zero hook transactions and normalizes the restored bytes once
+// while keeping every accepted identity, a pure refusal
 // settles the call durably with no effect transaction and never reaches the
 // preparer, and an effectful no-op in a net-restored chain still records its
 // own result, retains the consumed pure intermediate bytes as its input, and
 // every accepted hook stays in the tool settlement's provenance in configured
 // order.
-// The repair row adds the settled D2 positive: a pure-only chain repairs a
-// producer-rejected invalid original, normalizing the original exactly once
-// (rejected) and the replacement exactly once with no re-normalization at
-// dispatch, and adds zero durable mutation steps over the same hookless
-// valid-call settlement.
+// A pure-only chain can repair an invalid original before normalization and
+// adds no durable mutation steps over the same hookless valid-call settlement.
 func TestArgumentHookPureChainRepairRestoreAndRefusal(t *testing.T) {
 	t.Run("pure repair then exact restore adds no transactions", func(t *testing.T) {
 		spy := &hookToolSpy{}
@@ -1038,7 +1030,7 @@ func TestArgumentHookPureChainRepairRestoreAndRefusal(t *testing.T) {
 		testassert.Require(t, results[0].Status == model.ResultSuccess, "tool result = %+v, want the restored chain to run the call", results[0])
 		testassert.Require(t, len(hookGraphHookResults(t, store, sessionID)) == 0, "hook results = %+v, want zero durable transactions for a net-restored pure chain", hookGraphHookResults(t, store, sessionID))
 		prepared := spy.received()
-		testassert.Require(t, len(prepared) == 1 && string(prepared[0].Arguments) == `{"x":1}`, "preparer received %+v, want the assistant's committed normalization restored", prepared)
+		testassert.Require(t, len(prepared) == 1 && string(prepared[0].Arguments) == `{"x":1}`, "preparer received %+v, want the restored arguments normalized", prepared)
 		testassert.Require(t, string(results[0].NormalizedArguments) == `{"x":1}` &&
 			len(results[0].HookIDs) == 2 && results[0].HookIDs[0].HookID == "cap.pure.one" && results[0].HookIDs[1].HookID == "cap.pure.two",
 			"tool result provenance = %+v %s, want the original consumed value and every accepted pure identity in order", results[0].NormalizedArguments, results[0].HookIDs)
@@ -1088,7 +1080,7 @@ func TestArgumentHookPureChainRepairRestoreAndRefusal(t *testing.T) {
 			results[0].HookIDs[0].HookID == "cap.pure.one" && results[0].HookIDs[1].HookID == "cap.effectful.noop" && results[0].HookIDs[2].HookID == "cap.pure.restore" &&
 			string(results[0].NormalizedArguments) == `{"x":1}`, "tool result provenance = %+v %s, want every accepted identity in configured order with the restored consumed value", results[0].HookIDs, results[0].NormalizedArguments)
 	})
-	t.Run("pure-only repair of an invalid original normalizes exactly twice and adds no transactions", func(t *testing.T) {
+	t.Run("pure-only repair of an invalid original normalizes once and adds no transactions", func(t *testing.T) {
 		var (
 			mu            sync.Mutex
 			attempts      []string // normalizer argument bytes per attempt in call order
@@ -1167,14 +1159,11 @@ func TestArgumentHookPureChainRepairRestoreAndRefusal(t *testing.T) {
 		}
 		{
 			mu.Lock()
-			testassert.Require(t, len(attempts) == 2 && attempts[0] == "not json" && attempts[1] == `{"x":2}` && failures == 1,
-				"normalization attempts = %v with %d failures, want the rejected original plus one accepted replacement", attempts, failures)
+			testassert.Require(t, len(attempts) == 1 && attempts[0] == `{"x":2}` && failures == 0,
+				"normalization attempts = %v with %d failures, want one accepted replacement", attempts, failures)
 			mu.Unlock()
 			assistant := compositionAssistant(t, store, sessionID)
-			testassert.Require(t, len(assistant.ToolCalls) == 1 && assistant.ToolCalls[0].NormalizedArguments == nil,
-				"assistant call record = %+v, want no committed normalization before the repair", assistant.ToolCalls)
-			testassert.Require(t, assistant.ToolCalls[0].NormalizationFailure != "",
-				"assistant call record = %+v, want the saved normalization-failure diagnostic on the invalid original", assistant.ToolCalls)
+			testassert.Require(t, len(assistant.ToolCalls) == 1, "assistant call record = %+v", assistant.ToolCalls)
 			raw, derr := base64.StdEncoding.DecodeString(assistant.ToolCalls[0].ArgumentsBase64)
 			testassert.Require(t, derr == nil && string(raw) == "not json", "assistant raw bytes = %q, want the source arguments preserved verbatim", raw)
 		}
@@ -1182,8 +1171,8 @@ func TestArgumentHookPureChainRepairRestoreAndRefusal(t *testing.T) {
 		testassert.NoError(t, <-done)
 		{
 			mu.Lock()
-			testassert.Require(t, len(attempts) == 2 && failures == 1 && attempts[1] == `{"x":2}`,
-				"normalization attempts = %v with %d failures, want the rejected original plus one accepted replacement and no re-normalization at dispatch", attempts, failures)
+			testassert.Require(t, len(attempts) == 1 && failures == 0 && attempts[0] == `{"x":2}`,
+				"normalization attempts = %v with %d failures, want one final normalization", attempts, failures)
 			mu.Unlock()
 		}
 		testassert.Require(t, len(preparedCalls) == 1 && string(preparedCalls[0].Arguments) == `{"x":2}`, "preparer received %+v, want the accepted normalized replacement", preparedCalls)
@@ -1297,10 +1286,9 @@ func TestRequestHookInvalidOpenedExecutionRejectsHooks(t *testing.T) {
 				}
 				return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 					return InvocationExecution{
-						Model:         modelFn,
-						Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-						NormalizeTool: objectNormalize,
-						RequestHooks:  tc.hooks,
+						Model:        modelFn,
+						LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+						RequestHooks: tc.hooks,
 						Close: func() error {
 							closed++
 							return nil
@@ -2357,7 +2345,7 @@ func TestCallbackIdentityCompleteAtEveryBoundary(t *testing.T) {
 		}},
 		{ID: "cap.hook.effect", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 			record(&effectful, ctx)
-			return call.Arguments, nil // unchanged consumes the accepted replacement without a third normalization
+			return call.Arguments, nil // unchanged passes the replacement to the final normalizer
 		}},
 	}
 	outputs := []ToolOutputHook{{ID: "cap.hook.output", ExtensionID: "cap-a", Run: func(ctx context.Context, input ToolOutputInput) (string, error) {
@@ -2369,7 +2357,7 @@ func TestCallbackIdentityCompleteAtEveryBoundary(t *testing.T) {
 			Model: func(context.Context, model.Request) (model.Stream, error) {
 				return completedTurnStream(), nil
 			},
-			Tool: tool, NormalizeTool: normalize, ToolHooks: hooks, ToolOutputHooks: outputs,
+			LookupTool: fixtureToolLookup(tool, normalize), ToolHooks: hooks, ToolOutputHooks: outputs,
 		}, nil
 	}}
 	_, store, _, sessionID, results, err := freshExecutionToolCalls(t, testCapture(), exec, testToolCall("call-1"))
@@ -2377,13 +2365,13 @@ func TestCallbackIdentityCompleteAtEveryBoundary(t *testing.T) {
 	committedHooks := hookGraphHookResults(t, store, sessionID)
 	testassert.Require(t, len(committedHooks) == 1 && committedHooks[0].HookID == "cap.hook.effect" && committedHooks[0].Status == hookSucceeded, "committed hook results = %+v, want the effectful hook's result", committedHooks)
 
-	testassert.Require(t, len(prepared) == 1 && len(executed) == 1 && len(pure) == 1 && len(effectful) == 1 && len(shaped) == 1 && len(normalized) == 2, "observed identities = prepare %d execute %d pure %d effectful %d shaped %d normalize %d, want one each and two normalizations", len(prepared), len(executed), len(pure), len(effectful), len(shaped), len(normalized))
+	testassert.Require(t, len(prepared) == 1 && len(executed) == 1 && len(pure) == 1 && len(effectful) == 1 && len(shaped) == 1 && len(normalized) == 1, "observed identities = prepare %d execute %d pure %d effectful %d shaped %d normalize %d, want one each", len(prepared), len(executed), len(pure), len(effectful), len(shaped), len(normalized))
 	invocationID := prepared[0].RequestID
 	testassert.Require(t, invocationID != "", "Prepare identity %+v, want the opened invocation request", prepared[0])
 	for name, identity := range map[string]CallbackIdentity{
 		"prepare": prepared[0], "execute": executed[0], "pure hook": pure[0],
 		"effectful hook": effectful[0], "shaped output": shaped[0],
-		"replacement normalization": normalized[1],
+		"final normalization": normalized[0],
 	} {
 		testassert.Require(t, identity.RequestID == invocationID && identity.ToolCallID == "call-1", "%s identity = %+v, want invocation %q and call call-1", name, identity, invocationID)
 	}
@@ -2396,8 +2384,8 @@ func TestCallbackIdentityCompleteAtEveryBoundary(t *testing.T) {
 		}
 	}
 	testassert.Require(t, callAssistant != nil && callAssistant.RequestID != "", "no assistant entry published the tool call")
-	testassert.Require(t, normalized[0].RequestID == callAssistant.RequestID && normalized[0].ToolCallID == "call-1", "original normalization identity = %+v, want the producing model request %q and call call-1", normalized[0], callAssistant.RequestID)
-	testassert.Require(t, prepared[0].EffectID == "" && normalized[0].EffectID == "" && normalized[1].EffectID == "" && pure[0].EffectID == "", "pure/preprocessing identities = prepare %+v normalize %+v/%+v pure %+v, want no effect identity", prepared[0], normalized[0], normalized[1], pure[0])
+	testassert.Require(t, normalized[0].RequestID == invocationID && normalized[0].ToolCallID == "call-1", "normalization identity = %+v, want invocation %q and call call-1", normalized[0], invocationID)
+	testassert.Require(t, prepared[0].EffectID == "" && normalized[0].EffectID == "" && pure[0].EffectID == "", "pure/preprocessing identities = prepare %+v normalize %+v pure %+v, want no effect identity", prepared[0], normalized[0], pure[0])
 	testassert.Require(t, executed[0].EffectID == results[0].EntryID && shaped[0].EffectID == results[0].EntryID, "executed/shaped effect identities = %q/%q, want the committed tool result entry %q", executed[0].EffectID, shaped[0].EffectID, results[0].EntryID)
 	testassert.Require(t, effectful[0].EffectID != "" && effectful[0].EffectID == committedHooks[0].EntryID, "effectful hook effect identity = %q, want its committed hook result %q", effectful[0].EffectID, committedHooks[0].EntryID)
 }

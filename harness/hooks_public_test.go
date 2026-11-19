@@ -68,17 +68,16 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
 					return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 						return harness.InvocationExecution{
-							Model:         script.effect,
-							NormalizeTool: hookNormalize,
-							ToolHooks:     hooks,
-							Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+							Model:     script.effect,
+							ToolHooks: hooks,
+							LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 								mu.Lock()
 								prepared = append(prepared, string(call.Arguments))
 								mu.Unlock()
 								return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
 									Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"},
 								}}
-							},
+							}, hookNormalize),
 						}, nil
 					}}, nil
 				},
@@ -108,7 +107,7 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 		seen := append([]string{}, hookSeen...)
 		toolInput := append([]string{}, prepared...)
 		mu.Unlock()
-		testassert.Require(t, len(seen) == 2 && seen[0] == `{"x":1}` && seen[1] == `{ "x": "<" }`, "hook chain received %q, want the producer's committed normalization then the first hook's committed replacement", seen)
+		testassert.Require(t, len(seen) == 2 && seen[0] == `{"x":1}` && seen[1] == `{ "x": "<" }`, "hook chain received %q, want raw arguments then the first hook's committed replacement", seen)
 		testassert.Require(t, len(toolInput) == 1 && toolInput[0] == `{"y":"&>"}`, "concrete tool received %q, want the final committed replacement bytes", toolInput)
 
 		rec, err := f.h.ReadOperation(ctx, session, "op-1")
@@ -253,10 +252,9 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
 					return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 						return harness.InvocationExecution{
-							Model:         script.effect,
-							NormalizeTool: hookNormalize,
-							RequestHooks:  hooks,
-							Tool:          func(context.Context, model.ToolCall) harness.PreparedTool { return harness.PreparedTool{} },
+							Model:        script.effect,
+							RequestHooks: hooks,
+							LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) harness.PreparedTool { return harness.PreparedTool{} }, hookNormalize),
 						}, nil
 					}}, nil
 				},

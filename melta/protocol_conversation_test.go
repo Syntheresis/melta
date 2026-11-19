@@ -109,8 +109,8 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 			Refusal: "no",
 			Extra:   model.Extra{"model_extra": json.RawMessage(`{"k":1}`)},
 			ToolCalls: []harness.ToolCallRecord{
-				{ID: "call-1", Ordinal: 0, Name: "read", ArgumentsBase64: convArgs(`{"n":9007199254740993}`), Extra: model.Extra{"tool_extra": json.RawMessage(`{"tool_n":9007199254740993}`)}, NormalizedArguments: json.RawMessage(`{"x":1e1000}`), ResultEntryID: resultID},
-				{ID: "call-2", Ordinal: 1, Name: "grep", ArgumentsBase64: convArgs(`[]`), ResultEntryID: "cccccccccccccccccccccccccccccc04"},
+				{ID: "call-1", Ordinal: 0, Name: "read", ArgumentsBase64: convArgs(`{"n":9007199254740993}`), Extra: model.Extra{"tool_extra": json.RawMessage(`{"tool_n":9007199254740993}`)}, ResultEntryID: resultID},
+				{ID: "call-2", Ordinal: 1, Name: "grep", ArgumentsBase64: convArgs(`{"pending":1}`), ResultEntryID: "cccccccccccccccccccccccccccccc04"},
 			},
 		}),
 		convResultFact(resultID, assistantID, "call-1", "success", "", `{"rows":1e1000,"zero":0}`),
@@ -159,6 +159,7 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 			},
 		},
 	}
+	facts[2].ToolResult.NormalizedArguments = json.RawMessage(`{"x":1e1000}`)
 	items, err := projectConversation(convSessionID, facts)
 	testassert.NoError(t, err)
 	// the tool result stays absorbed
@@ -189,7 +190,7 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 	// content-part extras, with the same raw-number fidelity.
 	testassert.Require(t, call1.Extra != nil && string((*call1.Extra)["tool_extra"]) == `{"tool_n":9007199254740993}` && call1.NormalizedArguments != nil && string((*call1.NormalizedArguments)["x"]) == `1e1000` && call1.Status != nil && *call1.Status == protocol.ToolCallStatusSuccess && call1.Content != nil && *call1.Content == "" && call1.Metadata != nil && string(*call1.Metadata) == `{"rows":1e1000,"zero":0}`, "call-1 extra = %v, want the call-level extra with its raw number; call-1 normalized arguments = %v, want the raw object; call-1 terminal outcome = (%v, %v), want success with a present empty content; call-1 metadata = %v, want the raw value preserved", call1.Extra, call1.NormalizedArguments, call1.Status, call1.Content, call1.Metadata)
 	call2 := assistant.ToolCalls[1]
-	testassert.Require(t, call2.Status == nil && call2.Content == nil && call2.Metadata == nil && call2.NormalizedArguments == nil && call2.Arguments == `[]`, "pending call-2 = %+v, want every terminal member omitted; got %v, want %v", call2, call2.Arguments, `[]`)
+	testassert.Require(t, call2.Status == nil && call2.Content == nil && call2.Metadata == nil && call2.NormalizedArguments == nil && call2.Arguments == `{"pending":1}`, "pending call-2 = %+v, want only original arguments", call2)
 
 	// The signals carry their typed subtypes; the background completion names
 	// its related member and no operation. Every kind's item identity is the

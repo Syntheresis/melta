@@ -2105,12 +2105,11 @@ func TestNativeNormalizeUsesCompleteIdentityCarrier(t *testing.T) {
 	nativeIDs := append([]normalizeIdentity(nil), state.native...)
 	providerIDs := append([]normalizeIdentity(nil), state.provider...)
 	state.mu.Unlock()
-	testassert.Require(t, len(nativeIDs) == 2 && len(providerIDs) == 2, "normalize identities = native %v provider %v, want original and repaired calls", nativeIDs, providerIDs)
+	testassert.Require(t, len(nativeIDs) == 1 && len(providerIDs) == 1, "normalize identities = native %v provider %v, want one final normalization", nativeIDs, providerIDs)
 	for i := range nativeIDs {
 		testassert.Require(t, nativeIDs[i].requestID != "" && nativeIDs[i].toolCallID == "call-ident" && nativeIDs[i].effectID == "", "native normalize identity %d = %+v, want request, call-ident and no pure effect", i, nativeIDs[i])
 		testassert.Require(t, providerIDs[i] == nativeIDs[i], "provider identity %d = %+v, want the native caller identity %+v", i, providerIDs[i], nativeIDs[i])
 	}
-	testassert.Require(t, nativeIDs[0].requestID != nativeIDs[1].requestID, "original/repaired request identities = %+v, want the producing request and the invocation request", nativeIDs)
 	testassert.NoError(t, r.Close(ctx))
 }
 

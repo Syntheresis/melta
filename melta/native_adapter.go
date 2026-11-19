@@ -119,26 +119,34 @@ func (c *composition) toolDeclarations(names []string) ([]toolDeclaration, error
 	return declarations, nil
 }
 
-func (c *composition) bindTool(sel selection, id string) (Tool, error) {
+type boundTool struct {
+	Tool
+	identity harness.ToolImplementation
+}
+
+func (c *composition) bindTool(sel selection, id string) (boundTool, error) {
 	export, ok := c.exports[id]
 	if !ok {
-		return nil, fmt.Errorf("tool %q has no composed declaration: %w", id, ErrComposition)
+		return boundTool{}, fmt.Errorf("tool %q has no composed declaration: %w", id, ErrComposition)
 	}
 	if export.standard {
 		value := c.standardValues[id]
 		if value == nil {
-			return nil, fmt.Errorf("standard tool %q has no value: %w", id, ErrComposition)
+			return boundTool{}, fmt.Errorf("standard tool %q has no value: %w", id, ErrComposition)
 		}
-		return value, nil
+		return boundTool{Tool: value, identity: harness.ToolImplementation{ID: id}}, nil
 	}
 	value, ok := selectedCapability(sel.scopes, id)
 	if !ok || value.capability == nil || value.capability.Kind != extension.KindTool || value.scope.unavailable() {
-		return nil, fmt.Errorf("tool %q is not open in this invocation: %w", id, ErrClosed)
+		return boundTool{}, fmt.Errorf("tool %q is not open in this invocation: %w", id, ErrClosed)
 	}
 	if value.implementation.Tool == nil {
-		return nil, fmt.Errorf("tool %q has no implementation: %w", id, ErrComposition)
+		return boundTool{}, fmt.Errorf("tool %q has no implementation: %w", id, ErrComposition)
 	}
-	return extensionTool{composition: c, value: value, lease: sel.lease, operationSecrets: sel.operationSecrets}, nil
+	return boundTool{
+		Tool:     extensionTool{composition: c, value: value, lease: sel.lease, operationSecrets: sel.operationSecrets},
+		identity: harness.ToolImplementation{ID: value.capability.ID, ExtensionID: value.capability.Declaration.Declaration.ID},
+	}, nil
 }
 
 // extensionTool adapts one native Tool contribution to the host's baseline

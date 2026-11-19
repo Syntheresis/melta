@@ -181,7 +181,7 @@ func TestReviewNoneAfterModelWork(t *testing.T) {
 				return inv, err
 			}
 			if request.Purpose == InvocationPurposeConversation {
-				inv.Tool = tool
+				inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
 			}
 			return inv, nil
 		}

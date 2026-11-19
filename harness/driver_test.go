@@ -4,11 +4,24 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
+
+func fixtureToolLookup(prepare func(context.Context, model.ToolCall) PreparedTool, normalize func(context.Context, model.ToolCall) (json.RawMessage, error)) func(string) (ToolBinding, bool) {
+	if prepare == nil {
+		prepare = func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
+	}
+	if normalize == nil {
+		normalize = objectNormalize
+	}
+	return func(name string) (ToolBinding, bool) {
+		return ToolBinding{Identity: ToolImplementation{ID: name}, Normalize: normalize, Prepare: prepare}, true
+	}
+}
 
 // executeDirect drives one already-admitted Operation's real execution and
 // complete retirement with real owned control and graph use, without
@@ -38,11 +51,8 @@ func defaultInvocation(inv InvocationExecution) InvocationExecution {
 			return completedTurnStream(), nil
 		}
 	}
-	if inv.Tool == nil {
-		inv.Tool = func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
-	}
-	if inv.NormalizeTool == nil {
-		inv.NormalizeTool = objectNormalize
+	if inv.LookupTool == nil {
+		inv.LookupTool = fixtureToolLookup(nil, nil)
 	}
 	return inv
 }

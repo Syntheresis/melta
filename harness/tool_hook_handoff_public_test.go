@@ -54,14 +54,13 @@ func TestPublicExecutionCancellationAtToolIntentHandoff(t *testing.T) {
 			prep.Open = func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
 				return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 					return harness.InvocationExecution{
-						Model:         script.effect,
-						NormalizeTool: publicNormalize,
-						Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+						Model: script.effect,
+						LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 							return harness.PreparedTool{Permissions: publicPermission, Execute: func(context.Context) harness.ToolOutcome {
 								executed++
 								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 							}}
-						},
+						}, publicNormalize),
 					}, nil
 				}}, nil
 			}
@@ -106,14 +105,13 @@ func TestPublicExecutionCancellationAtHookIntentHandoff(t *testing.T) {
 			prep.Open = func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
 				return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 					return harness.InvocationExecution{
-						Model:         script.effect,
-						NormalizeTool: publicNormalize,
-						Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+						Model: script.effect,
+						LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 							prepared++
 							return harness.PreparedTool{Permissions: publicPermission, Execute: func(context.Context) harness.ToolOutcome {
 								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 							}}
-						},
+						}, publicNormalize),
 						ToolHooks: []harness.ToolArgumentsHook{{ID: "hook.handoff", ExtensionID: "handoff-ext", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 							hookRan++
 							return model.CloneRaw(call.Arguments), nil

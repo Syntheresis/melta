@@ -118,7 +118,6 @@ func TestPublicReadSessionHistoryOwnedCapture(t *testing.T) {
 					fact.Assistant.Usage.InputTokens = 999
 				}
 				if len(fact.Assistant.ToolCalls) > 0 {
-					fact.Assistant.ToolCalls[0].NormalizedArguments = json.RawMessage(`{"mutated":true}`)
 					if fact.Assistant.ToolCalls[0].Extra == nil {
 						fact.Assistant.ToolCalls[0].Extra = model.Extra{}
 					}
@@ -1512,7 +1511,7 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 			case harness.EntryAssistant:
 				testassert.Require(t, fact.Assistant != nil, "assistant fact fixture lost its payload: %+v", fact)
 				assistantReferences = assistantReferences || (len(fact.Assistant.Extra) > 0 && len(fact.Assistant.ToolCalls) > 0 &&
-					len(fact.Assistant.ToolCalls[0].Extra) > 0 && len(fact.Assistant.ToolCalls[0].NormalizedArguments) > 0 &&
+					len(fact.Assistant.ToolCalls[0].Extra) > 0 &&
 					fact.Assistant.Usage != nil)
 			case harness.EntryToolResult:
 				testassert.Require(t, fact.ToolResult != nil, "tool result fact fixture lost its payload: %+v", fact)
@@ -1619,15 +1618,15 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 						fact.Assistant.ToolCalls[0].Extra["c"][1] = 'x'
 						fact.Assistant.ToolCalls[0].Extra["c"] = json.RawMessage(`"mutated"`)
 					}
-					if len(fact.Assistant.ToolCalls[0].NormalizedArguments) > 0 {
-						fact.Assistant.ToolCalls[0].NormalizedArguments[5] = '2'
-					}
 					fact.Assistant.ToolCalls = append(fact.Assistant.ToolCalls, harness.ToolCallRecord{})
 				}
 				if fact.Assistant.Usage != nil {
 					*fact.Assistant.Usage = harness.UsageCount{InputTokens: 999}
 				}
 			case fact.ToolResult != nil:
+				if fact.ToolResult.Implementation != nil {
+					fact.ToolResult.Implementation.ID = "mutated"
+				}
 				if len(fact.ToolResult.Metadata) > 0 {
 					fact.ToolResult.Metadata[7] = '2'
 				}

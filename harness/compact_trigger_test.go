@@ -658,7 +658,7 @@ func TestModelEffectCompactTriggerSecondOverflowSameOperation(t *testing.T) {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeConversation {
-			inv.Tool = tool
+			inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
 		}
 		return inv, nil
 	}
@@ -722,7 +722,7 @@ func TestModelEffectCompactTriggerSummaryUsageStaysTotalsOnly(t *testing.T) {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeConversation {
-			inv.Tool = tool
+			inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
 		}
 		return inv, nil
 	}
@@ -1057,10 +1057,9 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 				refusal.RefusalFragment = "cannot do that"
 				return streamOf(refusal), nil
 			},
-			Tool: func(ctx context.Context, call model.ToolCall) PreparedTool {
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
 				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
-			},
-			NormalizeTool: objectNormalize,
+			}, objectNormalize),
 		}, nil
 	}}
 	compactRef := testCompactCapture().Model

@@ -140,11 +140,11 @@ func (e *EffectError) Unwrap() error { return e.Err }
 
 // ToolArgumentsHook is one argument hook: before a concrete tool call
 // prepares, it may rewrite the call's raw argument bytes. Its successful
-// replacement must be exactly one JSON object the execution's normalizer
-// accepts; it can never replace the call identity, tool name, or another
-// call's arguments. An effectful hook's execution is a Harness-settled
-// Operation effect with durable hook_result evidence; a pure hook coalesces
-// in memory. Run receives owned call data.
+// unchanged output passes through verbatim; a changed output must be one JSON
+// object. The bound tool normalizes after the hook chain. Hooks cannot replace
+// the call identity, tool name, or another call's arguments. An effectful hook
+// is a Harness-settled Operation effect; a pure hook runs in memory. Run
+// receives owned call data.
 type ToolArgumentsHook struct {
 	ID          string
 	ExtensionID string
@@ -243,12 +243,9 @@ type InvocationRequest struct {
 }
 
 // InvocationExecution is one opened Engine invocation: the physical
-// model-request callback the Harness retries and assembles, the tool effect
-// function, the required pure argument-normalization callback, the selected
-// argument hooks, the selected output-shaping hooks, plus the cleanup of the
-// external resources backing them — the existing callback contracts bound to
-// that invocation. A successful Model, Tool and NormalizeTool must be
-// non-nil, and every ToolHooks and ToolOutputHooks entry requires a
+// model-request callback the Harness retries and assembles, the tool lookup,
+// argument hooks, output-shaping hooks, and cleanup of their resources.
+// Model and LookupTool must be non-nil, and every hook entry requires a
 // non-empty unique ID and a non-nil Run. Close is optional; the opened
 // invocation's resources are released exactly once after its effects settle
 // and their result is consumed, before the owning execution closes.
@@ -258,12 +255,8 @@ type InvocationExecution struct {
 	// or that attempt's failure; retry, assembly and settlement are
 	// Harness-owned.
 	Model func(context.Context, model.Request) (model.Stream, error)
-	Tool  func(context.Context, model.ToolCall) PreparedTool
-	// NormalizeTool is pure, terminating argument validation and defaulting
-	// with no filesystem, service, permission or effect I/O. It receives an
-	// owned call and returns one owned JSON object preserving unrelated
-	// accepted fields; its error is a per-call validation failure.
-	NormalizeTool func(context.Context, model.ToolCall) (json.RawMessage, error)
+	// LookupTool binds one implementation after argument hooks complete.
+	LookupTool func(string) (ToolBinding, bool)
 	// ToolHooks are the selected argument hooks in configured order. Each
 	// runs after the advertisement gate and before concrete preparation; the
 	// first receives the original raw call arguments, every later one the
@@ -281,6 +274,14 @@ type InvocationExecution struct {
 	// effect.
 	RequestHooks []RequestHook
 	Close        func() error
+}
+
+// ToolBinding holds one implementation for normalization and preparation.
+// Normalize is pure and returns one JSON object or a per-call error.
+type ToolBinding struct {
+	Identity  ToolImplementation
+	Normalize func(context.Context, model.ToolCall) (json.RawMessage, error)
+	Prepare   func(context.Context, model.ToolCall) PreparedTool
 }
 
 // Execution is one opened execution: the required invocation opener the
@@ -2350,6 +2351,10 @@ func ownOperationRecord(rec OperationRecord) OperationRecord {
 // are deep-copied so a public read can never alias the coordinator's state.
 func ownActiveEffect(effect *ActiveEffect) *ActiveEffect {
 	out := *effect
+	if effect.Implementation != nil {
+		identity := *effect.Implementation
+		out.Implementation = &identity
+	}
 	if effect.Model != nil {
 		modelRef := *effect.Model
 		out.Model = &modelRef

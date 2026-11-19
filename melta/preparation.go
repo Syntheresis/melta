@@ -747,7 +747,7 @@ func wireDebugDir(location string) string {
 // classification and scope disposal belong to the shared machinery.
 func (p *preparation) concreteOpener(transport, compactTransport *model.Transport, session harness.SessionIdentity, workspace string, catalog []model.ToolDefinition, subprocessEnv func(context.Context) ([]string, error)) openInvocation {
 	return func(_ context.Context, admission harness.OperationAdmission, sel selection, request harness.InvocationRequest) (harness.InvocationExecution, error) {
-		table := make(map[string]Tool, len(catalog))
+		table := make(map[string]boundTool, len(catalog))
 		for _, definition := range catalog {
 			tool, err := sel.invocation.snapshot.composition.bindTool(sel, definition.Name)
 			if err != nil {
@@ -786,14 +786,23 @@ func (p *preparation) concreteOpener(transport, compactTransport *model.Transpor
 				p.passive.replaceProtocolWarnings(admission.SessionID, protocolWarnings(admission.SessionID, warnings))
 				return stream, err
 			},
-			Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				callTC := tc
-				background := &boundBackground{bridge: p.background, sessionID: sessionID}
-				callTC.Background = background
-				return background.bindPlan(table[call.Name].Prepare(ctx, callTC, call))
-			},
-			NormalizeTool: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-				return table[call.Name].Normalize(ctx, tc, call)
+			LookupTool: func(name string) (harness.ToolBinding, bool) {
+				tool, ok := table[name]
+				if !ok {
+					return harness.ToolBinding{}, false
+				}
+				return harness.ToolBinding{
+					Identity: tool.identity,
+					Normalize: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+						return tool.Normalize(ctx, tc, call)
+					},
+					Prepare: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+						callTC := tc
+						background := &boundBackground{bridge: p.background, sessionID: sessionID}
+						callTC.Background = background
+						return background.bindPlan(tool.Prepare(ctx, callTC, call))
+					},
+				}, true
 			},
 			ToolHooks:       hooks,
 			RequestHooks:    requestHooks,

@@ -81,7 +81,6 @@ func factFixtureGraph() *testGraph {
 	call := validToolCallRecord()
 	call.ResultEntryID = testResultID
 	call.Extra = model.Extra{"call": json.RawMessage(`"x"`)}
-	call.NormalizedArguments = json.RawMessage(`{"x":1}`)
 	assistant1.ToolCalls = []toolCallRecord{call}
 
 	hook := validHookResultEntry(hookSucceeded)
@@ -91,6 +90,7 @@ func factFixtureGraph() *testGraph {
 	result.EntryID = testResultID
 	result.AssistantEntry.EntryID = hexID(2)
 	result.Metadata = json.RawMessage(`{"n":1}`)
+	result.HookIDs = []HookIdentity{{ExtensionID: hook.ExtensionID, HookID: hook.HookID}}
 
 	assistant2 := validAssistantEntry(testOpID)
 	assistant2.RequestID = "request-two"
@@ -399,7 +399,7 @@ func TestHistoryViewFactUnionAndOwnership(t *testing.T) {
 		firstAssistant := facts[1].Assistant
 		testassert.Require(t, firstAssistant != nil && firstAssistant.Extra["reasoning"] != nil && len(firstAssistant.ToolCalls) == 1, "assistant fact lost its extra or call: %+v", firstAssistant)
 		call := firstAssistant.ToolCalls[0]
-		testassert.Require(t, call.ID == "call-1" && call.Ordinal == 0 && call.Name == "echo" && call.ResultEntryID == testResultID && call.Extra["call"] != nil && string(call.NormalizedArguments) == `{"x":1}`, "tool call record = %+v", call)
+		testassert.Require(t, call.ID == "call-1" && call.Ordinal == 0 && call.Name == "echo" && call.ResultEntryID == testResultID && call.Extra["call"] != nil, "tool call record = %+v", call)
 		testassert.Require(t, facts[2].ToolResult != nil && string(facts[2].ToolResult.Metadata) == `{"n":1}` && facts[2].ToolResult.AssistantEntry.EntryID == hexID(2), "tool result fact = %+v", facts[2])
 		testassert.Require(t, facts[3].Assistant != nil && facts[3].Assistant.Usage != nil && *facts[3].Assistant.Usage == (UsageCount{InputTokens: 3, CachedInputTokens: 1, OutputTokens: 2}), "completing assistant fact = %+v", facts[3])
 		testassert.Require(t, facts[4].Signal != nil && facts[4].Signal.Signal == SignalInterruption && facts[4].Signal.RelatedOperation != nil && facts[4].Signal.RelatedOperation.OperationID == testOpID, "owned signal fact = %+v", facts[4])

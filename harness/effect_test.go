@@ -90,7 +90,7 @@ var fixturePermission = []PermissionRequest{{Permission: PermissionCommandRun, T
 // invocationExecution supplies the fixtures' opened invocation: the given
 // model and tool callbacks over the shared ordinary invocation defaults.
 func invocationExecution(modelFn func(context.Context, model.Request) (model.Stream, error), toolFn func(context.Context, model.ToolCall) PreparedTool) InvocationExecution {
-	return defaultInvocation(InvocationExecution{Model: modelFn, Tool: toolFn})
+	return defaultInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(toolFn, nil)})
 }
 
 // effectExecution supplies the normalizer every opened invocation requires,
@@ -1117,12 +1117,12 @@ func TestExecuteCancellationShapedOpeningErrors(t *testing.T) {
 // invalid-success rows: a successful Open with a nil invocation opener has
 // its execution Close invoked exactly once inline before the rejection, and a
 // successful Open whose opened conversation invocation has a nil Model, Tool,
-// or NormalizeTool has the invocation's non-nil Close invoked exactly once
+// or tool lookup has the invocation's non-nil Close invoked exactly once
 // before the rejection and the execution's Close once through completion —
 // while the Operation is still running — never runs the Agent, and settles
 // failure through the ordinary terminal settlement.
 func TestExecuteInvalidOpenedExecutionClosesBeforeRejection(t *testing.T) {
-	for _, name := range []string{"nil opener", "nil model", "nil tool", "nil normalization"} {
+	for _, name := range []string{"nil opener", "nil model", "nil lookup"} {
 		t.Run(name, func(t *testing.T) {
 			var h *Harness
 			invCloses, execCloses := 0, 0
@@ -1144,10 +1144,8 @@ func TestExecuteInvalidOpenedExecutionClosesBeforeRejection(t *testing.T) {
 						switch name {
 						case "nil model":
 							inv.Model = nil
-						case "nil tool":
-							inv.Tool = nil
-						case "nil normalization":
-							inv.NormalizeTool = nil
+						case "nil lookup":
+							inv.LookupTool = nil
 						}
 						inv.Close = func() error {
 							invCloses++
@@ -1724,7 +1722,7 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 				}
 				return inner
 			}
-			exec := executionForInvocation(InvocationExecution{Tool: plan, NormalizeTool: objectNormalize})
+			exec := executionForInvocation(InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize)})
 			exec.Permissions = tc.evaluator
 			results, runErr := runToolCalls(t, h, c, store, sessionID, context.Background(), testOpID, exec, capture, []model.ToolCall{testToolCall("call-1")})
 			testassert.NoError(t, runErr)
@@ -1883,7 +1881,7 @@ func TestToolEffectAdvertisementGate(t *testing.T) {
 			return RequestConsequence{ToolNames: []string{}}, nil // the admitted catalog has echo; the request advertises none
 		}}
 		testassert.Require(t, len(testCapture().Tools) == 1 && testCapture().Tools[0].Name == "echo", "fixture catalog = %+v, want the admitted echo tool", testCapture().Tools)
-		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: normalize, RequestHooks: []RequestHook{hide}}, testToolCall("call-1"))
+		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize), RequestHooks: []RequestHook{hide}}, testToolCall("call-1"))
 		testassert.NoError(t, err)
 		testassert.Require(t, result.Status == model.ResultError && result.Content == `Tool "echo" is not available.` && result.Evidence == ExecutionNotStarted,
 			"hidden-echo result = %+v, want the ordinary unavailable error with proven-unstarted knowledge", result)
@@ -1901,7 +1899,7 @@ func TestToolEffectAdvertisementGate(t *testing.T) {
 			prepared++
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 		}
-		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: normalize}, testToolCall("call-1"))
+		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize)}, testToolCall("call-1"))
 		testassert.NoError(t, err)
 		testassert.Require(t, result.Status == model.ResultSuccess && result.Content == "done", "advertised echo result = %+v, want the ordinary settled success", result)
 		testassert.Equal(t, normalized, 1)
@@ -1916,7 +1914,7 @@ func TestToolEffectAdvertisementGate(t *testing.T) {
 			prepared++
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}}}
 		}
-		_, _, _, result, err := freshToolBoundary(t, capture, InvocationExecution{Tool: plan, NormalizeTool: objectNormalize}, testToolCall("call-1"))
+		_, _, _, result, err := freshToolBoundary(t, capture, InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize)}, testToolCall("call-1"))
 		testassert.NoError(t, err)
 		testassert.Require(t, result.Status == model.ResultError && result.Content == `Tool "echo" is not available.`, "names-omitted result = %+v, want the ordinary unavailable-tool error for the captured echo name", result)
 		testassert.Equal(t, prepared, 0)
@@ -1937,15 +1935,11 @@ func firstCommittedCall(t *testing.T, store *graphStorage, sessionID string) too
 	return toolCallRecord{}
 }
 
-// TestToolEffectConsumesCommittedNormalization proves the one normalized
-// value chain over real admitted executions: the tool boundary consumes the
-// original assistant's committed normalized_arguments byte-identically with no
-// second normalization, and an invalid unhooked original settles with the
-// bounded failure diagnostic its single producer normalization stored — zero
-// NormalizeTool invocations at dispatch and no preparation. The committed
-// assistant record is never mutated afterwards.
-func TestToolEffectConsumesCommittedNormalization(t *testing.T) {
-	t.Run("valid original normalizes once and the preparer sees the committed bytes", func(t *testing.T) {
+// TestToolEffectNormalizesOnce proves one dispatch-time
+// normalization and retained raw assistant arguments, including diagnostics
+// for invalid input and byte ownership across preparation.
+func TestToolEffectNormalizesOnce(t *testing.T) {
+	t.Run("valid original normalizes once and the preparer sees the normalized bytes", func(t *testing.T) {
 		normalized := 0
 		normalize := func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 			normalized++
@@ -1966,21 +1960,20 @@ func TestToolEffectConsumesCommittedNormalization(t *testing.T) {
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 		}
 		call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(` {"x": 1} `)}
-		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: normalize}, call)
+		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize)}, call)
 		testassert.NoError(t, err)
 		testassert.Require(t, result.Status == model.ResultSuccess && result.Content == "done", "result = %+v, want the committed call to execute", result)
 		testassert.Equal(t, normalized, 1)
 		testassert.Equal(t, seenName, "echo")
-		testassert.Require(t, string(seen) == `{"x":1}`, "preparer arguments = %q, want byte-identical committed bytes", seen)
+		testassert.Require(t, string(seen) == `{"x":1}`, "preparer arguments = %q, want normalized bytes", seen)
 		after := firstCommittedCall(t, store, sessionID)
-		testassert.Require(t, string(after.NormalizedArguments) == `{"x":1}`, "assistant normalized member = %q", after.NormalizedArguments)
 		{
 			raw, derr := base64.StdEncoding.DecodeString(after.ArgumentsBase64)
 			testassert.Require(t, derr == nil && string(raw) == ` {"x": 1} `, "assistant raw arguments = %q (%v)", raw, derr)
 		}
 	})
 
-	t.Run("executor intent consumes the committed bytes byte-identically", func(t *testing.T) {
+	t.Run("executor-backed preparation receives normalized bytes", func(t *testing.T) {
 		normalized := 0
 		normalize := func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 			normalized++
@@ -1994,14 +1987,14 @@ func TestToolEffectConsumesCommittedNormalization(t *testing.T) {
 			}}
 		}
 		call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(` {"x": 1} `)}
-		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: normalize}, call)
+		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize)}, call)
 		testassert.NoError(t, err)
 		testassert.Require(t, result.Status == model.ResultSuccess && result.Content == "ran", "result = %+v, want the executed outcome", result)
 		testassert.Equal(t, normalized, 1)
-		testassert.Require(t, string(seen) == `{"x":1}`, "preparer arguments = %q, want the committed normalized bytes, not the raw %q", seen, ` {"x": 1} `)
+		testassert.Require(t, string(seen) == `{"x":1}`, "preparer arguments = %q, want normalized bytes, not the raw %q", seen, ` {"x": 1} `)
 	})
 
-	t.Run("invalid original settles its stored diagnostic without re-normalizing", func(t *testing.T) {
+	t.Run("invalid original settles its normalizer diagnostic", func(t *testing.T) {
 		normalized, prepared := 0, 0
 		normalize := func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 			normalized++
@@ -2012,13 +2005,13 @@ func TestToolEffectConsumesCommittedNormalization(t *testing.T) {
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}}}
 		}
 		call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`not json`)}
-		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: normalize}, call)
+		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize)}, call)
 		testassert.NoError(t, err)
 		testassert.Equal(t, normalized, 1)
-		testassert.Require(t, result.Status == model.ResultError && result.Content == "arguments must be one non-null JSON object", "result = %+v, want the stored diagnostic consumed verbatim", result)
+		testassert.Require(t, result.Status == model.ResultError && result.Content == "arguments must be one non-null JSON object", "result = %+v, want the normalizer diagnostic", result)
 		testassert.Equal(t, prepared, 0)
 		committed := firstCommittedCall(t, store, sessionID)
-		testassert.Require(t, len(committed.NormalizedArguments) == 0 && committed.NormalizationFailure == "arguments must be one non-null JSON object", "committed member = %+v, want the one producer diagnostic", committed)
+		testassert.Equal(t, committed.ArgumentsBase64, base64.StdEncoding.EncodeToString(call.Arguments))
 	})
 
 	t.Run("committed extras reach the boundary in the decoded encoded form", func(t *testing.T) {
@@ -2032,7 +2025,7 @@ func TestToolEffectConsumesCommittedNormalization(t *testing.T) {
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 		}
 		call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{"x":1}`), Extra: model.Extra{"form": producer}}
-		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: normalize}, call)
+		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize)}, call)
 		testassert.NoError(t, err)
 		testassert.Require(t, result.Status == model.ResultSuccess, "result = %+v, want the valid original to run", result)
 		testassert.Equal(t, seenAtBoundary, `{ "n" : [1, 1.0, 9007199254740993] }`)
@@ -2052,10 +2045,10 @@ func TestToolEffectConsumesCommittedNormalization(t *testing.T) {
 			return PreparedTool{}
 		}
 		call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`not json`)}
-		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: normalize}, call)
+		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize)}, call)
 		testassert.NoError(t, err)
 		testassert.Equal(t, normalized, 1)
-		stored := firstCommittedCall(t, store, sessionID).NormalizationFailure
+		stored := result.Content
 		testassert.Require(t, len(stored) <= maxToolDiagnosticBytes && strings.HasPrefix(stored, "xyyyyy"), "stored diagnostic = %q, want it truncated within %d bytes", stored, maxToolDiagnosticBytes)
 		testassert.Require(t, result.Status == model.ResultError && result.Content == stored, "result = %+v, want the stored bounded diagnostic %q consumed verbatim", result, stored)
 	})
@@ -2071,10 +2064,9 @@ func TestToolEffectConsumesCommittedNormalization(t *testing.T) {
 			return PreparedTool{}
 		}
 		call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{"x":1}`)}
-		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: normalize}, call)
+		_, _, _, result, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, normalize)}, call)
 		testassert.NoError(t, err)
 		testassert.Equal(t, normalized, 1)
-		testassert.Require(t, firstCommittedCall(t, store, sessionID).NormalizationFailure == invalidToolResultContent, "stored normalization failure = %q, want the fixed internal-validation content", firstCommittedCall(t, store, sessionID).NormalizationFailure)
 		testassert.Require(t, result.Status == model.ResultError && result.Content == invalidToolResultContent, "result = %+v, want the stored internal-validation error consumed verbatim", result)
 	})
 }
@@ -2118,7 +2110,7 @@ func TestToolOutcomeMetadataRules(t *testing.T) {
 				}
 				return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome { return outcome }}
 			}
-			_, _, _, settled, err := freshToolBoundary(t, testCapture(), InvocationExecution{Tool: plan, NormalizeTool: objectNormalize}, testToolCall("call-1"))
+			_, _, _, settled, err := freshToolBoundary(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize)}, testToolCall("call-1"))
 			testassert.NoError(t, err)
 			want := model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ran"}
 			testassert.Equal(t, model.ToolResult{CallID: settled.ToolCallID, Status: settled.Status, Content: settled.Content}, want)
@@ -2533,7 +2525,7 @@ func TestToolResultEvidenceByProducer(t *testing.T) {
 			if len(tc.names) == 1 && tc.names[0] != "echo" {
 				capture.Tools = []model.ToolDefinition{{Name: tc.names[0], Description: "fixture", Parameters: json.RawMessage(`{"type":"object"}`)}}
 			}
-			_, store, sessionID, result, err := freshToolBoundary(t, capture, InvocationExecution{Tool: tc.prepare, NormalizeTool: objectNormalize}, testToolCall("call-1"))
+			_, store, sessionID, result, err := freshToolBoundary(t, capture, InvocationExecution{LookupTool: fixtureToolLookup(tc.prepare, objectNormalize)}, testToolCall("call-1"))
 			testassert.NoError(t, err)
 			testassert.Require(t, result.Status == tc.status && result.Content == tc.content, "result = %+v, want %s %q", result, tc.status, tc.content)
 			graph, err := validateFixture(t, store, sessionID)
@@ -2611,8 +2603,7 @@ func toolMessageText(t *testing.T, req model.Request, callID string) string {
 func TestToolOutputShaping(t *testing.T) {
 	t.Run("successful shaping replaces content and keeps the original", func(t *testing.T) {
 		inv := InvocationExecution{
-			Tool:          shapingExecutor(model.ResultSuccess, "raw output", json.RawMessage(`{"n":1}`)),
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(shapingExecutor(model.ResultSuccess, "raw output", json.RawMessage(`{"n":1}`)), objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{shapingHook("shaper.one", func(_ context.Context, in ToolOutputInput) (string, error) {
 				testassert.Equal(t, in.Content, "raw output")
 				testassert.Equal(t, string(in.Outcome.Metadata), `{"n":1}`)
@@ -2639,8 +2630,7 @@ func TestToolOutputShaping(t *testing.T) {
 
 	t.Run("failing shaper preserves the real outcome", func(t *testing.T) {
 		inv := InvocationExecution{
-			Tool:          shapingExecutor(model.ResultSuccess, "raw output", json.RawMessage(`{"n":1}`)),
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(shapingExecutor(model.ResultSuccess, "raw output", json.RawMessage(`{"n":1}`)), objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{shapingHook("shaper.boom", func(context.Context, ToolOutputInput) (string, error) {
 				return "", errors.New("shaper broke")
 			})},
@@ -2656,7 +2646,7 @@ func TestToolOutputShaping(t *testing.T) {
 
 	t.Run("interrupted shaper cannot relabel the observed outcome", func(t *testing.T) {
 		inv := InvocationExecution{
-			Tool: shapingExecutor(model.ResultSuccess, "raw output", nil), NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(shapingExecutor(model.ResultSuccess, "raw output", nil), objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{shapingHook("shaper.interrupted", func(context.Context, ToolOutputInput) (string, error) {
 				return "", &EffectError{Evidence: ExecutionUnknown, Err: context.Canceled, Interrupted: true}
 			})},
@@ -2669,8 +2659,7 @@ func TestToolOutputShaping(t *testing.T) {
 
 	t.Run("invalid shaped output aborts with the rule diagnostic", func(t *testing.T) {
 		inv := InvocationExecution{
-			Tool:          shapingExecutor(model.ResultError, "real failure", nil),
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(shapingExecutor(model.ResultError, "real failure", nil), objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{shapingHook("shaper.empty", func(context.Context, ToolOutputInput) (string, error) {
 				return "", nil
 			})},
@@ -2694,8 +2683,7 @@ func TestToolOutputShaping(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := InvocationExecution{
-				Tool:          shapingExecutor(model.ResultSuccess, "raw output", nil),
-				NormalizeTool: objectNormalize,
+				LookupTool: fixtureToolLookup(shapingExecutor(model.ResultSuccess, "raw output", nil), objectNormalize),
 				ToolOutputHooks: []ToolOutputHook{shapingHook("shaper.boom", func(context.Context, ToolOutputInput) (string, error) {
 					return "", tc.err
 				})},
@@ -2716,8 +2704,7 @@ func TestToolOutputShaping(t *testing.T) {
 
 	t.Run("a later failure abandons partial shaping", func(t *testing.T) {
 		inv := InvocationExecution{
-			Tool:          shapingExecutor(model.ResultSuccess, "raw output", nil),
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(shapingExecutor(model.ResultSuccess, "raw output", nil), objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{
 				shapingHook("shaper.one", func(_ context.Context, in ToolOutputInput) (string, error) {
 					return "partial " + in.Content, nil
@@ -2738,8 +2725,7 @@ func TestToolOutputShaping(t *testing.T) {
 	t.Run("hooks chain in configured order", func(t *testing.T) {
 		seen := []string{}
 		inv := InvocationExecution{
-			Tool:          shapingExecutor(model.ResultSuccess, "raw output", nil),
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(shapingExecutor(model.ResultSuccess, "raw output", nil), objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{
 				shapingHook("shaper.one", func(_ context.Context, in ToolOutputInput) (string, error) {
 					seen = append(seen, in.Content)
@@ -2763,8 +2749,7 @@ func TestToolOutputShaping(t *testing.T) {
 	t.Run("hook outcome input is an owned copy", func(t *testing.T) {
 		var second ToolOutputInput
 		inv := InvocationExecution{
-			Tool:          shapingExecutor(model.ResultSuccess, "raw output", json.RawMessage(`{"n":1}`)),
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(shapingExecutor(model.ResultSuccess, "raw output", json.RawMessage(`{"n":1}`)), objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{
 				shapingHook("shaper.mutate", func(_ context.Context, in ToolOutputInput) (string, error) {
 					copy(in.Outcome.Metadata, "XXXXXXXX")
@@ -2789,10 +2774,9 @@ func TestToolOutputShaping(t *testing.T) {
 
 	t.Run("immediate outcomes shape from their replacement content", func(t *testing.T) {
 		inv := InvocationExecution{
-			Tool: func(ctx context.Context, call model.ToolCall) PreparedTool {
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
 				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "wrong-call", Status: model.ResultSuccess, Content: "done"}}}
-			},
-			NormalizeTool: objectNormalize,
+			}, objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{shapingHook("shaper.one", func(_ context.Context, in ToolOutputInput) (string, error) {
 				testassert.Equal(t, in.Content, invalidToolResultContent)
 				return "shaped " + in.Content, nil
@@ -2836,8 +2820,7 @@ func TestToolShapingPreservesUnknownOutcomeNotice(t *testing.T) {
 					next = request
 					return completedTurnStream(), nil
 				},
-				Tool:            invalidExecutor,
-				NormalizeTool:   objectNormalize,
+				LookupTool:      fixtureToolLookup(invalidExecutor, objectNormalize),
 				ToolOutputHooks: hooks,
 			}, nil
 		}}
@@ -3429,17 +3412,9 @@ func TestToolEffectGateBeforePreparation(t *testing.T) {
 	requireSessionCleared(t, h, sessionID)
 }
 
-// TestAssistantEntryOriginalNormalizationCommitsAtProducer proves the
-// assistant-entry normalization producer: before the entry commits, each
-// advertised completed call runs through the pure callback exactly once — a
-// successful owned object populates the nested call's normalized_arguments
-// member while the exact raw argument bytes are always retained, a per-call
-// validation failure stores its bounded diagnostic in the nested call's
-// normalization_failure member, a malformed (non-object) callback result
-// stores the fixed internal-validation content there, and an unadvertised
-// name invokes no callback and stores neither member. The entry round-trips
-// through the codecs under the closed exactly-one rule.
-func TestAssistantEntryOriginalNormalizationCommitsAtProducer(t *testing.T) {
+// TestAssistantEntryRetainsRawCalls verifies retained
+// raw arguments and per-call normalization and advertisement gating.
+func TestAssistantEntryRetainsRawCalls(t *testing.T) {
 	valid := json.RawMessage(` {"x": 1} `)      // valid JSON whose bytes are not compact
 	malformed := json.RawMessage("\xff{broken") // invalid JSON and invalid UTF-8
 	normalized := 0
@@ -3453,7 +3428,7 @@ func TestAssistantEntryOriginalNormalizationCommitsAtProducer(t *testing.T) {
 	periodic := func(ctx context.Context, call model.ToolCall) PreparedTool {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 	}
-	_, store, sessionID, _, err := freshToolCalls(t, testCapture(), InvocationExecution{Tool: periodic, NormalizeTool: normalize},
+	_, store, sessionID, _, err := freshToolCalls(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(periodic, normalize)},
 		model.ToolCall{ID: "call-1", Name: "echo", Arguments: valid},
 		model.ToolCall{ID: "call-2", Name: "echo", Arguments: malformed},
 		model.ToolCall{ID: "call-3", Name: "echo", Arguments: json.RawMessage(`{"x":1}`)},
@@ -3472,28 +3447,18 @@ func TestAssistantEntryOriginalNormalizationCommitsAtProducer(t *testing.T) {
 			raw, derr := base64.StdEncoding.DecodeString(calls[0].ArgumentsBase64)
 			testassert.Require(t, derr == nil && string(raw) == string(valid), "call-1 raw arguments = %q err %v, want the exact caller bytes", raw, derr)
 		}
-		testassert.Require(t, string(calls[0].NormalizedArguments) == `{"x":1}`, "call-1 normalized arguments = %q, want the successful callback object", calls[0].NormalizedArguments)
-		testassert.Require(t, calls[0].NormalizationFailure == "", "call-1 normalization failure = %q, want no failure beside a successful normalization", calls[0].NormalizationFailure)
 		{
 			raw, derr := base64.StdEncoding.DecodeString(calls[1].ArgumentsBase64)
 			testassert.Require(t, derr == nil && string(raw) == string(malformed), "call-2 raw arguments = %q err %v, want the exact malformed bytes preserved", raw, derr)
 		}
-		testassert.Require(t, len(calls[1].NormalizedArguments) == 0, "call-2 normalized arguments = %q, want the member absent for a failed normalization", calls[1].NormalizedArguments)
-		testassert.Require(t, calls[1].NormalizationFailure == "arguments must be one non-null JSON object", "call-2 normalization failure = %q, want the bounded useful diagnostic", calls[1].NormalizationFailure)
-		testassert.Require(t, len(calls[2].NormalizedArguments) == 0, "call-3 normalized arguments = %q, want the member absent for a malformed callback result", calls[2].NormalizedArguments)
-		testassert.Require(t, calls[2].NormalizationFailure == invalidToolResultContent, "call-3 normalization failure = %q, want the fixed internal-validation content", calls[2].NormalizationFailure)
-		testassert.Require(t, len(calls[3].NormalizedArguments) == 0 && calls[3].NormalizationFailure == "", "call-4 members = (%q, %q), want neither for an unadvertised name", calls[3].NormalizedArguments, calls[3].NormalizationFailure)
 		return
 	}
 	t.Fatalf("no assistant entry with four calls committed")
 }
 
-// TestAssistantEntryBoundedDiagnosticIsAlwaysValidUTF8 proves the producer's
-// bounded diagnostic renders valid UTF-8 at any length: a short normalizer
-// error carrying invalid UTF-8 bytes still publishes the complete assistant
-// entry — every sibling call commits — with the sanitized diagnostic stored
-// as the call's normalization failure, which round-trips through the codec.
-func TestAssistantEntryBoundedDiagnosticIsAlwaysValidUTF8(t *testing.T) {
+// TestNormalizationDiagnosticIsAlwaysValidUTF8 verifies sanitized
+// normalization errors settle independently of a successful sibling.
+func TestNormalizationDiagnosticIsAlwaysValidUTF8(t *testing.T) {
 	normalize := func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 		if call.ID == "call-1" {
 			return nil, errors.New("bad\xffbyte") // one short diagnostic carrying invalid UTF-8 bytes
@@ -3503,24 +3468,13 @@ func TestAssistantEntryBoundedDiagnosticIsAlwaysValidUTF8(t *testing.T) {
 	periodic := func(ctx context.Context, call model.ToolCall) PreparedTool {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 	}
-	_, store, sessionID, _, err := freshToolCalls(t, testCapture(), InvocationExecution{Tool: periodic, NormalizeTool: normalize},
+	_, _, _, results, err := freshToolCalls(t, testCapture(), InvocationExecution{LookupTool: fixtureToolLookup(periodic, normalize)},
 		model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`not json`)},
 		model.ToolCall{ID: "call-2", Name: "echo", Arguments: json.RawMessage(`{"x":1}`)},
 	)
 	testassert.NoError(t, err) // one bad diagnostic cannot abort the model result's publication
-	graph, err := validateFixture(t, store, sessionID)
-	testassert.NoError(t, err)
-	for _, entry := range graph.Entries {
-		if entry.Assistant == nil || len(entry.Assistant.ToolCalls) != 2 {
-			continue
-		}
-		testassert.Require(t, entry.Assistant.ToolCalls[0].NormalizationFailure == "badbyte",
-			"call-1 stored diagnostic = %q, want the invalid bytes removed", entry.Assistant.ToolCalls[0].NormalizationFailure)
-		testassert.Require(t, string(entry.Assistant.ToolCalls[1].NormalizedArguments) == `{"x":1}`,
-			"call-2 normalized arguments = %q, want the sibling call committed normally", entry.Assistant.ToolCalls[1].NormalizedArguments)
-		return
-	}
-	t.Fatalf("no assistant entry with two calls committed")
+	testassert.Require(t, results[0].Content == "badbyte" && string(results[1].NormalizedArguments) == `{"x":1}`,
+		"results = %+v, want sanitized error and successful sibling", results)
 }
 
 // TestModelEffectIntentPublicationUnderCancellationRetainsRunningState proves

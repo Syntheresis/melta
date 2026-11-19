@@ -396,16 +396,16 @@ func projectToolCall(call harness.ToolCallRecord, results map[string]harness.Too
 		Arguments: string(arguments),
 		Extra:     extraObject(call.Extra),
 	}
-	if len(call.NormalizedArguments) > 0 {
-		normalized := protocol.JSONObject{}
-		if err := json.Unmarshal(call.NormalizedArguments, &normalized); err != nil {
-			return protocol.ToolCallView{}, fmt.Errorf("tool call %q normalized arguments: %v", call.ID, err)
-		}
-		view.NormalizedArguments = &normalized
-	}
 	result, ok := results[call.ResultEntryID]
 	if !ok {
 		return view, nil
+	}
+	if len(result.NormalizedArguments) > 0 {
+		normalized := protocol.JSONObject{}
+		if err := json.Unmarshal(result.NormalizedArguments, &normalized); err != nil {
+			return protocol.ToolCallView{}, fmt.Errorf("tool call %q normalized arguments: %v", call.ID, err)
+		}
+		view.NormalizedArguments = &normalized
 	}
 	status := protocol.ToolCallStatus(result.Status)
 	content := result.Content

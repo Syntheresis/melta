@@ -745,10 +745,9 @@ func TestPublicManualCompactInterruptKeepsPriorProjection(t *testing.T) {
 							}
 							return harness.InvocationExecution{
 								Model: attempt,
-								Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+								LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 									return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-								},
-								NormalizeTool: publicNormalize,
+								}, publicNormalize),
 							}, nil
 						}}, nil
 					},

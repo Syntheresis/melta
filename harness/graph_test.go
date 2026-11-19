@@ -485,7 +485,7 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 	assistant.OperationID = ""
 	assistant.Evidence.ToolNames = []string{"foreign"}
 	call := validToolCallRecord()
-	call.Name, call.ResultEntryID, call.NormalizedArguments = "foreign", hexID(4), json.RawMessage(`{"x":1}`)
+	call.Name, call.ResultEntryID = "foreign", hexID(4)
 	assistant.ToolCalls = []toolCallRecord{call}
 	result := validToolResultEntry("")
 	result.EntryID, result.AssistantEntry.EntryID = hexID(4), hexID(2)
@@ -502,30 +502,20 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 	stored, err := encodeAssistantEntry(*assistant)
 	testassert.NoError(t, err)
 	for _, tc := range []struct {
-		name   string
-		detail string
-		mutate func(map[string]json.RawMessage)
+		name       string
+		advertised []string
 	}{
-		{"advertised without normalization", "advertised call", func(obj map[string]json.RawMessage) {
-			var calls []map[string]json.RawMessage
-			testassert.NoError(t, json.Unmarshal(obj["tool_calls"], &calls))
-			delete(calls[0], "normalized_arguments_base64")
-			obj["tool_calls"] = mustMarshal(calls)
-		}},
-		{"unadvertised with normalization", "unadvertised call", func(obj map[string]json.RawMessage) {
-			evidence := wireObject(t, obj["evidence"])
-			evidence["tool_names"] = mustMarshal([]string{"echo"})
-			obj["evidence"] = mustMarshal(evidence)
-		}},
+		{"advertised", []string{"foreign"}},
+		{"unadvertised", []string{"echo"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			obj := wireObject(t, stored)
-			tc.mutate(obj)
+			evidence := wireObject(t, obj["evidence"])
+			evidence["tool_names"] = mustMarshal(tc.advertised)
+			obj["evidence"] = mustMarshal(evidence)
 			fixture.entries[1].rawOverride = mustMarshal(obj)
 			_, err := validateFixture(t, fixture.storage(t), testSessionID)
-			if err == nil || !strings.Contains(err.Error(), tc.detail) {
-				t.Fatalf("copied normalization violation = %v", err)
-			}
+			testassert.NoError(t, err)
 		})
 	}
 }
@@ -726,6 +716,9 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 		result.Status = model.ResultInterrupted
 		result.Content = "agent interrupted"
 		result.OriginalContent = "agent interrupted"
+		result.Evidence = ExecutionNotStarted
+		result.Implementation = nil
+		result.NormalizedArguments = nil
 		fixture.entries = append(fixture.entries,
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(5), OperationID: testOpID, Kind: EntryHookResult, Sequence: 3, CommittedAt: testTime}, hookResult: &hook},
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryToolResult, Sequence: 4, CommittedAt: testTime}, toolResult: &result},
@@ -943,6 +936,7 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 		firstResult.EntryID = hexID(4)
 		firstResult.AssistantEntry = EntryRef{SessionID: testSessionID, EntryID: hexID(2)}
 		firstResult.ToolCallID = "c"
+		firstResult.HookIDs = []HookIdentity{{ExtensionID: one.ExtensionID, HookID: one.HookID}}
 		fixture.entries = append(fixture.entries,
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryHookResult, Sequence: 3, CommittedAt: testTime}, hookResult: &one},
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(4), OperationID: testOpID, Kind: EntryToolResult, Sequence: 4, CommittedAt: testTime}, toolResult: &firstResult},
@@ -1721,7 +1715,7 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 			fixture.entries = append(fixture.entries, testEntry{
 				env: Entry{SessionID: testSessionID, ID: hexID(4), OperationID: testOpID, Kind: EntryHookResult, Sequence: 4, CommittedAt: testTime}, hookResult: &failed,
 			})
-			fixture.ops[0].State.ActiveEffect = &ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{"x":1}`)}
+			fixture.ops[0].State.ActiveEffect = &ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{"x":1}`), Implementation: &ToolImplementation{ID: "echo"}}
 		}},
 		{"interrupted hook with an error tool result", func(t *testing.T, fixture *testGraph) {
 			assistant := validAssistantEntry(testOpID)
@@ -2029,6 +2023,7 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
 				Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1",
 				FinalArguments: json.RawMessage(`{"x":1}`),
+				Implementation: &ToolImplementation{ID: "echo"},
 			}
 		}},
 		{"tool result provenance names a hook effect committed after the result", func(t *testing.T, fixture *testGraph) {
@@ -2076,6 +2071,7 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
 				Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1",
 				FinalArguments:  json.RawMessage(`{"x":1}`),
+				Implementation:  &ToolImplementation{ID: "echo"},
 				ContributionIDs: []HookIdentity{{ExtensionID: "ext.one", HookID: "cap.hook.two"}, {ExtensionID: "ext.one", HookID: "cap.hook.one"}},
 			}
 		}},

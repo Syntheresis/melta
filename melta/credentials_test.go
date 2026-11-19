@@ -220,7 +220,7 @@ func TestOperationCredentialsUsePreparedOpeningCapture(t *testing.T) {
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-prepared", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	outcome := inv.Tool(context.Background(), model.ToolCall{ID: "call-prepared", Name: "cred_probe", Arguments: json.RawMessage(`{"key":"probe"}`)}).Execute(context.Background())
+	outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-prepared", Name: "cred_probe", Arguments: json.RawMessage(`{"key":"probe"}`)}).Execute(context.Background())
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "tool outcome = %+v, want success", outcome.Result)
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
@@ -263,8 +263,8 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-shared", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	inv.Tool(context.Background(), model.ToolCall{ID: "call-a", Name: "cred_probe_a", Arguments: json.RawMessage(`{"key":"a"}`)}).Execute(context.Background())
-	inv.Tool(context.Background(), model.ToolCall{ID: "call-b", Name: "cred_probe_b", Arguments: json.RawMessage(`{"key":"b"}`)}).Execute(context.Background())
+	fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-a", Name: "cred_probe_a", Arguments: json.RawMessage(`{"key":"a"}`)}).Execute(context.Background())
+	fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-b", Name: "cred_probe_b", Arguments: json.RawMessage(`{"key":"b"}`)}).Execute(context.Background())
 	first.mu.Lock()
 	second.mu.Lock()
 	defer first.mu.Unlock()
@@ -792,7 +792,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-nested", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	outcome := inv.Tool(context.Background(), model.ToolCall{ID: "call-nested", Name: "cred_caller", Arguments: json.RawMessage(`{}`)}).Execute(context.Background())
+	outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-nested", Name: "cred_caller", Arguments: json.RawMessage(`{}`)}).Execute(context.Background())
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "nested outcome = %+v, want success", outcome.Result)
 	testassert.Equal(t, outcome.Result.Content, "caller=caller-value|provider=provider-value")
 }
@@ -956,7 +956,7 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 			_ = stream.Close()
 		}
 		testassert.Require(t, server.requests() == before+1 && server.authAt(before) == "Bearer "+key, "provider authorization = %q, want %q", server.authAt(before), "Bearer "+key)
-		outcome := inv.Tool(context.Background(), model.ToolCall{ID: "call-" + key, Name: "cred_probe", Arguments: json.RawMessage(`{"key":"` + key + `"}`)}).Execute(context.Background())
+		outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-" + key, Name: "cred_probe", Arguments: json.RawMessage(`{"key":"` + key + `"}`)}).Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "tool outcome = %+v, want success", outcome.Result)
 	}
 	run(newPrepared, "session-new", "op-new", "inv-new", "shared-later")

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -192,6 +193,15 @@ func TestExecutableFixtureEndToEnd(t *testing.T) {
 	arguments, err := hooks.BeforeTool(context.Background(), hookContext, call)
 	if err != nil || string(arguments) != string(wantArguments) {
 		t.Fatalf("before-tool hook = %q, %v, want %q", arguments, err, wantArguments)
+	}
+	for _, raw := range [][]byte{nil, []byte("not json"), {0xff, 0xfe}} {
+		opaqueCall := call
+		opaqueCall.Arguments = raw
+		got, err := hooks.BeforeTool(context.Background(), hookContext, opaqueCall)
+		want := `{"hooked":` + strconv.Quote(string(raw)) + `}`
+		if err != nil || string(got) != want {
+			t.Fatalf("before-tool opaque %q = %q, %v, want %q", raw, got, err, want)
+		}
 	}
 	wantShaped := "fixture-shaped:" + hashHex([]byte("raw")) + ":raw"
 	shaped, err := hooks.AfterTool(context.Background(), hookContext, harness.ToolOutputInput{Content: "raw"})

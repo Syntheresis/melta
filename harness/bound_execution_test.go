@@ -80,8 +80,7 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 					Model: func(context.Context, model.Request) (model.Stream, error) {
 						return summaryStream("bound summary", model.Usage{InputTokens: 1}), nil
 					},
-					Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-					NormalizeTool: objectNormalize,
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 					Close: func() error {
 						closeOrder = append(closeOrder, "maintenance-close")
 						return nil
@@ -100,12 +99,11 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 					}
 					return completedTurnStream(), nil
 				},
-				Tool: func(ctx context.Context, call model.ToolCall) PreparedTool {
+				LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
 					return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
 						return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}, Evidence: ExecutionObserved}
 					}}
-				},
-				NormalizeTool: objectNormalize,
+				}, objectNormalize),
 				Close: func() error {
 					closeOrder = append(closeOrder, "conversation-close")
 					return nil
@@ -331,8 +329,7 @@ func TestExecuteDirectOwnsCancellableChildContext(t *testing.T) {
 				ctxDuringStream = ctx
 				return &checkingStream{ctx: ctx, inner: streamOf(turnDelta("stop", "done")), onRead: func(live bool) { streamLive = live }}, nil
 			},
-			Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 		}, nil
 	}}
 	testassert.NoError(t, executeDirect(h, c, parent, testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
@@ -386,9 +383,8 @@ func TestManualMaintenanceDisposalFollowsCompletionPublication(t *testing.T) {
 				Strategy: &StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}},
 				OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 					return InvocationExecution{
-						Model:         modelFn,
-						Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-						NormalizeTool: objectNormalize,
+						Model:      modelFn,
+						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 						Close: func() error {
 							events = append(events, "maintenance-close")
 							rec, err := h.ReadOperation(context.Background(), sessionID, "compact-op")
@@ -815,8 +811,7 @@ func TestExecutionAdoptsCommittedCapture(t *testing.T) {
 				sent = request
 				return completedTurnStream(), nil
 			},
-			Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 		}, nil
 	}}
 	prepared := preparedExecutionFor(capture, func(_ context.Context, admission OperationAdmission) (Execution, error) {
@@ -1026,8 +1021,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 						}
 						return streamOf(turnDelta("stop", fmt.Sprintf("pass %d", pass))), nil
 					},
-					Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-					NormalizeTool: objectNormalize,
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 					Close: func() error {
 						events = append(events, fmt.Sprintf("maintenance-close-%d", pass))
 						return nil
@@ -1039,8 +1033,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 					events = append(events, "conversation-dispatch")
 					return streamOf(turnDelta("stop", "final answer"), usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1})), nil
 				},
-				Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-				NormalizeTool: objectNormalize,
+				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 			}, nil
 		},
 	}
@@ -1131,8 +1124,7 @@ func TestWaitRetainsManualPublicationBeforeLaterExecution(t *testing.T) {
 				Model: func(context.Context, model.Request) (model.Stream, error) {
 					return summaryStream("manual summary", model.Usage{InputTokens: 1}), nil
 				},
-				Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-				NormalizeTool: objectNormalize,
+				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 				Close: func() error {
 					race.aCloseArrived <- struct{}{}
 					<-race.aCloseGate
@@ -1189,8 +1181,7 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 						Model: func(context.Context, model.Request) (model.Stream, error) {
 							return summaryStream("automatic summary", model.Usage{InputTokens: 1}), nil
 						},
-						Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-						NormalizeTool: objectNormalize,
+						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 						Close: func() error {
 							race.aCloseArrived <- struct{}{}
 							<-race.aCloseGate
@@ -1199,9 +1190,8 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 					}, nil
 				}
 				return InvocationExecution{
-					Model:         func(context.Context, model.Request) (model.Stream, error) { return completedTurnStream(), nil },
-					Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-					NormalizeTool: objectNormalize,
+					Model:      func(context.Context, model.Request) (model.Stream, error) { return completedTurnStream(), nil },
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 				}, nil
 			},
 		}
