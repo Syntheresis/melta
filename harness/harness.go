@@ -69,6 +69,7 @@ type PreparationSession struct {
 type PreparationRequest struct {
 	Session     PreparationSession
 	RequestKind RequestKind
+	Content     []model.ContentPart
 }
 
 // PreparedExecution is the outcome of one preparation: the durable capture,
@@ -650,88 +651,28 @@ func (h *Harness) ClaimExternalData(ctx context.Context, sessionID, extensionID 
 	if extensionID == "" {
 		return invalidInput("external data owner must be a nonempty extension ID")
 	}
-	c, release, err := h.acquireCoordinator(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	defer release()
-	for {
-		if err := c.waitIdle(ctx); err != nil {
-			return err
+	_, err := h.updateOpenSession(ctx, sessionID, "an external data claim", func(state *SessionState) (bool, error) {
+		if slices.Contains(state.ExternalDataOwners, extensionID) {
+			return false, nil
 		}
-		c.mu.Lock()
-		if c.reserved != nil { // a reservation was taken between the wait and the lock
-			c.mu.Unlock()
-			continue
-		}
-		if c.gone { // a deletion committed while this call waited or relocked
-			c.mu.Unlock()
-			return notFoundSession(sessionID)
-		}
-		if c.graph.Session.State.Lifecycle != LifecycleOpen {
-			c.mu.Unlock()
-			return invalidInput("session %q is archived; an external data claim requires an open Session", sessionID)
-		}
-		expected := c.graph.Session.Revision
-		var (
-			updated SessionRecord
-			changed bool
-		)
-		err := h.deps.Storage.Transact(ctx, func(tx Transaction) error {
-			key := RegisterKey{SessionID: sessionID, Kind: RegisterSession}
-			reg, err := tx.ReadRegister(key)
-			if err != nil {
-				return err
-			}
-			current, err := decodeSessionRegister(reg)
-			if err != nil {
-				return corruptSession(sessionID, "session register: %v", err)
-			}
-			if reg.Revision != expected {
-				return fmt.Errorf("%w: session %q revision %d changed concurrently to %d", errRevisionRace, sessionID, expected, reg.Revision)
-			}
-			if slices.Contains(current.State.ExternalDataOwners, extensionID) {
-				updated = current // a repeated claim is a true no-op
-				return nil
-			}
-			state := current.State
-			state.ExternalDataOwners = append(append([]string(nil), state.ExternalDataOwners...), extensionID)
-			changedRecord := SessionRecord{Identity: current.Identity, State: state}
-			payload, err := encodeSessionRegister(changedRecord)
-			if err != nil {
-				return err
-			}
-			replaced, err := tx.ReplaceRegister(key, reg.Revision, payload)
-			if err != nil {
-				return err
-			}
-			changedRecord.Revision = replaced.Revision
-			updated = changedRecord
-			changed = true
-			return nil
-		})
-		if err != nil {
-			h.markCorrupt(sessionID, err)
-			c.mu.Unlock()
-			if errors.Is(err, errRevisionRace) { // a foreign writer changed the durable state under the resident view
-				if rerr := h.rematerialize(ctx, c, sessionID); rerr != nil {
-					return rerr
-				}
-			}
-			return err
-		}
-		if changed {
-			c.graph.Session = updated
-		}
-		c.mu.Unlock()
-		if changed {
-			h.observeInvalidation(c) // the durable external-data claim
-		}
-		return nil
-	}
+		state.ExternalDataOwners = append(slices.Clone(state.ExternalDataOwners), extensionID)
+		return true, nil
+	})
+	return err
 }
 
 func (h *Harness) changeSelection(ctx context.Context, sessionID string, update func(AgentSelection) (AgentSelection, error)) (SessionRecord, error) {
+	return h.updateOpenSession(ctx, sessionID, "the Agent type", func(state *SessionState) (bool, error) {
+		selection, err := update(state.AgentSelection)
+		if err != nil {
+			return false, err
+		}
+		state.AgentSelection = selection
+		return true, nil
+	})
+}
+
+func (h *Harness) updateOpenSession(ctx context.Context, sessionID, operation string, update func(*SessionState) (bool, error)) (SessionRecord, error) {
 	c, release, err := h.acquireCoordinator(ctx, sessionID)
 	if err != nil {
 		return SessionRecord{}, err
@@ -752,10 +693,13 @@ func (h *Harness) changeSelection(ctx context.Context, sessionID string, update 
 		}
 		if c.graph.Session.State.Lifecycle != LifecycleOpen {
 			c.mu.Unlock()
-			return SessionRecord{}, invalidInput("session %q is archived; the Agent type requires an open Session", sessionID)
+			return SessionRecord{}, invalidInput("session %q is archived; %s requires an open Session", sessionID, operation)
 		}
 		expected := c.graph.Session.Revision
-		var updated SessionRecord
+		var (
+			updated SessionRecord
+			changed bool
+		)
 		err := h.deps.Storage.Transact(ctx, func(tx Transaction) error {
 			key := RegisterKey{SessionID: sessionID, Kind: RegisterSession}
 			reg, err := tx.ReadRegister(key)
@@ -770,12 +714,16 @@ func (h *Harness) changeSelection(ctx context.Context, sessionID string, update 
 				return fmt.Errorf("%w: session %q revision %d changed concurrently to %d", errRevisionRace, sessionID, expected, reg.Revision)
 			}
 			state := current.State
-			state.AgentSelection, err = update(state.AgentSelection)
+			changed, err = update(&state)
 			if err != nil {
 				return err
 			}
-			changed := SessionRecord{Identity: current.Identity, State: state}
-			payload, err := encodeSessionRegister(changed)
+			if !changed {
+				updated = current
+				return nil
+			}
+			changedRecord := SessionRecord{Identity: current.Identity, State: state}
+			payload, err := encodeSessionRegister(changedRecord)
 			if err != nil {
 				return err
 			}
@@ -783,24 +731,28 @@ func (h *Harness) changeSelection(ctx context.Context, sessionID string, update 
 			if err != nil {
 				return err
 			}
-			changed.Revision = replaced.Revision
-			updated = changed
+			changedRecord.Revision = replaced.Revision
+			updated = changedRecord
 			return nil
 		})
 		if err != nil {
 			h.markCorrupt(sessionID, err)
 			c.mu.Unlock()
 			if errors.Is(err, errRevisionRace) { // a foreign writer changed the durable state under the resident view
-				if rerr := h.rematerialize(ctx, c, sessionID); rerr != nil { // a discovered corruption or storage failure is the current truth
+				if rerr := h.rematerialize(ctx, c, sessionID); rerr != nil {
 					return SessionRecord{}, rerr
 				}
 			}
 			return SessionRecord{}, err
 		}
-		c.graph.Session = updated
+		if changed {
+			c.graph.Session = updated
+		}
 		result := ownSessionRecord(updated)
 		c.mu.Unlock()
-		h.observeInvalidation(c) // the durable Agent-type advance
+		if changed {
+			h.observeInvalidation(c)
+		}
 		return result, nil
 	}
 }
@@ -1763,7 +1715,7 @@ func (h *Harness) admitReserved(ctx context.Context, c *coordinator, req admissi
 	prepared, capture, prepCtx, cleanup, err := h.prepareExecution(ctx, PreparationSession{
 		Identity:       view.Identity,
 		AgentSelection: view.State.AgentSelection,
-	}, req.Kind)
+	}, req.Kind, req.Content)
 	if err != nil {
 		if isPreparationRefusal(err) { // known non-admission before publication, typed or not: nothing was written
 			return OperationRecord{}, nil, "", refuseAdmission(err)
@@ -1799,7 +1751,7 @@ func (h *Harness) admitReserved(ctx context.Context, c *coordinator, req admissi
 // cancellation observed after preparation — so only an adopted prepared
 // execution ever carries one. Caller or Harness cancellation before or after
 // preparation publishes nothing.
-func (h *Harness) prepareExecution(ctx context.Context, session PreparationSession, kind RequestKind) (PreparedExecution, ExecutionCapture, context.Context, context.CancelFunc, error) {
+func (h *Harness) prepareExecution(ctx context.Context, session PreparationSession, kind RequestKind, content []model.ContentPart) (PreparedExecution, ExecutionCapture, context.Context, context.CancelFunc, error) {
 	prepCtx, cancel := context.WithCancel(h.ctx)
 	stop := context.AfterFunc(ctx, cancel)
 	cleanup := func() {
@@ -1818,6 +1770,7 @@ func (h *Harness) prepareExecution(ctx context.Context, session PreparationSessi
 	prepared, prepErr := h.deps.Prepare(prepCtx, PreparationRequest{
 		Session:     session,
 		RequestKind: kind,
+		Content:     ownContentParts(content),
 	})
 	if prepErr != nil {
 		cleanup()

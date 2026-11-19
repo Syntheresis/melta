@@ -142,6 +142,41 @@ func newTestHarness(t *testing.T, store Storage, prepare func(context.Context, P
 	return h
 }
 
+func TestPreparationInputOwnsContent(t *testing.T) {
+	content := []model.ContentPart{{Kind: model.PartText, Text: "original", Extra: model.Extra{"nested": json.RawMessage(`{"n":1}`)}}}
+	var retained []model.ContentPart
+	h := newTestHarness(t, freshSessionStore(t), func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
+		retained = req.Content
+		req.Content[0].Text = "changed"
+		req.Content[0].Extra["nested"][5] = '2'
+		return validPrepared(), nil
+	})
+	prepared, _, _, cleanup, err := h.prepareExecution(context.Background(), PreparationSession{AgentSelection: testSelection("test")}, RequestKindMessage, content)
+	testassert.NoError(t, err)
+	defer cleanup()
+	defer h.releasePrepared(&prepared)
+	retained[0].Text = "retained"
+	retained[0].Extra["nested"][5] = '3'
+	if content[0].Text != "original" || string(content[0].Extra["nested"]) != `{"n":1}` {
+		t.Fatalf("preparation changed source content: %#v", content)
+	}
+}
+
+func TestPreparationInputCompactHasNoContent(t *testing.T) {
+	seen := make(chan PreparationRequest, 1)
+	h := newTestHarness(t, emptyStore(t), func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
+		seen <- req
+		return validPrepared(), nil
+	})
+	session := createSession(t, h)
+	_, err := h.Compact(context.Background(), CompactRequest{SessionID: session, OperationID: "compact"})
+	testassert.NoError(t, err)
+	req := <-seen
+	if req.RequestKind != RequestKindCompact || req.Content != nil {
+		t.Fatalf("compact preparation input = %+v", req)
+	}
+}
+
 // validExecution returns the fixtures' execution: an opener whose invocations
 // carry a model function that never returns, so an auto-started execution
 // keeps its Operation current without settling it, a tool function returning

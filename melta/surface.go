@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,6 +43,88 @@ type surfaceResult struct {
 	Warnings []prompt.Warning
 }
 
+type surfacePrompt struct {
+	input     prompt.AssemblyInput
+	globalDir string
+	read      bool
+	rules     prompt.Rules
+	rulesErr  error
+	assembled bool
+	result    surfaceResult
+	err       error
+}
+
+func newSurfacePrompt(req surfaceRequest) *surfacePrompt {
+	start := req.sessionStart
+	if start.IsZero() {
+		start = time.Now()
+	}
+	input := prompt.AssemblyInput{
+		Identity: req.hostIdentity, Instructions: req.promptBody, Mode: req.promptSize,
+		Workspace: req.workspace, SessionStart: start,
+	}
+	if req.promptSize != prompt.ModeNone {
+		input.OS = goruntime.GOOS
+		input.Shell = req.shell
+		input.OSDescription = captureOSDescription()
+	}
+	return &surfacePrompt{input: input, globalDir: req.globalRulesDir}
+}
+
+func (p *surfacePrompt) readRules() (prompt.Rules, error) {
+	if !p.read {
+		p.read = true
+		p.rules, p.rulesErr = prompt.ReadRules(p.globalDir, p.input.Workspace, p.input.Mode)
+	}
+	rules, err := p.rules, p.rulesErr
+	rules.Warnings = slices.Clone(rules.Warnings)
+	return rules, err
+}
+
+func (p *surfacePrompt) sections() []prompt.Section {
+	return prompt.BaselineSections(p.input)
+}
+
+func (p *surfacePrompt) environment() string {
+	return prompt.Environment(p.input)
+}
+
+func (p *surfacePrompt) ruleSections() (string, []prompt.Section, error) {
+	rules, err := p.readRules()
+	if err != nil {
+		return "", nil, err
+	}
+	return prompt.CombinedRules(rules), prompt.RuleSections(p.input.Mode, rules), nil
+}
+
+func (p *surfacePrompt) defaultPrompt() (surfaceResult, error) {
+	if !p.assembled {
+		p.assembled = true
+		input := p.input
+		input.Rules, p.err = p.readRules()
+		if p.err != nil {
+			return surfaceResult{}, p.err
+		}
+		text, err := prompt.Assemble(input)
+		if err != nil {
+			p.err = err
+			return surfaceResult{}, p.err
+		}
+		p.result = surfaceResult{Prompt: text, Assembly: input, Warnings: input.Rules.Warnings}
+	}
+	result := p.result
+	result.Warnings = slices.Clone(result.Warnings)
+	result.Assembly.Rules.Warnings = slices.Clone(result.Assembly.Rules.Warnings)
+	return result, p.err
+}
+
+func (p *surfacePrompt) resolve(replacement *string) (surfaceResult, error) {
+	if replacement != nil {
+		return surfaceResult{Prompt: *replacement, Warnings: slices.Clone(p.rules.Warnings)}, nil
+	}
+	return p.defaultPrompt()
+}
+
 // composeSurface converts the captured inputs into one final owned prompt and
 // the eligible tool catalog, with no harness or storage I/O. The prompt reads
 // the explicitly supplied global and Workspace rules and assembles the
@@ -51,33 +134,10 @@ type surfaceResult struct {
 // constraints made ineligible. A zero session start samples the compose time
 // once, so the resulting prompt is captured once.
 func composeSurface(ctx context.Context, req surfaceRequest) (surfaceResult, []model.ToolDefinition, error) {
-	sessionStart := req.sessionStart
-	if sessionStart.IsZero() {
-		sessionStart = time.Now()
-	}
-	rules, err := prompt.ReadRules(req.globalRulesDir, req.workspace, req.promptSize)
+	result, err := newSurfacePrompt(req).defaultPrompt()
 	if err != nil {
 		return surfaceResult{}, nil, err
 	}
-	input := prompt.AssemblyInput{
-		Identity:     req.hostIdentity,
-		Instructions: req.promptBody,
-		Mode:         req.promptSize,
-		Rules:        rules,
-		Workspace:    req.workspace,
-		SessionStart: sessionStart,
-	}
-	if req.promptSize != prompt.ModeNone {
-		input.OS = goruntime.GOOS
-		input.Shell = req.shell
-		input.OSDescription = captureOSDescription()
-	}
-	assembled, err := prompt.Assemble(input)
-	if err != nil {
-		return surfaceResult{}, nil, err
-	}
-	result := surfaceResult{Prompt: assembled, Assembly: input, Warnings: rules.Warnings}
-
 	catalog := make([]model.ToolDefinition, 0, len(req.toolSpecs))
 	for _, spec := range req.toolSpecs {
 		description, err := spec.describe(ctx, req.invocation, req.model, req.constraints, req.identity, req.agentInputs)

@@ -549,7 +549,7 @@ func (p *preparation) concretePrepare(ctx context.Context, req harness.Preparati
 	// preparation/request hook input, and an absent projection or value
 	// renders the existing "unknown".
 	shell := projectedShell(ctx, subprocessEnv)
-	result, catalog, err := composeSurface(ctx, surfaceRequest{
+	surface := surfaceRequest{
 		hostIdentity:   p.identity,
 		globalRulesDir: p.locations.GlobalRulesDir,
 		workspace:      req.Session.Identity.Workspace,
@@ -563,7 +563,8 @@ func (p *preparation) concretePrepare(ctx context.Context, req harness.Preparati
 		agentInputs:    agentInputs,
 		toolSpecs:      specs,
 		shell:          shell,
-	})
+	}
+	result, catalog, err := composeSurface(ctx, surface)
 	if err != nil {
 		return harness.ExecutionCapture{}, nil, err
 	}

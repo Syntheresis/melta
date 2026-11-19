@@ -96,7 +96,7 @@ func (h *Harness) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	prepared, capture, prepCtx, cleanup, err := h.prepareExecution(ctx, PreparationSession{
 		Identity:       SessionIdentity{SessionID: destID, Workspace: view.Identity.Workspace},
 		AgentSelection: view.State.AgentSelection,
-	}, RequestKindMessage)
+	}, RequestKindMessage, content)
 	if err != nil {
 		return ForkResult{}, err
 	}

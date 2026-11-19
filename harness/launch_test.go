@@ -943,6 +943,7 @@ func TestLaunchChildPrepareOwnsSelection(t *testing.T) {
 			settings := json.RawMessage(`{"setting":1}`)
 			prepared.Capture.Strategy.Settings = settings
 			h, cancel := newCancelableHarness(t, store, PreparedExecution{}, func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
+				testassert.Require(t, len(req.Content) == 1 && req.Content[0].Text == "child task", "child preparation input = %+v", req.Content)
 				if req.Session.AgentSelection.Inputs != nil {
 					i := req.Session.AgentSelection.Inputs
 					i.Tools[0], i.Capabilities[0], i.Strategy.Settings[2] = "changed", "changed", 'X'

@@ -5393,6 +5393,7 @@ func TestPublicForkPrepareOwnsSelection(t *testing.T) {
 			testassert.NoError(t, err)
 			boundary := forkEntryOf(t, store, source, harness.EntryInput, "source-op").ID
 			f.prepareHook = func(_ int, req harness.PreparationRequest) (harness.PreparedExecution, error) {
+				testassert.Require(t, len(req.Content) == 1 && req.Content[0].Text == "fork", "fork preparation input = %+v", req.Content)
 				if req.Session.AgentSelection.Inputs != nil {
 					i := req.Session.AgentSelection.Inputs
 					i.Tools[0], i.Capabilities[0], i.Strategy.Settings[2] = "changed", "changed", 'X'
@@ -5403,6 +5404,7 @@ func TestPublicForkPrepareOwnsSelection(t *testing.T) {
 			}
 			forked, err := f.h.Fork(context.Background(), harness.ForkRequest{Origin: harness.InputOriginUser, SourceSessionID: source, BoundaryEntryID: boundary, OperationID: "fork-op", Content: []model.ContentPart{{Kind: model.PartText, Text: "fork"}}})
 			testassert.NoError(t, err)
+			forkEntryOf(t, store, forked.Session.Identity.SessionID, harness.EntryInput, "fork-op")
 			testassert.Require(t, reflect.DeepEqual(forked.Session.State.AgentSelection, selection) && reflect.DeepEqual(forked.Operation.Admission.AgentSelection, selection), "fork callback changed selection: %+v", forked)
 			header, err := f.h.ReadSessionHeader(context.Background(), source)
 			testassert.NoError(t, err)

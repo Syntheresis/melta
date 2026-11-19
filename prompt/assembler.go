@@ -159,21 +159,18 @@ func validMode(mode Mode) bool {
 func buildSpec(input AssemblyInput) string {
 	var b strings.Builder
 
-	for _, section := range defaultSectionsForMode(input) {
-		b.WriteString(strings.TrimSpace(section))
+	for _, section := range BaselineSections(input) {
+		b.WriteString(strings.TrimSpace(section.Text))
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(renderEnvironment(input))
+	b.WriteString(Environment(input))
 	b.WriteString("\n\n")
 
-	rulesContent := strings.TrimSpace(input.Rules.GlobalText + "\n\n" + input.Rules.WorkspaceText)
-	overridden := detectOverrides(rulesContent)
-	for _, name := range overridableOrderForMode(input.Mode) {
-		if !overridden[name] {
-			b.WriteString(strings.TrimSpace(overridableSections[name]))
-			b.WriteString("\n\n")
-		}
+	rulesContent := CombinedRules(input.Rules)
+	for _, section := range RuleSections(input.Mode, input.Rules) {
+		b.WriteString(strings.TrimSpace(section.Text))
+		b.WriteString("\n\n")
 	}
 
 	writeAgentBody(&b, input.Instructions)
@@ -187,20 +184,50 @@ func buildSpec(input AssemblyInput) string {
 	return strings.TrimSpace(b.String())
 }
 
-func defaultSectionsForMode(input AssemblyInput) []string {
+// Section is one named baseline prompt section.
+type Section struct {
+	Name string
+	Text string
+}
+
+// CombinedRules joins the global and Workspace rules in their assembly order.
+func CombinedRules(rules Rules) string {
+	return strings.TrimSpace(rules.GlobalText + "\n\n" + rules.WorkspaceText)
+}
+
+// BaselineSections returns the sections preceding the environment.
+func BaselineSections(input AssemblyInput) []Section {
+	if input.Mode == ModeNone {
+		return nil
+	}
 	if input.Mode == ModeSimple {
-		return []string{
-			input.Identity,
-			coreRulesSection,
-			compactionAwarenessSection,
+		return []Section{
+			{"identity", input.Identity},
+			{"core_rules", coreRulesSection},
+			{"compaction_awareness", compactionAwarenessSection},
 		}
 	}
-	return []string{
-		input.Identity,
-		coreRulesSection,
-		rulesFileGuideSection,
-		compactionAwarenessSection,
+	return []Section{
+		{"identity", input.Identity},
+		{"core_rules", coreRulesSection},
+		{"rules_file_guide", rulesFileGuideSection},
+		{"compaction_awareness", compactionAwarenessSection},
 	}
+}
+
+// RuleSections returns the sections not suppressed by rules headings.
+func RuleSections(mode Mode, rules Rules) []Section {
+	if mode == ModeNone {
+		return nil
+	}
+	overridden := detectOverrides(CombinedRules(rules))
+	var sections []Section
+	for _, name := range overridableOrderForMode(mode) {
+		if !overridden[name] {
+			sections = append(sections, Section{name, overridableSections[name]})
+		}
+	}
+	return sections
 }
 
 func overridableOrderForMode(mode Mode) []string {
@@ -244,7 +271,11 @@ func startsWithAgentPromptHeading(body string) bool {
 	return false
 }
 
-func renderEnvironment(input AssemblyInput) string {
+// Environment renders the captured environment without reading rules.
+func Environment(input AssemblyInput) string {
+	if input.Mode == ModeNone {
+		return ""
+	}
 	return fmt.Sprintf("## Environment\n\nWorking directory: %s\nPlatform: %s\nShell: %s\nOS: %s\nSession started: %s",
 		input.Workspace,
 		input.OS,

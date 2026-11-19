@@ -919,7 +919,7 @@ func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest
 	prepared, capture, prepCtx, cleanup, err := h.prepareExecution(ctx, PreparationSession{
 		Identity:       childIdentity,
 		AgentSelection: req.AgentSelection,
-	}, RequestKindMessage)
+	}, RequestKindMessage, content)
 	if err != nil {
 		return LaunchChildResult{}, err
 	}

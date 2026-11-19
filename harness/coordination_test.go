@@ -1072,6 +1072,7 @@ func TestSessionModelChangeDuringBlockedEffect(t *testing.T) {
 	_, err = submitText(t, h, session, "turn-1", MessageModeRegular, "hello")
 	testassert.NoError(t, err)
 	<-script.arrived
+	testassert.NoError(t, h.ClaimExternalData(context.Background(), session, "parked-owner"))
 	_, err = submitText(t, h, session, "turn-2", MessageModeQueued, "later")
 	testassert.NoError(t, err)
 	updated, err := h.SetSessionModel(context.Background(), session, model.ModelRef{Provider: "p", Model: "new"})
@@ -1092,6 +1093,36 @@ func TestSessionModelChangeDuringBlockedEffect(t *testing.T) {
 	read, err := h.ReadSessionHeader(context.Background(), session)
 	testassert.NoError(t, err)
 	testassert.Require(t, read.Revision.DurableRevision == changed.Revision && read.AgentSelection.Definition.DefinitionID == "reviewer", "conflict changed session: %+v", read)
+}
+
+func TestPreparationInputSubmitAndDrain(t *testing.T) {
+	store := emptyStore(t)
+	script := newModelScript()
+	script.gate = make(chan struct{})
+	prepared := modelPrepared(script.model)
+	var mu sync.Mutex
+	var seen []string
+	h, cancel := newCancelableHarness(t, store, prepared, func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
+		mu.Lock()
+		seen = append(seen, req.Content[0].Text)
+		mu.Unlock()
+		return prepared, nil
+	})
+	defer cancel()
+	session := createSession(t, h)
+	watch := watchSettlements(store)
+	_, err := submitText(t, h, session, "first", MessageModeRegular, "first input")
+	testassert.NoError(t, err)
+	<-script.arrived
+	_, err = submitText(t, h, session, "second", MessageModeQueued, "second input")
+	testassert.NoError(t, err)
+	script.releaseGate()
+	watch.next()
+	watch.next()
+	mu.Lock()
+	testassert.Require(t, reflect.DeepEqual(seen, []string{"first input", "second input"}), "preparation saw %v", seen)
+	mu.Unlock()
+	testassert.Require(t, reflect.DeepEqual(entryTexts(t, store, session), []string{"first input", "second input"}), "committed inputs differ")
 }
 
 // TestWaitConvergence proves the Harness-lifetime row: Wait returns only after

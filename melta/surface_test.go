@@ -80,6 +80,107 @@ func baseSurfaceRequest(t *testing.T) surfaceRequest {
 	}
 }
 
+func TestComposeSurfaceLazyReplacementAndMemoizedRead(t *testing.T) {
+	req := baseSurfaceRequest(t)
+	path := filepath.Join(req.workspace, "AGENTS.md")
+	testassert.NoError(t, os.WriteFile(path, []byte("FIRST RULE"), 0o600))
+	provider := newSurfacePrompt(req)
+	empty := ""
+	replaced, err := provider.resolve(&empty)
+	testassert.NoError(t, err)
+	if replaced.Prompt != "" || len(replaced.Warnings) != 0 || provider.read || provider.assembled {
+		t.Fatalf("replacement read default: %+v", replaced)
+	}
+	first, err := provider.defaultPrompt()
+	testassert.NoError(t, err)
+	if !strings.Contains(first.Prompt, "FIRST RULE") {
+		t.Fatal("default did not read actual rules")
+	}
+	testassert.NoError(t, os.WriteFile(path, []byte("SECOND RULE"), 0o600))
+	again, err := provider.defaultPrompt()
+	testassert.NoError(t, err)
+	if again.Prompt != first.Prompt || strings.Contains(again.Prompt, "SECOND RULE") {
+		t.Fatal("default was read again")
+	}
+}
+
+func TestComposeSurfaceLazyWarningsFollowRead(t *testing.T) {
+	req := baseSurfaceRequest(t)
+	path := filepath.Join(req.workspace, "AGENTS.md")
+	testassert.NoError(t, os.Mkdir(path, 0o700))
+	provider := newSurfacePrompt(req)
+	replacement := "replacement"
+	result, err := provider.resolve(&replacement)
+	testassert.NoError(t, err)
+	if len(result.Warnings) != 0 || provider.read {
+		t.Fatalf("unread replacement has warnings: %+v", result)
+	}
+	rules, err := provider.readRules()
+	testassert.NoError(t, err)
+	if len(rules.Warnings) == 0 || provider.assembled {
+		t.Fatal("actual read did not report its warning")
+	}
+	replaced, err := provider.resolve(&replacement)
+	testassert.NoError(t, err)
+	if replaced.Prompt != replacement || !reflect.DeepEqual(replaced.Warnings, rules.Warnings) || provider.assembled {
+		t.Fatalf("replacement lost actual read warnings: %+v", replaced)
+	}
+	testassert.NoError(t, os.Remove(path))
+	testassert.NoError(t, os.WriteFile(path, []byte("new rules"), 0o600))
+	result, err = provider.defaultPrompt()
+	testassert.NoError(t, err)
+	again, err := provider.defaultPrompt()
+	testassert.NoError(t, err)
+	if !reflect.DeepEqual(again, result) {
+		t.Fatal("repeated read changed the admission result")
+	}
+	replaced, err = provider.resolve(&replacement)
+	testassert.NoError(t, err)
+	if replaced.Prompt != replacement || !reflect.DeepEqual(replaced.Warnings, result.Warnings) {
+		t.Fatalf("replacement lost actual read warnings: %+v", replaced)
+	}
+}
+
+func TestComposeSurfaceRulesDemandBeforeDefault(t *testing.T) {
+	req := baseSurfaceRequest(t)
+	path := filepath.Join(req.workspace, "AGENTS.md")
+	testassert.NoError(t, os.WriteFile(path, []byte("## Tone\n\nearly rule"), 0o600))
+	provider := newSurfacePrompt(req)
+	sections, environment := provider.sections(), provider.environment()
+	if len(sections) == 0 || !strings.Contains(environment, req.workspace) || provider.read || provider.assembled {
+		t.Fatalf("pure values read rules: %v %q", sections, environment)
+	}
+	rules, err := provider.readRules()
+	testassert.NoError(t, err)
+	if rules.WorkspaceText != "## Tone\n\nearly rule" || provider.assembled {
+		t.Fatalf("rules demand assembled default: %+v", rules)
+	}
+	testassert.NoError(t, os.WriteFile(path, []byte("late rule"), 0o600))
+	combined, ruleSections, err := provider.ruleSections()
+	testassert.NoError(t, err)
+	if combined != "## Tone\n\nearly rule" || len(ruleSections) == 0 {
+		t.Fatalf("rules values = %q, %+v", combined, ruleSections)
+	}
+	for _, section := range ruleSections {
+		if section.Name == "tone" {
+			t.Fatal("rules heading did not suppress tone")
+		}
+	}
+	result, err := provider.defaultPrompt()
+	testassert.NoError(t, err)
+	if !strings.Contains(result.Prompt, "early rule") || strings.Contains(result.Prompt, "late rule") {
+		t.Fatal("default did not reuse the admission's rules read")
+	}
+	for _, section := range append(sections, ruleSections...) {
+		if !strings.Contains(result.Prompt, strings.TrimSpace(section.Text)) {
+			t.Fatalf("assembled prompt missing section %s", section.Name)
+		}
+	}
+	if !strings.Contains(result.Prompt, environment) {
+		t.Fatal("assembled prompt missing captured environment")
+	}
+}
+
 func TestComposeSurfacePromptSizesSkipRulesUnderNone(t *testing.T) {
 	req := baseSurfaceRequest(t)
 	req.sessionStart = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)

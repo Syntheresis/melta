@@ -270,3 +270,26 @@ func TestClaimExternalDataReservationWaitAndCancel(t *testing.T) {
 		testassert.Require(t, err == nil && slices.Equal(rec.State.ExternalDataOwners, []string{"owner.a"}), "owners after the reservation retry = %v (%v)", rec.State.ExternalDataOwners, err)
 	}
 }
+
+func TestClaimExternalDataNoopDoesNotObserve(t *testing.T) {
+	store := emptyStore(t)
+	var facts []HarnessFact
+	h, err := New(context.Background(), Dependencies{
+		Storage: store,
+		Prepare: func(context.Context, PreparationRequest) (PreparedExecution, error) { return validPrepared(), nil },
+		Observe: func(fact HarnessFact) { facts = append(facts, fact) },
+	})
+	testassert.NoError(t, err)
+	session := createSession(t, h)
+	testassert.NoError(t, h.ClaimExternalData(context.Background(), session, "owner"))
+	count := len(facts)
+	before := sessionRegister(t, store, session)
+	testassert.NoError(t, h.ClaimExternalData(context.Background(), session, "owner"))
+	testassert.Require(t, len(facts) == count && sessionRegister(t, store, session).Revision == before.Revision, "duplicate claim advanced or emitted an observation")
+	first, err := h.ChangeAgentType(context.Background(), session, testSelection("same"))
+	testassert.NoError(t, err)
+	count = len(facts)
+	second, err := h.ChangeAgentType(context.Background(), session, testSelection("same"))
+	testassert.NoError(t, err)
+	testassert.Require(t, len(facts) == count+1 && second.Revision == first.Revision+1, "identical selection did not advance and observe")
+}
