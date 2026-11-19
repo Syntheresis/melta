@@ -437,7 +437,7 @@ func TestStopRootStopsMembersAndReopens(t *testing.T) {
 	// two completions may commit in either order; the set is what survives.
 	texts := inputTexts(t, tree.store, tree.root)
 	sort.Strings(texts)
-	want := []string{"Task interrupted.", "hello", "job done", "queued-msg"}
+	want := []string{"Session " + tree.child + ": interruption", "hello", "job done", "queued-msg"}
 	sort.Strings(want)
 	testassert.Require(t, reflect.DeepEqual(texts, want), "root entries = %q, want the surviving buffers delivered", texts)
 	// Each delivered completion owns its own Operation: op-1 keeps exactly its
@@ -518,7 +518,7 @@ func TestDirectStopPreservesOwnedSessionWork(t *testing.T) {
 	}
 	{
 		got := runtimeInputTextRaw(t, store, root)
-		testassert.Equal(t, got, "Task interrupted.")
+		testassert.Equal(t, got, "Session "+child+": interruption")
 	}
 }
 
@@ -716,7 +716,7 @@ func TestStopRacingStartSettlesWithoutStarting(t *testing.T) {
 	}
 	{
 		got := runtimeInputTextRaw(t, store, testSessionID)
-		testassert.Equal(t, got, "Task interrupted.")
+		testassert.Equal(t, got, "Session "+childID+": interruption")
 	}
 }
 
@@ -758,7 +758,7 @@ func TestOwnerStopAfterHandoffBeforeFirstInstallation(t *testing.T) {
 	testassert.NoError(t, stopResult(t, stopDone))
 	testassert.Equal(t, opened.Load(), int32(0))
 	testassert.Equal(t, settledOperation(t, store, childID, "child-op-1").State.Status, OperationInterruption)
-	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Task interrupted.")
+	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Session "+childID+": interruption")
 }
 
 func TestRejectedLaunchCompletionWaitsForLiveDescendant(t *testing.T) {
@@ -810,7 +810,7 @@ func TestRejectedLaunchCompletionWaitsForLiveDescendant(t *testing.T) {
 	testassert.Require(t, live, "member ended before its descendant")
 	close(jobGate)
 	testassert.NoError(t, stopResult(t, stopped))
-	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Task interrupted.")
+	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Session "+childID+": interruption")
 }
 
 func TestDirectGroupAndOwnerMemberStopsOverlap(t *testing.T) {
@@ -906,7 +906,7 @@ func TestStopChildJoinsReservationAndRun(t *testing.T) {
 	parentC.mu.Unlock()
 	testassert.NoError(t, err)
 	childC.mu.Lock()
-	childC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+	childC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
 	childC.mu.Unlock()
 	release, err := h.reserve(context.Background(), childC)
 	testassert.NoError(t, err)
@@ -998,7 +998,7 @@ func TestStopChildWaitsForLiveJobDelivery(t *testing.T) {
 	}
 	{
 		got := runtimeInputTextRaw(t, store, root)
-		testassert.Equal(t, got, "Task interrupted.")
+		testassert.Equal(t, got, "Session "+child+": interruption")
 	}
 	if len(storedSignals(t, store, root)) != 0 {
 		t.Fatalf("parent signals = %+v, want the idle parent's admission delivery, not a signal", storedSignals(t, store, root))
@@ -1190,7 +1190,7 @@ func TestStopReportsChildErrorAndWaitsForNaturalDelivery(t *testing.T) {
 		store.mu.Unlock()
 		childC := leaseCoordinator(t, h, completionChildID)
 		childC.mu.Lock()
-		childC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+		childC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
 		childC.mu.Unlock()
 		h.childCompletionSettled(childC, "") // the settled child's completion delivers on its own
 
@@ -1199,7 +1199,7 @@ func TestStopReportsChildErrorAndWaitsForNaturalDelivery(t *testing.T) {
 		waitMemberDone(t, member)
 		{
 			got := runtimeInputTextRaw(t, store, testSessionID)
-			testassert.Equal(t, got, "Task completed.")
+			testassert.Equal(t, got, "Session "+completionChildID+": success")
 		}
 	})
 }

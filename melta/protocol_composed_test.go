@@ -820,10 +820,12 @@ func TestProtocolComposedFlow(t *testing.T) {
 		}, "the child's own invalidation on the shared stream")
 		model.releaseChild()
 		// The parent receives the completion as one runtime-origin input
-		// admitted as its own settled Operation: the child's final assistant
-		// text, never one of the submitted user texts.
-		completionText := composedAwaitCompletionInput(t, c, main, "child finished")
-		testassert.Require(t, completionText == "child finished", "completion input = %q, want exactly the child's final text", completionText)
+		// admitted as its own settled Operation: the child's identity and
+		// terminal status, then its final assistant text, never one of the
+		// submitted user texts.
+		completionWant := "Session " + childID + ": success\nchild finished"
+		completionText := composedAwaitCompletionInput(t, c, main, completionWant)
+		testassert.Require(t, completionText == completionWant, "completion input = %q, want exactly the child's composed report", completionText)
 		childHydration := composedHydrate(t, c, childID)
 		testassert.Require(t, childHydration.Session.SessionId == childID && childHydration.Session.Lifecycle == protocol.Open && childHydration.ActiveOperation == nil && len(childHydration.Background) == 0 && len(childHydration.Operations) != 0 && len(childHydration.Conversation.Items) >= 2, "child hydration = %+v, want one ordinary open session with its own settled operations; child conversation items = %+v, want its own input and assistant items", childHydration.Session, childHydration.Conversation.Items)
 		for _, operation := range childHydration.Operations {

@@ -476,6 +476,7 @@ func (b *bgRuntime) launchChild(parent, prompt, operationID string, maxConcurren
 			ExtensionID:     "test.extension",
 			MaxConcurrent:   maxConcurrent,
 			OutputLimit:     4096,
+			Report:          true,
 		})
 		if err != nil {
 			return err

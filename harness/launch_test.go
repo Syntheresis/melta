@@ -34,6 +34,7 @@ func launchRequest() LaunchChildRequest {
 		ExtensionID:     "test.extension",
 		MaxConcurrent:   2,
 		OutputLimit:     1024,
+		Report:          true,
 	}
 }
 
@@ -51,6 +52,28 @@ func advanceSessionRevision(t *testing.T, store *graphStorage, sessionID string)
 		return err
 	})
 	testassert.NoError(t, err)
+}
+
+// stopLaunchOnChildInput installs the rejected-handoff stimulus on one launch's
+// exact child input entry: the stop lands between the launch commit and its
+// handoff. The entry hook runs for every transaction, so the stop is taken only
+// for that Session and Operation identity — never inside a transaction that
+// already holds the coordinator mutex — and the hook stays installed for the
+// fixture's lifetime instead of being removed under a running execution. An
+// existing entry hook is preserved and called afterwards.
+func stopLaunchOnChildInput(store *graphStorage, c *coordinator, parentID, operationID string) {
+	previous := store.entryHook
+	store.entryHook = func(draft EntryDraft) error {
+		if draft.Kind == EntryInput && draft.OperationID == operationID && draft.SessionID != parentID {
+			c.mu.Lock()
+			c.stop = &stopInterval{done: make(chan struct{})}
+			c.mu.Unlock()
+		}
+		if previous != nil {
+			return previous(draft)
+		}
+		return nil
+	}
 }
 
 // TestStartJobRejectsBeforeSpawn proves every StartJob rejection happens
@@ -252,40 +275,56 @@ func TestMemberStopRejectsJobHandoff(t *testing.T) {
 }
 
 func TestMemberStopRejectsSessionHandoff(t *testing.T) {
-	store := freshSessionStore(t)
-	var opened atomic.Int32
-	stub := newPrepareStub(PreparedExecution{
-		Capture: testCapture(),
-		Open: func(context.Context, OperationAdmission) (Execution, error) {
-			opened.Add(1)
-			return effectExecution(quickModel(), nil), nil
-		},
-	})
-	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
-	defer cancel()
-	c := leaseCoordinator(t, h, testSessionID)
-	var stopped atomic.Bool
-	store.txHook = func(string) error {
-		if stopped.CompareAndSwap(false, true) {
-			c.mu.Lock()
-			c.memberStop = &backgroundMember{done: make(chan struct{})}
-			c.mu.Unlock()
+	for _, report := range []bool{true, false} {
+		name := "report-free"
+		if report {
+			name = "report"
 		}
-		return nil
+		t.Run(name, func(t *testing.T) {
+			store := freshSessionStore(t)
+			var opened atomic.Int32
+			stub := newPrepareStub(PreparedExecution{
+				Capture: testCapture(),
+				Open: func(context.Context, OperationAdmission) (Execution, error) {
+					opened.Add(1)
+					return effectExecution(quickModel(), nil), nil
+				},
+			})
+			h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
+			defer cancel()
+			c := leaseCoordinator(t, h, testSessionID)
+			var stopped atomic.Bool
+			store.txHook = func(string) error {
+				if stopped.CompareAndSwap(false, true) {
+					c.mu.Lock()
+					c.memberStop = &backgroundMember{done: make(chan struct{})}
+					c.mu.Unlock()
+				}
+				return nil
+			}
+			request := launchRequest()
+			request.Report = report
+			result, err := h.LaunchChildSession(context.Background(), request)
+			store.txHook = nil
+			testassert.NoError(t, err)
+			testassert.Require(t, result.ChildSessionID != "", "committed Session receipt missing")
+			rec := settledOperation(t, store, result.ChildSessionID, "child-op-1")
+			testassert.Require(t, rec.State.Status == OperationInterruption && rec.State.Terminal != nil && rec.State.Terminal.Detail == executionInterruptedDetail, "operation = %+v", rec.State)
+			testassert.Equal(t, opened.Load(), int32(0))
+			c.mu.Lock()
+			empty := !liveBackground(c)
+			c.mu.Unlock()
+			testassert.Require(t, empty, "rejected handoff left a member")
+			signals := storedSignals(t, store, testSessionID)
+			if report { // the pre-open interruption reports through the same settled-content path as a normal retirement
+				want := "Session " + result.ChildSessionID + ": interruption"
+				testassert.Require(t, len(signals) == 1 && signals[0].Content == want, "completion = %+v, want %q", signals, want)
+			} else {
+				testassert.Require(t, len(signals) == 0, "the report-free interruption delivered %+v", signals)
+				testassert.Require(t, storedEntryCount(store, testSessionID) == 0, "the report-free interruption committed %d parent entries", storedEntryCount(store, testSessionID))
+			}
+		})
 	}
-	result, err := h.LaunchChildSession(context.Background(), launchRequest())
-	store.txHook = nil
-	testassert.NoError(t, err)
-	testassert.Require(t, result.ChildSessionID != "", "committed Session receipt missing")
-	rec := settledOperation(t, store, result.ChildSessionID, "child-op-1")
-	testassert.Require(t, rec.State.Status == OperationInterruption && rec.State.Terminal != nil && rec.State.Terminal.Detail == executionInterruptedDetail, "operation = %+v", rec.State)
-	testassert.Equal(t, opened.Load(), int32(0))
-	c.mu.Lock()
-	empty := !liveBackground(c)
-	c.mu.Unlock()
-	testassert.Require(t, empty, "rejected handoff left a member")
-	signals := storedSignals(t, store, testSessionID)
-	testassert.Require(t, len(signals) == 1 && signals[0].Content == "Task interrupted.", "completion = %+v", signals)
 }
 
 // TestStartJobHandoffLossFinishesMemberOnce proves the handoff failure
@@ -670,18 +709,15 @@ func TestLaunchChildSessionSettlesRejectedHandoff(t *testing.T) {
 	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
 	defer cancel()
 	c := leaseCoordinator(t, h, testSessionID)
-	store.txHook = func(string) error { // the stop lands between admission and handoff
-		c.mu.Lock()
-		c.stop = &stopInterval{done: make(chan struct{})}
-		c.mu.Unlock()
-		return nil
-	}
-	result, err := h.LaunchChildSession(context.Background(), launchRequest())
-	store.txHook = nil
+	request := launchRequest()
+	stopLaunchOnChildInput(store, c, request.ParentSessionID, request.OperationID)
+	result, err := h.LaunchChildSession(context.Background(), request)
 	testassert.NoError(t, err)
 
+	ids, err := store.ListSessionIDs(context.Background())
+	testassert.NoError(t, err)
 	var childID string
-	for id := range store.registers {
+	for _, id := range ids {
 		if id != testSessionID {
 			childID = id
 		}
@@ -698,7 +734,7 @@ func TestLaunchChildSessionSettlesRejectedHandoff(t *testing.T) {
 		n := storedEntryCount(store, childID)
 		testassert.Equal(t, n, 3)
 	}
-	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Task interrupted.")
+	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Session "+childID+": interruption")
 	{
 		signals := storedSignals(t, store, testSessionID)
 		testassert.Require(t, len(signals) == 0, "the rejected launch delivered %+v, want no completion", signals)
@@ -715,20 +751,15 @@ func TestRejectedHandoffCompletionStorageFailureKeepsReceipt(t *testing.T) {
 	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
 	defer cancel()
 	owner := leaseCoordinator(t, h, testSessionID)
-	store.txHook = func(string) error {
-		owner.mu.Lock()
-		owner.stop = &stopInterval{done: make(chan struct{})}
-		owner.mu.Unlock()
-		return nil
-	}
 	store.entryHook = func(d EntryDraft) error {
 		if d.SessionID == testSessionID && d.Kind == EntryInput {
 			return fmt.Errorf("%w: completion unavailable", ErrStorage)
 		}
 		return nil
 	}
-	result, err := h.LaunchChildSession(context.Background(), launchRequest())
-	store.txHook, store.entryHook = nil, nil
+	request := launchRequest()
+	stopLaunchOnChildInput(store, owner, request.ParentSessionID, request.OperationID)
+	result, err := h.LaunchChildSession(context.Background(), request)
 	testassert.Require(t, errors.Is(err, ErrStorage) && result.ChildSessionID != "", "result = %+v, error = %v", result, err)
 	testassert.Equal(t, settledOperation(t, store, result.ChildSessionID, "child-op-1").State.Status, OperationInterruption)
 	testassert.Equal(t, storedEntryCount(store, testSessionID), 0)

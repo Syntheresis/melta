@@ -177,6 +177,7 @@ func launchChildThroughRuntime(t *testing.T, r *Melta, parent, operationID strin
 			ExtensionID:     "test.extension",
 			MaxConcurrent:   1,
 			OutputLimit:     4096,
+			Report:          true,
 		})
 		if err != nil {
 			return err

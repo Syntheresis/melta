@@ -1050,6 +1050,7 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 			ExtensionID:     "test.extension",
 			MaxConcurrent:   1,
 			OutputLimit:     1024,
+			Report:          true,
 		})
 		testassert.NoError(t, err)
 		<-arrived // the child's Operation is parked at its boundary
@@ -1092,7 +1093,7 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 		parent, err = h.ReadSessionView(ctx, root)
 		testassert.NoError(t, err)
 		// admit, stop, enqueue, finish, reopen
-		testassert.Require(t, len(parent.Background) == 0 && (len(parent.Steering) == 1 && parent.Steering[0].Origin == harness.InputOriginRuntime && parent.Steering[0].Content[0].Text == "Task interrupted.") && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+5, "parent background after the finish = %+v; parent steering after the delivery = %+v; got %v, want %v", parent.Background, parent.Steering, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+5)
+		testassert.Require(t, len(parent.Background) == 0 && (len(parent.Steering) == 1 && parent.Steering[0].Origin == harness.InputOriginRuntime && parent.Steering[0].Content[0].Text == "Session "+res.ChildSessionID+": interruption") && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+5, "parent background after the finish = %+v; parent steering after the delivery = %+v; got %v, want %v", parent.Background, parent.Steering, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+5)
 
 		f.cancel()
 		go close(parentGate)

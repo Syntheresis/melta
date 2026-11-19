@@ -663,7 +663,7 @@ func TestAdmissionPreparationContract(t *testing.T) {
 		store := freshSessionStore(t)
 		h := newTestHarness(t, store, stub.prepare)
 		_, err := h.Submit(context.Background(), SubmitRequest{SessionID: testSessionID, OperationID: testOpID, Origin: InputOriginUser, Mode: MessageModeRegular})
-		testassert.Equal(t, err, prepErr)
+		testassert.Require(t, errors.Is(err, prepErr) && err.Error() == prepErr.Error(), "Submit error = %v, want the preparation cause preserved", err)
 		entries, regs := storedSessionState(store, testSessionID)
 		testassert.Require(t, len(entries) == 0 && len(regs) == 1, "failed preparation published entries %v registers %v", entries, regs)
 	})

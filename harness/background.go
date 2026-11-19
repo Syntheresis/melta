@@ -33,10 +33,12 @@ type backgroundGroup struct {
 	members map[string]*backgroundMember // keyed by completionID; claimed members remain until finished
 }
 
-// launchInfo is one child Session's reserved completion identity.
+// launchInfo is one child Session's reserved completion identity and the
+// start's report choice.
 type launchInfo struct {
 	completionID string // the child member's reserved completion identity
-	outputLimit  int
+	outputLimit  int    // the requested report body limit in UTF-8 bytes
+	report       bool   // the start requested a completion report
 }
 
 // stopInterval is one stop's join handle: err is written before done closes
@@ -175,17 +177,19 @@ func backgroundDeliveryPriority(h *Harness, c *coordinator, item *pendingMessage
 // mode: a not-receivable parent commits the durable background_completion
 // signal entry; a receivable active parent steers the completion into the
 // running Operation; a receivable idle parent admits it as an Operation under
-// the completion identity. Only a storage-class delivery failure (ErrStorage)
-// is retained through the Harness storage latch, and the first retained one is
-// never replaced; the retention happens before the claimed member finishes, so
-// a joiner released by the member finish observes the retained error; the
-// claimed member still finishes only after the delivery attempt, so a
-// successful closed record
-// commits before the member is marked terminal, and a second delivery is a
-// no-op. Delivery is one attempt with no retry and no fallback write, and an
-// exited Job is removed after its callback: a process read cannot recover a
-// failed post-exit delivery's completion itself; the child's history is
-// separate evidence.
+// the completion identity, and a known semantic refusal of that admission —
+// with the Session record readable and writable — becomes the same durable
+// signal entry instead. An already admitted completion is success. Only a
+// storage-class delivery failure (ErrStorage) is retained through the Harness
+// storage latch, and the first retained one is never replaced; the retention
+// happens before the claimed member finishes, so a joiner released by the
+// member finish observes the retained error; the claimed member still finishes
+// only after the delivery attempt, so a successful closed record commits
+// before the member is marked terminal, and a second delivery is a no-op.
+// Delivery is one attempt with no retry and no fallback write, and an exited
+// Job is removed after its callback: a process read cannot recover a failed
+// post-exit delivery's completion itself; the child's history is separate
+// evidence.
 func (h *Harness) DeliverBackgroundCompletion(ctx context.Context, sessionID, completionID, content string) error {
 	if content == "" {
 		return invalidInput("background completion content must be non-empty")
@@ -227,7 +231,7 @@ func (h *Harness) deliverBackgroundCompletion(ctx context.Context, c *coordinato
 		return invalidInput("background completion content: %v", err)
 	}
 	parts := []model.ContentPart{part}
-	item := &pendingMessage{operationID: member.completionID, origin: InputOriginRuntime, content: parts}
+	item := completionItem(member, parts)
 
 	validated.mu.Lock()
 	mode := backgroundDeliveryPriority(h, validated, item)
@@ -240,10 +244,30 @@ func (h *Harness) deliverBackgroundCompletion(ctx context.Context, c *coordinato
 	case bgDeliverSteering:
 		return nil // enqueued at evaluation; the boundary exit and the successor admission deliver it
 	case bgDeliverIdle:
-		return h.deliverIdleCompletion(validated, member, parts, content)
+		return h.deliverIdleCompletion(validated, item)
 	default:
-		return h.deliverClosedCompletion(validated, member, content)
+		return h.deliverClosedCompletion(validated, item.completion, content, nil)
 	}
+}
+
+// completionItem builds one completion's buffered input item: the completion
+// identity, the runtime origin, the report parts, and a copy of only the
+// related member kind and ID — never the live member the completion was
+// claimed from — so a deferred admission can still record the signal the idle
+// path would.
+func completionItem(member *backgroundMember, parts []model.ContentPart) *pendingMessage {
+	return &pendingMessage{
+		operationID: member.completionID,
+		origin:      InputOriginRuntime,
+		content:     parts,
+		completion:  completionMember(member),
+	}
+}
+
+// completionMember copies the related member kind and ID of one claimed
+// completion.
+func completionMember(member *backgroundMember) *relatedMember {
+	return &relatedMember{Kind: string(member.kind), ID: member.id}
 }
 
 // deliverIdleCompletion admits one completion through the idle path: it takes
@@ -253,36 +277,38 @@ func (h *Harness) deliverBackgroundCompletion(ctx context.Context, c *coordinato
 // reservation, installing the execution before releasing it. The reserved
 // body runs directly because the reservation is already held: a wrapper that
 // takes its own reservation would deadlock against itself. A reserve failure resolves to
-// the closed path; an admission failure is final: no retry and no fallback
-// signal write.
-func (h *Harness) deliverIdleCompletion(c *coordinator, member *backgroundMember, parts []model.ContentPart, content string) error {
+// the closed path; a semantic refusal of the admission decision becomes the
+// operationless signal under the same reservation; every other admission
+// failure is final: no retry and no fallback signal write.
+func (h *Harness) deliverIdleCompletion(c *coordinator, item *pendingMessage) error {
+	text := item.content[0].Text
 	release, err := h.reserve(h.ctx, c)
 	if err != nil { // the reservation failed under harness loss: re-evaluated receivability is the closed path
-		return h.deliverClosedCompletion(c, member, content)
+		return h.deliverClosedCompletion(c, item.completion, text, nil)
 	}
 	defer release()
 	c.mu.Lock()
 	sessionID := c.sessionID
-	mode := backgroundDeliveryPriority(h, c, &pendingMessage{operationID: member.completionID, origin: InputOriginRuntime, content: parts})
+	mode := backgroundDeliveryPriority(h, c, item)
 	c.mu.Unlock()
 	if mode == bgDeliverSteering { // the completion enqueue is a coordinator-local publication
 		h.observeInvalidation(c)
 	}
 	switch mode {
 	case bgDeliverClosed:
-		return h.deliverClosedCompletion(c, member, content)
+		return h.deliverClosedCompletion(c, item.completion, text, nil)
 	case bgDeliverSteering:
 		return nil // enqueued at the re-evaluation
 	}
 	rec, prepared, _, err := h.admitReserved(h.ctx, c, admissionRequest{
 		SessionID:   sessionID,
-		OperationID: member.completionID,
+		OperationID: item.operationID,
 		Kind:        RequestKindMessage,
 		Origin:      InputOriginRuntime,
-		Content:     parts,
+		Content:     item.content,
 	})
 	if err != nil {
-		return err
+		return h.resolveCompletionFailure(c, item.completion, text, nil, err)
 	}
 	if prepared != nil { // install the execution before the deferred release runs
 		h.startExecution(c, rec.Admission.OperationID, *prepared)
@@ -290,18 +316,37 @@ func (h *Harness) deliverIdleCompletion(c *coordinator, member *backgroundMember
 	return nil
 }
 
+// resolveCompletionFailure applies the one completion error policy shared by
+// the idle and buffered delivery owners: a refusal becomes the operationless
+// signal under the caller's reservation, and every remaining failure returns
+// with its cause for the owner's existing first-failure retention. Existing
+// same-kind admission is success and never reaches this policy.
+func (h *Harness) resolveCompletionFailure(c *coordinator, related *relatedMember, content string, buffered *pendingMessage, err error) error {
+	if isAdmissionRefusal(err) {
+		return h.deliverClosedCompletion(c, related, content, buffered)
+	}
+	return err
+}
+
 // deliverClosedCompletion commits one operationless background_completion
 // signal entry through the compare/commit/adopt/rematerialize pattern, with
 // the coordinator mutex held across the whole transaction: it re-reads and
 // decodes the parent register, compares its revision with the resident view —
 // decode failure is corruption and drift the revision-race conflict — inserts
-// the entry with related_member{kind, id} and the producer-bounded content,
-// and replaces the Session register with its unchanged payload and advanced
-// revision. On transaction error the filtered corruption marker runs; on
+// the entry with the completion's related member kind/ID and the
+// producer-bounded content, and replaces the Session register with its
+// unchanged payload and advanced revision. A buffered completion verifies
+// under the same held mutex that the exact selected head still belongs to its
+// buffer: a stop or shutdown that discarded it during preparation leaves no
+// record. On transaction error the filtered corruption marker runs; on
 // revision drift the view rematerializes once on the settlement context,
 // whose failure replaces the original error. Delivery is never retried.
-func (h *Harness) deliverClosedCompletion(c *coordinator, member *backgroundMember, content string) error {
+func (h *Harness) deliverClosedCompletion(c *coordinator, related *relatedMember, content string, buffered *pendingMessage) error {
 	c.mu.Lock()
+	if buffered != nil && !c.holdsBufferedLocked(buffered) {
+		c.mu.Unlock()
+		return nil // the stop or shutdown discarded the selected item: it never reappears as a signal
+	}
 	sessionID := c.graph.Session.Identity.SessionID
 	view := c.graph.Session
 	entryID, err := newHexID()
@@ -313,7 +358,7 @@ func (h *Harness) deliverClosedCompletion(c *coordinator, member *backgroundMemb
 		SessionID:     sessionID,
 		EntryID:       entryID,
 		Signal:        SignalBackgroundCompletion,
-		RelatedMember: &relatedMember{Kind: string(member.kind), ID: member.id},
+		RelatedMember: related,
 		Content:       content,
 	}
 	payload, err := encodeSignalEntry(entry)
@@ -372,6 +417,10 @@ func (h *Harness) deliverClosedCompletion(c *coordinator, member *backgroundMemb
 	}
 	c.graph.Entries = append(c.graph.Entries, adopted)
 	c.graph.Session = committedSession
+	dropped := c.dropBufferedLocked(buffered) // the head leaves in the same adoption hold as its signal
+	if dropped {
+		c.bumpLocalRevision()
+	}
 	c.mu.Unlock()
 	h.observeInvalidation(c) // the durable operationless completion advance
 	return nil
@@ -385,10 +434,11 @@ func (h *Harness) deliverClosedCompletion(c *coordinator, member *backgroundMemb
 // and either abandons the obligation — a validation failure, or a non-empty
 // settled operation identity still current because that execution's terminal
 // commit failed — or defers while the child is not terminal, retired, and
-// quiet: a non-empty current Operation, an installed run, or a non-empty
-// group. When settled, it takes the pending info and renders the parent-facing
-// completion text; every parent-side call happens after releasing the child
-// lock.
+// quiet: a non-empty current Operation, an installed run, a non-empty group,
+// or a non-empty steering or queued buffer. When settled, it takes the pending
+// info; a report-free start releases its member here, and a requested report
+// is rendered and delivered to the parent. Every parent-side call happens
+// after releasing the child lock.
 func (h *Harness) childCompletionSettled(c *coordinator, settledOperationID string) error {
 	c.mu.Lock()
 	if c.pendingCompletion == nil {
@@ -437,11 +487,16 @@ func (h *Harness) childCompletionSettled(c *coordinator, settledOperationID stri
 		h.abandonChildCompletion(parentID, info.completionID)
 		return nil
 	}
-	if c.graph.Session.State.CurrentOperationID != "" || c.run != nil || (c.group != nil && len(c.group.members) > 0) {
+	if !c.quiescentLocked() {
 		c.mu.Unlock() // not yet terminal, retired and quiet: the obligation waits
 		return nil
 	}
 	c.pendingCompletion = nil
+	if !info.report { // a report-free start ends its member at settlement
+		c.mu.Unlock()
+		h.abandonChildCompletion(parentID, info.completionID)
+		return nil
+	}
 	content := childCompletionContent(c.graph, info.outputLimit)
 	c.mu.Unlock()
 	// The parent-side delivery runs on the same settlement context, so a
@@ -452,10 +507,11 @@ func (h *Harness) childCompletionSettled(c *coordinator, settledOperationID stri
 }
 
 // abandonChildCompletion releases one pending completion's process-local
-// ownership without delivery: it looks up the parent's registry member and, on
-// a resolved coordinator, claim-finishes the completion — no corruption
-// validation is bypassed and no compensating write is made; durable running
-// child Operations remain for recovery.
+// ownership without delivery: a report-free settlement ends its member here,
+// and an aborted obligation releases its claim. It looks up the parent's
+// registry member and, on a resolved coordinator, claim-finishes the
+// completion — no corruption validation is bypassed and no compensating write
+// is made; durable running child Operations remain for recovery.
 func (h *Harness) abandonChildCompletion(parentID, completionID string) {
 	h.mu.Lock()
 	parent := h.sessions[parentID]
@@ -466,15 +522,17 @@ func (h *Harness) abandonChildCompletion(parentID, completionID string) {
 	h.claimFinishBackgroundMember(parent, completionID)
 }
 
-// childCompletionContent renders one settled child's parent-facing completion
-// text from its latest committed Operation settlement by entry sequence: the
-// settlement entry's status and detail — matching that Operation's terminal
-// register — and, on success, the last assistant entry belonging to that
-// Operation with its text parts joined in stored order. Earlier assistant
-// turns, tool results, and previous Operations never contribute. Success with
-// no assistant text renders the stated empty-success fallback; interruption
-// and failure render their fixed texts, failure with its detail. The rendered
-// text is capped at the completion's output limit in UTF-8 bytes. A terminal,
+// childCompletionContent renders one settled child's parent-facing report:
+// the stable header "Session <id>: <terminal status>", followed by a newline
+// and a body only when the body is non-empty. The body is the latest committed
+// Operation settlement's final assistant text — the last assistant entry
+// belonging to that Operation with its text parts joined in stored order — on
+// success and interruption, and the settlement's diagnostic on failure.
+// Earlier assistant turns, tool results, and previous Operations never
+// contribute, and a failure's assistant text never replaces its diagnostic.
+// The body is capped at the start's requested limit and, separately, at what
+// the whole-report bound leaves after the header's newline; both bounds count
+// the trailing marker, and an empty body keeps the header alone. A terminal,
 // retired and quiet child with a pending completion always owns a settlement
 // entry — a pending completion implies a launched child, an empty current
 // Operation leaves every Operation terminal, and each terminal Operation owns
@@ -491,9 +549,10 @@ func childCompletionContent(g *sessionGraph, outputLimit int) string {
 	if settlement == nil {
 		return "" // unreachable for a validated graph
 	}
-	var text string
+	header := fmt.Sprintf("Session %s: %s", g.Session.Identity.SessionID, settlement.Status)
+	var body string
 	switch settlement.Status {
-	case OperationSuccess:
+	case OperationSuccess, OperationInterruption:
 		var assistant *assistantEntry
 		for i := range g.Entries {
 			e := &g.Entries[i]
@@ -503,33 +562,37 @@ func childCompletionContent(g *sessionGraph, outputLimit int) string {
 		}
 		if assistant != nil {
 			for _, part := range assistant.Content {
-				text += part.Text
+				body += part.Text
 			}
 		}
-		if text == "" {
-			text = "Task completed."
-		}
-	case OperationInterruption:
-		text = "Task interrupted."
 	default:
-		text = "Task failed: " + settlement.Detail
+		body = settlement.Detail
 	}
-	return truncateCompletionText(text, outputLimit)
+	limit := outputLimit
+	if whole := maxCompletionReportBytes - len(header) - 1; limit > whole {
+		limit = whole
+	}
+	if body = truncateCompletionText(body, limit); body == "" {
+		return header
+	}
+	return header + "\n" + body
 }
 
-// truncateCompletionText caps one rendered completion at the output limit in
-// UTF-8 bytes, retaining the longest complete-character prefix that fits the
-// trailing marker.
+// maxCompletionReportBytes bounds one rendered report as a whole, header,
+// separator and body together.
+const maxCompletionReportBytes = 1048576
+
+// truncateCompletionText caps one rendered report body at limit UTF-8 bytes,
+// retaining the longest complete-character prefix that leaves room for the
+// trailing marker. The accepted launch limits are far larger than the marker,
+// so the reservation always fits.
 func truncateCompletionText(text string, limit int) string {
 	const marker = "\n[truncated]"
-	if limit <= 0 || len(text) <= limit {
+	if len(text) <= limit {
 		return text
 	}
 	max := limit - len(marker)
-	if max < 0 {
-		max = 0
-	}
-	for max > 0 && text[max]&0xC0 == 0x80 { // back off to a complete-character boundary
+	for text[max]&0xC0 == 0x80 { // back off to a complete-character boundary
 		max--
 	}
 	return text[:max] + marker
@@ -777,8 +840,8 @@ func (h *Harness) StartJob(ctx context.Context, sessionID, jobID string, spawn f
 // LaunchChildRequest is the input of one child launch: the open root parent
 // Session, the requested Agent type and message, the caller-generated
 // globally unique Operation identity, the calling extension's attribution,
-// the parent's child concurrency cap, and the completion output limit in
-// UTF-8 bytes.
+// the parent's child concurrency cap, the requested report body limit, and
+// whether the start requests a completion report.
 type LaunchChildRequest struct {
 	ParentSessionID string
 	AgentSelection  AgentSelection
@@ -787,6 +850,7 @@ type LaunchChildRequest struct {
 	ExtensionID     string // the calling extension's attribution
 	MaxConcurrent   int    // 1..20
 	OutputLimit     int    // 1024..1048576 UTF-8 bytes
+	Report          bool   // whether the settled child hands the parent a report
 }
 
 // LaunchChildResult is the outcome of one child launch: the durable child
@@ -900,7 +964,7 @@ func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest
 
 	if err := h.backgroundHandoffFailure(c, member); err != nil {
 		h.releasePrepared(&prepared) // the rejected handoff settles its member and drops the prepared execution
-		return LaunchChildResult{ChildSessionID: childID}, h.settleRejectedChildLaunch(c, member, childID, req.OperationID, req.OutputLimit)
+		return LaunchChildResult{ChildSessionID: childID}, h.settleRejectedChildLaunch(c, member, childID, req.OperationID, req.OutputLimit, req.Report)
 	}
 	// The committed child installs as a stable cell with its validated durable
 	// graph and a call-owned pin, so the pending completion and the execution
@@ -915,7 +979,7 @@ func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest
 	}
 	defer childRelease()
 	childCoordinator.mu.Lock()
-	childCoordinator.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: req.OutputLimit}
+	childCoordinator.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: req.OutputLimit, report: req.Report}
 	childCoordinator.mu.Unlock()
 	h.observeInvalidation(childCoordinator) // the durable child creation
 	h.startExecution(childCoordinator, req.OperationID, prepared)
@@ -972,9 +1036,10 @@ func (h *Harness) launchTransaction(tx Transaction, view SessionRecord, req Laun
 // settleRejectedChildLaunch resolves one committed child whose handoff was
 // rejected. A materialization or terminal-settlement failure leaves the
 // running Operation for recovery and releases the member without delivery.
-// After successful settlement the usual completion owner waits for any
-// remaining child work and delivers its report.
-func (h *Harness) settleRejectedChildLaunch(c *coordinator, member *backgroundMember, childID, operationID string, outputLimit int) error {
+// After successful settlement the start's report choice decides: the usual
+// completion owner waits for any remaining child work and delivers its report,
+// and a report-free start releases the member at settlement.
+func (h *Harness) settleRejectedChildLaunch(c *coordinator, member *backgroundMember, childID, operationID string, outputLimit int, report bool) error {
 	child, childRelease, err := h.acquireCoordinator(context.WithoutCancel(h.ctx), childID)
 	if err == nil {
 		defer childRelease()
@@ -990,7 +1055,7 @@ func (h *Harness) settleRejectedChildLaunch(c *coordinator, member *backgroundMe
 		return err
 	}
 	child.mu.Lock()
-	child.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: outputLimit}
+	child.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: outputLimit, report: report}
 	child.mu.Unlock()
 	return h.childCompletionSettled(child, "")
 }

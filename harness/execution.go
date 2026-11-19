@@ -79,13 +79,23 @@ func (h *Harness) runExecution(c *coordinator, control *activeExecution, operati
 // through the one quiet gate, retains the actual publication/storage cause,
 // then disposes the owned conversation invocation, the opened Execution and
 // the preparation reservation, and drains the post-terminal buffers while the
-// reservation is held. A canceled contended acquisition skips only the drain.
+// reservation is held. A canceled contended acquisition skips the drain and
+// discards the undelivered buffers itself, so the retiring run still retires
+// into a quiet Session and its settlement notification cannot strand the
+// completion obligation.
 func (d *executionDriver) complete(res agent.TerminalResult, runErr error) error {
 	h := d.harness
 	c := d.coordinator
 	release, reserveErr := h.reserve(h.ctx, c)
 	if reserveErr == nil {
 		defer release()
+	} else { // shutdown prevented the drain: the retiring run's buffers are not deliverable
+		c.mu.Lock()
+		discarded := c.discardBuffers()
+		c.mu.Unlock()
+		if discarded {
+			h.observeInvalidation(c)
+		}
 	}
 	err := d.settleTerminal(d.control.execCtx, res, runErr)
 	h.recordStorageFailure(err) // the established outcome's storage-class cause; maintenance latches its own before disposing

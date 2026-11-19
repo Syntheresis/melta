@@ -399,14 +399,10 @@ func TestPreparationReservationReleasesOnDiscards(t *testing.T) {
 		h, cancel := releasingHarness(t, store, prepared)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		store.txHook = func(string) error { // the group closes between the launch commit and the handoff
-			c.mu.Lock()
-			c.stop = &stopInterval{done: make(chan struct{})}
-			c.mu.Unlock()
-			return nil
-		}
-		result, err := h.LaunchChildSession(context.Background(), launchRequest())
-		store.txHook = nil
+		request := launchRequest()
+		request.Report = false // the isolated release never runs a reporting parent
+		stopLaunchOnChildInput(store, c, request.ParentSessionID, request.OperationID)
+		result, err := h.LaunchChildSession(context.Background(), request)
 		testassert.NoError(t, err)
 		testassert.Require(t, result.ChildSessionID != "", "committed launch did not return its session ID")
 		testassert.Equal(t, counters.releases.Load(), int64(1))

@@ -60,6 +60,7 @@ func publicChildLaunch(root string) harness.LaunchChildRequest {
 		ExtensionID:     "test.extension",
 		MaxConcurrent:   2,
 		OutputLimit:     1024,
+		Report:          true,
 	}
 }
 
@@ -269,7 +270,7 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 			}
 			if observed.session == root && observed.operation == completionID {
 				got := texts(observed.request)
-				foundParent = len(got) == 2 && got[1] == "child answer"
+				foundParent = len(got) == 2 && got[1] == "Session "+child+": success\nchild answer"
 			}
 		}
 		testassert.Check(t, len(compactRequests) == 0, "ordinary first child turn compacted")

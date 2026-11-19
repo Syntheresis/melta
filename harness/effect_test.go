@@ -3469,7 +3469,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 			testassert.Require(t, rec.State.Status == OperationRunning, "operation state = %+v, want the running state left for recovery", rec.State)
 		}
 	})
-	t.Run("acquisition cancellation skips only the drain", func(t *testing.T) {
+	t.Run("acquisition cancellation skips the drain and discards the buffers", func(t *testing.T) {
 		for _, tc := range []struct {
 			name    string
 			hook    bool
@@ -3521,7 +3521,9 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 				defer release()
 				// The execution runs under a live Harness context; canceling at
 				// its first callback makes the completion's acquisition fail
-				// while its settle and disposal still run without cancellation.
+				// while its settle and disposal still run without cancellation,
+				// and the retiring run discards the buffers the skipped drain
+				// never delivered.
 				go func() {
 					<-started
 					harnessCancel()
@@ -3542,7 +3544,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 				held, buffered := c.reserved != nil, len(c.steering)
 				c.mu.Unlock()
 				testassert.Require(t, held, "the other holder's reservation was released")
-				testassert.Equal(t, buffered, 1)
+				testassert.Equal(t, buffered, 0)
 				{
 					rec := settledOperation(t, store, session.Identity.SessionID, testOpID)
 					testassert.Require(t, rec.State.Status == tc.want, "operation state = %+v, want %s", rec.State, tc.want)

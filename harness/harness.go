@@ -430,12 +430,16 @@ type Harness struct {
 // pendingMessage is one buffered Submit: a process-local FIFO item that is
 // neither a durable Operation nor a Session entry while it waits, carries no
 // idempotency, and is discarded on Harness-context loss. A delivery's
-// selected head stays buffered until its one attempt resolves.
+// selected head stays buffered until its one attempt resolves. A buffered
+// background completion also carries a copy of its related member kind and ID,
+// never the original live member, so a refused admission can still record the
+// signal the closed path would.
 type pendingMessage struct {
 	operationID string
 	origin      InputOrigin
 	extensionID string
 	content     []model.ContentPart
+	completion  *relatedMember // nil for ordinary input
 }
 
 // activeExecution is the one in-flight execution of a coordinator: installed
@@ -1339,6 +1343,13 @@ func (c *coordinator) discardBuffers() bool {
 	return changed
 }
 
+// holdsBufferedLocked reports whether one selected item is still the head of
+// whichever process-local buffer holds it. The caller holds the coordinator
+// mutex.
+func (c *coordinator) holdsBufferedLocked(item *pendingMessage) bool {
+	return (len(c.steering) > 0 && c.steering[0] == item) || (len(c.queued) > 0 && c.queued[0] == item)
+}
+
 // dropBufferedLocked removes one delivery's previously selected pending item
 // from the head of whichever buffer still holds it, reporting whether it
 // removed anything. The caller holds the coordinator mutex. Only the exact
@@ -1610,6 +1621,45 @@ var errAdmissionExisting = errors.New("harness: operation already admitted in th
 // coordinator's validated view. It keeps the landed conflict class reachable.
 var errRevisionRace = fmt.Errorf("harness: session changed concurrently: %w", ErrConflict)
 
+// isPreparationRefusal reports whether one preparation failure is the
+// completion admission's known non-admission: an ordinary producer failure
+// before any publication, typed or not. Storage, corruption, cancellation and
+// absent-owner outcomes keep their own class.
+func isPreparationRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, ErrStorage) && !errors.Is(err, ErrNotFound) && !isCorruption(err) &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+// admissionRefusal is the one private semantic-refusal wrapper: the admission
+// decision rejected otherwise valid input because of the Session's own
+// readable and writable state — archived, stopping, or already running an
+// Operation — or because preparation refused the admission before publication.
+// A background completion answers a refusal with its operationless signal;
+// storage, corruption, owner loss, conflict, identity misuse and producer
+// failures are never refusals and keep their own propagation and latch.
+type admissionRefusal struct{ cause error }
+
+func (e *admissionRefusal) Error() string { return e.cause.Error() }
+func (e *admissionRefusal) Unwrap() error { return e.cause }
+
+// refuseAdmission marks one admission decision's semantic refusal.
+func refuseAdmission(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &admissionRefusal{cause: cause}
+}
+
+// isAdmissionRefusal reports whether one error is the admission decision's own
+// semantic refusal.
+func isAdmissionRefusal(err error) bool {
+	var refusal *admissionRefusal
+	return errors.As(err, &refusal)
+}
+
 // validateSubmitInput validates one submitted message's identity, origin,
 // provenance, and content, returning the owned content copy every downstream
 // use consumes. Extension provenance is present exactly for plugin origin.
@@ -1670,16 +1720,16 @@ func (h *Harness) admitReserved(ctx context.Context, c *coordinator, req admissi
 	}
 	if c.graph.Session.State.Lifecycle != LifecycleOpen {
 		c.mu.Unlock()
-		return OperationRecord{}, nil, "", invalidInput("session %q is archived; admission requires an open Session", req.SessionID)
+		return OperationRecord{}, nil, "", refuseAdmission(invalidInput("session %q is archived; admission requires an open Session", req.SessionID))
 	}
 	if memberStopping(c) {
 		c.mu.Unlock()
-		return OperationRecord{}, nil, "", invalidInput("session is closed to agent work")
+		return OperationRecord{}, nil, "", refuseAdmission(invalidInput("session is closed to agent work"))
 	}
 	if c.graph.Session.State.CurrentOperationID != "" {
 		running := c.graph.Session.State.CurrentOperationID
 		c.mu.Unlock()
-		return OperationRecord{}, nil, "", invalidInput("session %q already runs operation %q; admission requires an idle Session", req.SessionID, running)
+		return OperationRecord{}, nil, "", refuseAdmission(invalidInput("session %q already runs operation %q; admission requires an idle Session", req.SessionID, running))
 	}
 	view := c.graph.Session // the state the reservation resolved on
 	c.mu.Unlock()
@@ -1689,6 +1739,9 @@ func (h *Harness) admitReserved(ctx context.Context, c *coordinator, req admissi
 		AgentSelection: view.State.AgentSelection,
 	}, req.Kind)
 	if err != nil {
+		if isPreparationRefusal(err) { // known non-admission before publication, typed or not: nothing was written
+			return OperationRecord{}, nil, "", refuseAdmission(err)
+		}
 		return OperationRecord{}, nil, "", err
 	}
 	defer cleanup() // the combined context stays live until publication returns
@@ -1837,10 +1890,10 @@ func (h *Harness) publishAdmission(ctx context.Context, c *coordinator, view Ses
 			}
 			// a violated semantic precondition outranks the conflict class
 			if current.State.Lifecycle != LifecycleOpen {
-				return invalidInput("session %q is archived; admission requires an open Session", req.SessionID)
+				return refuseAdmission(invalidInput("session %q is archived; admission requires an open Session", req.SessionID))
 			}
 			if current.State.CurrentOperationID != "" {
-				return invalidInput("session %q already runs operation %q; admission requires an idle Session", req.SessionID, current.State.CurrentOperationID)
+				return refuseAdmission(invalidInput("session %q already runs operation %q; admission requires an idle Session", req.SessionID, current.State.CurrentOperationID))
 			}
 			return fmt.Errorf("%w: session %q revision %d changed concurrently to %d", errRevisionRace, req.SessionID, view.Revision, reg.Revision)
 		}
@@ -2107,6 +2160,11 @@ func (h *Harness) drainBuffers(c *coordinator, run *activeExecution) {
 			buffered:    item,
 		})
 		if err != nil || disposition != DispositionAdmitted || prepared == nil {
+			if item.completion != nil && err != nil { // an already admitted completion is success
+				if rerr := h.resolveCompletionFailure(c, item.completion, item.content[0].Text, item, err); rerr != nil {
+					h.recordStorageFailure(rerr)
+				}
+			}
 			// one failed delivery attempt is final for the item: the selected
 			// head leaves its buffer as the attempt's final outcome; an
 			// admission that does not adopt its prepared execution already

@@ -661,6 +661,240 @@ func TestBufferedItemFailureIsFinal(t *testing.T) {
 			})
 		})
 	}
+
+	t.Run("completion preparation refusal records the signal and advances", func(t *testing.T) {
+		store := emptyStore(t)
+		script := newModelScript()
+		script.gate = make(chan struct{})
+		var (
+			mu    sync.Mutex
+			calls int
+		)
+		prepare := func(context.Context, PreparationRequest) (PreparedExecution, error) {
+			mu.Lock()
+			calls++
+			call := calls
+			mu.Unlock()
+			if call == 1 { // turn-1's own execution
+				return modelPrepared(script.model), nil
+			}
+			return PreparedExecution{}, fmt.Errorf("no model configured: %w", ErrInvalid) // the production preparation refusal
+		}
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, prepare)
+		defer cancel()
+		session := createSession(t, h)
+		watch := watchSettlements(store)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+		{
+			_, err := submitText(t, h, session, "turn-1", MessageModeRegular, "hello")
+			testassert.NoError(t, err)
+		}
+		<-script.arrived // turn-1 is parked at its boundary
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "buffered report")
+			testassert.NoError(t, err)
+		}
+		waitMemberDone(t, member) // the handoff ends the membership while the report is buffered
+		script.releaseGate()      // turn-1 settles; the drain's preparation is refused
+		watch.next()              // turn-1's settlement
+		awaitHarnessQuiet(t, h, session)
+
+		signals := storedSignals(t, store, session)
+		testassert.Require(t, len(signals) == 1 && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "buffered report", "committed signals = %+v, want the buffered completion's operationless record", signals)
+		testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the refused buffered completion admitted an Operation")
+		c.mu.Lock()
+		buffers := len(c.steering) + len(c.queued)
+		c.mu.Unlock()
+		testassert.Equal(t, buffers, 0)
+	})
+
+	t.Run("completion publication failure is latched with no signal", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			err         error
+			wantLatched bool
+		}{
+			{"storage class", fmt.Errorf("%w: injected storage failure", ErrStorage), true},
+			{"marked publication", wrapPublication(errors.New("injected publication failure")), true},
+			{"plain transaction", errors.New("injected plain failure"), false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				store := emptyStore(t)
+				script := newModelScript()
+				script.gate = make(chan struct{})
+				h, cancel := newCancelableHarness(t, store, modelPrepared(script.model), nil)
+				defer cancel()
+				session := createSession(t, h)
+				c := leaseCoordinator(t, h, session)
+				member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+				testassert.NoError(t, err)
+				{
+					_, err := submitText(t, h, session, "turn-1", MessageModeRegular, "hello")
+					testassert.NoError(t, err)
+				}
+				<-script.arrived // turn-1 is parked at its boundary
+				{
+					err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "buffered report")
+					testassert.NoError(t, err)
+				}
+				waitMemberDone(t, member)
+				// The drain's completion admission fails at its input
+				// publication with a supported latch outcome.
+				store.entryHook = func(draft EntryDraft) error {
+					if draft.Kind == EntryInput && draft.OperationID == member.completionID {
+						return tc.err
+					}
+					return nil
+				}
+				script.releaseGate()
+				awaitHarnessQuiet(t, h, session)
+				store.entryHook = nil
+
+				testassert.Require(t, len(storedSignals(t, store, session)) == 0, "a failed publication committed a fallback signal")
+				testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the failed publication admitted an Operation")
+				c.mu.Lock()
+				buffers := len(c.steering) + len(c.queued)
+				c.mu.Unlock()
+				testassert.Equal(t, buffers, 0)
+				h.mu.Lock()
+				latched := h.storageFailure
+				h.mu.Unlock()
+				if tc.wantLatched {
+					testassert.Require(t, latched != nil && latched.Error() == tc.err.Error(), "latched failure = %v, want the preserved cause %v", latched, tc.err)
+				} else {
+					testassert.Require(t, latched == nil, "a plain transaction error latched %v; it is neither a refusal nor an uncertain publication", latched)
+				}
+			})
+		}
+	})
+
+	t.Run("completion refusal records the signal and advances", func(t *testing.T) {
+		store := emptyStore(t)
+		script := newModelScript()
+		script.gate = make(chan struct{})
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, archiveDuringPrepare(store, 2, modelPrepared(script.model)))
+		defer cancel()
+		session := createSession(t, h)
+		watch := watchSettlements(store)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+		{
+			_, err := submitText(t, h, session, "turn-1", MessageModeRegular, "hello")
+			testassert.NoError(t, err)
+		}
+		<-script.arrived // turn-1 is parked at its boundary
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "buffered report")
+			testassert.NoError(t, err)
+		}
+		waitMemberDone(t, member) // the handoff ends the membership while the report is buffered
+		{
+			_, err := submitText(t, h, session, "turn-2", MessageModeQueued, "later")
+			testassert.NoError(t, err)
+		}
+		script.releaseGate() // turn-1 settles: the drain's completion admission is refused, then the ordinary item's is
+		watch.next()         // turn-1's settlement
+		awaitHarnessQuiet(t, h, session)
+
+		signals := storedSignals(t, store, session)
+		testassert.Require(t, len(signals) == 1 && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "buffered report", "committed signals = %+v, want the buffered completion's operationless record", signals)
+		testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the refused buffered completion admitted an Operation")
+		testassert.Require(t, !storedOperationExists(store, session, "turn-2"), "the ordinary queued item admitted an Operation")
+		c.mu.Lock()
+		buffers := len(c.steering) + len(c.queued)
+		c.mu.Unlock()
+		testassert.Equal(t, buffers, 0)
+		// The admitted input is the whole input record: the refused completion
+		// and the ordinary refused item leave nothing behind.
+		{
+			got := strings.Join(entryTexts(t, store, session), ",")
+			testassert.Equal(t, got, "hello")
+		}
+	})
+}
+
+// TestBufferedReportDiscardedBeforeRefusal proves the discarded-report race: a
+// stop that clears the originating Session's buffers while the drain's
+// admission is still preparing leaves no fallback signal for the discarded
+// item, and the stop still joins through the cleared report.
+func TestBufferedReportDiscardedBeforeRefusal(t *testing.T) {
+	store := emptyStore(t)
+	script := newModelScript()
+	script.gate = make(chan struct{})
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	park := make(chan struct{})
+	arrived := make(chan struct{})
+	var arrivedOnce sync.Once
+	prepare := func(context.Context, PreparationRequest) (PreparedExecution, error) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		if call == 1 { // the launched child's own first execution
+			return modelPrepared(script.model), nil
+		}
+		arrivedOnce.Do(func() { close(arrived) })
+		<-park // the owner's stop lands while this admission prepares
+		return PreparedExecution{}, fmt.Errorf("no model configured: %w", ErrInvalid)
+	}
+	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, prepare)
+	defer cancel()
+	root := createSession(t, h)
+	res, err := h.LaunchChildSession(context.Background(), launchRequestFor(root))
+	testassert.NoError(t, err)
+	child := res.ChildSessionID
+	childC := leaseCoordinator(t, h, child)
+
+	jobMember, err := admitLocked(h, childC, memberJob, jobFixtureID, 0)
+	testassert.NoError(t, err)
+	{
+		err := h.DeliverBackgroundCompletion(context.Background(), child, jobMember.completionID, "discarded report")
+		testassert.NoError(t, err)
+	}
+	waitMemberDone(t, jobMember) // the handoff buffers the report under the running child
+	childC.mu.Lock()
+	buffered := len(childC.steering)
+	childC.mu.Unlock()
+	testassert.Equal(t, buffered, 1)
+
+	script.releaseGate() // the child's operation settles; the drain selects the buffered report
+	<-arrived            // the drain's admission is parked in preparation
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- h.Stop(context.Background(), root) }()
+	awaitMemberStop(t, childC, stopDone) // the owner's recursive stop clears the child's buffers
+	childC.mu.Lock()
+	discarded := len(childC.steering) + len(childC.queued)
+	childC.mu.Unlock()
+	testassert.Equal(t, discarded, 0)
+
+	close(park) // the refusal returns to a Session whose selected item is already gone
+	{
+		err := stopResult(t, stopDone)
+		testassert.NoError(t, err)
+	}
+
+	// The discarded report never reappeared; the child's own settled report
+	// still reaches the root and is refused as its own operationless signal.
+	testassert.Require(t, len(storedSignals(t, store, child)) == 0, "discarded report signals = %+v, want none", storedSignals(t, store, child))
+	testassert.Require(t, !storedOperationExists(store, child, jobMember.completionID), "the discarded report admitted an Operation")
+	rootSignals := storedSignals(t, store, root)
+	want := "Session " + child + ": success\ndone"
+	testassert.Require(t, len(rootSignals) == 1 && rootSignals[0].RelatedMember != nil && rootSignals[0].RelatedMember.Kind == "session" && rootSignals[0].RelatedMember.ID == child && rootSignals[0].Content == want, "root signals = %+v, want the child's own settled report %q", rootSignals, want)
+	{
+		rootC := cachedCoordinator(t, h, root)
+		rootC.mu.Lock()
+		live := liveBackground(rootC)
+		rootC.mu.Unlock()
+		testassert.Require(t, !live, "the stop left the child member live")
+	}
 }
 
 // TestFinalBoundarySerialization proves the coordinator linearizes the final

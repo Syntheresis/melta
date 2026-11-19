@@ -403,7 +403,7 @@ func newCancelledCompletionFixture(t *testing.T, storage Storage, store *graphSt
 	jobMember, err := admitLocked(h, childLease, memberJob, jobFixtureID, 0)
 	testassert.NoError(t, err)
 	childLease.mu.Lock()
-	childLease.pendingCompletion = &launchInfo{completionID: parentMember.completionID, outputLimit: 1024}
+	childLease.pendingCompletion = &launchInfo{completionID: parentMember.completionID, outputLimit: 1024, report: true}
 	childLease.mu.Unlock()
 	childRelease()
 
@@ -452,7 +452,7 @@ func TestCancelledMemberFinishSettlesTheChildCompletion(t *testing.T) {
 		}
 		testassert.Equal(t, jobFacts, 1)
 		signals := storedSignals(t, store, completionParentID)
-		testassert.Require(t, len(signals) == 1 && signals[0].Content == "child text", "parent signals = %+v, want the child's rendered completion as the closed-path record", signals)
+		testassert.Require(t, len(signals) == 1 && signals[0].Content == "Session "+completionChildID+": success\nchild text", "parent signals = %+v, want the child's rendered completion as the closed-path record", signals)
 		{
 			childSignals := storedSignals(t, store, completionChildID)
 			testassert.Require(t, len(childSignals) == 1 && childSignals[0].Content == "job done", "child signals = %+v, want the job's own completion record", childSignals)
@@ -838,13 +838,13 @@ func TestChildCompletionRendersThroughAGraphlessChild(t *testing.T) {
 	member, err := admitLocked(h, parent, memberSession, completionChildID, 0)
 	testassert.NoError(t, err)
 	child.mu.Lock()
-	child.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+	child.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
 	child.mu.Unlock()
 
 	h.childCompletionSettled(child, "")
 	{
 		got := runtimeInputTextRaw(t, store, completionParentID)
-		testassert.Equal(t, got, "child text")
+		testassert.Equal(t, got, "Session "+completionChildID+": success\nchild text")
 	}
 	assertMemberCount(t, parent, 0)
 }

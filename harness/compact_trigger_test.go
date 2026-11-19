@@ -996,7 +996,7 @@ func TestModelEffectCompactBoundaryExcludesPostFreezeAppends(t *testing.T) {
 	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
 	testassert.NoError(t, err)
 	{
-		err := h.deliverClosedCompletion(c, member, "Task completed.")
+		err := h.deliverClosedCompletion(c, completionMember(member), "Task completed.", nil)
 		testassert.NoError(t, err)
 		h.finishBackgroundMember(c, member)
 	}

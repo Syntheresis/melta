@@ -628,6 +628,8 @@ func (c *composition) childLaunchHandler(ctx context.Context, call extension.Cal
 	if c.hosts == nil || c.hosts.background == nil || c.hosts.background.h == nil {
 		return extension.Result{}, ErrClosed
 	}
+	// The child_launch contract's delegation always requests the settled
+	// child's completion report.
 	result, err := c.hosts.background.h.LaunchChildSession(ctx, harness.LaunchChildRequest{
 		ParentSessionID: call.SessionID,
 		AgentSelection:  harness.AgentSelection{Definition: &request.Definition},
@@ -636,6 +638,7 @@ func (c *composition) childLaunchHandler(ctx context.Context, call extension.Cal
 		ExtensionID:     call.ExtensionID,
 		MaxConcurrent:   request.MaxConcurrent,
 		OutputLimit:     request.OutputLimit,
+		Report:          true,
 	})
 	value, marshalErr := json.Marshal(struct {
 		ChildSessionID string `json:"child_session_id"`

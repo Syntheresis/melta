@@ -171,10 +171,33 @@ func runtimeInputText(t *testing.T, store *graphStorage, sessionID string) strin
 	return ""
 }
 
+// archiveDuringPrepare returns a preparation callback that archives the
+// prepared admission's own Session on the given call, then returns the result.
+// The callback may run on the execution's goroutine, so it reports the archive
+// failure through its own error instead of the test.
+func archiveDuringPrepare(store *graphStorage, call int, result PreparedExecution) func(context.Context, PreparationRequest) (PreparedExecution, error) {
+	calls := 0
+	return func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
+		calls++
+		if calls == call {
+			err := store.Transact(context.Background(), func(tx Transaction) error {
+				return foreignArchiveChange(tx, req.Session.Identity.SessionID)
+			})
+			if err != nil {
+				return PreparedExecution{}, err
+			}
+		}
+		return result, nil
+	}
+}
+
 // TestDeliverBackgroundCompletionModes proves the delivery priority: a
 // not-receivable parent takes the durable signal entry regardless of
-// activity, a receivable active parent steers, and a receivable idle parent
-// admits under the completion identity.
+// activity, a receivable active parent steers, a receivable idle parent
+// admits under the completion identity, and a semantic refusal of that
+// admission becomes the same operationless signal instead of an error. It also
+// covers a report-free settlement, a stop waiting on the member, and a signal
+// write that fails without a fallback write.
 func TestDeliverBackgroundCompletionModes(t *testing.T) {
 	t.Run("closed during harness cancellation with a settling run", func(t *testing.T) {
 		store := emptyStore(t)
@@ -335,6 +358,197 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 			testassert.Equal(t, got, "queued completion")
 		}
 	})
+
+	t.Run("idle refusal becomes the operationless signal and releases the member", func(t *testing.T) {
+		store := emptyStore(t)
+		script := newModelScript()
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, archiveDuringPrepare(store, 1, modelPrepared(script.model)))
+		defer cancel()
+		session := createSession(t, h)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "refused report")
+			testassert.NoError(t, err) // the refusal is delivered as the signal, not returned as a failure
+		}
+		waitMemberDone(t, member)
+		signals := storedSignals(t, store, session)
+		testassert.Require(t, len(signals) == 1 && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "refused report", "committed signal = %+v, want the refused completion's operationless record", signals)
+		testassert.Require(t, storedEntryCount(store, session) == 1, "the refused delivery committed %d entries, want only the signal", storedEntryCount(store, session))
+		testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the refused completion admitted an Operation")
+		c.mu.Lock()
+		live, lifecycle := liveBackground(c), c.graph.Session.State.Lifecycle
+		c.mu.Unlock()
+		testassert.Require(t, !live, "the refused completion left its member live")
+		// The archived record proves the delivery reached the admission
+		// decision instead of taking the not-receivable closed path.
+		testassert.Equal(t, lifecycle, LifecycleArchived)
+	})
+
+	t.Run("preparation refusal becomes the operationless signal and releases the member", func(t *testing.T) {
+		store := emptyStore(t)
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, func(context.Context, PreparationRequest) (PreparedExecution, error) {
+			return PreparedExecution{}, fmt.Errorf("no model configured: %w", ErrInvalid) // the production preparation refusal
+		})
+		defer cancel()
+		session := createSession(t, h)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "refused report")
+			testassert.NoError(t, err) // the prepublication refusal is delivered as the signal, not returned as a failure
+		}
+		waitMemberDone(t, member)
+		signals := storedSignals(t, store, session)
+		testassert.Require(t, len(signals) == 1 && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "refused report", "committed signal = %+v, want the refused completion's operationless record", signals)
+		testassert.Require(t, storedEntryCount(store, session) == 1, "the refused delivery committed %d entries, want only the signal", storedEntryCount(store, session))
+		testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the refused completion admitted an Operation")
+		testassert.Require(t, storedSignals(t, store, session)[0].OperationID == "", "the preparation refusal committed an Operation-bound signal")
+		c.mu.Lock()
+		live := liveBackground(c)
+		c.mu.Unlock()
+		testassert.Require(t, !live, "the refused completion left its member live")
+	})
+
+	t.Run("untyped preparation refusal becomes the signal and is not latched", func(t *testing.T) {
+		store := emptyStore(t)
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, func(context.Context, PreparationRequest) (PreparedExecution, error) {
+			return PreparedExecution{}, errors.New("preparation broke") // ordinary, untyped producer failure before publication
+		})
+		defer cancel()
+		session := createSession(t, h)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "refused report")
+			testassert.NoError(t, err)
+		}
+		waitMemberDone(t, member)
+		signals := storedSignals(t, store, session)
+		testassert.Require(t, len(signals) == 1 && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "refused report", "committed signal = %+v, want the untyped refusal's operationless record", signals)
+		testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the refused completion admitted an Operation")
+		h.mu.Lock()
+		latched := h.storageFailure
+		h.mu.Unlock()
+		testassert.Require(t, latched == nil, "known non-admission latched %v, want nothing", latched)
+	})
+
+	t.Run("preparation storage failure propagates and latches without a signal", func(t *testing.T) {
+		store := emptyStore(t)
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, func(context.Context, PreparationRequest) (PreparedExecution, error) {
+			return PreparedExecution{}, fmt.Errorf("%w: injected preparation storage failure", ErrStorage)
+		})
+		defer cancel()
+		session := createSession(t, h)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+
+		err = h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "refused report")
+		testassert.Require(t, errors.Is(err, ErrStorage) && strings.Contains(err.Error(), "injected preparation storage failure"), "delivery = %v, want the preparation storage class", err)
+		waitMemberDone(t, member)
+		testassert.Require(t, len(storedSignals(t, store, session)) == 0, "a preparation storage failure committed a signal")
+		testassert.Require(t, storedEntryCount(store, session) == 0, "the preparation storage failure committed %d entries", storedEntryCount(store, session))
+		h.mu.Lock()
+		latched := h.storageFailure
+		h.mu.Unlock()
+		testassert.Require(t, errors.Is(latched, ErrStorage), "latched failure = %v, want the preparation storage class", latched)
+	})
+
+	t.Run("a report-free child settles its member without a parent entry", func(t *testing.T) {
+		store := completionChildGraph(completionParentID, false, OperationSuccess, "", "child text").storage(t)
+		addRootSession(t, store, completionParentID)
+		h := newTestHarness(t, store, nil)
+		cP := leaseCoordinator(t, h, completionParentID)
+		cC := leaseCoordinator(t, h, completionChildID)
+		member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+		cC.mu.Lock()
+		cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+		cC.mu.Unlock()
+
+		h.childCompletionSettled(cC, "")
+		waitMemberDone(t, member)
+		testassert.Require(t, storedEntryCount(store, completionParentID) == 0, "the report-free child delivered %d parent entries", storedEntryCount(store, completionParentID))
+		testassert.Require(t, len(storedSignals(t, store, completionParentID)) == 0, "the report-free child committed a signal")
+		cC.mu.Lock()
+		pending := cC.pendingCompletion
+		cC.mu.Unlock()
+		testassert.Require(t, pending == nil, "the report-free obligation survived settlement")
+		cP.mu.Lock()
+		live := liveBackground(cP)
+		cP.mu.Unlock()
+		testassert.Require(t, !live, "the report-free member stayed live")
+	})
+
+	t.Run("a stop blocked on the member still admits the report", func(t *testing.T) {
+		store := emptyStore(t)
+		script := newModelScript()
+		h, cancel := newCancelableHarness(t, store, modelPrepared(script.model), nil)
+		defer cancel()
+		session := createSession(t, h)
+		watch := watchSettlements(store)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+
+		stopDone := make(chan error, 1)
+		go func() { stopDone <- h.Stop(context.Background(), session) }()
+		awaitStopInterval(t, c, stopDone) // the stop waits on the live member
+
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "report during the stop")
+			testassert.NoError(t, err)
+		}
+		waitMemberDone(t, member)
+		{
+			err := stopResult(t, stopDone)
+			testassert.NoError(t, err)
+		}
+		watch.next() // the admitted report's own Operation settles
+		{
+			got := runtimeInputText(t, store, session)
+			testassert.Equal(t, got, "report during the stop")
+		}
+		testassert.Require(t, len(storedSignals(t, store, session)) == 0, "the receivable parent recorded a signal instead of the input")
+	})
+
+	t.Run("refusal signal storage failure is latched with no fallback write", func(t *testing.T) {
+		store := emptyStore(t)
+		script := newModelScript()
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, archiveDuringPrepare(store, 1, modelPrepared(script.model)))
+		defer cancel()
+		session := createSession(t, h)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+		store.entryHook = func(draft EntryDraft) error {
+			if draft.Kind == EntrySignal {
+				return fmt.Errorf("%w: injected signal failure", ErrStorage)
+			}
+			return nil
+		}
+
+		err = h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "refused report")
+		store.entryHook = nil
+		testassert.Require(t, errors.Is(err, ErrStorage), "delivery = %v, want the failed signal write's storage class", err)
+		waitMemberDone(t, member)
+		testassert.Require(t, storedEntryCount(store, session) == 0, "the failed signal write left %d entries", storedEntryCount(store, session))
+		h.mu.Lock()
+		latched := h.storageFailure != nil
+		h.mu.Unlock()
+		testassert.Require(t, latched, "the failed signal write was not retained")
+		c.mu.Lock()
+		live := liveBackground(c)
+		c.mu.Unlock()
+		testassert.Require(t, !live, "the failed signal write left its member live")
+	})
 }
 
 // TestDeliverBackgroundCompletionEmptyContentRejected proves empty completion
@@ -403,6 +617,34 @@ func TestDeliverBackgroundCompletionSecondDeliveryIsNoOp(t *testing.T) {
 		testassert.Require(t, reflect.DeepEqual(got, []string{"first"}), "committed inputs = %q, want exactly the first delivery", got)
 	}
 	testassert.Require(t, storedOperationExists(store, session, member.completionID), "the completion identity was not admitted")
+
+	// A refused completion follows the same first-writer rule: its signal is
+	// the one durable record, and a duplicate delivery changes nothing.
+	t.Run("refused completion duplicate is a no-op", func(t *testing.T) {
+		store := emptyStore(t)
+		script := newModelScript()
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, archiveDuringPrepare(store, 1, modelPrepared(script.model)))
+		defer cancel()
+		session := createSession(t, h)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		testassert.NoError(t, err)
+
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "refused")
+			testassert.NoError(t, err)
+		}
+		waitMemberDone(t, member)
+		beforeEntries, beforeRegs := storedSessionState(store, session)
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "second")
+			testassert.NoError(t, err)
+		}
+		afterEntries, afterRegs := storedSessionState(store, session)
+		testassert.Require(t, reflect.DeepEqual(beforeEntries, afterEntries) && reflect.DeepEqual(beforeRegs, afterRegs), "the duplicate delivery changed the durable registers or entries")
+		signals := storedSignals(t, store, session)
+		testassert.Require(t, len(signals) == 1 && signals[0].Content == "refused", "committed signals = %+v, want the one first-writer record", signals)
+	})
 }
 
 // TestDeliverBackgroundCompletionCorruptParent proves an unavailable parent
@@ -542,7 +784,7 @@ func TestDeliverBackgroundCompletionReserveFailureTakesClosedPath(t *testing.T) 
 	cancel() // the idle delivery's reserve call fails against the dead context
 
 	{
-		err := h.deliverIdleCompletion(c, member, admissionContent("closed on failure"), "closed on failure")
+		err := h.deliverIdleCompletion(c, completionItem(member, admissionContent("closed on failure")))
 		testassert.NoError(t, err)
 	}
 	signals := storedSignals(t, store, session)
@@ -554,9 +796,12 @@ func TestDeliverBackgroundCompletionReserveFailureTakesClosedPath(t *testing.T) 
 // TestDeliverBackgroundCompletionAdmissionFailuresFinal proves the idle
 // admission attempt is final under the one-attempt rule: the original error
 // returns, the member finishes once, no replacement Operation is admitted,
-// and no retry or fallback signal write happens; a storage-class failure is
-// latched and a non-storage one is not.
+// and no retry or fallback signal write happens. A storage-class failure and
+// an otherwise unknown transaction failure are both retained as a failed
+// publication with their own cause; a known conflict rejection keeps its class
+// and is not latched.
 func TestDeliverBackgroundCompletionAdmissionFailuresFinal(t *testing.T) {
+	plain := errors.New("injected plain failure")
 	cases := []struct {
 		name        string
 		err         error
@@ -565,6 +810,9 @@ func TestDeliverBackgroundCompletionAdmissionFailuresFinal(t *testing.T) {
 	}{
 		{"storage failure", fmt.Errorf("%w: injected storage failure", ErrStorage), true, func(t *testing.T, err error) {
 			testassert.Require(t, errors.Is(err, ErrStorage), "delivery error = %v, want the storage class", err)
+		}},
+		{"plain transaction failure", plain, false, func(t *testing.T, err error) {
+			testassert.Equal(t, err, plain) // general admission keeps the transaction error's own identity
 		}},
 		{"conflict failure", fmt.Errorf("%w: injected conflict", ErrConflict), false, func(t *testing.T, err error) {
 			testassert.Require(t, errors.Is(err, ErrInvalid) && strings.Contains(err.Error(), "already exists in another session"), "delivery error = %v, want the cross-session reuse rejection", err)
@@ -899,18 +1147,19 @@ func TestClosedDeliveryRevisionDrift(t *testing.T) {
 // completion as the successor Operation, the settlement check defers on the
 // installed run until the successor retires, and the parent-facing result
 // reaches the parent only afterwards — carrying the successor's own text or
-// exactly the empty-success fallback for a refusal-only successor, never the
+// exactly the header alone for a refusal-only successor, never the
 // predecessor's earlier text.
 func TestJobCompletionWaitsForChildSuccessorRetirement(t *testing.T) {
 	refusal := turnDelta("stop", "")
 	refusal.RefusalFragment = "no"
+	header := "Session " + completionChildID + ": success"
 	for _, tc := range []struct {
 		name      string
 		successor modelAttempt
 		want      string
 	}{
-		{"text-bearing successor", modelAttempt{stream: streamOf(turnDelta("stop", "final"))}, "final"},
-		{"refusal-only successor", modelAttempt{stream: streamOf(refusal, usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1}))}, "Task completed."},
+		{"text-bearing successor", modelAttempt{stream: streamOf(turnDelta("stop", "final"))}, header + "\nfinal"},
+		{"refusal-only successor", modelAttempt{stream: streamOf(refusal, usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1}))}, header},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := completionChildGraph(completionParentID, false, OperationSuccess, "", "").storage(t)
@@ -926,7 +1175,7 @@ func TestJobCompletionWaitsForChildSuccessorRetirement(t *testing.T) {
 			member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
 			testassert.NoError(t, err)
 			cC.mu.Lock()
-			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
 			cC.mu.Unlock()
 			jobMember, err := admitLocked(h, cC, memberJob, jobFixtureID, 0)
 			testassert.NoError(t, err)
@@ -1002,7 +1251,7 @@ func TestChildCompletionSettledAbandonment(t *testing.T) {
 		member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
 		testassert.NoError(t, err)
 		cC.mu.Lock()
-		cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+		cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
 		cC.mu.Unlock()
 		return h, store, cC, member
 	}
@@ -1036,11 +1285,59 @@ func TestChildCompletionSettledAbandonment(t *testing.T) {
 	})
 }
 
-// TestChildCompletionRendersParentFacingText proves the rendered completion
-// per settlement status: the last assistant text of the settled Operation,
-// the empty-success fallback, the interruption text, and the failure detail —
+// TestChildCompletionSettledWaitsForBuffers proves the quiet predicate's FIFO
+// half: a terminal child that still holds a steering or queued item is not
+// settled, and its obligation delivers only after both buffers are empty.
+func TestChildCompletionSettledWaitsForBuffers(t *testing.T) {
+	for _, name := range []string{"steering", "queued"} {
+		t.Run(name, func(t *testing.T) {
+			store := completionChildGraph(completionParentID, false, OperationSuccess, "", "child text").storage(t)
+			addRootSession(t, store, completionParentID)
+			h := newTestHarness(t, store, nil)
+			cP := leaseCoordinator(t, h, completionParentID)
+			cC := leaseCoordinator(t, h, completionChildID)
+			member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
+			testassert.NoError(t, err)
+			closeBackgroundMode(cP) // the closed path records the report without a model
+			cC.mu.Lock()
+			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
+			item := &pendingMessage{operationID: "op-2", origin: InputOriginUser, content: admissionContent("later")}
+			if name == "steering" {
+				cC.steering = append(cC.steering, item)
+			} else {
+				cC.queued = append(cC.queued, item)
+			}
+			cC.mu.Unlock()
+
+			h.childCompletionSettled(cC, "")
+			select {
+			case <-member.done:
+				t.Fatalf("the buffered child settled its member")
+			default:
+			}
+			cC.mu.Lock()
+			pending := cC.pendingCompletion != nil
+			cC.mu.Unlock()
+			testassert.Require(t, pending, "the buffered child's obligation was taken")
+
+			cC.mu.Lock()
+			cC.steering, cC.queued = nil, nil // the drain consumed the item
+			cC.mu.Unlock()
+			h.childCompletionSettled(cC, "")
+			waitMemberDone(t, member)
+			signals := storedSignals(t, store, completionParentID)
+			testassert.Require(t, len(signals) == 1 && signals[0].Content == "Session "+completionChildID+": success\nchild text", "committed signal = %+v, want the quiet child's report", signals)
+		})
+	}
+}
+
+// TestChildCompletionRendersParentFacingText proves the rendered report per
+// settlement status: the stable Session-and-status header, followed by the
+// last assistant text of the settled Operation on success and interruption,
+// the failure detail on failure, and the header alone when the body is empty —
 // each delivered to the idle parent under the completion identity.
 func TestChildCompletionRendersParentFacingText(t *testing.T) {
+	header := "Session " + completionChildID + ": "
 	cases := []struct {
 		name          string
 		status        OperationState
@@ -1048,10 +1345,11 @@ func TestChildCompletionRendersParentFacingText(t *testing.T) {
 		assistantText string
 		want          string
 	}{
-		{"success assistant text", OperationSuccess, "", "done", "done"},
-		{"empty success fallback", OperationSuccess, "", "", "Task completed."},
-		{"interruption text", OperationInterruption, "stopped", "", "Task interrupted."},
-		{"failure detail", OperationFailure, "boom", "", "Task failed: boom"},
+		{"success assistant text", OperationSuccess, "", "done", header + "success\ndone"},
+		{"empty success header", OperationSuccess, "", "", header + "success"},
+		{"interruption header", OperationInterruption, "stopped", "", header + "interruption"},
+		{"interruption assistant text", OperationInterruption, "stopped", "halted", header + "interruption\nhalted"},
+		{"failure detail", OperationFailure, "boom", "ignored", header + "failure\nboom"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1066,7 +1364,7 @@ func TestChildCompletionRendersParentFacingText(t *testing.T) {
 			member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
 			testassert.NoError(t, err)
 			cC.mu.Lock()
-			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
 			cC.mu.Unlock()
 
 			h.childCompletionSettled(cC, "")
@@ -1088,15 +1386,17 @@ func TestChildCompletionRendersParentFacingText(t *testing.T) {
 	}
 }
 
-// TestChildCompletionTruncatesAtOutputLimit proves the rendered completion is
-// capped at the output limit in UTF-8 bytes, retaining the longest
-// complete-character prefix that fits the trailing marker.
+// TestChildCompletionTruncatesAtOutputLimit proves the rendered report body is
+// capped at the requested limit in UTF-8 bytes, retaining the longest
+// complete-character prefix that fits the trailing marker, while the header
+// stays whole.
 func TestChildCompletionTruncatesAtOutputLimit(t *testing.T) {
 	text := strings.Repeat("é", 700) // 1400 UTF-8 bytes
+	header := "Session " + completionChildID + ": success"
 	cases := []struct {
 		name  string
 		limit int
-		want  string
+		body  string
 	}{
 		{"even byte boundary", 1000, strings.Repeat("é", 494) + "\n[truncated]"},
 		{"backed off to a complete character", 999, strings.Repeat("é", 493) + "\n[truncated]"},
@@ -1113,7 +1413,7 @@ func TestChildCompletionTruncatesAtOutputLimit(t *testing.T) {
 			testassert.NoError(t, err)
 			closeBackgroundMode(cP) // the closed path records the rendered content verbatim
 			cC.mu.Lock()
-			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: tc.limit}
+			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: tc.limit, report: true}
 			cC.mu.Unlock()
 
 			h.childCompletionSettled(cC, "")
@@ -1122,9 +1422,134 @@ func TestChildCompletionTruncatesAtOutputLimit(t *testing.T) {
 			testassert.Equal(t, len(signals), 1)
 			{
 				got := signals[0].Content
-				testassert.Equal(t, got, tc.want)
+				testassert.Equal(t, got, header+"\n"+tc.body)
 			}
-			testassert.Require(t, len(signals[0].Content) <= tc.limit, "truncated content exceeds the limit: %d > %d", len(signals[0].Content), tc.limit)
+			testassert.Require(t, len(signals[0].Content) <= len(header)+1+tc.limit, "truncated report exceeds the body limit: %d > %d", len(signals[0].Content), len(header)+1+tc.limit)
 		})
+	}
+}
+
+// TestChildCompletionWholeReportBound proves the whole-report bound applies in
+// addition to the requested body limit: the body loses exactly the room the
+// header and separator take, the marker counts against the bound, and the
+// identity-and-status header survives verbatim.
+func TestChildCompletionWholeReportBound(t *testing.T) {
+	store := completionChildGraph(completionParentID, false, OperationSuccess, "", strings.Repeat("x", maxCompletionReportBytes)).storage(t)
+	graph, err := validateFixture(t, store, completionChildID)
+	testassert.NoError(t, err)
+
+	header := "Session " + completionChildID + ": success"
+	got := childCompletionContent(graph, 2*maxCompletionReportBytes)
+	testassert.Require(t, len(got) <= maxCompletionReportBytes, "whole report = %d bytes, want at most %d", len(got), maxCompletionReportBytes)
+	testassert.Require(t, strings.HasPrefix(got, header+"\n"), "whole report does not carry the unchanged header")
+	testassert.Require(t, strings.HasSuffix(got, "\n[truncated]"), "whole report does not carry the truncation marker")
+	body := strings.TrimPrefix(got, header+"\n")
+	testassert.Equal(t, len(body), maxCompletionReportBytes-len(header)-1)
+}
+
+// TestShutdownContendedRetirementDiscardsBuffers proves the shutdown case of the
+// completion owner: when shutdown cancels the drain reservation while another
+// holder contends it, the retiring run discards both FIFOs itself, so the
+// quiet settlement notification still delivers the Session's own report while
+// the discarded buffered report never becomes a signal and Wait joins only
+// after the contended holder releases.
+func TestShutdownContendedRetirementDiscardsBuffers(t *testing.T) {
+	store := emptyStore(t)
+	script := newModelScript()
+	script.gate = make(chan struct{})
+	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, func(context.Context, PreparationRequest) (PreparedExecution, error) {
+		return modelPrepared(script.model), nil
+	})
+	defer cancel()
+	root := createSession(t, h)
+	res, err := h.LaunchChildSession(context.Background(), launchRequestFor(root))
+	testassert.NoError(t, err)
+	child := res.ChildSessionID
+	childC := leaseCoordinator(t, h, child)
+
+	jobMember, err := admitLocked(h, childC, memberJob, jobFixtureID, 0)
+	testassert.NoError(t, err)
+	{
+		err := h.DeliverBackgroundCompletion(context.Background(), child, jobMember.completionID, "discarded report")
+		testassert.NoError(t, err)
+	}
+	waitMemberDone(t, jobMember) // the handoff buffers the report under the running child
+	childC.mu.Lock()
+	buffered := len(childC.steering)
+	childC.mu.Unlock()
+	testassert.Equal(t, buffered, 1)
+
+	held, err := h.reserve(context.Background(), childC) // the contended reservation the drain must not take
+	testassert.NoError(t, err)
+	defer held()
+	cancel()             // shutdown: the draining acquisition now sees contention and the dead context
+	script.releaseGate() // the child's parked execution finishes and retires
+	childC.mu.Lock()
+	run := childC.run
+	childC.mu.Unlock()
+	if run != nil {
+		select {
+		case <-run.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the retiring run did not converge")
+		}
+	}
+
+	waited := make(chan error, 1)
+	go func() { waited <- h.Wait(context.Background()) }()
+	select {
+	case err := <-waited:
+		t.Fatalf("Wait returned before the contended reservation released: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	held()
+	select {
+	case err := <-waited:
+		testassert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not join after the contended reservation released")
+	}
+
+	// The retired run discarded both FIFOs, so its quiet notification settled
+	// the child's own report as the parent's closed-path signal; the discarded
+	// buffered report never reappeared.
+	childC.mu.Lock()
+	discarded := len(childC.steering) + len(childC.queued)
+	childC.mu.Unlock()
+	testassert.Equal(t, discarded, 0)
+	testassert.Require(t, len(storedSignals(t, store, child)) == 0, "discarded report signals = %+v, want none", storedSignals(t, store, child))
+	rootSignals := storedSignals(t, store, root)
+	testassert.Require(t, len(rootSignals) == 1 && rootSignals[0].RelatedMember != nil && rootSignals[0].RelatedMember.Kind == "session" && rootSignals[0].RelatedMember.ID == child && strings.HasPrefix(rootSignals[0].Content, "Session "+child+": ") && !strings.Contains(rootSignals[0].Content, "discarded report"), "root signals = %+v, want the child's own settled report and not the discarded item", rootSignals)
+}
+
+// TestBufferedCompletionSignalRemovesItsHead proves the coherent fallback
+// adoption: the signal producer removes the selected buffered head under the
+// same lock that commits the signal, so no reader can observe the committed
+// signal and the pending item together.
+func TestBufferedCompletionSignalRemovesItsHead(t *testing.T) {
+	store := freshSessionStore(t)
+	h := newTestHarness(t, store, nil)
+	c := leaseCoordinator(t, h, testSessionID)
+	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	testassert.NoError(t, err)
+	item := completionItem(member, admissionContent("buffered report"))
+	c.mu.Lock()
+	c.steering = append(c.steering, item)
+	c.bumpLocalRevision()
+	c.mu.Unlock()
+
+	{
+		err := h.deliverClosedCompletion(c, completionMember(member), "buffered report", item)
+		testassert.NoError(t, err)
+	}
+	signals := storedSignals(t, store, testSessionID)
+	testassert.Require(t, len(signals) == 1 && signals[0].Content == "buffered report", "committed signals = %+v, want the fallback record", signals)
+	view, err := h.ReadSessionView(context.Background(), testSessionID)
+	testassert.NoError(t, err)
+	testassert.Require(t, len(view.Steering)+len(view.Queued) == 0, "the view shows a buffered item beside the committed signal: steering %+v queued %+v", view.Steering, view.Queued)
+	testassert.Require(t, storedEntryCount(store, testSessionID) == 1, "the session carries %d entries, want the signal alone", storedEntryCount(store, testSessionID))
+	{
+		got := entryTexts(t, store, testSessionID)
+		testassert.Require(t, len(got) == 0, "the buffered report also committed an input entry: %q", got)
 	}
 }
