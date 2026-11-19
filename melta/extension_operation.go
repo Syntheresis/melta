@@ -180,7 +180,7 @@ func (r *Melta) InvokeExtension(ctx context.Context, c Caller, request protocol.
 		case CallerScopeWorkspace:
 			workspace = target.Workspace
 		}
-		if err := extension.ValidateArguments(capability.Methods, request.Method, arguments); err != nil {
+		if err := method.ValidateArguments(arguments); err != nil {
 			return fmt.Errorf("%w: %w", harness.ErrInvalid, err)
 		}
 
@@ -210,7 +210,7 @@ func (r *Melta) InvokeExtension(ctx context.Context, c Caller, request protocol.
 				commandScope: target,
 			},
 		}
-		result, err = snapshot.composition.invokeAcceptedProvider(ctx, provider, capability.Methods, request.Method, arguments, nil, identity, false)
+		result, err = snapshot.composition.invokeAcceptedProvider(ctx, provider, method, arguments, nil, identity, false)
 		if err != nil {
 			return err
 		}

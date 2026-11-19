@@ -267,6 +267,22 @@ func TestPackageInstallRejectsBindingSchemaExternalReference(t *testing.T) {
 	mustNotExist(t, filepath.Join(dataDir, "extensions", extensionDataHash(declaration.ID), "selected"), "a binding schema external reference created a selection")
 }
 
+func TestPackageInstallAcceptsExternalBindingWithoutProvider(t *testing.T) {
+	service := extension.ServiceCapability("remote", "test.remote", extension.PureMethod("read", `{"type":"object"}`, `{"type":"string"}`))
+	declaration := extension.Declaration{
+		ID: "consumer", Version: "1.0.0", ConfigSchema: json.RawMessage(`{"type":"object"}`),
+		Components: []extension.Component{{ID: "consumer.component", Lifetime: extension.LifetimeHarness,
+			Requires: []extension.Binding{{Name: "remote", Provider: "other/component", CapabilityID: service.ID,
+				Definition: extension.CapabilityDefinition{ContractID: service.ContractID, ContractVersion: service.ContractVersion, Kind: service.Kind, Methods: service.Methods}}}}},
+	}
+	dataDir := t.TempDir()
+	source := executablePackageSource(t, executableExtension{Declaration: declaration, EntryPoint: "worker"})
+	if _, err := newPackageManager(dataDir).install(source); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	testassert.Equal(t, readSelectedRecord(t, dataDir, declaration.ID).Version, "1.0.0")
+}
+
 // TestPackageSelectedDeclarationFailureIsUnusable proves a selected copy
 // whose declaration fails compilation at load is recorded unusable: an
 // enabled section rejects the build and a disabled one is ignored.

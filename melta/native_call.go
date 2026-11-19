@@ -250,7 +250,7 @@ func (c *composition) dispatch(ctx context.Context, Caller extension.CallContext
 		return extension.Result{}, fmt.Errorf("binding %q: pure callback cannot invoke %s method %q: %w", bindingName, method.Mode, methodName, ErrComposition)
 	}
 	arguments = append(json.RawMessage(nil), arguments...)
-	if err := extension.ValidateArguments(binding.Methods, methodName, arguments); err != nil {
+	if err := method.ValidateArguments(arguments); err != nil {
 		return extension.Result{}, fmt.Errorf("%w: %w", ErrComposition, err)
 	}
 	if binding.Host {
@@ -268,15 +268,7 @@ func (c *composition) dispatch(ctx context.Context, Caller extension.CallContext
 		if lease != nil {
 			hostCtx = context.WithValue(hostCtx, artifactLeaseKey{}, lease)
 		}
-		result, err := handler(hostCtx, hostCaller, arguments)
-		if err != nil {
-			return extension.Result{}, ownCallError(err)
-		}
-		result = ownResult(result)
-		if err := extension.ValidateResult(binding.Methods, methodName, result); err != nil {
-			return extension.Result{}, fmt.Errorf("host service %q: %w", binding.CapabilityID, err)
-		}
-		return result, nil
+		return executeProvider(hostCtx, hostCaller, method, handler, "host service", binding.CapabilityID, arguments)
 	}
 	provider := targets[bindingName]
 	if provider == nil {
@@ -298,7 +290,7 @@ func (c *composition) dispatch(ctx context.Context, Caller extension.CallContext
 		lease:            lease,
 		operationSecrets: secrets.operation,
 	}
-	return c.invokeAcceptedProvider(ctx, provider, binding.Methods, methodName, arguments, nil, childIdentity, grant.lifecycle)
+	return c.invokeAcceptedProvider(ctx, provider, method, arguments, nil, childIdentity, grant.lifecycle)
 }
 
 // invokeProvider is the accept-then-execute wrapper for callers that have not
@@ -311,28 +303,29 @@ func (c *composition) invokeProvider(ctx context.Context, provider *capabilityVa
 		return extension.Result{}, ErrClosed
 	}
 	arguments = append(json.RawMessage(nil), arguments...)
-	if err := extension.ValidateArguments(methods, method, arguments); err != nil {
+	contract, ok := methods[method]
+	if !ok {
+		return extension.Result{}, fmt.Errorf("%w: %w: method %q is not declared", ErrComposition, extension.ErrInvalid, method)
+	}
+	if err := contract.ValidateArguments(arguments); err != nil {
 		return extension.Result{}, fmt.Errorf("%w: %w", ErrComposition, err)
 	}
-	return c.invokeAcceptedProvider(ctx, provider, methods, method, arguments, section, identity, lifecycle)
+	return c.invokeAcceptedProvider(ctx, provider, contract, arguments, section, identity, lifecycle)
 }
 
 // invokeAcceptedProvider executes one already-validated provider call. The
 // method declaration, purity, scope guard, private view and result validation
 // stay shared with invokeProvider and nested dispatch; only argument schema
 // validation has already happened at the accepting boundary.
-func (c *composition) invokeAcceptedProvider(ctx context.Context, provider *capabilityValue, methods extension.MethodSet, method string, arguments, section json.RawMessage, identity callIdentity, lifecycle bool) (extension.Result, error) {
+func (c *composition) invokeAcceptedProvider(ctx context.Context, provider *capabilityValue, accepted *extension.CompiledMethod, arguments, section json.RawMessage, identity callIdentity, lifecycle bool) (extension.Result, error) {
 	if provider == nil {
 		return extension.Result{}, ErrClosed
 	}
-	contract, ok := provider.capability.Methods[method]
-	if !ok {
-		return extension.Result{}, fmt.Errorf("capability %q: method %q is not declared: %w", provider.capability.ID, method, ErrComposition)
+	method := accepted.Name
+	if identity.grant.pure && accepted.Mode != extension.ModePure {
+		return extension.Result{}, fmt.Errorf("capability %q: pure callback cannot invoke %s method %q: %w", provider.capability.ID, accepted.Mode, method, ErrComposition)
 	}
-	if identity.grant.pure && contract.Mode != extension.ModePure {
-		return extension.Result{}, fmt.Errorf("capability %q: pure callback cannot invoke %s method %q: %w", provider.capability.ID, contract.Mode, method, ErrComposition)
-	}
-	arguments = append(json.RawMessage(nil), arguments...)
+	handler := provider.implementation.Service[method]
 	callCtx, release, err := provider.scope.enterFor(ctx, lifecycle)
 	if err != nil {
 		return extension.Result{}, err
@@ -346,17 +339,20 @@ func (c *composition) invokeAcceptedProvider(ctx context.Context, provider *capa
 	if section != nil {
 		childCall.Section = append(json.RawMessage(nil), section...)
 	}
-	handler := provider.implementation.Service[method]
 	if handler == nil {
 		return extension.Result{}, fmt.Errorf("capability %q: method %q has no implementation: %w", provider.capability.ID, method, ErrComposition)
 	}
-	result, err := handler(child.ctx, childCall, arguments)
+	return executeProvider(child.ctx, childCall, accepted, handler, "capability", provider.capability.ID, arguments)
+}
+
+func executeProvider(ctx context.Context, call extension.CallContext, method *extension.CompiledMethod, handler extension.Handler, kind, id string, arguments json.RawMessage) (extension.Result, error) {
+	result, err := handler(ctx, call, arguments)
 	if err != nil {
 		return extension.Result{}, ownCallError(err)
 	}
 	result = ownResult(result)
-	if err := extension.ValidateResult(methods, method, result); err != nil {
-		return extension.Result{}, fmt.Errorf("capability %q: %w", provider.capability.ID, err)
+	if err := method.ValidateResult(result); err != nil {
+		return extension.Result{}, fmt.Errorf("%s %q: %w", kind, id, err)
 	}
 	return result, nil
 }

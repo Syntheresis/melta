@@ -19,8 +19,8 @@ func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, args...))
 }
 
-// methodContract is one compiled method declaration.
-type methodContract struct {
+// CompiledMethod is one compiled method declaration.
+type CompiledMethod struct {
 	Method
 	input   *jsonschema.Schema
 	success *jsonschema.Schema
@@ -50,7 +50,7 @@ type CompiledDeclaration struct {
 // MethodSet is one compiled method declaration set. It is the common call
 // boundary for nested declared calls and host-initiated provider calls, so
 // both validate through the same compiled schemas.
-type MethodSet map[string]*methodContract
+type MethodSet map[string]*CompiledMethod
 
 // CompiledCapability is one resolved exported capability.
 type CompiledCapability struct {
@@ -254,14 +254,14 @@ func (c *Compiled) compileCapability(declaration *CompiledDeclaration, capabilit
 		return nil, invalid("capability %q: duplicate method name", capability.ID)
 	}
 	resolved := &CompiledCapability{Declaration: declaration, Capability: capability, Methods: make(MethodSet, len(capability.Methods))}
-	for i, method := range capability.Methods {
+	for _, method := range capability.Methods {
 		if method.Name == "" {
 			return nil, invalid("capability %q: empty method name", capability.ID)
 		}
 		if !method.Mode.valid() {
 			return nil, invalid("capability %q method %q: invalid mode %q", capability.ID, method.Name, method.Mode)
 		}
-		compiled, err := compileMethod(capability.ID, method, i)
+		compiled, err := compileMethod(capability.ID, method)
 		if err != nil {
 			return nil, err
 		}
@@ -334,7 +334,7 @@ func duplicateMethodNames(methods []Method) bool {
 	return false
 }
 
-func compileMethod(capabilityID string, method Method, index int) (*methodContract, error) {
+func compileMethod(capabilityID string, method Method) (*CompiledMethod, error) {
 	label := fmt.Sprintf("%s/%s", capabilityID, method.Name)
 	input, err := compileSchema(method.Input, label+"/input")
 	if err != nil {
@@ -357,7 +357,7 @@ func compileMethod(capabilityID string, method Method, index int) (*methodContra
 			return nil, invalid("capability %q method %q partial schema: %v", capabilityID, method.Name, err)
 		}
 	}
-	return &methodContract{Method: method, input: input, success: success, failure: failure, partial: partial}, nil
+	return &CompiledMethod{Method: method, input: input, success: success, failure: failure, partial: partial}, nil
 }
 
 func validateCapabilityShape(declaration *CompiledDeclaration, capability *CompiledCapability) error {
@@ -495,8 +495,8 @@ func (c *Compiled) resolveBinding(declaration *CompiledDeclaration, component *C
 
 func compileDefinitionMethods(capabilityID string, definition CapabilityDefinition) (MethodSet, error) {
 	methods := make(MethodSet, len(definition.Methods))
-	for i, method := range definition.Methods {
-		compiled, err := compileMethod(capabilityID, method, i)
+	for _, method := range definition.Methods {
+		compiled, err := compileMethod(capabilityID, method)
 		if err != nil {
 			return nil, err
 		}
@@ -741,11 +741,15 @@ func (c *Compiled) ValidateSection(id string, section json.RawMessage) error {
 	if !ok {
 		return invalid("extension %q is not installed", id)
 	}
+	return validateSection(id, declaration.config, section)
+}
+
+func validateSection(id string, schema *jsonschema.Schema, section json.RawMessage) error {
 	value, err := decodeJSON(section)
 	if err != nil {
 		return invalid("extension %q section: %v", id, err)
 	}
-	if err := declaration.config.Validate(value); err != nil {
+	if err := schema.Validate(value); err != nil {
 		return invalid("extension %q section: %v", id, err)
 	}
 	return nil
@@ -821,6 +825,11 @@ func ValidateArguments(methods MethodSet, method string, arguments json.RawMessa
 	if !ok {
 		return invalid("method %q is not declared", method)
 	}
+	return contract.ValidateArguments(arguments)
+}
+
+// ValidateArguments validates arguments against this method.
+func (contract *CompiledMethod) ValidateArguments(arguments json.RawMessage) error {
 	return validateValue(contract.input, arguments, "arguments")
 }
 
@@ -844,6 +853,12 @@ func ValidateResult(methods MethodSet, method string, result Result) error {
 	if !ok {
 		return invalid("method %q is not declared", method)
 	}
+	return contract.ValidateResult(result)
+}
+
+// ValidateResult validates the result against this method.
+func (contract *CompiledMethod) ValidateResult(result Result) error {
+	method := contract.Name
 	if err := ValidateResultEnvelope(result); err != nil {
 		return invalid("method %q: %v", method, err)
 	}

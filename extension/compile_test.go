@@ -49,6 +49,46 @@ func modelToolDefinition(id string) model.ToolDefinition {
 	return model.ToolDefinition{Name: id, Description: id, Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
+func TestCompiledValidatorsIndependentOfGraph(t *testing.T) {
+	section, err := compileSchema(json.RawMessage(`{"type":"integer","const":9007199254740993}`), "isolated/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSection("isolated", section, json.RawMessage(`9007199254740993`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSection("isolated", section, json.RawMessage(`9007199254740992`)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("section error = %v", err)
+	}
+	standalone, err := compileMethod("service", PureMethod("read", `{"type":"integer"}`, `{"type":"string"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := standalone.ValidateResult(Result{Value: json.RawMessage(`12`)}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("standalone result error = %v", err)
+	}
+	capability := ServiceCapability("service", "test.service", PureMethod("read", `{"type":"integer"}`, `{"type":"string"}`))
+	compiled, err := CompileNative(testNative("isolated", LifetimeHarness, []Capability{capability}, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, _ := compiled.Capability("service")
+	method := provider.Methods["read"]
+	delete(provider.Methods, "read")
+	if err := method.ValidateArguments(json.RawMessage(`12`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := method.ValidateArguments(json.RawMessage(`"12"`)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("argument error = %v", err)
+	}
+	if err := method.ValidateResult(Result{Value: json.RawMessage(`"ok"`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := method.ValidateResult(Result{Value: json.RawMessage(`12`)}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("result error = %v", err)
+	}
+}
+
 func TestCompileAcceptsDeclaredGraphAndPreservesRawBytes(t *testing.T) {
 	provider := ServiceCapability("provider", "test.service", PureMethod("read", `{"type":"object"}`, `{"type":"object"}`))
 	definition := provider.definition()
@@ -315,7 +355,7 @@ func TestCompileComparesMethodsBySetAndIgnoresParticipationMetadata(t *testing.T
 	}
 }
 
-func fixedCapabilityMethods(t *testing.T, capability Capability) map[string]*methodContract {
+func fixedCapabilityMethods(t *testing.T, capability Capability) map[string]*CompiledMethod {
 	t.Helper()
 	native := testNative("schemaext", LifetimeHarness, []Capability{capability}, nil, nil)
 	if capability.Kind == KindTool {
