@@ -30,6 +30,51 @@ func setupWarningsOf(t *testing.T, store *warningStore) []protocol.Warning {
 	return out
 }
 
+func TestSetupWarningsDoNotUseBaselineModelWithoutAgents(t *testing.T) {
+	for _, doc := range []string{`{}`, `{"model":"missing/model"}`} {
+		t.Run(doc, func(t *testing.T) {
+			h := newServiceHarness(t)
+			writeServiceFile(t, h.configPath, doc)
+			svc := h.preparedService(context.Background())
+			store := newWarningStore()
+			svc.attachWarnings(store)
+			_, err := svc.publish(context.Background())
+			testassert.NoError(t, err)
+			if warnings := setupWarningsOf(t, store); len(warnings) != 0 {
+				t.Fatalf("unexpected setup warnings without Agents: %+v", warnings)
+			}
+		})
+	}
+}
+
+func TestSetupWarningsUseAgentModelInsteadOfBaseline(t *testing.T) {
+	for _, row := range []struct {
+		baseline, primary string
+		wantWarning       bool
+	}{
+		{"prov/missing", "prov/m", false},
+		{"prov/m", "prov/missing", true},
+	} {
+		t.Run(row.primary, func(t *testing.T) {
+			h := newServiceHarness(t)
+			doc := strings.Replace(warningIdentityConfig("https://prov.test/v1"), "{", `{"model":"`+row.baseline+`",`, 1)
+			writeServiceFile(t, h.configPath, doc)
+			writeAgentDefinitions(t, h.configPath, `{"primary":{"model":"`+row.primary+`"}}`)
+			svc := h.preparedService(context.Background(), agentsTestNative())
+			store := newWarningStore()
+			svc.attachWarnings(store)
+			_, err := svc.publish(context.Background())
+			testassert.NoError(t, err)
+			warnings := setupWarningsOf(t, store)
+			if row.wantWarning {
+				testassert.Require(t, len(warnings) == 1 && warnings[0].Kind == setupModelUnavailable && strings.Contains(warnings[0].Message, row.primary), "warnings = %+v", warnings)
+			} else {
+				testassert.Require(t, len(warnings) == 0, "warnings = %+v", warnings)
+			}
+		})
+	}
+}
+
 // TestSetupWarningsUseSuppliedPrimaryReference proves the named-model warning
 // addresses only the supplied agents/agents.definitions/primary projection:
 // a foreign resolver's first/only primary name never substitutes, while an

@@ -56,13 +56,9 @@ func RunModels(ctx context.Context, opts Options, provider string, all, asJSON b
 	if err := decoder.Decode(&view); err != nil {
 		return fmt.Errorf("decode configuration response: %w", err)
 	}
-	primaryModel := ""
-	suppliedPrimary := protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "primary"}
-	for _, agent := range view.Agents {
-		if agent.Definition == suppliedPrimary {
-			primaryModel = string(agent.Model)
-			break
-		}
+	defaultModel := ""
+	if view.Settings.Model != nil {
+		defaultModel = string(*view.Settings.Model)
 	}
 	rows := []modelRow{}
 	var known []string
@@ -95,7 +91,7 @@ func RunModels(ctx context.Context, opts Options, provider string, all, asJSON b
 			rows = append(rows, modelRow{
 				Ref: ref, Provider: p.Id, ProviderName: providerName, Model: m.Id, DisplayName: displayName,
 				ContextWindow: m.ContextWindow, MaxOutputTokens: m.MaxOutputTokens, Cost: m.Cost,
-				Hidden: hidden, ProviderHidden: p.Hidden, Incomplete: m.Incomplete, Default: ref == primaryModel, Source: m.Source,
+				Hidden: hidden, ProviderHidden: p.Hidden, Incomplete: m.Incomplete, Default: ref == defaultModel, Source: m.Source,
 			})
 		}
 	}

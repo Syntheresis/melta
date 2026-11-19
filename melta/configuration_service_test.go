@@ -338,7 +338,7 @@ func TestRuntimeConfigurationCandidateResources(t *testing.T) {
 	sub, err := r.Subscribe(32)
 	testassert.NoError(t, err)
 	defer sub.Close()
-	settings := projectSettings(previous.sessions, previous.tools, previous.jobs, previous.compaction, previous.extensions)
+	settings := projectSettings(previous)
 	settings.Extensions["alpha"] = `{"enabled":true,"value":2}`
 	fail.Store(true)
 	_, err = updateSettingsOnly(r, context.Background(), settings)

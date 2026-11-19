@@ -14,6 +14,7 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
+	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
 
@@ -37,6 +38,7 @@ var ErrConfiguration = errors.New("melta: configuration failure")
 // publication carries its passive configuration event inside the same
 // observation section as its atomic Store.
 type configurationService struct {
+	hostModel     model.ModelRef
 	loader        *catalog.Loader
 	configuration ConfigurationSource
 	credentials   CredentialSource
@@ -622,6 +624,10 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 		return nil, configurationFailure(err)
 	}
 	snapshot.composition = graph
+	snapshot.baselineModel = snapshot.model
+	if snapshot.baselineModel.IsZero() {
+		snapshot.baselineModel = s.hostModel
+	}
 	snapshot.credentials = credentials
 	snapshot.credentialNames = credentialNames
 	snapshot.secrets = secrets

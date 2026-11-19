@@ -34,6 +34,7 @@ type openInvocation func(context.Context, harness.OperationAdmission, selection,
 // and present in the execution view; neither selection is ever rebound.
 type selection struct {
 	inputs     harness.AgentInputs
+	strategy   harness.StrategyCapture
 	definition *harness.DefinitionRef
 	scopes     []*scope
 	selected   []string
@@ -220,17 +221,9 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		if err := harness.ValidateAgentInputs(inputs); err != nil {
 			return harness.PreparedExecution{}, fmt.Errorf("agent inputs: %v: %w", err, harness.ErrInvalid)
 		}
-		// A selected strategy's declared capability and lifetime are one
-		// admission rule for both selection forms; the concrete open
-		// implementation is resolved later under the execution guard.
-		if inputs.Strategy.ID != "" {
-			capability, ok := snapshot.composition.compiled.Capability(inputs.Strategy.ID)
-			if !ok || capability.Kind != extension.KindStrategy {
-				return harness.PreparedExecution{}, fmt.Errorf("unknown strategy %q: %w", inputs.Strategy.ID, harness.ErrInvalid)
-			}
-			if capability.Component.Lifetime.Rank() > extension.LifetimeOperation.Rank() {
-				return harness.PreparedExecution{}, fmt.Errorf("strategy %q is shorter-lived than an Operation: %w", inputs.Strategy.ID, harness.ErrInvalid)
-			}
+		strategy, err := captureStrategy(snapshot, inputs.Strategy)
+		if err != nil {
+			return harness.PreparedExecution{}, err
 		}
 		// Every selected capability must exist in the compiled export table
 		// before admission. A selected binding that belongs to a shorter
@@ -246,9 +239,12 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 				return harness.PreparedExecution{}, fmt.Errorf("selected tool %q is unavailable: %w", id, harness.ErrInvalid)
 			}
 		}
-		if err := requireCatalogModel(snapshot, inputs.Model); err != nil {
+		sel := selection{inputs: inputs, strategy: strategy, invocation: Invocation{snapshot: snapshot}, credentials: captured.snapshot.credentials}
+		entry, transport, err := p.bindModel(ctx, &sel)
+		if err != nil {
 			return harness.PreparedExecution{}, err
 		}
+		inputs = sel.inputs
 		workspace := req.Session.Identity.Workspace
 		evaluator, err := p.permissionEvaluator(snapshot, workspace)
 		if err != nil {
@@ -263,7 +259,11 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		selected := make([]string, 0, len(inputs.Capabilities)+len(inputs.Tools))
 		selected = append(selected, inputs.Capabilities...)
 		selected = append(selected, inputs.Tools...)
-		sel := selection{inputs: inputs, definition: definition, scopes: []*scope{runtimeScope, workspaceScope}, selected: selected, invocation: Invocation{snapshot: snapshot}, credentials: captured.snapshot.credentials, permissions: evaluator, operationSecrets: captured.operationSecrets()}
+		sel.definition = definition
+		sel.scopes = []*scope{runtimeScope, workspaceScope}
+		sel.selected = selected
+		sel.permissions = evaluator
+		sel.operationSecrets = captured.operationSecrets()
 
 		callCtx, release, err := workspaceScope.enter(ctx)
 		if err != nil {
@@ -275,7 +275,7 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		// preparation — validation, hooks and cancellation checks all passed —
 		// publishes its values under the admitted Session identity.
 		sel.warnings = &preparationWarnings{}
-		capture, opener, err := p.concretePrepare(callCtx, req, sel)
+		capture, opener, err := p.concretePrepare(callCtx, req, sel, entry, transport)
 		if err != nil {
 			return harness.PreparedExecution{}, err
 		}
@@ -420,30 +420,66 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 	}, nil
 }
 
-// defaultStrategy returns the captured composition's host-selected default
-// strategy binding. The one copy is captured at construction and consumed for
-// both the execution capture and strategy selection.
-func defaultStrategy(snapshot *configuration) *harness.StrategyBinding {
-	return snapshot.composition.defaultStrategy
+// captureStrategy validates the selected strategy and captures its admission metadata.
+func captureStrategy(snapshot *configuration, selected harness.StrategySelection) (harness.StrategyCapture, error) {
+	binding := snapshot.composition.defaultStrategy
+	capture := harness.StrategyCapture{ID: binding.ID, RequiresContextWindow: binding.RequiresContextWindow, Settings: append(json.RawMessage(nil), selected.Settings...)}
+	if selected.ID != "" {
+		capability, ok := snapshot.composition.compiled.Capability(selected.ID)
+		if !ok || capability.Kind != extension.KindStrategy {
+			return harness.StrategyCapture{}, fmt.Errorf("unknown strategy %q: %w", selected.ID, harness.ErrInvalid)
+		}
+		if capability.Component.Lifetime.Rank() > extension.LifetimeOperation.Rank() {
+			return harness.StrategyCapture{}, fmt.Errorf("strategy %q is shorter-lived than an Operation: %w", selected.ID, harness.ErrInvalid)
+		}
+		capture.ID = capability.ID
+		capture.RequiresContextWindow = capability.Strategy.RequiresContextWindow
+	}
+	return capture, nil
 }
 
-// requireCatalogModel admits only a selected model that resolves in the
-// captured catalog, and rejects a wholly
-// empty selection with the retained "no model configured" diagnostic. A
-// partial identity keeps the catalog path: it is not resolvable there either.
-// The context-window requirement is the selected strategy's declared
-// metadata, enforced by the Harness admission gate over the capture.
-// Credentials and provider connection are resolved by the concrete
-// preparation that follows this availability check.
-func requireCatalogModel(snapshot *configuration, ref model.ModelRef) error {
-	if ref.IsZero() {
-		return fmt.Errorf("no model configured: %w", harness.ErrInvalid)
+func (p *preparation) bindModel(ctx context.Context, sel *selection) (*catalog.Model, *model.Transport, error) {
+	snapshot := sel.invocation.snapshot
+	chosen := sel.inputs.Model
+	refs := []model.ModelRef{chosen}
+	if !snapshot.baselineModel.IsZero() && snapshot.baselineModel != chosen {
+		refs = append(refs, snapshot.baselineModel)
 	}
-	_, _, err := snapshot.catalog.Lookup(catalog.ModelRef{Provider: ref.Provider, Model: ref.Model})
-	if err != nil {
-		return fmt.Errorf("agent model %s is not available in the catalog: %w: %w", ref.String(), err, harness.ErrInvalid)
+	var lastErr error
+	for _, ref := range refs {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if ref.IsZero() {
+			lastErr = fmt.Errorf("no model configured: %w", harness.ErrInvalid)
+			continue
+		}
+		provider, entry, err := snapshot.catalog.LookupOrIncomplete(catalog.ModelRef{Provider: ref.Provider, Model: ref.Model})
+		if err != nil {
+			lastErr = fmt.Errorf("agent model %s is not available in the catalog: %w: %w", ref.String(), err, harness.ErrInvalid)
+			continue
+		}
+		if sel.strategy.RequiresContextWindow && entry.ContextWindow <= 0 {
+			lastErr = fmt.Errorf("agent model %s is incomplete: %w: %w", ref.String(), catalog.ErrIncomplete, harness.ErrInvalid)
+			continue
+		}
+		key := ""
+		if env := provider.Transport.APIKeyEnv; env != "" {
+			key = sel.credentials[env].Value
+			if key == "" {
+				lastErr = fmt.Errorf("%w: %s (for provider %q): %w", config.ErrMissingEnvVar, env, provider.ID, harness.ErrInvalid)
+				continue
+			}
+		}
+		transport, err := p.concreteTransport(provider, entry, ref, key)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		sel.inputs.Model = ref
+		return entry, transport, nil
 	}
-	return nil
+	return nil, nil, lastErr
 }
 
 // concretePrepare is the one production preparation. It consumes only the captured snapshot's inputs — the
@@ -453,23 +489,8 @@ func requireCatalogModel(snapshot *configuration, ref model.ModelRef) error {
 // configuration reloads and environment changes never reach a prepared
 // execution, and no transport input, secret, or warning is stored beyond the
 // durable capture fields.
-func (p *preparation) concretePrepare(ctx context.Context, req harness.PreparationRequest, sel selection) (harness.ExecutionCapture, openInvocation, error) {
+func (p *preparation) concretePrepare(ctx context.Context, req harness.PreparationRequest, sel selection, entry *catalog.Model, transport *model.Transport) (harness.ExecutionCapture, openInvocation, error) {
 	snapshot := sel.invocation.snapshot
-	provider, entry, err := snapshot.catalog.Lookup(catalog.ModelRef{Provider: sel.inputs.Model.Provider, Model: sel.inputs.Model.Model})
-	if err != nil {
-		return harness.ExecutionCapture{}, nil, fmt.Errorf("agent model %s is not available in the catalog: %w: %w", sel.inputs.Model.String(), err, harness.ErrInvalid)
-	}
-	apiKey := ""
-	if env := provider.Transport.APIKeyEnv; env != "" {
-		apiKey = sel.credentials[env].Value
-		if apiKey == "" {
-			return harness.ExecutionCapture{}, nil, fmt.Errorf("%w: %s (for provider %q): %w", config.ErrMissingEnvVar, env, provider.ID, harness.ErrInvalid)
-		}
-	}
-	transport, err := p.concreteTransport(provider, entry, sel.inputs.Model, apiKey)
-	if err != nil {
-		return harness.ExecutionCapture{}, nil, err
-	}
 	// The compact configuration is the top-level compaction section of the
 	// same one-revision snapshot; it is independent of the selectable compact
 	// Agent definition.
@@ -562,17 +583,9 @@ func (p *preparation) concretePrepare(ctx context.Context, req harness.Preparati
 			SystemPrompt: compaction.prompt,
 			Pricing:      capturedPricing(compactCost),
 		},
-		Strategy: harness.StrategyCapture{
-			ID:                    defaultStrategy(snapshot).ID,
-			RequiresContextWindow: defaultStrategy(snapshot).RequiresContextWindow,
-		},
+		Strategy:        sel.strategy,
 		Implementations: implementationProvenance(snapshot.composition, sel),
 	}
-	if sel.inputs.Strategy.ID != "" {
-		capability, _ := snapshot.composition.compiled.Capability(sel.inputs.Strategy.ID)
-		capture.Strategy = harness.StrategyCapture{ID: capability.ID, RequiresContextWindow: capability.Strategy.RequiresContextWindow}
-	}
-	capture.Strategy.Settings = append(json.RawMessage(nil), sel.inputs.Strategy.Settings...)
 	workspace := req.Session.Identity.Workspace
 	return capture, p.concreteOpener(transport, compactTransport, req.Session.Identity, workspace, view.catalog, subprocessEnv), nil
 }

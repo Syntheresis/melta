@@ -29,7 +29,7 @@ const (
 	testCredential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	// testVersion is the current wire identity every compatible fixture
 	// speaks; the incompatible rows keep the literal old "1".
-	testVersion = string(protocol.N16)
+	testVersion = string(protocol.N17)
 )
 
 // recordContent builds one private four-field discovery document.
@@ -320,6 +320,12 @@ func TestConnectHealthClassification(t *testing.T) {
 	t.Run("live version differs", func(t *testing.T) {
 		server := newFixture(t, jsonHealth(testInstance, "1"), nil)
 		_, err := client.Connect(context.Background(), writeDiscovery(t, server.URL, testInstance, testVersion, testCredential))
+		assertIncompatible(t, err)
+	})
+
+	t.Run("previous version is incompatible", func(t *testing.T) {
+		server := newFixture(t, jsonHealth(testInstance, "16"), nil)
+		_, err := client.Connect(context.Background(), writeDiscovery(t, server.URL, testInstance, "16", testCredential))
 		assertIncompatible(t, err)
 	})
 

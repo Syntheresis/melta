@@ -126,17 +126,28 @@ func compactPrepSelection(t *testing.T, captured configurationCapture, agentName
 	t.Helper()
 	inputs, err := resolveDefinition(context.Background(), captured.snapshot, harness.DefinitionRef{ExtensionID: agents.ExtensionID, CapabilityID: agents.DefinitionsCapabilityID, DefinitionID: agentName})
 	testassert.Require(t, err == nil, "resolveDefinition(%q): %v", agentName, err)
+	strategy, err := captureStrategy(captured.snapshot, inputs.Strategy)
+	testassert.NoError(t, err)
 	sc := mustOpenScope(t, captured.snapshot.composition, context.Background(), ScopeInfo{Kind: ScopeRuntime, DataDir: t.TempDir()}, nil)
 	t.Cleanup(func() { _ = sc.close() })
 	selected := append([]string(nil), inputs.Capabilities...)
 	selected = append(selected, inputs.Tools...)
 	return selection{
 		inputs:      inputs,
+		strategy:    strategy,
 		scopes:      []*scope{sc},
 		selected:    selected,
 		invocation:  Invocation{snapshot: captured.snapshot},
 		credentials: captured.snapshot.credentials,
 	}
+}
+
+func concretePrepareTest(ctx context.Context, prep *preparation, req harness.PreparationRequest, sel selection) (harness.ExecutionCapture, openInvocation, error) {
+	entry, transport, err := prep.bindModel(ctx, &sel)
+	if err != nil {
+		return harness.ExecutionCapture{}, nil, err
+	}
+	return prep.concretePrepare(ctx, req, sel, entry, transport)
 }
 
 // TestConcretePrepareCompactCapture pins every capture field the compaction
@@ -252,7 +263,7 @@ func TestConcretePrepareCompactCapture(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			captured, prep := compactPrepWith(t, tc.agentsDoc, compactPrepConfigDocumentWith("https://prov.test/v1", tc.compaction), "https://prov.test/v1")
 			sel := compactPrepSelection(t, captured, tc.agent)
-			capture, opener, err := prep.concretePrepare(context.Background(), compactPrepRequest(), sel)
+			capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), sel)
 			testassert.NoError(t, err)
 			testassert.Require(t, opener != nil, "concretePrepare returned no opener")
 			if capture.Model != tc.wantModel {
@@ -337,7 +348,7 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 			server := newCompactRecordingServer(t)
 			captured, prep := compactPrepWith(t, compactAgentsDocument, compactPrepConfigDocumentWith(server.URL, tc.compaction), server.URL)
 			sel := compactPrepSelection(t, captured, "solo")
-			capture, opener, err := prep.concretePrepare(context.Background(), compactPrepRequest(), sel)
+			capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), sel)
 			testassert.NoError(t, err)
 			admission := harness.OperationAdmission{
 				SessionID:      "000000000000000000000000000000aa",

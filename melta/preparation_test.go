@@ -2045,6 +2045,14 @@ func TestNativeDescribeReceivesCompleteResolvedInputs(t *testing.T) {
 	e := newOwnerEnv(t)
 	enableFixturePlugin(t, e.configPath, "metaext")
 	writeAgentDefinitions(t, e.configPath, `{"resolved_agent":{"model":"prov/m","system_prompt":"full","prompt":"resolved instructions","tools":["meta_a","meta_b"],"capabilities":["meta_cap"]}}`)
+	raw, err := os.ReadFile(e.configPath)
+	testassert.NoError(t, err)
+	var roots map[string]json.RawMessage
+	testassert.NoError(t, json.Unmarshal(raw, &roots))
+	roots["model"] = json.RawMessage(`"prov/m"`)
+	raw, err = json.Marshal(roots)
+	testassert.NoError(t, err)
+	writeServiceFile(t, e.configPath, string(raw))
 	e.fixtureStore(storage.NewMemory())
 	state := &describeInputState{}
 	toolCapabilityA := extension.ToolCapability("meta_a")
@@ -2102,7 +2110,7 @@ func TestNativeDescribeReceivesCompleteResolvedInputs(t *testing.T) {
 	err = r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
 		var createErr error
 		supplied, createErr = r.createSessionRecord(ctx, h, e.dataDir, harness.AgentSelection{Inputs: &harness.AgentInputs{
-			Model:        model.ModelRef{Provider: "prov", Model: "m"},
+			Model:        model.ModelRef{Provider: "prov", Model: "missing"},
 			Instructions: "supplied instructions",
 			AssemblyMode: "simple",
 			Tools:        []string{"meta_a", "meta_b"},
@@ -2133,11 +2141,13 @@ func TestNativeDescribeReceivesCompleteResolvedInputs(t *testing.T) {
 	testassert.Require(t, okA && okB && okSA && okSB, "metadata records = %+v, want both tools for both preparations", records)
 	testassert.Require(t, resolvedA.inputs.AssemblyMode == "full" && resolvedA.inputs.Model == (model.ModelRef{Provider: "prov", Model: "m"}) && slices.Contains(resolvedA.inputs.Capabilities, "meta_cap") && slices.Equal(resolvedA.inputs.Tools, []string{"meta_a", "meta_b"}), "resolved inputs = %+v, want the resolved definition values", resolvedA.inputs)
 	testassert.Require(t, suppliedA.inputs.AssemblyMode == "simple" && len(suppliedA.inputs.Capabilities) == 0 && suppliedA.inputs.Instructions == "supplied instructions" && string(suppliedA.inputs.Strategy.Settings) == `{"keep":1}`, "supplied inputs = %+v, want the supplied selection values", suppliedA.inputs)
+	testassert.Require(t, suppliedA.inputs.Model == (model.ModelRef{Provider: "prov", Model: "m"}), "fallback metadata = %+v", suppliedA.inputs.Model)
 	testassert.Require(t, resolvedA.model == resolvedA.inputs.Model && resolvedA.constraints == resolvedA.inputs.Constraints && suppliedA.model == suppliedA.inputs.Model && suppliedA.constraints == suppliedA.inputs.Constraints, "DescribeInput Model/Constraints did not derive from the same resolved inputs")
 	testassert.Require(t, slices.Equal(resolvedB.inputs.Tools, []string{"meta_a", "meta_b"}) && slices.Contains(resolvedB.inputs.Capabilities, "meta_cap") && resolvedB.inputs.Instructions == "resolved instructions" && resolvedB.inputs.AssemblyMode == "full", "later resolved metadata = %+v, want the unmutated inputs", resolvedB.inputs)
 	testassert.Require(t, slices.Equal(suppliedB.inputs.Tools, []string{"meta_a", "meta_b"}) && len(suppliedB.inputs.Capabilities) == 0 && suppliedB.inputs.Instructions == "supplied instructions" && suppliedB.inputs.AssemblyMode == "simple" && string(suppliedB.inputs.Strategy.Settings) == `{"keep":1}`, "later supplied metadata = %+v, want the unmutated inputs", suppliedB.inputs)
 
 	suppliedRec := awaitOperation(t, r, supplied.Identity.SessionID, "op-supplied", harness.OperationSuccess)
+	testassert.Require(t, suppliedRec.Admission.Execution.Model == (model.ModelRef{Provider: "prov", Model: "m"}) && suppliedRec.Admission.AgentSelection.Inputs.Model.Model == "missing", "capture or stored choice changed: %+v / %+v", suppliedRec.Admission.Execution.Model, suppliedRec.Admission.AgentSelection)
 	testassert.Require(t, string(suppliedRec.Admission.Execution.Strategy.Settings) == `{"keep":1}`, "captured strategy settings = %s, want the admitted selection unchanged by metadata mutation", suppliedRec.Admission.Execution.Strategy.Settings)
 	testassert.Require(t, slices.Equal(toolNames(suppliedRec.Admission.Execution.Tools), []string{"meta_a", "meta_b"}) && len(suppliedRec.Admission.Execution.Capabilities) == 0, "capture = tools %v capabilities %v, want the admitted selection unchanged by metadata mutation", toolNames(suppliedRec.Admission.Execution.Tools), suppliedRec.Admission.Execution.Capabilities)
 	testassert.NoError(t, r.Close(ctx))

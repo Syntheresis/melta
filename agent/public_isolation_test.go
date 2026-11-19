@@ -272,6 +272,10 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 			if imp != modelPkg && imp != atomicfsPkg && !std[imp] {
 				problems = append(problems, rel+": internal/catalog imports "+imp+"; the catalog may import only the standard library, "+atomicfsPkg+", and the public "+modelPkg+" identity it forwards")
 			}
+		case "internal/config":
+			if imp != modelPkg && imp != atomicfsPkg && !std[imp] {
+				problems = append(problems, rel+": internal/config imports "+imp+"; configuration may import only the standard library, "+atomicfsPkg+", and "+modelPkg)
+			}
 		case "extensions/agents":
 			if imp != modelPkg && imp != promptPkg && imp != harnessPkg && imp != extensionPkg && imp != protocolPkg && imp != toolargsPkg && !std[imp] {
 				problems = append(problems, rel+": extensions/agents imports "+imp+"; the supplied Agents extension may import only the standard library, "+modelPkg+", "+promptPkg+", "+harnessPkg+", "+extensionPkg+", "+protocolPkg+", and "+toolargsPkg+", never the Runtime owner")
@@ -362,7 +366,7 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 // TestDependencyRulesRejectNonStdlibDotlessImports proves the allowlists use authoritative standard-library membership, not a dot-in-path shape: the cgo pseudo-import "C" and a dotless path outside the stdlib set fail every package row, while ordinary stdlib imports, the model dependency on agent's side, and internal/storage's dependency on harness still pass. The foundation's own reverse and skipping edges — model or agent reaching harness, any target package reaching internal/storage, and the driver reaching a target package — are each rejected exactly once.
 func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 	std := standardLibraryImports(t)
-	for _, rel := range []string{"model/x.go", "agent/x.go", "harness/x.go", "internal/storage/x.go", "internal/toolargs/x.go", "internal/testassert/x.go", "protocol/x.go", "client/x.go", "internal/terminal/x.go", "internal/hostprocess/x.go", "internal/clienthost/x.go", "internal/clientview/x.go", "internal/clientops/x.go", "internal/protocolgen/x.go", "internal/acpclient/x.go", "internal/cliclient/x.go", "internal/desktopclient/x.go", "extension/worker/x.go", "extension/worker/testdata/fixture/main.go"} {
+	for _, rel := range []string{"model/x.go", "agent/x.go", "harness/x.go", "internal/config/x.go", "internal/storage/x.go", "internal/toolargs/x.go", "internal/testassert/x.go", "protocol/x.go", "client/x.go", "internal/terminal/x.go", "internal/hostprocess/x.go", "internal/clienthost/x.go", "internal/clientview/x.go", "internal/clientops/x.go", "internal/protocolgen/x.go", "internal/acpclient/x.go", "internal/cliclient/x.go", "internal/desktopclient/x.go", "extension/worker/x.go", "extension/worker/testdata/fixture/main.go"} {
 		for _, imp := range []string{"C", "notreal/pkg"} {
 			{
 				problems := checkTrackedGoFile(rel, []string{imp}, std)
@@ -749,6 +753,10 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 	}
 	// Root and retained helper files cannot reach the Runtime, concrete plugins,
 	// or protocol contracts outside their declared roles.
+	{
+		problems := checkTrackedGoFile("internal/config/x.go", []string{"encoding/json", publicModule + "/model", publicModule + "/internal/atomicfs"}, std)
+		testassert.Check(t, len(problems) == 0, "allowed configuration imports flagged: %v", problems)
+	}
 	for _, row := range []struct{ rel, imp string }{
 		{"main.go", publicModule + "/runtime"},
 		{"app.go", publicModule + "/runtime"},

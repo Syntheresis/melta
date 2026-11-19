@@ -16,6 +16,7 @@ import (
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/jobs"
+	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
 
@@ -28,6 +29,9 @@ import (
 // Input documents are discarded once the snapshot is built; later consumers
 // add their own fields when they land.
 type configuration struct {
+	// model is the file choice; baselineModel falls back to the host choice.
+	model                model.ModelRef
+	baselineModel        model.ModelRef
 	generation           uint64
 	resources            *resourceSet
 	composition          *composition
@@ -56,6 +60,7 @@ type configuration struct {
 // numbers stay exact through the UseNumber decoder, and no legacy
 // whole-document shape or permission rule is enforced.
 type capturedConfigDocument struct {
+	Model       *string                    `json:"model"`
 	Providers   map[string]any             `json:"providers"`
 	Sessions    json.RawMessage            `json:"sessions"`
 	Tools       json.RawMessage            `json:"tools"`
@@ -164,6 +169,10 @@ func decodeCapturedConfig(configData []byte) (capturedConfigDocument, error) {
 // their Harness resources are ready. Plugin-section validation belongs to the
 // publisher, not here.
 func newConfiguration(generation uint64, doc capturedConfigDocument, built catalog.BuildResult, workspacePermissions map[string]json.RawMessage) (*configuration, error) {
+	ref, err := config.ParseOptionalModel(doc.Model)
+	if err != nil {
+		return nil, fmt.Errorf("captured configuration: %w", err)
+	}
 	sessions, err := config.ParseSessions(doc.Sessions)
 	if err != nil {
 		return nil, fmt.Errorf("captured configuration sessions: %w", err)
@@ -179,6 +188,7 @@ func newConfiguration(generation uint64, doc capturedConfigDocument, built catal
 		return nil, fmt.Errorf("captured configuration compaction: %w", err)
 	}
 	return &configuration{
+		model:                ref,
 		generation:           generation,
 		catalog:              built.Catalog,
 		catalogWarnings:      built.Warnings,
@@ -194,29 +204,26 @@ func newConfiguration(generation uint64, doc capturedConfigDocument, built catal
 	}, nil
 }
 
-// projectSettings projects one captured revision's settings view: the parsed
-// session policy beside the top-level baseline sections and every owned raw
-// plugin section. The baseline sections are copied as their exact captured
-// JSON objects, with an absent section projected as the empty object so its
-// owning service applies its defaults at consumption. Every plugin section is
-// an opaque JSON document string. This is a lossless transport projection, not
-// an interpreted settings authority — each section is returned as captured
-// and the owning declaration's validator owns interpretation. An owned empty
-// object is an empty document, absent plugin sections are absent map members,
-// and unowned numbers survive as their exact lexemes inside the copied bytes.
-func projectSettings(sessions config.SessionConfig, tools, jobs, compaction json.RawMessage, plugins map[string]json.RawMessage) protocol.Settings {
+// projectSettings projects the file model, session policy and owned sections
+// from one revision. Absent baseline sections project as empty objects;
+// extension sections remain opaque document strings with exact numeric lexemes.
+func projectSettings(snapshot *configuration) protocol.Settings {
 	out := protocol.Settings{
 		Sessions: protocol.SessionsSettings{
-			AutoArchive:            sessions.AutoArchive,
-			ArchiveAfterDays:       sessions.ArchiveAfterDays,
-			DeleteAfterArchiveDays: sessions.DeleteAfterArchiveDays,
+			AutoArchive:            snapshot.sessions.AutoArchive,
+			ArchiveAfterDays:       snapshot.sessions.ArchiveAfterDays,
+			DeleteAfterArchiveDays: snapshot.sessions.DeleteAfterArchiveDays,
 		},
-		Tools:      projectSettingsObject(tools),
-		Jobs:       projectSettingsObject(jobs),
-		Compaction: projectSettingsObject(compaction),
-		Extensions: make(protocol.ExtensionsSettings, len(plugins)),
+		Tools:      projectSettingsObject(snapshot.tools),
+		Jobs:       projectSettingsObject(snapshot.jobs),
+		Compaction: projectSettingsObject(snapshot.compaction),
+		Extensions: make(protocol.ExtensionsSettings, len(snapshot.extensions)),
 	}
-	for id, raw := range plugins {
+	if !snapshot.model.IsZero() {
+		value := protocol.ModelRef(snapshot.model.String())
+		out.Model = &value
+	}
+	for id, raw := range snapshot.extensions {
 		out.Extensions[id] = string(raw)
 	}
 	return out

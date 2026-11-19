@@ -331,16 +331,9 @@ func (s *configurationService) applyConnectionEffects(ctx context.Context, conn 
 	return nil
 }
 
-// editSettings builds the settings edit: the whole sessions member, the
-// top-level baseline tools, jobs and compaction sections, and the whole
-// extensions member are written as the generated target shape — each baseline
-// section as its exact JSON object bytes and each extension ID's opaque document
-// string becomes its raw section, and an ID absent from the
-// target removes any newer section, exactly one object per document — and
-// every other top-level root member is unowned and kept untouched. Never
-// merged per field. The selected declaration's validator, not this edit,
-// interprets each active document; candidate construction validates the
-// baseline sections with their owning services' validators.
+// editSettings replaces the file model, sessions, tools, jobs, compaction and
+// extension sections. An omitted model or extension is removed; other roots
+// remain untouched. Section owners validate the resulting candidate.
 func editSettings(settings protocol.Settings) configurationEdit {
 	return configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
 		sessions, err := json.Marshal(settings.Sessions)
@@ -356,6 +349,15 @@ func editSettings(settings protocol.Settings) configurationEdit {
 			return 0, configurationFailure(fmt.Errorf("encode plugins documents: %w", err))
 		}
 		roots.config["sessions"] = sessions
+		if settings.Model == nil || *settings.Model == "" {
+			delete(roots.config, "model")
+		} else {
+			raw, err := json.Marshal(*settings.Model)
+			if err != nil {
+				return 0, err
+			}
+			roots.config["model"] = raw
+		}
 		roots.config["extensions"] = pluginsRaw
 		roots.config["tools"] = settingsSection(settings.Tools)
 		roots.config["jobs"] = settingsSection(settings.Jobs)

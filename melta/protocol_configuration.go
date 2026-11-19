@@ -21,8 +21,8 @@ import (
 // credential value is returned.
 
 // GetConfiguration projects the complete published configuration view: the
-// effective settings beside the raw sections, the Agent roster, and the
-// provider views with their source and key-source labels.
+// file-backed settings, the Agent roster, and provider views with their source
+// and key-source labels.
 func (r *Melta) GetConfiguration(ctx context.Context, c Caller) (protocol.ConfigurationView, error) {
 	release, err := r.enter(ctx)
 	if err != nil {
@@ -38,7 +38,7 @@ func (r *Melta) GetConfiguration(ctx context.Context, c Caller) (protocol.Config
 	}
 	return protocol.ConfigurationView{
 		ConfigurationRevision: configurationRevision(captured.snapshot, r.instance),
-		Settings:              projectSettings(captured.snapshot.sessions, captured.snapshot.tools, captured.snapshot.jobs, captured.snapshot.compaction, captured.snapshot.extensions),
+		Settings:              projectSettings(captured.snapshot),
 		Agents:                projectAgents(captured.snapshot),
 		Providers:             projectProviders(captured),
 	}, nil
@@ -221,7 +221,7 @@ func (r *Melta) UpdateSettings(ctx context.Context, c Caller, request protocol.U
 	}
 	return protocol.SettingsMutation{
 		ConfigurationRevision: configurationRevision(captured.snapshot, r.instance),
-		Result:                projectSettings(captured.snapshot.sessions, captured.snapshot.tools, captured.snapshot.jobs, captured.snapshot.compaction, captured.snapshot.extensions),
+		Result:                projectSettings(captured.snapshot),
 	}, nil
 }
 

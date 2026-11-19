@@ -713,7 +713,7 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"16\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"17\"}"
     }
    ],
    "reject": [
@@ -723,16 +723,16 @@
     },
     {
      "name": "bad-instance-pattern",
-     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"16\"}",
+     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"17\"}",
      "typescript": false
     },
     {
      "name": "missing-instance",
-     "json": "{\"protocol_version\":\"16\"}"
+     "json": "{\"protocol_version\":\"17\"}"
     },
     {
      "name": "unknown-member",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"16\",\"extra\":true}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"17\",\"extra\":true}"
     }
    ]
   },
@@ -1779,10 +1779,18 @@
     },
     {
      "name": "baseline-raw",
-     "json": "{\"sessions\":{\"auto_archive\":true,\"archive_after_days\":7,\"delete_after_archive_days\":7},\"tools\":{\"read_max_lines\":9007199254740993},\"jobs\":{\"max_output_bytes\":1024},\"compaction\":{\"model\":\"prov/m\",\"prompt\":\"custom\"},\"extensions\":{\"agents\":\"{}\"}}"
+     "json": "{\"model\":\"prov/m\",\"sessions\":{\"auto_archive\":true,\"archive_after_days\":7,\"delete_after_archive_days\":7},\"tools\":{\"read_max_lines\":9007199254740993},\"jobs\":{\"max_output_bytes\":1024},\"compaction\":{\"model\":\"prov/m\",\"prompt\":\"custom\"},\"extensions\":{\"agents\":\"{}\"}}"
     }
    ],
    "reject": [
+    {
+     "name": "model-null",
+     "json": "{\"model\":null,\"sessions\":{\"auto_archive\":false,\"archive_after_days\":0,\"delete_after_archive_days\":0},\"tools\":{},\"jobs\":{},\"compaction\":{},\"extensions\":{}}"
+    },
+    {
+     "name": "model-number",
+     "json": "{\"model\":42,\"sessions\":{\"auto_archive\":false,\"archive_after_days\":0,\"delete_after_archive_days\":0},\"tools\":{},\"jobs\":{},\"compaction\":{},\"extensions\":{}}"
+    },
     {
      "name": "missing-tools",
      "json": "{\"sessions\":{\"auto_archive\":false,\"archive_after_days\":0,\"delete_after_archive_days\":0},\"jobs\":{},\"compaction\":{},\"extensions\":{}}"

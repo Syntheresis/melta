@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
+	"github.com/Syntheresis/melta/protocol"
 )
 
 // recordingStrategy delegates to the included summary policy while recording
@@ -64,6 +67,40 @@ func strategyExtension(id, version, capabilityID string, implementation harness.
 				capabilityID: {Strategy: implementation},
 			}}, nil
 		},
+	}
+}
+
+func TestSelectedStrategyWindowAndCapture(t *testing.T) {
+	for _, required := range []bool{false, true} {
+		t.Run(fmt.Sprintf("selected-requires-%t", required), func(t *testing.T) {
+			e := newOwnerEnv(t)
+			writeServiceFile(t, e.configPath, `{"model":"p/m","providers":{"p":{"transport":{"base_url":"`+e.server.URL+`","api_key_env":""},"discovery":false,"models":{"m":{}}}},"extensions":{"strategyext":{"enabled":true}}}`)
+			e.fixtureStore(storage.NewMemory())
+			e.server.setScript(func(_ context.Context, _ string) []string { return textTurnEvents("done") })
+			native := strategyExtension("strategyext", "1", "selected.strategy", &recordingStrategy{})
+			native.Declaration.Capabilities[0].Strategy.RequiresContextWindow = required
+			opts := e.options(native)
+			opts.Strategy = &harness.StrategyBinding{ID: "host", RequiresContextWindow: !required, Strategy: harness.IncludedStrategyBinding().Strategy}
+			r, err := open(context.Background(), opts)
+			testassert.NoError(t, err)
+			defer r.Close(context.Background())
+			ctx := context.Background()
+			inputs := harness.AgentInputs{AssemblyMode: "none", Strategy: harness.StrategySelection{ID: "selected.strategy", Settings: json.RawMessage(`{"keep":1}`)}}
+			selection := projectAgentSelection(harness.AgentSelection{Inputs: &inputs})
+			session, err := r.CreateSession(ctx, testCaller(r), e.dataDir, &selection)
+			testassert.NoError(t, err)
+			var part protocol.ContentPart
+			testassert.NoError(t, part.FromTextPart(protocol.TextPart{Kind: protocol.TextPartKindText, Text: "hello"}))
+			result, err := r.SubmitSession(ctx, testCaller(r), session.SessionId, protocol.SubmitRequest{OperationId: "selected", Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{part}})
+			if required {
+				testassert.Require(t, err != nil && result.Operation == nil && errors.Is(readOperationError(ctx, r, session.SessionId, "selected"), harness.ErrNotFound), "required window admitted: %+v %v", result, err)
+				return
+			}
+			testassert.NoError(t, err)
+			record := awaitOperation(t, r, session.SessionId, "selected", harness.OperationSuccess)
+			capture := record.Admission.Execution.Strategy
+			testassert.Require(t, capture.ID == "selected.strategy" && !capture.RequiresContextWindow && string(capture.Settings) == `{"keep":1}`, "strategy capture = %+v", capture)
+		})
 	}
 }
 

@@ -2783,6 +2783,23 @@ describe('agent type ownership', () => {
 });
 
 describe('settings editor', () => {
+  it('preserves the baseline model when saving another setting', async () => {
+    const raw = JSON.stringify({
+      configuration_revision: { instance_id: INSTANCE, generation: '1' },
+      settings: { model: 'provider/org/model', sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, tools: {}, jobs: {}, compaction: {}, extensions: {} },
+      agents: [], providers: [],
+    });
+    const { target } = await mountApp(settingsRawConnection(raw));
+    await openSettings(target);
+    await changeInput(target, 'archive_after_days', '7');
+    (target.querySelector('[aria-label="Save settings"]') as HTMLElement).click();
+    await settle();
+    await settle();
+    const saved = JSON.parse(bodyOf(vi.mocked(sdk.UpdateConfigurationSettings).mock.calls[0][0] as never)).settings;
+    expect(saved.model).toBe('provider/org/model');
+    expect(saved.sessions.archive_after_days).toBe(7);
+  });
+
   it.each([
     ['absent extension', undefined, '{"task":{"max_concurrent":7}}', false],
     ['absent task', '{"enabled":false}', '{"enabled":false,"task":{"max_concurrent":7}}', false],

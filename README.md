@@ -93,6 +93,7 @@ provider `transport.api_key_env` fields:
 
 ```json
 {
+  "model": "ollama/qwen3.6:27b",
   "providers": {
     "openrouter": {
       "transport": {
@@ -123,10 +124,14 @@ provider `transport.api_key_env` fields:
 }
 ```
 
-Add model selections to the same `~/.melta/config.json` document:
+The top-level `model` is the baseline choice, including when no extensions
+are enabled. A Session's chosen model takes precedence; if it cannot bind,
+Melta tries this baseline. Named Agent definitions can select their own models
+in the same `~/.melta/config.json` document:
 
 ```json
 {
+  "model": "openrouter/z-ai/glm-5.1",
   "extensions": {
     "agents": {
       "enabled": true,

@@ -202,7 +202,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '16';
+    protocol_version: '17';
 };
 
 /**
@@ -677,6 +677,7 @@ export type ExtensionsSettings = {
 };
 
 export type Settings = {
+    model?: ModelRef;
     sessions: SessionsSettings;
     tools: ToolsSettings;
     jobs: JobsSettings;

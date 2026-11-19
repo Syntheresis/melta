@@ -234,6 +234,7 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	c.reportWarning = adapter.reportPluginWarning
 	loader := catalog.NewLoader(options.Locations.DiscoveryCacheDir, nil)
 	configService = newConfigurationService(work, c, loader, options.Configuration, options.Credentials, options.Locations, strategy, obs)
+	configService.hostModel = inputs.Model
 	configService.executables = packages.loadedExecutables()
 	configService.unusablePackages = packages.unusable
 	configService.supervisor = supervisor

@@ -394,13 +394,13 @@ func (e ExtensionSuccessKind) Valid() bool {
 
 // Defines values for HealthProtocolVersion.
 const (
-	N16 HealthProtocolVersion = "16"
+	N17 HealthProtocolVersion = "17"
 )
 
 // Valid indicates whether the value is a known member of the HealthProtocolVersion enum.
 func (e HealthProtocolVersion) Valid() bool {
 	switch e {
-	case N16:
+	case N17:
 		return true
 	default:
 		return false
@@ -2025,7 +2025,10 @@ type Settings struct {
 	Extensions ExtensionsSettings `json:"extensions"`
 
 	// Jobs The baseline background jobs configuration object, carried with its accepted raw members and exact numeric lexemes. An absent section is the empty object, whose defaults the jobs service applies at consumption.
-	Jobs     JobsSettings     `json:"jobs"`
+	Jobs JobsSettings `json:"jobs"`
+
+	// Model A full model identity spelled as the "provider/model" string, split at the first slash; provider identifiers never contain a slash, so a slash-containing model suffix stays unambiguous.
+	Model    *ModelRef        `json:"model,omitempty"`
 	Sessions SessionsSettings `json:"sessions"`
 
 	// Tools The baseline standard tools' configuration object, carried with its accepted raw members and exact numeric lexemes. An absent section is the empty object, whose defaults the tools apply at consumption.

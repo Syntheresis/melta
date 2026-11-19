@@ -31,7 +31,7 @@ func (r *Melta) Health(ctx context.Context, c Caller) (protocol.Health, error) {
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return protocol.Health{}, err
 	}
-	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N16}, nil
+	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N17}, nil
 }
 
 // ListSessions projects Session headers under one required workspace and
@@ -744,8 +744,8 @@ type sessionSelection struct {
 // and window. An unknown, duplicate, or empty-name definition and a
 // definition with no configured model yield no selection. A configured model
 // that is absent from the captured catalog, or whose entry has no positive
-// window, stays identifiable with a zero window: admission still refuses it
-// and no fallback model is invented.
+// window, stays identifiable with a zero window. This is the stored choice;
+// admission independently binds its effective model.
 func resolveSessionSelection(selection harness.AgentSelection, captured *configuration) sessionSelection {
 	var selected model.ModelRef
 	if selection.Inputs != nil {

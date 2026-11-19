@@ -85,7 +85,7 @@ func Run(p Params) (Report, bool) {
 	}
 
 	dataDir := filepath.Join(p.Home, ".melta")
-	cfg, agentsCfg, dotenvKeys := dataChecks(p, dataDir, &checks, add)
+	cfg, dotenvKeys := dataChecks(p, dataDir, &checks, add)
 
 	// Catalog.
 	var userRaw map[string]any
@@ -112,25 +112,24 @@ func Run(p Params) (Report, bool) {
 	}
 	anyConnected := providerChecks(result.Catalog, dotenvKeys, p.LookupEnv, envIsSet, add)
 
-	// Setup — WARN-level mirrors of the agent's setup warnings.
+	// Setup reports provider connectivity and the configured baseline model.
 	if anyConnected {
 		add("setup", "provider", StatusOK, "at least one provider is connected")
 	} else {
 		add("setup", "provider", StatusWarn, "no provider connected - configure a provider with credentials and at least one usable model")
 	}
-	if agentsCfg != nil {
-		setupModelCheck(agentsCfg, result.Catalog, envIsSet, add)
+	if cfg != nil {
+		setupModelCheck(cfg.Model, result.Catalog, envIsSet, add)
 	}
 
 	return summarize(checks), !anyConnected
 }
 
-// dataChecks runs the data-dir group and returns the parsed config and agent
-// definitions (nil when absent or unparseable) and the .env key names, each
-// mapped to whether its value is non-empty. The directory's own diagnostic
-// never gates the config/agents/.env checks: the resolved ConfigPath may
-// point outside the default data directory.
-func dataChecks(p Params, dataDir string, checks *[]Check, add func(group, name, status, detail string)) (*config.Config, *agentcfg.Config, map[string]bool) {
+// dataChecks runs the data-dir group and returns the parsed config and the
+// .env key names, each mapped to whether its value is non-empty. The
+// directory's diagnostic never gates the config/agents/.env checks: the
+// resolved ConfigPath may point outside the default data directory.
+func dataChecks(p Params, dataDir string, checks *[]Check, add func(group, name, status, detail string)) (*config.Config, map[string]bool) {
 	dotenvKeys := map[string]bool{}
 
 	info, err := os.Lstat(dataDir)
@@ -150,7 +149,6 @@ func dataChecks(p Params, dataDir string, checks *[]Check, add func(group, name,
 	}
 
 	var cfg *config.Config
-	var agentsCfg *agentcfg.Config
 	if p.ConfigPathErr == nil {
 		if _, err := os.Stat(p.ConfigPath); os.IsNotExist(err) {
 			add("data", "config", StatusOK, "config.json: not created yet (created on first run)")
@@ -183,7 +181,6 @@ func dataChecks(p Params, dataDir string, checks *[]Check, add func(group, name,
 				} else if warnings := parsed.Warnings(); len(warnings) != 0 {
 					add("data", "agents", StatusFail, warnings[0].Error())
 				} else {
-					agentsCfg = parsed
 					add("data", "agents", StatusOK, "extensions.agents")
 				}
 			}
@@ -210,7 +207,7 @@ func dataChecks(p Params, dataDir string, checks *[]Check, add func(group, name,
 			add("data", "env", StatusOK, fmt.Sprintf("%d keys", len(keys)))
 		}
 	}
-	return cfg, agentsCfg, dotenvKeys
+	return cfg, dotenvKeys
 }
 
 // catalogChecks maps build warnings to severities. A silently dropped user
@@ -285,33 +282,23 @@ func providerChecks(cat *catalog.Catalog, dotenvKeys map[string]bool, lookupEnv 
 	return anyConnected
 }
 
-// setupModelCheck mirrors the agent's no-model / model-unavailable
-// unavailable warnings, which are mutually exclusive.
-func setupModelCheck(agentsCfg *agentcfg.Config, cat *catalog.Catalog, envIsSet func(string) bool, add func(group, name, status, detail string)) {
-	resolved, err := agentsCfg.Resolve("primary")
-	if err != nil {
-		add("setup", "model", StatusWarn, err.Error())
+// setupModelCheck reports the configured baseline model's offline readiness.
+func setupModelCheck(ref catalog.ModelRef, cat *catalog.Catalog, envIsSet func(string) bool, add func(group, name, status, detail string)) {
+	if ref.IsZero() {
+		add("setup", "model", StatusWarn, "No baseline model is configured.")
 		return
 	}
-	if resolved.Model == "" {
-		add("setup", "model", StatusWarn, "No model is configured. Select a model to get started.")
-		return
-	}
-	ref, err := catalog.ParseModelRef(resolved.Model)
-	if err != nil {
-		add("setup", "model", StatusWarn, fmt.Sprintf("configured model %q is unavailable: %v", resolved.Model, err))
-		return
-	}
+	configured := ref.String()
 	prov, model, err := cat.Lookup(ref)
 	if err != nil || model == nil || model.ContextWindow <= 0 {
-		add("setup", "model", StatusWarn, fmt.Sprintf("configured model %q is unavailable: not in the catalog or incomplete", resolved.Model))
+		add("setup", "model", StatusWarn, fmt.Sprintf("configured model %q is unavailable: not in the catalog or incomplete", configured))
 		return
 	}
 	if !catalog.ProviderConnected(prov, envIsSet) {
-		add("setup", "model", StatusWarn, fmt.Sprintf("configured model %q is unavailable: provider %s is not connected", resolved.Model, ref.Provider))
+		add("setup", "model", StatusWarn, fmt.Sprintf("configured model %q is unavailable: provider %s is not connected", configured, ref.Provider))
 		return
 	}
-	add("setup", "model", StatusOK, resolved.Model)
+	add("setup", "model", StatusOK, configured)
 }
 
 func summarize(checks []Check) Report {

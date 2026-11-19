@@ -103,7 +103,7 @@ func TestSettingsMutationWritesBaselineRootsExactly(t *testing.T) {
 	} {
 		testassert.Equal(t, compactJSON(t, root[name]), want)
 	}
-	view := projectSettings(candidate.snapshot.sessions, candidate.snapshot.tools, candidate.snapshot.jobs, candidate.snapshot.compaction, candidate.snapshot.extensions)
+	view := projectSettings(candidate.snapshot)
 	testassert.Equal(t, compactJSON(t, view.Tools), `{"read_max_lines":9007199254740993,"unknown":1}`)
 	testassert.Equal(t, compactJSON(t, view.Jobs), `{"max_output_bytes":1048576,"unknown":2}`)
 	testassert.Equal(t, compactJSON(t, view.Compaction), `{"model":"prov/m2","prompt":"  exact prompt  ","unknown":3}`)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Syntheresis/melta/internal/catalog"
@@ -140,7 +141,7 @@ func TestExternalConfigDiagnosedWithoutDataDir(t *testing.T) {
 	t.Run("existing config and agents", func(t *testing.T) {
 		home := t.TempDir()
 		external := t.TempDir()
-		configPath := writeExternal(t, external, "config.json", keyedProviderConfig)
+		configPath := writeExternal(t, external, "config.json", strings.Replace(keyedProviderConfig, "{", `{"model":"keyedtest/m1",`, 1))
 		writeDefinitions(t, configPath, `{"primary": {"model": "keyedtest/m1"}}`)
 		p := params(home)
 		p.ConfigPath = configPath
@@ -282,7 +283,7 @@ func TestAgentChecksOnlyForInstalledEnabledSection(t *testing.T) {
 				testassert.Require(t, find(t, report, "data", "agents").Status == StatusFail, "invalid enabled definitions accepted")
 			} else {
 				for _, check := range report.Checks {
-					testassert.Require(t, !(check.Group == "data" && check.Name == "agents") && !(check.Group == "setup" && check.Name == "model"), "inactive agent diagnostics = %+v", check)
+					testassert.Require(t, !(check.Group == "data" && check.Name == "agents"), "inactive agent diagnostics = %+v", check)
 				}
 			}
 		})
@@ -356,14 +357,14 @@ func TestKeySourceClasses(t *testing.T) {
       "models": {"m1": {"context_window": 8192}}
     }
   },
-  "default_model": "keyedtest/m1"
+  "model": "keyedtest/m1"
 }`)
 		writeAgents(t, home, `{"primary": {"model": "keyedtest/m1"}}`)
 		testassert.NoError(t, os.WriteFile(filepath.Join(home, ".melta", ".env"), []byte("DOCTOR_TEST_KEY=\n"), 0o600))
 		report, _ := run(t, params(home))
 		{
 			c := find(t, report, "setup", "model")
-			testassert.Require(t, c.Status == StatusWarn, "setup/model = %+v, want warn with an empty key", c)
+			testassert.Require(t, c.Status == StatusWarn && c.Detail == `configured model "keyedtest/m1" is unavailable: provider keyedtest is not connected`, "setup/model = %+v, want the empty-key reason", c)
 		}
 	})
 
@@ -446,7 +447,7 @@ func TestConnectionSemantics(t *testing.T) {
 	})
 }
 
-func TestPrimaryModelChecks(t *testing.T) {
+func TestBaselineModelChecks(t *testing.T) {
 	configWithModel := func(modelBody string) string {
 		return `{
   "providers": {
@@ -463,53 +464,75 @@ func TestPrimaryModelChecks(t *testing.T) {
 	cases := []struct {
 		name       string
 		config     string
+		model      string
 		agents     string
 		env        func(string) (string, bool)
 		wantStatus string
+		wantDetail string
 	}{
-		{"available primary model", configWithModel(`{"context_window": 8192}`), `{"primary": {"model": "keyedtest/m1"}}`, envSet, StatusOK},
-		{"missing primary model", configWithModel(`{"context_window": 8192}`), `{"primary": {"model": "keyedtest/nosuch"}}`, envSet, StatusWarn},
-		{"incomplete primary model", configWithModel(`{}`), `{"primary": {"model": "keyedtest/m1"}}`, envSet, StatusWarn},
-		{"provider not connected", configWithModel(`{"context_window": 8192}`), `{"primary": {"model": "keyedtest/m1"}}`, nil, StatusWarn},
-		{"hidden but complete primary model", configWithModel(`{"context_window": 8192, "hidden": true}`), `{"primary": {"model": "keyedtest/m1"}}`, envSet, StatusOK},
+		{"available baseline, unavailable primary", configWithModel(`{"context_window": 8192}`), "keyedtest/m1", `{"primary":{"model":"keyedtest/nosuch"}}`, envSet, StatusOK, "keyedtest/m1"},
+		{"missing baseline, available primary", configWithModel(`{"context_window": 8192}`), "keyedtest/nosuch", `{"primary":{"model":"keyedtest/m1"}}`, envSet, StatusWarn, `configured model "keyedtest/nosuch" is unavailable: not in the catalog or incomplete`},
+		{"no baseline, available primary", configWithModel(`{"context_window": 8192}`), "", `{"primary":{"model":"keyedtest/m1"}}`, envSet, StatusWarn, "No baseline model is configured."},
+		{"baseline, no primary", configWithModel(`{"context_window": 8192}`), "keyedtest/m1", `{}`, envSet, StatusOK, "keyedtest/m1"},
+		{"baseline, no Agents", configWithModel(`{"context_window": 8192}`), "keyedtest/m1", "", envSet, StatusOK, "keyedtest/m1"},
+		{"no baseline, no Agents", configWithModel(`{"context_window": 8192}`), "", "", envSet, StatusWarn, "No baseline model is configured."},
+		{"incomplete baseline", configWithModel(`{}`), "keyedtest/m1", `{"primary":{"model":"keyedtest/nosuch"}}`, envSet, StatusWarn, `configured model "keyedtest/m1" is unavailable: not in the catalog or incomplete`},
+		{"provider not connected", configWithModel(`{"context_window": 8192}`), "keyedtest/m1", `{}`, nil, StatusWarn, `configured model "keyedtest/m1" is unavailable: provider keyedtest is not connected`},
+		{"hidden but complete baseline", configWithModel(`{"context_window": 8192, "hidden": true}`), "keyedtest/m1", `{}`, envSet, StatusOK, "keyedtest/m1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
-			writeConfig(t, home, tc.config)
-			writeAgents(t, home, tc.agents)
+			doc := tc.config
+			if tc.model != "" {
+				doc = strings.Replace(doc, "{", `{"model":"`+tc.model+`",`, 1)
+			}
+			writeConfig(t, home, doc)
 			p := params(home)
+			if tc.agents != "" {
+				writeAgents(t, home, tc.agents)
+			} else {
+				p.InstalledExtensions = nil
+			}
 			if tc.env != nil {
 				p.LookupEnv = tc.env
 			}
-			baseline, _ := run(t, p)
-			{
-				c := find(t, baseline, "setup", "model")
-				testassert.Require(t, c.Status == tc.wantStatus, "setup/model = %+v, want %s", c, tc.wantStatus)
-			}
+			report, _ := run(t, p)
+			c := find(t, report, "setup", "model")
+			testassert.Require(t, c.Status == tc.wantStatus && c.Detail == tc.wantDetail, "setup/model = %+v, want %s %q", c, tc.wantStatus, tc.wantDetail)
+		})
+	}
+}
 
-			// A valid custom definition does not change the primary model check.
-			var doc map[string]json.RawMessage
-			testassert.NoError(t, json.Unmarshal([]byte(tc.agents), &doc))
-			doc["custom"] = json.RawMessage(`{"model":"test/ghost","tools":[]}`)
-			augmented, err := json.Marshal(doc)
+func TestEnabledAgentDefinitionsRemainValidated(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, home, keyedProviderConfig)
+	agents := `{"primary":{"model":"keyedtest/m1"}}`
+	writeAgents(t, home, agents)
+	p := params(home)
+	baseline, _ := run(t, p)
+	{
+		// A valid custom definition does not change the baseline model check.
+		var doc map[string]json.RawMessage
+		testassert.NoError(t, json.Unmarshal([]byte(agents), &doc))
+		doc["custom"] = json.RawMessage(`{"model":"test/ghost","tools":[]}`)
+		augmented, err := json.Marshal(doc)
+		testassert.NoError(t, err)
+		writeAgents(t, home, string(augmented))
+		report, _ := run(t, p)
+		testassert.Require(t, reflect.DeepEqual(report, baseline), "custom definitions changed the doctor report:\nbaseline:  %+v\naugmented: %+v", baseline, report)
+		for _, invalid := range []json.RawMessage{
+			json.RawMessage(`{"model":"test/ghost","capabilities":["not-declared"]}`),
+			json.RawMessage(`{"model":"test/ghost","tools":["not-compiled"]}`),
+			json.RawMessage(`{"model":"test/ghost","capabilities":"not-a-list"}`),
+		} {
+			doc["custom"] = invalid
+			augmented, err = json.Marshal(doc)
 			testassert.NoError(t, err)
 			writeAgents(t, home, string(augmented))
-			report, _ := run(t, p)
-			testassert.Require(t, reflect.DeepEqual(report, baseline), "custom definitions changed the doctor report:\nbaseline:  %+v\naugmented: %+v", baseline, report)
-			for _, invalid := range []json.RawMessage{
-				json.RawMessage(`{"model":"test/ghost","capabilities":["not-declared"]}`),
-				json.RawMessage(`{"model":"test/ghost","tools":["not-compiled"]}`),
-				json.RawMessage(`{"model":"test/ghost","capabilities":"not-a-list"}`),
-			} {
-				doc["custom"] = invalid
-				augmented, err = json.Marshal(doc)
-				testassert.NoError(t, err)
-				writeAgents(t, home, string(augmented))
-				report, _ = run(t, p)
-				testassert.Require(t, find(t, report, "data", "agents").Status == StatusFail, "invalid active definition was accepted: %s", invalid)
-			}
-		})
+			report, _ = run(t, p)
+			testassert.Require(t, find(t, report, "data", "agents").Status == StatusFail, "invalid active definition was accepted: %s", invalid)
+		}
 	}
 }
 

@@ -37,7 +37,7 @@ func modelsEndpoint(t *testing.T, status int, body []byte) clienthost.Options {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/health":
-			_ = json.NewEncoder(w).Encode(map[string]string{"instance_id": instance, "protocol_version": string(protocol.N16)})
+			_ = json.NewEncoder(w).Encode(map[string]string{"instance_id": instance, "protocol_version": string(protocol.N17)})
 		case "/v1/configuration":
 			w.WriteHeader(status)
 			_, _ = w.Write(body)
@@ -55,7 +55,7 @@ func modelsEndpoint(t *testing.T, status int, body []byte) clienthost.Options {
 		testassert.Check(t, reflect.DeepEqual(requests, want), "requests = %v, want exactly %v", requests, want)
 	})
 	dir := t.TempDir()
-	record, err := json.Marshal(map[string]string{"endpoint": server.URL, "instance_id": instance, "protocol_version": string(protocol.N16), "credential": credential})
+	record, err := json.Marshal(map[string]string{"endpoint": server.URL, "instance_id": instance, "protocol_version": string(protocol.N17), "credential": credential})
 	testassert.NoError(t, err)
 	testassert.NoError(t, os.WriteFile(filepath.Join(dir, "runtime.json"), record, 0o600))
 	return clienthost.Options{DataDir: dir, Executable: filepath.Join(dir, "must-not-launch")}
@@ -85,8 +85,10 @@ func foreignPrimaryAgent(modelRef string) protocol.Agent {
 }
 
 func retainedModelsView() protocol.ConfigurationView {
+	ref := protocol.ModelRef("modeltest/vis")
 	return protocol.ConfigurationView{
 		ConfigurationRevision: protocol.ConfigurationRevision{InstanceId: strings.Repeat("a", 32), Generation: "9007199254740993"},
+		Settings:              protocol.Settings{Model: &ref},
 		Agents:                []protocol.Agent{suppliedPrimaryAgent("modeltest/vis")},
 		Providers: []protocol.Provider{
 			{Id: "modeltest", Connected: true, Models: []protocol.ModelView{
@@ -103,6 +105,7 @@ func retainedModelsView() protocol.ConfigurationView {
 func TestRunModelsRetainedOutput(t *testing.T) {
 	base := retainedModelsView()
 	noPrimary := retainedModelsView()
+	noPrimary.Settings.Model = nil
 	noPrimary.Agents = []protocol.Agent{{Name: "secondary", Definition: protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "secondary"}, Model: "modeltest/vis"}}
 	other := protocol.Provider{Id: "other", Connected: true, Models: []protocol.ModelView{{Id: "m", ContextWindow: 4096}}}
 	noPrimary.Providers = append(noPrimary.Providers, other)
@@ -153,8 +156,10 @@ func TestRunModelsRetainedOutput(t *testing.T) {
 
 func TestRunModelsConfigurationFields(t *testing.T) {
 	zero, input, output, cacheWrite := 0.0, 1.25, 2.5, 4.75
+	ref := protocol.ModelRef("hidden/org/m")
 	view := protocol.ConfigurationView{
-		Agents: []protocol.Agent{suppliedPrimaryAgent("hidden/org/m")},
+		Settings: protocol.Settings{Model: &ref},
+		Agents:   []protocol.Agent{suppliedPrimaryAgent("hidden/org/m")},
 		Providers: []protocol.Provider{
 			{Id: "hidden", Name: "Hidden Provider", Connected: true, Hidden: true, Models: []protocol.ModelView{
 				{Id: "org/m", Name: "Named Model", ContextWindow: 9007199254740993, MaxOutputTokens: 0, Source: "discovery",
@@ -203,7 +208,7 @@ func TestRunModelsConfigurationFields(t *testing.T) {
 func TestRunModelsOpaqueOverflowFieldsRenders(t *testing.T) {
 	// Raw JSON supplies the overflow lexemes exactly; a generated struct
 	// cannot carry them.
-	raw := `{"configuration_revision":{"instance_id":"` + strings.Repeat("a", 32) + `","generation":"1"},"settings":{},"agents":[{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"model":"prov/m"}],"providers":[{"id":"prov","connected":true,"extra_body":{"n":9007199254740993,"big":1e400},"models":[{"id":"m","name":"M","context_window":4096,"source":"user","extra_body":{"n":9007199254740993,"big":1e400}}]}]}`
+	raw := `{"configuration_revision":{"instance_id":"` + strings.Repeat("a", 32) + `","generation":"1"},"settings":{"model":"prov/m"},"agents":[{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"model":"prov/m"}],"providers":[{"id":"prov","connected":true,"extra_body":{"n":9007199254740993,"big":1e400},"models":[{"id":"m","name":"M","context_window":4096,"source":"user","extra_body":{"n":9007199254740993,"big":1e400}}]}]}`
 	opts := modelsEndpoint(t, http.StatusOK, []byte(raw))
 	var out, diagnostics bytes.Buffer
 	testassert.NoError(t, clienthost.RunModels(context.Background(), opts, "", false, false, &out, &diagnostics))
@@ -217,11 +222,17 @@ func TestRunModelsOpaqueOverflowFieldsRenders(t *testing.T) {
 	}
 }
 
-func TestRunModelsDefaultMarkerUsesSuppliedPrimaryOnly(t *testing.T) {
+func TestRunModelsDefaultMarkerUsesSettings(t *testing.T) {
 	foreignOnly := retainedModelsView()
+	foreignOnly.Settings.Model = nil
 	foreignOnly.Agents = []protocol.Agent{foreignPrimaryAgent("modeltest/vis")}
+	suppliedOnly := retainedModelsView()
+	suppliedOnly.Settings.Model = nil
+	suppliedOnly.Agents = []protocol.Agent{suppliedPrimaryAgent("modeltest/vis")}
 	foreignFirst := retainedModelsView()
-	foreignFirst.Agents = []protocol.Agent{foreignPrimaryAgent("modeltest/vis"), suppliedPrimaryAgent("modeltest/inc")}
+	ref := protocol.ModelRef("modeltest/inc")
+	foreignFirst.Settings.Model = &ref
+	foreignFirst.Agents = []protocol.Agent{foreignPrimaryAgent("modeltest/vis"), suppliedPrimaryAgent("modeltest/hid")}
 	for _, tc := range []struct {
 		name string
 		view protocol.ConfigurationView
@@ -229,7 +240,8 @@ func TestRunModelsDefaultMarkerUsesSuppliedPrimaryOnly(t *testing.T) {
 		want string
 	}{
 		{"foreign-only primary never marks", foreignOnly, false, "modeltest/vis\t8192\t1024\t-\n"},
-		{"foreign-first supplied primary marks its own model", foreignFirst, true, "modeltest/hid\t16384\t0\thidden\nmodeltest/inc\t0\t0\tdefault,incomplete\nmodeltest/vis\t8192\t1024\t-\n"},
+		{"supplied primary without file model never marks", suppliedOnly, false, "modeltest/vis\t8192\t1024\t-\n"},
+		{"settings model overrides named primary", foreignFirst, true, "modeltest/hid\t16384\t0\thidden\nmodeltest/inc\t0\t0\tdefault,incomplete\nmodeltest/vis\t8192\t1024\t-\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, diagnostics bytes.Buffer

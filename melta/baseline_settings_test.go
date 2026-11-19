@@ -101,7 +101,7 @@ func TestBaselineSettingsDriveToolsJobsAndCompaction(t *testing.T) {
 	// The compact capture consumes the top-level compaction section, not the
 	// selectable compact Agent's overlay.
 	selection := compactPrepSelection(t, captured, "solo")
-	capture, opener, err := prep.concretePrepare(context.Background(), compactPrepRequest(), selection)
+	capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), selection)
 	testassert.NoError(t, err)
 	testassert.Require(t, opener != nil, "concretePrepare returned no opener")
 	testassert.Equal(t, capture.Compact.Model.String(), "prov/m2")
@@ -139,7 +139,7 @@ func TestBaselineCompactionAndCompactAgentEditIndependently(t *testing.T) {
 	testassert.Require(t, compactAgent(t, snapshot).inputs.Model == (model.ModelRef{Provider: "prov", Model: "m3"}), "compact Agent model = %s, want the saved definition override", compactAgent(t, snapshot).inputs.Model.String())
 	testassert.Require(t, snapshot.compactionValues.model == (model.ModelRef{Provider: "prov", Model: "m2"}) && snapshot.compactionValues.prompt == "baseline edit", "compaction after the Agent edit = %+v, want the baseline values unchanged", snapshot.compactionValues)
 
-	settings := projectSettings(snapshot.sessions, snapshot.tools, snapshot.jobs, snapshot.compaction, snapshot.extensions)
+	settings := projectSettings(snapshot)
 	settings.Compaction = json.RawMessage(`{"model":"prov/mzero","prompt":"settings edit"}`)
 	{
 		_, err := svc.mutate(context.Background(), editSettings(settings))
@@ -178,7 +178,7 @@ func TestCompactionSettingsResetRestoresFallbackDefaults(t *testing.T) {
 	prepare := func(t *testing.T, captured configurationCapture) harness.ExecutionCapture {
 		t.Helper()
 		selection := compactPrepSelection(t, captured, "solo")
-		capture, opener, err := prep.concretePrepare(context.Background(), compactPrepRequest(), selection)
+		capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), selection)
 		testassert.NoError(t, err)
 		testassert.Require(t, opener != nil, "concretePrepare returned no opener")
 		return capture
@@ -186,7 +186,7 @@ func TestCompactionSettingsResetRestoresFallbackDefaults(t *testing.T) {
 	before := prepare(t, captured)
 	testassert.Require(t, before.Compact.Model.String() == "prov/m2" && before.Compact.SystemPrompt == "baseline summary", "custom compaction capture = %+v, want the configured model and prompt", before.Compact)
 
-	settings := projectSettings(svc.current().sessions, svc.current().tools, svc.current().jobs, svc.current().compaction, svc.current().extensions)
+	settings := projectSettings(svc.current())
 	settings.Compaction = json.RawMessage(`{}`)
 	{
 		_, err := svc.mutate(context.Background(), editSettings(settings))
@@ -223,7 +223,7 @@ func newBaselineSettingsService(t *testing.T, configDoc string) (*serviceHarness
 func prepareCompactCapture(t *testing.T, prep *preparation, captured configurationCapture) harness.ExecutionCapture {
 	t.Helper()
 	selection := compactPrepSelection(t, captured, "solo")
-	capture, opener, err := prep.concretePrepare(context.Background(), compactPrepRequest(), selection)
+	capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), selection)
 	testassert.NoError(t, err)
 	testassert.Require(t, opener != nil, "concretePrepare returned no opener")
 	return capture
@@ -284,7 +284,7 @@ func TestBaselineCapturesStayFrozenAcrossSettingsPublication(t *testing.T) {
 	oldCompact := prepareCompactCapture(t, prep, oldCaptured)
 	testassert.Require(t, oldCompact.Compact.Model.String() == "prov/m2" && oldCompact.Compact.SystemPrompt == "baseline summary", "old compact = %+v, want the retained revision", oldCompact.Compact)
 
-	settings := projectSettings(oldCaptured.snapshot.sessions, oldCaptured.snapshot.tools, oldCaptured.snapshot.jobs, oldCaptured.snapshot.compaction, oldCaptured.snapshot.extensions)
+	settings := projectSettings(oldCaptured.snapshot)
 	settings.Tools = json.RawMessage(`{"read_max_lines":88}`)
 	settings.Jobs = json.RawMessage(`{"max_output_bytes":2048}`)
 	settings.Compaction = json.RawMessage(`{"model":"prov/m","prompt":"fresh prompt"}`)
@@ -316,7 +316,7 @@ func TestBaselineCapturesStayFrozenAcrossSettingsPublication(t *testing.T) {
 // bound, and an omitted compaction prompt/model.
 func TestBaselinePartialObjectSettingsUseAbsentDefaults(t *testing.T) {
 	sh, svc, prep, captured := newBaselineSettingsService(t, baselineSettingsConfigDocument("https://prov.test/v1"))
-	settings := projectSettings(captured.snapshot.sessions, captured.snapshot.tools, captured.snapshot.jobs, captured.snapshot.compaction, captured.snapshot.extensions)
+	settings := projectSettings(captured.snapshot)
 	settings.Tools = json.RawMessage(`{"max_output_bytes":2048}`)
 	settings.Jobs = json.RawMessage(`{"max_background_processes":5}`)
 	settings.Compaction = json.RawMessage(`{"model":"prov/m2"}`)
@@ -357,7 +357,7 @@ func TestBaselinePartialObjectSettingsUseAbsentDefaults(t *testing.T) {
 	testassert.Require(t, compact.Compact.Model.String() == "prov/m2" && compact.Compact.SystemPrompt == prompt.DefaultSummarizerPrompt, "omitted compaction prompt capture = %+v, want the builtin default", compact.Compact)
 
 	// Omit model independently while retaining a custom prompt.
-	settings = projectSettings(fresh.snapshot.sessions, fresh.snapshot.tools, fresh.snapshot.jobs, fresh.snapshot.compaction, fresh.snapshot.extensions)
+	settings = projectSettings(fresh.snapshot)
 	settings.Compaction = json.RawMessage(`{"prompt":"custom retained"}`)
 	{
 		_, err := svc.mutate(context.Background(), editSettings(settings))
@@ -397,7 +397,7 @@ func TestConcretePrepareCompactionWithoutRoster(t *testing.T) {
 			testassert.Equal(t, len(projectAgents(&owned)), 0)
 			selection := compactPrepSelection(t, captured, "solo")
 			selection.invocation = Invocation{snapshot: &owned}
-			capture, opener, err := prep.concretePrepare(context.Background(), compactPrepRequest(), selection)
+			capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), selection)
 			testassert.NoError(t, err)
 			testassert.Require(t, opener != nil, "concretePrepare returned no opener")
 			testassert.Require(t, capture.Compact.Model.String() == tc.wantModel && capture.Compact.SystemPrompt == tc.wantPrompt, "rosterless compact capture = %+v, want %s with %q", capture.Compact, tc.wantModel, tc.wantPrompt)

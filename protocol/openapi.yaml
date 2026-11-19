@@ -7,7 +7,7 @@
 openapi: "3.0.3"
 info:
   title: melta-protocol
-  version: "16"
+  version: "17"
 servers:
   - url: "http://127.0.0.1"
 # Every path requires the bearer credential; it is declared once here and
@@ -1266,7 +1266,7 @@ components:
         protocol_version:
           type: string
           enum:
-            - "16"
+            - "17"
     Scope:
       description: >
         One SSE event's applicable scope, discriminated by kind. Every
@@ -2390,6 +2390,8 @@ components:
         - compaction
         - extensions
       properties:
+        model:
+          $ref: "#/components/schemas/ModelRef"
         sessions:
           $ref: "#/components/schemas/SessionsSettings"
         tools:

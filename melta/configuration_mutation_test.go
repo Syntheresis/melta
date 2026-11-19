@@ -282,7 +282,7 @@ func TestConfigurationMutateSettingsReplacesWholeShapeAndRetainsUnowned(t *testi
 	if candidate.snapshot.generation != 2 || svc.current() != candidate.snapshot {
 		t.Fatalf("mutate = generation %d (current published %v), want generation 2 published", candidate.snapshot.generation, svc.current() == candidate.snapshot)
 	}
-	testassert.Equal(t, projectSettings(candidate.snapshot.sessions, candidate.snapshot.tools, candidate.snapshot.jobs, candidate.snapshot.compaction, candidate.snapshot.extensions).Sessions, wantSettings.Sessions)
+	testassert.Equal(t, projectSettings(candidate.snapshot).Sessions, wantSettings.Sessions)
 
 	// The owning file: the written members are the marshaled shape, the
 	// unowned members and their exact numeric lexeme survive.
@@ -425,7 +425,7 @@ func TestConfigurationMutateSettingsOwnsOpaquePluginDocuments(t *testing.T) {
 	}
 	candidate, err := svc.mutate(context.Background(), editSettings(stale))
 	testassert.NoError(t, err)
-	published := projectSettings(candidate.snapshot.sessions, candidate.snapshot.tools, candidate.snapshot.jobs, candidate.snapshot.compaction, candidate.snapshot.extensions)
+	published := projectSettings(candidate.snapshot)
 	testassert.Require(t, len(published.Extensions) == 0 && compactJSON(t, published.Tools) == compactJSON(t, stale.Tools), "published extensions = %v, tools = %s, want no extension documents and the written tools object", published.Extensions, published.Tools)
 	root := fileRoot(t, h.configPath)
 	var plugins map[string]json.RawMessage
@@ -479,7 +479,7 @@ func TestConfigurationMutateSettingsOwnsOpaquePluginDocuments(t *testing.T) {
 	candidate, err = svc.mutate(context.Background(), editSettings(protocol.Settings{Sessions: stale.Sessions, Extensions: protocol.ExtensionsSettings{}}))
 	testassert.NoError(t, err)
 	{
-		got := projectSettings(candidate.snapshot.sessions, candidate.snapshot.tools, candidate.snapshot.jobs, candidate.snapshot.compaction, candidate.snapshot.extensions).Extensions
+		got := projectSettings(candidate.snapshot).Extensions
 		testassert.Require(t, len(got) == 0, "published plugins after the empty map = %v, want none", got)
 	}
 	root = fileRoot(t, h.configPath)
@@ -489,7 +489,7 @@ func TestConfigurationMutateSettingsOwnsOpaquePluginDocuments(t *testing.T) {
 	retained := protocol.ExtensionsSettings{"ghost": `{"enabled":true,"unknown":1}`, "alpha": `1`}
 	candidate, err = svc.mutate(context.Background(), editSettings(protocol.Settings{Sessions: stale.Sessions, Extensions: retained}))
 	testassert.NoError(t, err)
-	got := projectSettings(candidate.snapshot.sessions, candidate.snapshot.tools, candidate.snapshot.jobs, candidate.snapshot.compaction, candidate.snapshot.extensions).Extensions
+	got := projectSettings(candidate.snapshot).Extensions
 	testassert.Require(t, reflect.DeepEqual(got, retained), "inactive documents = %v, want %v", got, retained)
 	nextConfigurationEvent(t, sub, "4")
 }
@@ -551,7 +551,7 @@ func TestConfigurationMutateWritesOwningFileOnly0600(t *testing.T) {
 	}
 
 	// The settings PUT retains the Agent document carried by the caller.
-	settings := projectSettings(candidate.snapshot.sessions, candidate.snapshot.tools, candidate.snapshot.jobs, candidate.snapshot.compaction, candidate.snapshot.extensions)
+	settings := projectSettings(candidate.snapshot)
 	settings.Sessions = mutationSettings().Sessions
 	{
 		_, err := svc.mutate(context.Background(), editSettings(settings))
@@ -669,7 +669,7 @@ func TestConfigurationMutateAgentModelPreservesConcurrentSettings(t *testing.T) 
 	svc := h.preparedService(context.Background(), alpha, fixtureAgentPlugin(alpha))
 	initial, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	settings := projectSettings(initial.snapshot.sessions, initial.snapshot.tools, initial.snapshot.jobs, initial.snapshot.compaction, initial.snapshot.extensions)
+	settings := projectSettings(initial.snapshot)
 	settings.Extensions["agents"] = `{"enabled":true,"task":{"max_concurrent":7},"definitions":{"worker":{"system_prompt":"simple","description":"latest","tools":[]}}}`
 	settings.Extensions["uninstalled"] = `{"enabled":true,"unknown":9007199254740993}`
 	armed.Store(true)
@@ -1493,7 +1493,7 @@ func TestConfigurationMutateExternalEditorRaceLastWriterWins(t *testing.T) {
 	}
 
 	// The published projection: the same winning candidate's settings.
-	view := projectSettings(svc.current().sessions, svc.current().tools, svc.current().jobs, svc.current().compaction, svc.current().extensions)
+	view := projectSettings(svc.current())
 	testassert.Require(t, view.Sessions == mutationSettings().Sessions && compactJSON(t, view.Tools) == compactJSON(t, mutationSettings().Tools), "published settings = %+v, want the requested shape", view)
 }
 
@@ -1600,7 +1600,7 @@ func TestConfigurationSettingsRejectNonIntegerTaskLexemes(t *testing.T) {
 			before, err := os.ReadFile(h.configPath)
 			testassert.NoError(t, err)
 			generation := svc.current().generation
-			settings := projectSettings(initial.snapshot.sessions, initial.snapshot.tools, initial.snapshot.jobs, initial.snapshot.compaction, initial.snapshot.extensions)
+			settings := projectSettings(initial.snapshot)
 			settings.Extensions["agents"] = `{"enabled":true,"task":` + row.task + `}`
 			_, err = svc.mutate(context.Background(), editSettings(settings))
 			if row.accepted {

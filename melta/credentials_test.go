@@ -377,7 +377,7 @@ func TestExternalSharedCredentialRotationKeepsProviderObservation(t *testing.T) 
 	testassert.Equal(t, activationBinding.value, "shared-later")
 	operations := captured.operationSecrets()
 	testassert.Equal(t, operations["credshared"]["/operation"], "shared-later")
-	settings := projectSettings(captured.snapshot.sessions, captured.snapshot.tools, captured.snapshot.jobs, captured.snapshot.compaction, captured.snapshot.extensions)
+	settings := projectSettings(captured.snapshot)
 	projected := settings.Extensions["credshared"]
 	testassert.Require(t, strings.Contains(projected, name), "settings extension document = %q, want the reference name", projected)
 	testassert.Require(t, !strings.Contains(projected, "shared-candidate") && !strings.Contains(projected, "shared-later"), "settings extension document = %q, want no credential value", projected)
