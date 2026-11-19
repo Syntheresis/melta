@@ -688,8 +688,10 @@ func TestCredentialStrategyCapturesAtItsOperationOpen(t *testing.T) {
 	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-strategy", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, execution.Close()) }()
-	testassert.Require(t, execution.Strategy != nil && execution.Strategy.ID == "cred_strategy" && strategy != nil, "strategy binding = %+v, want the opened strategy", execution.Strategy)
-	if _, err := execution.Strategy.Strategy.Plan(harness.PlanInput{}); err != nil {
+	testassert.Require(t, execution.ResolveStrategy != nil && prepared.Capture.Strategy.ID == "cred_strategy" && strategy != nil, "strategy resolver/capture = %+v, want the opened strategy", prepared.Capture.Strategy)
+	binding, err := execution.ResolveStrategy(context.Background(), prepared.Capture.Strategy.ID)
+	testassert.Require(t, err == nil && binding != nil && binding.ID == "cred_strategy", "resolved strategy = %+v err %v, want the captured strategy", binding, err)
+	if _, err := binding.Strategy.Plan(harness.PlanInput{}); err != nil {
 		t.Fatalf("strategy Plan: %v", err)
 	}
 	testassert.Equal(t, strategy.value, "later-value")

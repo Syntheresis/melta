@@ -185,7 +185,7 @@ func TestExecutableFixtureEndToEnd(t *testing.T) {
 	if err != nil || consequence.Prompt == nil || *consequence.Prompt != wantPrompt {
 		t.Fatalf("preparation hook = %+v, %v, want %q", consequence, err, wantPrompt)
 	}
-	request, err := hooks.Request(context.Background(), hookContext, harness.RequestHookInput{RequestID: "request-1"})
+	request, err := hooks.Request(context.Background(), hookContext, harness.RequestHookInput{RequestID: "request-1", Purpose: harness.InvocationPurposeConversation, Model: model.ModelRef{Provider: "provider", Model: "model"}})
 	if err != nil || request.Prompt != nil || request.ToolNames == nil || len(request.ToolNames) != 0 {
 		t.Fatalf("request hook = %+v, %v, want the empty visible subset", request, err)
 	}

@@ -2043,7 +2043,7 @@ func TestExecutableCallbackEffectKnowledgeMatchesNative(t *testing.T) {
 		switch capabilityID {
 		case "peer.pure_request", "peer.effectful_request":
 			call := extension.CallContext{ExtensionID: declaration.ID, ComponentID: "peer.component", InstanceID: "instance", Lifetime: extension.LifetimeHarness}
-			input := harness.RequestHookInput{RequestID: "request-1"}
+			input := harness.RequestHookInput{RequestID: "request-1", Purpose: harness.InvocationPurposeConversation, Model: model.ModelRef{Provider: "provider", Model: "model"}}
 			_, got := workerSide.Request(context.Background(), call, input)
 			_, want := nativeSide.Request(context.Background(), call, input)
 			compare(t, got, want)
@@ -2113,7 +2113,7 @@ func TestExecutableEffectfulHookCancelledAuthorEvidence(t *testing.T) {
 		t.Fatal("effectful hook capability is not open")
 	}
 	call := extension.CallContext{ExtensionID: declaration.ID, ComponentID: "peer.component", InstanceID: "instance", Lifetime: extension.LifetimeHarness}
-	input := harness.RequestHookInput{RequestID: "request-1"}
+	input := harness.RequestHookInput{RequestID: "request-1", Purpose: harness.InvocationPurposeConversation, Model: model.ModelRef{Provider: "provider", Model: "model"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {

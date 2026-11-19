@@ -337,7 +337,7 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 		}
 		store := idleFixture(t, validTestGraph(), hexID(20))
 		exec := compactionExecution(t, compact, nil)
-		exec.Strategy = &StrategyBinding{ID: "test.accept/v1", Strategy: acceptAnyStrategy{}}
+		exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: "test.accept/v1", Strategy: acceptAnyStrategy{}})
 		capture := testCapture()
 		capture.Strategy = StrategyCapture{ID: "test.accept/v1"}
 		prepared := compactPrepared(capture, exec)
@@ -836,7 +836,7 @@ func TestMaintenanceNonComparableCauseSettlesWithoutPanic(t *testing.T) {
 					return summaryStream("summary", model.Usage{}), nil
 				}
 				exec := purposeExecution(quietConversation(), compactFn)
-				exec.Strategy = binding
+				exec.ResolveStrategy = fixedStrategyResolver(binding)
 				exec.OpenInvocation = func(ctx context.Context, request InvocationRequest) (InvocationExecution, error) {
 					if row.source == "opener" && request.Purpose == InvocationPurposeMaintenance {
 						return InvocationExecution{}, row.cause
@@ -953,7 +953,7 @@ func TestCommitCompactionAutomaticCommitsAtomically(t *testing.T) {
 	exec := purposeExecution(conversation, func(context.Context, model.Request) (model.Stream, error) {
 		return summaryStream("summary one", usage), nil
 	})
-	exec.Strategy = &StrategyBinding{ID: "test.auto/v1", Strategy: strategy}
+	exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: "test.auto/v1", Strategy: strategy})
 	h, store, c, sessionID := newAdmittedHarness(t, context.Background(), PreparedExecution{
 		Capture: capture,
 		Open: func(context.Context, OperationAdmission) (Execution, error) {

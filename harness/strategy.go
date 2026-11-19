@@ -26,9 +26,9 @@ const (
 // PlanInput is the frozen owned input of one maintenance procedure: the
 // trigger kind, the frozen canonical model messages of the conversation view
 // the procedure may consume, that view's canonical checkpoint and boundary
-// references, the captured instructions and tool catalog, the separate frozen
-// request contributions, the optional conversation measurement, the captured
-// model limits, and the captured strategy settings as owned strategy input.
+// references, the captured instructions and tool catalog, the optional
+// conversation measurement, the captured model limits, and the captured
+// strategy settings as owned strategy input.
 type PlanInput struct {
 	Trigger           string
 	Messages          []model.Message
@@ -36,7 +36,6 @@ type PlanInput struct {
 	BoundaryEntryID   string
 	Instructions      string
 	Tools             []model.ToolDefinition
-	Contributions     *RequestEvidence
 	Measurement       *UsageCount
 	ContextWindow     int
 	OutputReserve     int
@@ -128,15 +127,6 @@ func IncludedStrategyBinding() *StrategyBinding {
 		RequiresContextWindow: true,
 		Strategy:              summaryStrategy{},
 	}
-}
-
-// resolveStrategyBinding selects the execution's binding: nil is the included
-// one.
-func resolveStrategyBinding(binding *StrategyBinding) *StrategyBinding {
-	if binding == nil {
-		return IncludedStrategyBinding()
-	}
-	return binding
 }
 
 // validatePlanOutput enforces the closed plan union: exactly one variant

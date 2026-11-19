@@ -162,14 +162,10 @@ func (d *executionDriver) execute(execCtx context.Context) (agent.TerminalResult
 		}
 		return agent.TerminalResult{}, err
 	}
-	// The opened Execution owns its selected strategy from here: the resolved
-	// StrategyBinding value is copied once, before any invocation or strategy
-	// callback, so every maintenance procedure of this Execution selects the
-	// same accepted binding and a caller mutating its own supplied binding
-	// afterwards can never change the selection. A nil selection resolves to
-	// a copy of the included binding.
-	acceptedBinding := *resolveStrategyBinding(exec.Strategy)
-	exec.Strategy = &acceptedBinding
+	// The opened Execution supplies the invocation opener and its explicit
+	// strategy fallback; a host that owns per-procedure strategy resolution
+	// supplies ResolveStrategy and the procedure accepts one binding at each
+	// start from the retained execution configuration.
 	if exec.OpenInvocation == nil {
 		if exec.Close != nil {
 			h.recordCleanupFailure(exec.Close())
@@ -202,7 +198,7 @@ func (d *executionDriver) execute(execCtx context.Context) (agent.TerminalResult
 			OutputReserve:     d.capture.OutputReserve,
 			Settings:          model.CloneRaw(d.capture.Strategy.Settings),
 		}
-		_, err = d.completeMaintenance(execCtx, planInput, nil, true)
+		_, err = d.completeMaintenance(execCtx, planInput, true)
 		return agent.TerminalResult{}, err
 	}
 	conversation, err := d.openInvocation(execCtx, InvocationPurposeConversation, d.capture.Model)

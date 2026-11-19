@@ -388,7 +388,7 @@ func conversationModelEffect(resultID string) (*ActiveEffect, *RunningRequest) {
 		Purpose:       InvocationPurposeConversation,
 		Evidence:      evidence,
 	}
-	return effect, &RunningRequest{RequestID: "request-active", BoundaryEntryID: hexID(1)}
+	return effect, &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1)}
 }
 
 // toolBoundHookEffect returns a coherent tool-bound hook active effect for
@@ -521,7 +521,7 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 }
 
 func TestEvidenceCatalogForCommittedOwners(t *testing.T) {
-	for _, owner := range []string{"hook", "checkpoint", "settlement"} {
+	for _, owner := range []string{"hook", "settlement"} {
 		for _, foreign := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/foreign=%v", owner, foreign), func(t *testing.T) {
 				fixture := validTestGraph()
@@ -539,12 +539,6 @@ func TestEvidenceCatalogForCommittedOwners(t *testing.T) {
 					assistant.assistant.RequestID = "request-one"
 					assistant.assistant.Evidence.HookIDs = []HookIdentity{{ExtensionID: hook.ExtensionID, HookID: hook.HookID}}
 					fixture.entries = []testEntry{fixture.entries[0], {env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryHookResult, Sequence: 2, CommittedAt: testTime}, hookResult: &hook}, assistant}
-				case "checkpoint":
-					comp := validCompactionEntry(testOpID)
-					comp.EntryID = hexID(5)
-					comp.Evidence.ToolNames = names
-					fixture.entries = append(fixture.entries, testEntry{env: Entry{SessionID: testSessionID, ID: hexID(5), OperationID: testOpID, Kind: EntryCompaction, Sequence: 3, CommittedAt: testTime}, compaction: &comp})
-					fixture.session.State.CheckpointEntryID = hexID(5)
 				case "settlement":
 					settlement := validSettlementEntry()
 					settlement.EntryID = hexID(3)
@@ -736,7 +730,7 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 			env: Entry{SessionID: testSessionID, ID: hexID(5), OperationID: testOpID, Kind: EntryCompaction, Sequence: 3, CommittedAt: testTime}, compaction: &comp,
 		})
 		fixture.session.State.CheckpointEntryID = hexID(5)
-		fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(5)}
+		fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(5)}
 		if _, err := validateFixture(t, fixture.storage(t), testSessionID); err != nil {
 			t.Fatalf("summary-only running request boundary: %v", err)
 		}
@@ -753,7 +747,7 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(6), OperationID: testOpID, Kind: EntrySignal, Sequence: 4, CommittedAt: testTime}, signal: &signal},
 		)
 		fixture.session.State.CheckpointEntryID = hexID(5)
-		fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(6)}
+		fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(6)}
 		if _, err := validateFixture(t, fixture.storage(t), testSessionID); err != nil {
 			t.Fatalf("later canonical tail boundary: %v", err)
 		}
@@ -772,7 +766,6 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 		fixture.ops = append(fixture.ops, second)
 		comp := validCompactionEntry("op-2")
 		comp.EntryID = hexID(3)
-		comp.ConsumedRequestID = "" // the dedicated compact Operation's own maintenance carries no conversation source
 		settlement := validSettlementEntry()
 		settlement.EntryID = hexID(4)
 		settlement.OperationID = "op-2"
@@ -1902,10 +1895,10 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 		}},
 		{"active request hook names itself in its consumed provenance", func(t *testing.T, fixture *testGraph) {
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
-				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.two", ExtensionID: "ext.two", RequestID: "request-active",
+				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.two", ExtensionID: "ext.two", RequestID: "request-active", Purpose: InvocationPurposeConversation,
 				Evidence: &RequestEvidence{BoundaryEntryID: hexID(1), HookIDs: []HookIdentity{{ExtensionID: "ext.two", HookID: "cap.hook.two"}}},
 			}
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", BoundaryEntryID: hexID(1)}
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1)}
 		}},
 		{"active request hook provenance omits a committed request hook", func(t *testing.T, fixture *testGraph) {
 			hook := validRequestBoundHookResult(hookSucceeded)
@@ -1915,10 +1908,10 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 				env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryHookResult, Sequence: 2, CommittedAt: testTime}, hookResult: &hook,
 			})
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
-				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.two", ExtensionID: "ext.two", RequestID: "request-one",
+				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.two", ExtensionID: "ext.two", RequestID: "request-one", Purpose: InvocationPurposeConversation,
 				Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)},
 			}
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-one", BoundaryEntryID: hexID(1), HookResults: []EntryRef{{SessionID: testSessionID, EntryID: hexID(3)}}}
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-one", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1), HookResults: []EntryRef{{SessionID: testSessionID, EntryID: hexID(3)}}}
 		}},
 		{"running request hook results reference committed hooks out of order", func(t *testing.T, fixture *testGraph) {
 			first := validRequestBoundHookResult(hookSucceeded)
@@ -1934,10 +1927,10 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 				testEntry{env: Entry{SessionID: testSessionID, ID: hexID(4), OperationID: testOpID, Kind: EntryHookResult, Sequence: 3, CommittedAt: testTime}, hookResult: &second},
 			)
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
-				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.three", ExtensionID: "ext.three", RequestID: "request-one",
+				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.three", ExtensionID: "ext.three", RequestID: "request-one", Purpose: InvocationPurposeConversation,
 				Evidence: &RequestEvidence{BoundaryEntryID: hexID(1), HookIDs: []HookIdentity{{ExtensionID: "ext.one", HookID: "cap.hook.one"}, {ExtensionID: "ext.one", HookID: "cap.hook.two"}}},
 			}
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-one", BoundaryEntryID: hexID(1), HookResults: []EntryRef{{SessionID: testSessionID, EntryID: hexID(4)}, {SessionID: testSessionID, EntryID: hexID(3)}}}
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-one", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1), HookResults: []EntryRef{{SessionID: testSessionID, EntryID: hexID(4)}, {SessionID: testSessionID, EntryID: hexID(3)}}}
 		}},
 		{"settled request evidence names a hook result committed later", func(t *testing.T, fixture *testGraph) {
 			stamped := testTime
@@ -2082,7 +2075,7 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 				env: Entry{SessionID: testSessionID, ID: hexID(5), OperationID: testOpID, Kind: EntryCompaction, Sequence: 3, CommittedAt: testTime}, compaction: &comp,
 			})
 			fixture.session.State.CheckpointEntryID = hexID(5)
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)}
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)}
 		}},
 		{"active request hook effect references a boundary its checkpoint covered", func(t *testing.T, fixture *testGraph) {
 			comp := validCompactionEntry(testOpID)
@@ -2092,18 +2085,10 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 			})
 			fixture.session.State.CheckpointEntryID = hexID(5)
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
-				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.one", ExtensionID: "ext.one", RequestID: "request-active",
+				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.one", ExtensionID: "ext.one", RequestID: "request-active", Purpose: InvocationPurposeConversation,
 				Evidence: &RequestEvidence{CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)},
 			}
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)}
-		}},
-		{"automatic maintenance record names no consumed conversation request", func(t *testing.T, fixture *testGraph) {
-			comp := validCompactionEntry(testOpID)
-			comp.EntryID = hexID(3)
-			comp.ConsumedRequestID = ""
-			fixture.entries = append(fixture.entries, testEntry{
-				env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryCompaction, Sequence: 3, CommittedAt: testTime}, compaction: &comp,
-			})
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)}
 		}},
 	}
 	// The input-ownership rows share ONE generic typed-corruption diagnostic:
@@ -2713,10 +2698,17 @@ func TestForkCopyCompactionEntries(t *testing.T) {
 		}
 		testassert.Equal(t, len(copiedCompactions), 2)
 		testassert.Require(t, copiedCompactionIDs[0] != hexID(3) && copiedCompactionIDs[1] != hexID(4), "copied compaction identities %v are not both fresh", copiedCompactionIDs)
+		copiedIDs := make(map[string]bool, len(commit.entries))
+		for i := range commit.entries {
+			copiedIDs[commit.entries[i].Envelope.ID] = true
+		}
 		for i, v := range copiedCompactions {
 			testassert.Require(t, v.SessionID == destID && v.EntryID == copiedCompactionIDs[i], "copied compaction identity %s/%s, want destination identities", v.SessionID, v.EntryID)
-			testassert.Require(t, v.ConsumedRequestID == "request-two", "copied compaction %s consumed source = %q, want the source identity carried unchanged and informational", v.EntryID, v.ConsumedRequestID)
 			testassert.Equal(t, v.OperationID, "")
+			testassert.Require(t, v.Evidence != nil && copiedIDs[v.Evidence.BoundaryEntryID], "copied compaction evidence = %+v, want a destination-local boundary reference", v.Evidence)
+			if v.Evidence.CheckpointEntryID != "" {
+				testassert.Require(t, copiedIDs[v.Evidence.CheckpointEntryID], "copied compaction evidence = %+v, want a destination-local checkpoint reference", v.Evidence)
+			}
 			for _, fact := range v.Facts {
 				if fact.Usage != nil {
 					t.Fatalf("copied compaction carries source usage %+v", *fact.Usage)

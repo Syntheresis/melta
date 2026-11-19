@@ -330,7 +330,7 @@ func compactRawRunningModelState(now, reserved, boundary string) string {
 	return fmt.Sprintf(
 		`{"status":"running","started_at":%q,`+
 			`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live-%s","model":{"provider":"prov","model":"m"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"compact-sys","tool_names":[]}},`+
-			`"running_request":{"request_id":"request-live-%s","boundary_entry_id":%q,"hook_results":[]},`+
+			`"running_request":{"request_id":"request-live-%s","purpose":"conversation","boundary_entry_id":%q,"hook_results":[]},`+
 			`"pending_tool_calls":[],"usage":{"by_model":[]}}`,
 		now, reserved, reserved, boundary, reserved, boundary)
 }
@@ -370,8 +370,8 @@ func compactRawCompactionEntry(sessionID, entryID, operationID, summary, boundar
 			`"messages":[{"role":"assistant","source":{"provider":"prov","model":"m"},"content":[{"kind":"text","text":%q}]}],`+
 			`"boundary_entry_id":%q,"configuration_revision":"rev-1",`+
 			`"facts":[{"request_id":%q,"model":{"provider":"prov","model":"m"},"input":[{"role":"user","content":[{"kind":"text","text":"transcript seed"}]}]}],`+
-			`"consumed_request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"compact-sys","tool_names":[]}}`,
-		sessionID, entryID, operationID, "[Previous conversation summary]\n\n"+summary+"\n\n[End of summary. Continue from here.]", boundaryID, "maintainer-"+entryID, "request-"+operationID, boundaryID)
+			`"evidence":{"boundary_entry_id":%q,"prompt":"","tool_names":[]}}`,
+		sessionID, entryID, operationID, "[Previous conversation summary]\n\n"+summary+"\n\n[End of summary. Continue from here.]", boundaryID, "maintainer-"+entryID, boundaryID)
 }
 
 // compactRawSuccessOperation seeds one settled success message Operation:

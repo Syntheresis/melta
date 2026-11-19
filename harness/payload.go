@@ -557,6 +557,9 @@ func validateAssistantEntry(v assistantEntry) error {
 	if v.Evidence == nil {
 		return errors.New("assistant entry requires its effective request evidence")
 	}
+	if v.Evidence.BoundaryEntryID == "" {
+		return errors.New("assistant entry requires a nonempty boundary reference")
+	}
 	if err := validateRequestEvidence(*v.Evidence); err != nil {
 		return err
 	}
@@ -868,6 +871,9 @@ func encodeHookResultEntry(v hookResultEntry) (json.RawMessage, error) {
 	if v.RequestID != "" {
 		obj["request_id"] = mustMarshal(v.RequestID)
 	}
+	if v.Purpose != "" {
+		obj["purpose"] = mustMarshal(string(v.Purpose))
+	}
 	if v.Status == hookSucceeded {
 		// A successful effectful execution always carries its binding-owned
 		// consequence record.
@@ -907,7 +913,7 @@ func decodeHookResultEntry(env Entry) (hookResultEntry, error) {
 	if err != nil {
 		return hookResultEntry{}, err
 	}
-	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "hook_id", "extension_id", "tool_call_id", "request_id", "status", "evidence", "arguments_base64", "error", "input_arguments_base64", "input_evidence", "consequence"); err != nil {
+	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "hook_id", "extension_id", "tool_call_id", "request_id", "purpose", "status", "evidence", "arguments_base64", "error", "input_arguments_base64", "input_evidence", "consequence"); err != nil {
 		return hookResultEntry{}, err
 	}
 	sessionID, err := stringMember(obj, "session_id", true)
@@ -935,6 +941,10 @@ func decodeHookResultEntry(env Entry) (hookResultEntry, error) {
 		return hookResultEntry{}, err
 	}
 	requestID, err := optionalNonEmptyString(obj, "request_id")
+	if err != nil {
+		return hookResultEntry{}, err
+	}
+	purpose, err := optionalNonEmptyString(obj, "purpose")
 	if err != nil {
 		return hookResultEntry{}, err
 	}
@@ -1015,6 +1025,7 @@ func decodeHookResultEntry(env Entry) (hookResultEntry, error) {
 		ExtensionID:          extensionID,
 		ToolCallID:           toolCallID,
 		RequestID:            requestID,
+		Purpose:              InvocationPurpose(purpose),
 		Status:               hookResultStatus(status),
 		Evidence:             ExecutionEvidence(evidence),
 		Arguments:            arguments,
@@ -1076,6 +1087,9 @@ func validateHookResultEntry(v hookResultEntry) error {
 		return errors.New("hook result binds exactly one of a tool call or a request")
 	}
 	if v.ToolCallID != "" {
+		if v.Purpose != "" {
+			return errors.New("tool-bound hook result carries no purpose")
+		}
 		if err := validateOperationIdentity(v.ToolCallID, "hook result tool call id"); err != nil {
 			return err
 		}
@@ -1089,8 +1103,16 @@ func validateHookResultEntry(v hookResultEntry) error {
 			return errors.New("tool-bound hook result carries no request consequence")
 		}
 	} else {
+		switch v.Purpose {
+		case InvocationPurposeConversation, InvocationPurposeMaintenance:
+		default:
+			return fmt.Errorf("request-bound hook result purpose %q is not one of conversation or maintenance", v.Purpose)
+		}
 		if err := validateOperationIdentity(v.RequestID, "hook result request id"); err != nil {
 			return err
+		}
+		if v.Purpose != InvocationPurposeMaintenance && v.InputEvidence != nil && v.InputEvidence.BoundaryEntryID == "" {
+			return errors.New("conversation request-bound hook result requires a nonempty boundary reference")
 		}
 		if v.InputArgumentsBase64 != "" {
 			return errors.New("request-bound hook result carries no argument bytes input")
@@ -1336,31 +1358,29 @@ func encodeOperationSettlementEntry(v operationSettlementEntry) (json.RawMessage
 		factsRaw = raw
 	}
 	wire, err := json.Marshal(struct {
-		SessionID         string          `json:"session_id"`
-		EntryID           string          `json:"entry_id"`
-		OperationID       string          `json:"operation_id"`
-		Status            string          `json:"status"`
-		Detail            string          `json:"detail,omitempty"`
-		Model             json.RawMessage `json:"model,omitempty"`
-		Usage             *UsageCount     `json:"usage,omitempty"`
-		CompactionUsage   bool            `json:"compaction_usage,omitempty"`
-		RequestID         string          `json:"request_id,omitempty"`
-		ConsumedRequestID string          `json:"consumed_request_id,omitempty"`
-		Evidence          json.RawMessage `json:"evidence,omitempty"`
-		Facts             json.RawMessage `json:"facts,omitempty"`
+		SessionID       string          `json:"session_id"`
+		EntryID         string          `json:"entry_id"`
+		OperationID     string          `json:"operation_id"`
+		Status          string          `json:"status"`
+		Detail          string          `json:"detail,omitempty"`
+		Model           json.RawMessage `json:"model,omitempty"`
+		Usage           *UsageCount     `json:"usage,omitempty"`
+		CompactionUsage bool            `json:"compaction_usage,omitempty"`
+		RequestID       string          `json:"request_id,omitempty"`
+		Evidence        json.RawMessage `json:"evidence,omitempty"`
+		Facts           json.RawMessage `json:"facts,omitempty"`
 	}{
-		SessionID:         v.SessionID,
-		EntryID:           v.EntryID,
-		OperationID:       v.OperationID,
-		Status:            string(v.Status),
-		Detail:            v.Detail,
-		Model:             modelRaw,
-		Usage:             v.Usage,
-		CompactionUsage:   v.CompactionUsage,
-		RequestID:         v.RequestID,
-		ConsumedRequestID: v.ConsumedRequestID,
-		Evidence:          evidenceRaw,
-		Facts:             factsRaw,
+		SessionID:       v.SessionID,
+		EntryID:         v.EntryID,
+		OperationID:     v.OperationID,
+		Status:          string(v.Status),
+		Detail:          v.Detail,
+		Model:           modelRaw,
+		Usage:           v.Usage,
+		CompactionUsage: v.CompactionUsage,
+		RequestID:       v.RequestID,
+		Evidence:        evidenceRaw,
+		Facts:           factsRaw,
 	})
 	if err != nil {
 		return nil, err
@@ -1379,7 +1399,7 @@ func decodeOperationSettlementEntry(env Entry) (operationSettlementEntry, error)
 	if err != nil {
 		return operationSettlementEntry{}, err
 	}
-	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "status", "detail", "model", "usage", "compaction_usage", "request_id", "consumed_request_id", "evidence", "facts"); err != nil {
+	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "status", "detail", "model", "usage", "compaction_usage", "request_id", "evidence", "facts"); err != nil {
 		return operationSettlementEntry{}, err
 	}
 	sessionID, err := stringMember(obj, "session_id", true)
@@ -1434,10 +1454,6 @@ func decodeOperationSettlementEntry(env Entry) (operationSettlementEntry, error)
 	if err != nil {
 		return operationSettlementEntry{}, err
 	}
-	consumedRequestID, err := optionalNonEmptyString(obj, "consumed_request_id")
-	if err != nil {
-		return operationSettlementEntry{}, err
-	}
 	var evidence *RequestEvidence
 	if _, present := obj["evidence"]; present {
 		decoded, err := decodeRequestEvidence(obj["evidence"])
@@ -1466,18 +1482,17 @@ func decodeOperationSettlementEntry(env Entry) (operationSettlementEntry, error)
 		return operationSettlementEntry{}, fmt.Errorf("payload operation id %q does not agree with the envelope", operationID)
 	}
 	v := operationSettlementEntry{
-		SessionID:         sessionID,
-		EntryID:           entryID,
-		OperationID:       operationID,
-		Status:            OperationState(status),
-		Detail:            detail,
-		Model:             ref,
-		Usage:             usage,
-		CompactionUsage:   compactionUsage,
-		RequestID:         requestID,
-		ConsumedRequestID: consumedRequestID,
-		Evidence:          evidence,
-		Facts:             facts,
+		SessionID:       sessionID,
+		EntryID:         entryID,
+		OperationID:     operationID,
+		Status:          OperationState(status),
+		Detail:          detail,
+		Model:           ref,
+		Usage:           usage,
+		CompactionUsage: compactionUsage,
+		RequestID:       requestID,
+		Evidence:        evidence,
+		Facts:           facts,
 	}
 	if err := validateOperationSettlementEntry(v); err != nil {
 		return operationSettlementEntry{}, err
@@ -1489,11 +1504,10 @@ func decodeOperationSettlementEntry(env Entry) (operationSettlementEntry, error)
 // non-empty owning Operation identity, terminal status with the contract
 // detail rule (success empty, failure and interruption non-empty), the
 // usage-requires-model identity relation (a model identity alone marks a
-// no-output terminal model producer whose usage report was absent),
-// maintenance facts settling beside any ordinary usage on every terminal kind
-// with the maintenance producer witness required beside the maintenance
-// provenance marker, and a consumed source identity present only beside
-// maintenance evidence provenance.
+// no-output terminal model producer whose usage report was absent), and
+// maintenance facts settling beside any ordinary usage on every terminal kind.
+// Each fact owns its producer identity; a terminal carrying earlier facts does
+// not need a request identity of its own.
 func validateOperationSettlementEntry(v operationSettlementEntry) error {
 	if err := validateHexID(v.SessionID, "session id"); err != nil {
 		return err
@@ -1503,14 +1517,6 @@ func validateOperationSettlementEntry(v operationSettlementEntry) error {
 	}
 	if err := validateOperationIdentity(v.OperationID, "operation id"); err != nil {
 		return err
-	}
-	if v.ConsumedRequestID != "" {
-		if err := validateOperationIdentity(v.ConsumedRequestID, "settlement consumed request id"); err != nil {
-			return err
-		}
-		if v.Evidence == nil || !v.CompactionUsage {
-			return errors.New("settlement consumed request identity requires maintenance evidence provenance")
-		}
 	}
 	switch v.Status {
 	case OperationSuccess:
@@ -1531,14 +1537,18 @@ func validateOperationSettlementEntry(v operationSettlementEntry) error {
 		return errors.New("settlement evidence requires its request identity")
 	}
 	if v.Evidence != nil {
+		if v.CompactionUsage {
+			if err := validateFrozenInputEvidence(*v.Evidence, true); err != nil {
+				return fmt.Errorf("evidence: %w", err)
+			}
+		} else if v.Evidence.BoundaryEntryID == "" {
+			return errors.New("conversation settlement evidence requires a nonempty boundary reference")
+		}
 		if err := validateRequestEvidence(*v.Evidence); err != nil {
 			return err
 		}
 	}
 	if len(v.Facts) > 0 {
-		if v.CompactionUsage && v.RequestID == "" {
-			return errors.New("settlement maintenance facts require their request identity")
-		}
 		if err := validateMaintenanceFacts(v.Facts); err != nil {
 			return err
 		}
@@ -1707,7 +1717,6 @@ func encodeContextCheckpointEntry(v contextCheckpointEntry) (json.RawMessage, er
 		BoundaryEntryID       string          `json:"boundary_entry_id"`
 		ConfigurationRevision string          `json:"configuration_revision"`
 		Facts                 json.RawMessage `json:"facts"`
-		ConsumedRequestID     string          `json:"consumed_request_id,omitempty"`
 		Evidence              json.RawMessage `json:"evidence"`
 	}{
 		SessionID:             v.SessionID,
@@ -1718,7 +1727,6 @@ func encodeContextCheckpointEntry(v contextCheckpointEntry) (json.RawMessage, er
 		BoundaryEntryID:       v.BoundaryEntryID,
 		ConfigurationRevision: v.ConfigurationRevision,
 		Facts:                 factsRaw,
-		ConsumedRequestID:     v.ConsumedRequestID,
 		Evidence:              evidenceRaw,
 	})
 }
@@ -1733,7 +1741,7 @@ func decodeContextCheckpointEntry(env Entry) (contextCheckpointEntry, error) {
 	if err != nil {
 		return contextCheckpointEntry{}, err
 	}
-	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "strategy_id", "messages", "boundary_entry_id", "configuration_revision", "facts", "consumed_request_id", "evidence"); err != nil {
+	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "strategy_id", "messages", "boundary_entry_id", "configuration_revision", "facts", "evidence"); err != nil {
 		return contextCheckpointEntry{}, err
 	}
 	sessionID, err := stringMember(obj, "session_id", true)
@@ -1780,10 +1788,6 @@ func decodeContextCheckpointEntry(env Entry) (contextCheckpointEntry, error) {
 	if err != nil {
 		return contextCheckpointEntry{}, fmt.Errorf("member %q: %w", "facts", err)
 	}
-	consumedRequestID, err := optionalNonEmptyString(obj, "consumed_request_id")
-	if err != nil {
-		return contextCheckpointEntry{}, err
-	}
 	evidence, err := decodeRequestEvidence(obj["evidence"])
 	if err != nil {
 		return contextCheckpointEntry{}, fmt.Errorf("member %q: %w", "evidence", err)
@@ -1806,7 +1810,6 @@ func decodeContextCheckpointEntry(env Entry) (contextCheckpointEntry, error) {
 		BoundaryEntryID:       boundaryEntryID,
 		ConfigurationRevision: configurationRevision,
 		Facts:                 facts,
-		ConsumedRequestID:     consumedRequestID,
 		Evidence:              &evidence,
 	}
 	if err := validateContextCheckpointEntry(v); err != nil {
@@ -1865,13 +1868,14 @@ func validateContextCheckpointEntry(v contextCheckpointEntry) error {
 	if err := validateMaintenanceFacts(v.Facts); err != nil {
 		return err
 	}
-	if v.ConsumedRequestID != "" {
-		if err := validateOperationIdentity(v.ConsumedRequestID, "checkpoint consumed request id"); err != nil {
-			return err
-		}
-	}
 	if v.Evidence == nil {
-		return errors.New("context checkpoint entry requires its consumed contribution evidence")
+		return errors.New("context checkpoint entry requires its frozen canonical input evidence")
+	}
+	if v.Evidence.BoundaryEntryID == "" {
+		return errors.New("context checkpoint entry requires a nonempty boundary reference")
+	}
+	if err := validateFrozenInputEvidence(*v.Evidence, true); err != nil {
+		return fmt.Errorf("evidence: %w", err)
 	}
 	return validateRequestEvidence(*v.Evidence)
 }
@@ -3448,6 +3452,9 @@ func validateActiveEffect(v ActiveEffect) error {
 			if v.Evidence == nil {
 				return errors.New("conversation model active effect requires its effective input evidence")
 			}
+			if v.Evidence.BoundaryEntryID == "" {
+				return errors.New("conversation model active effect requires a nonempty boundary reference")
+			}
 		case InvocationPurposeMaintenance:
 			if v.Evidence != nil {
 				return errors.New("maintenance model active effect carries no conversation evidence")
@@ -3501,12 +3508,20 @@ func validateActiveEffect(v ActiveEffect) error {
 		if v.ExtensionID == "" {
 			return errors.New("hook active effect requires its extension identity")
 		}
-		if v.Model != nil || v.Purpose != "" {
+		if v.Model != nil {
 			return errors.New("hook active effect carries no model identity")
 		}
 		if v.RequestID != "" {
+			switch v.Purpose {
+			case InvocationPurposeConversation, InvocationPurposeMaintenance:
+			default:
+				return fmt.Errorf("request-bound hook active effect purpose %q is not one of conversation or maintenance", v.Purpose)
+			}
 			if v.Evidence == nil {
 				return errors.New("request-bound hook active effect requires its consumed input evidence")
+			}
+			if v.Purpose == InvocationPurposeConversation && v.Evidence.BoundaryEntryID == "" {
+				return errors.New("conversation request-bound hook active effect requires a nonempty boundary reference")
 			}
 			if err := validateRequestEvidence(*v.Evidence); err != nil {
 				return fmt.Errorf("evidence: %w", err)
@@ -3515,6 +3530,9 @@ func validateActiveEffect(v ActiveEffect) error {
 				return errors.New("request-bound hook active effect carries no argument members")
 			}
 		} else {
+			if v.Purpose != "" {
+				return errors.New("tool-bound hook active effect carries no purpose")
+			}
 			if v.Evidence != nil {
 				return errors.New("tool-bound hook active effect carries no evidence input")
 			}
@@ -3531,7 +3549,7 @@ func validateActiveEffect(v ActiveEffect) error {
 	return nil
 }
 
-// encodeRunningRequest renders one suspended conversation request state.
+// encodeRunningRequest renders one suspended request state.
 func encodeRunningRequest(v RunningRequest) (json.RawMessage, error) {
 	if err := validateRunningRequest(v); err != nil {
 		return nil, invalidInput("running request: %v", err)
@@ -3539,13 +3557,16 @@ func encodeRunningRequest(v RunningRequest) (json.RawMessage, error) {
 	return json.Marshal(v)
 }
 
-// decodeRunningRequest reads one suspended conversation request state with
-// exact keys.
+// decodeRunningRequest reads one suspended request state with exact keys.
 func decodeRunningRequest(obj map[string]json.RawMessage) (RunningRequest, error) {
-	if err := rejectUnknownMembers(obj, "request_id", "checkpoint_entry_id", "boundary_entry_id", "hook_results"); err != nil {
+	if err := rejectUnknownMembers(obj, "request_id", "purpose", "checkpoint_entry_id", "boundary_entry_id", "hook_results"); err != nil {
 		return RunningRequest{}, err
 	}
 	requestID, err := stringMember(obj, "request_id", true)
+	if err != nil {
+		return RunningRequest{}, err
+	}
+	purpose, err := stringMember(obj, "purpose", true)
 	if err != nil {
 		return RunningRequest{}, err
 	}
@@ -3575,6 +3596,7 @@ func decodeRunningRequest(obj map[string]json.RawMessage) (RunningRequest, error
 	}
 	v := RunningRequest{
 		RequestID:         requestID,
+		Purpose:           InvocationPurpose(purpose),
 		CheckpointEntryID: checkpointEntryID,
 		BoundaryEntryID:   boundaryEntryID,
 		HookResults:       hookResults,
@@ -3586,14 +3608,28 @@ func decodeRunningRequest(obj map[string]json.RawMessage) (RunningRequest, error
 }
 
 // validateRunningRequest enforces the closed running-request shape: the bound
-// request identity, the required canonical boundary reference, an optional
-// checkpoint reference, and committed request-hook result references.
+// request identity and actual purpose, the required canonical boundary
+// reference, an optional checkpoint reference, and committed request-hook
+// result references.
 func validateRunningRequest(v RunningRequest) error {
 	if err := validateOperationIdentity(v.RequestID, "running request id"); err != nil {
 		return err
 	}
-	if err := validateHexID(v.BoundaryEntryID, "running request boundary entry id"); err != nil {
-		return err
+	switch v.Purpose {
+	case InvocationPurposeConversation:
+		if err := validateHexID(v.BoundaryEntryID, "running request boundary entry id"); err != nil {
+			return err
+		}
+	case InvocationPurposeMaintenance:
+		if v.BoundaryEntryID == "" {
+			if v.CheckpointEntryID != "" {
+				return errors.New("running request checkpoint reference requires its boundary reference")
+			}
+		} else if err := validateHexID(v.BoundaryEntryID, "running request boundary entry id"); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("running request purpose %q is not one of conversation or maintenance", v.Purpose)
 	}
 	if v.CheckpointEntryID != "" {
 		if err := validateHexID(v.CheckpointEntryID, "running request checkpoint entry id"); err != nil {
@@ -3741,13 +3777,13 @@ func validateOperationState(v OperationCurrentState) error {
 			}
 		}
 		// One frozen request association rule covers every request-bound
-		// conversation intent: a conversation model effect and a request-bound
-		// hook effect each require the published running request with the same
-		// request identity and identical frozen canonical references. A
-		// maintenance model effect is the explicit exception: its producer
-		// identity may differ from the suspended conversation state, and it
-		// never forces them equal.
-		if v.ActiveEffect.Kind == EffectModel && v.ActiveEffect.Purpose == InvocationPurposeConversation ||
+		// intent: every model effect and every request-bound hook requires the
+		// published running request with the same request identity and actual
+		// purpose, and identical frozen canonical references when the intent
+		// carries them. An empty-history summary still publishes its
+		// purpose-bound slot with no canonical boundary. A missing or
+		// mismatched slot is corruption before repair.
+		if v.ActiveEffect.Kind == EffectModel ||
 			v.ActiveEffect.Kind == EffectHook && v.ActiveEffect.RequestID != "" {
 			if v.Request == nil {
 				return errors.New("request-bound active effect requires the published running request state")
@@ -3755,8 +3791,12 @@ func validateOperationState(v OperationCurrentState) error {
 			if v.Request.RequestID != v.ActiveEffect.RequestID {
 				return errors.New("request-bound active effect carries a request identity foreign to the published running request")
 			}
-			if v.Request.CheckpointEntryID != v.ActiveEffect.Evidence.CheckpointEntryID ||
-				v.Request.BoundaryEntryID != v.ActiveEffect.Evidence.BoundaryEntryID {
+			if v.Request.Purpose != v.ActiveEffect.Purpose {
+				return errors.New("request-bound active effect carries a purpose foreign to the published running request")
+			}
+			if v.ActiveEffect.Evidence != nil &&
+				(v.Request.CheckpointEntryID != v.ActiveEffect.Evidence.CheckpointEntryID ||
+					v.Request.BoundaryEntryID != v.ActiveEffect.Evidence.BoundaryEntryID) {
 				return errors.New("request-bound active effect references diverge from the published running request")
 			}
 		}
@@ -4188,13 +4228,35 @@ func decodeRequestEvidence(raw json.RawMessage) (RequestEvidence, error) {
 // boundary reference is required and durable-shaped, a present checkpoint
 // reference is durable-shaped, tool names are non-empty and unique, recorded
 // contributions are validated messages, and hook provenance is unique.
-func validateRequestEvidence(v RequestEvidence) error {
-	if err := validateHexID(v.BoundaryEntryID, "evidence boundary entry id"); err != nil {
-		return err
+// validateFrozenInputEvidence enforces the checkpoint and maintenance
+// settlement evidence shape: canonical boundary/checkpoint references only,
+// never effective prompt, messages, tool names or hook identities. A present
+// maintenance settlement record requires its boundary; a checkpoint always
+// does. The empty-history summary hook's consumed evidence is a different
+// record and may omit its boundary under its purpose.
+func validateFrozenInputEvidence(v RequestEvidence, requireBoundary bool) error {
+	if requireBoundary && v.BoundaryEntryID == "" {
+		return errors.New("frozen input evidence requires its canonical boundary reference")
 	}
-	if v.CheckpointEntryID != "" {
-		if err := validateHexID(v.CheckpointEntryID, "evidence checkpoint entry id"); err != nil {
+	if v.Prompt != "" || len(v.Messages) > 0 || len(v.ToolNames) > 0 || len(v.HookIDs) > 0 {
+		return errors.New("frozen input evidence carries only canonical boundary and checkpoint references")
+	}
+	return nil
+}
+
+func validateRequestEvidence(v RequestEvidence) error {
+	if v.BoundaryEntryID == "" {
+		if v.CheckpointEntryID != "" {
+			return errors.New("evidence checkpoint reference requires its boundary reference")
+		}
+	} else {
+		if err := validateHexID(v.BoundaryEntryID, "evidence boundary entry id"); err != nil {
 			return err
+		}
+		if v.CheckpointEntryID != "" {
+			if err := validateHexID(v.CheckpointEntryID, "evidence checkpoint entry id"); err != nil {
+				return err
+			}
 		}
 	}
 	for i, m := range v.Messages {

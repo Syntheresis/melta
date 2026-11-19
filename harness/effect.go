@@ -433,11 +433,10 @@ func publishedCallIDs(c *coordinator, operationID string) map[string]bool {
 // beginModelEffect commits the one active-effect intent of a logical model
 // effect: it reserves the effect's result entry identity, records the request
 // identity, actual model, purpose, and (for a conversation effect) the
-// effective input evidence it consumes, and publishes or preserves the
-// suspended conversation request state in the same transaction — a
-// conversation effect publishes its round's state when none is published, and
-// a maintenance effect publishes the supplied suspended conversation state
-// under the conversation identity, never replacing it with its own producer
+// effective input evidence it consumes, and publishes or preserves the one
+// suspended request state in the same transaction — a conversation effect
+// publishes its round's state when none is published, and a maintenance effect
+// publishes the supplied summary request state under its own producer
 // identity. The reserved identity stays free until the model result or the
 // consuming settlement commits under it. The caller continues on the
 // codec-adopted record the transaction wrote.
@@ -450,7 +449,7 @@ func publishedCallIDs(c *coordinator, operationID string) map[string]bool {
 // failure at the intent boundary: it propagates with the durable state
 // retained for recovery and is never followed by a guessed compensating
 // terminal write.
-func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operationID string, requestID string, purpose InvocationPurpose, mdl model.ModelRef, evidence *RequestEvidence, suspended *RunningRequest) (modelEffectIntent, error) {
+func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operationID string, requestID string, purpose InvocationPurpose, mdl model.ModelRef, evidence *RequestEvidence, requestState *RunningRequest) (modelEffectIntent, error) {
 	c.mu.Lock()
 	op, ok := c.graph.Operation(operationID)
 	if !ok {
@@ -520,6 +519,7 @@ func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operatio
 				if next.State.Request == nil {
 					next.State.Request = &RunningRequest{
 						RequestID:         requestID,
+						Purpose:           InvocationPurposeConversation,
 						CheckpointEntryID: evidence.CheckpointEntryID,
 						BoundaryEntryID:   evidence.BoundaryEntryID,
 					}
@@ -535,8 +535,8 @@ func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operatio
 				}
 			}
 		case InvocationPurposeMaintenance:
-			if next.State.Request == nil && suspended != nil {
-				published := *suspended
+			if next.State.Request == nil && requestState != nil {
+				published := *requestState
 				next.State.Request = &published
 			}
 		}
@@ -591,8 +591,9 @@ func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operatio
 // the semantic result entries, usage, the complete next Operation state, and
 // the required Session state. A running result clears the active effect and
 // records the completed calls' reservations; the suspended running request
-// state survives a result that produced a pending batch and a maintenance
-// result unchanged, and clears at a conversation result with no batch. A
+// state survives a result that produced a pending batch and clears at every
+// request's result with no batch — including the completed summary request
+// before the strategy folds its output. A
 // terminal result runs the common terminal helper — preserving any produced
 // assistant payload, interrupting every call that will not execute, appending
 // exactly one interruption signal, appending the settlement entry, writing the
@@ -751,8 +752,12 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 		next.State.Usage = opUsage
 		next.State.Status = OperationRunning
 		next.State.PendingToolCalls = append(next.State.PendingToolCalls, pending...)
-		if (intent == nil || !intent.compaction) && len(next.State.PendingToolCalls) == 0 {
-			next.State.Request = nil // the conversation result closed its request with no batch to suspend
+		if len(next.State.PendingToolCalls) == 0 {
+			// A request with no surviving batch is complete: the conversation
+			// result clears its own request, and a completed maintenance model
+			// clears the one summary request it was shaping before the pure
+			// folding stage consumes its output.
+			next.State.Request = nil
 		}
 		if intent != nil && intent.compaction {
 			// The completed maintenance model intent's empty running result leaves its
@@ -907,6 +912,7 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 			ExtensionID:          intent.ExtensionID,
 			ToolCallID:           intent.ToolCallID,
 			RequestID:            intent.RequestID,
+			Purpose:              intent.Purpose,
 			Status:               hookInterrupted,
 			Evidence:             ExecutionUnknown,
 			Error:                recoveryInterruptedDetail,
@@ -1051,17 +1057,14 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 		CompactionUsage: compactionUsage,
 	}
 	// The settlement's request witness: a maintenance-family settlement
-	// names its own producer identity (never a replacement of the suspended
-	// conversation state, which lives on the register state until this
-	// terminal clears it), recovery-included: an active maintenance intent no
-	// retained Fact witnesses still names that producer; otherwise the
-	// published running request; otherwise a live model intent's identity.
-	// Ordinary accumulated maintenance facts can ride any terminal kind
-	// without owning the settlement's own witness.
+	// names its own producer identity; recovery-included, an active
+	// maintenance intent no retained Fact witnesses still names that
+	// producer; otherwise the published running request; otherwise a live
+	// model intent's identity. Ordinary accumulated maintenance facts can
+	// ride any terminal kind without owning the settlement's own witness.
 	switch {
 	case compactionUsage && facts != nil && (facts.hasInput() || facts.hasConsumed()):
-		settlement.RequestID = maintenanceID
-		settlement.ConsumedRequestID = facts.sourceRequestID
+		settlement.RequestID = maintenanceID // a real maintenance request identity, empty when none opened
 	case assistant == nil && activeEffect != nil && activeEffect.Kind == EffectModel &&
 		activeEffect.Purpose == InvocationPurposeMaintenance && activeEffect.RequestID != "":
 		// Recovery retains no process-local Facts: the live maintenance
@@ -1076,7 +1079,7 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 		if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Evidence != nil {
 			evidence := *activeEffect.Evidence
 			settlement.Evidence = &evidence
-		} else if compactionUsage && facts != nil && facts.hasConsumed() {
+		} else if compactionUsage && facts != nil && facts.hasConsumed() && settlement.RequestID != "" {
 			consumed := facts.consumed
 			settlement.Evidence = &consumed
 		}
@@ -1920,16 +1923,16 @@ func (h *Harness) beginPendingCallEffect(ctx context.Context, c *coordinator, op
 // beginRequestHookEffect commits the one active-effect intent of a
 // request-bound hook effect: it reserves a fresh result identity, records the
 // hook identity, extension identity, and the consumed effective-view evidence
-// before any callback runs, and publishes the suspended conversation request
-// state inside this same existing effect transition when none is published
-// yet — the request state is never written by a pure-only transaction.
+// before any callback runs, and publishes the one suspended request state
+// inside this same existing effect transition when none is published yet —
+// the request state is never written by a pure-only transaction.
 // The intent owner follows beginModelEffect's origin rule: a cancellation
 // observed before the intent transaction is ever invoked returns unwrapped;
 // once the transaction is invoked it runs on a cancellation-free copy of the
 // execution context, so every error from it is a real store failure marked
 // publication-origin and propagates with the durable state retained for
 // recovery.
-func (h *Harness) beginRequestHookEffect(ctx context.Context, c *coordinator, operationID, requestID, hookID, extensionID string, consumed RequestEvidence) (string, error) {
+func (h *Harness) beginRequestHookEffect(ctx context.Context, c *coordinator, operationID, requestID string, purpose InvocationPurpose, hookID, extensionID string, consumed RequestEvidence) (string, error) {
 	c.mu.Lock()
 	op, ok := c.graph.Operation(operationID)
 	if !ok {
@@ -1982,6 +1985,7 @@ func (h *Harness) beginRequestHookEffect(ctx context.Context, c *coordinator, op
 			Kind:          EffectHook,
 			ResultEntryID: resultID,
 			RequestID:     requestID,
+			Purpose:       purpose,
 			HookID:        hookID,
 			ExtensionID:   extensionID,
 			Evidence:      &consumedCopy,
@@ -1989,6 +1993,7 @@ func (h *Harness) beginRequestHookEffect(ctx context.Context, c *coordinator, op
 		if next.State.Request == nil {
 			next.State.Request = &RunningRequest{
 				RequestID:         requestID,
+				Purpose:           purpose,
 				CheckpointEntryID: consumed.CheckpointEntryID,
 				BoundaryEntryID:   consumed.BoundaryEntryID,
 			}
@@ -2503,6 +2508,7 @@ func (h *Harness) commitHookResult(ctx context.Context, c *coordinator, operatio
 			res.InputArgumentsBase64 = intent.InputArgumentsBase64
 		} else {
 			res.RequestID = binding.requestID
+			res.Purpose = intent.Purpose
 			if intent.Evidence != nil {
 				consumed := *intent.Evidence
 				res.InputEvidence = &consumed
@@ -2585,21 +2591,20 @@ func (h *Harness) commitHookResult(ctx context.Context, c *coordinator, operatio
 // hook stops this boundary before its next external effect: the request is
 // never dispatched, the failure returns for the ordinary terminal settlement,
 // and an effectful failure durably settles its error hook_result.
-func (d *executionDriver) runRequestHooks(ctx context.Context, requestID string, view *requestView) error {
-	inv := d.conversation
+func (d *executionDriver) runRequestHooks(ctx context.Context, inv *openedInvocation, requestID string, view *requestView) error {
 	for _, hook := range inv.callbacks.RequestHooks {
 		if ctx.Err() != nil { // cancellation stops the next hook before anything commits
 			return errExecutionInterrupted
 		}
 		if hook.Mode == HookModePure {
-			consequence, err := d.runOneRequestHookPure(ctx, requestID, view, hook)
+			consequence, err := d.runOneRequestHookPure(ctx, inv, requestID, view, hook)
 			if err != nil {
 				return err
 			}
 			view.recordAccepted(HookIdentity{ExtensionID: hook.ExtensionID, HookID: hook.ID}, consequence)
 			continue
 		}
-		if err := d.runRequestHookEffect(ctx, hook, requestID, view); err != nil {
+		if err := d.runRequestHookEffect(ctx, inv, hook, requestID, view); err != nil {
 			return err
 		}
 	}
@@ -2609,10 +2614,13 @@ func (d *executionDriver) runRequestHooks(ctx context.Context, requestID string,
 // runOneRequestHookPure validates one pure consequence against the captured
 // catalog and shared message rule and returns it owned; nothing durable is
 // written for a pure change. The hook input carries the bound request
-// identity and the frozen canonical references with deep-owned views.
-func (d *executionDriver) runOneRequestHookPure(ctx context.Context, requestID string, view *requestView, hook RequestHook) (RequestConsequence, error) {
+// identity, purpose and actual model, and the frozen canonical references
+// with deep-owned views.
+func (d *executionDriver) runOneRequestHookPure(ctx context.Context, inv *openedInvocation, requestID string, view *requestView, hook RequestHook) (RequestConsequence, error) {
 	input := RequestHookInput{
 		RequestID:         requestID,
+		Purpose:           inv.request.Purpose,
+		Model:             inv.request.Model,
 		CanonicalMessages: cloneRequestMessages(view.canonical),
 		Messages:          cloneRequestMessages(view.currentCanonical()),
 		CheckpointEntryID: view.checkpoint,
@@ -2641,7 +2649,7 @@ func (d *executionDriver) runOneRequestHookPure(ctx context.Context, requestID s
 
 // runRequestHookEffect settles one effectful request hook as its own
 // Operation effect.
-func (d *executionDriver) runRequestHookEffect(ctx context.Context, hook RequestHook, requestID string, view *requestView) error {
+func (d *executionDriver) runRequestHookEffect(ctx context.Context, inv *openedInvocation, hook RequestHook, requestID string, view *requestView) error {
 	h := d.harness
 	c := d.coordinator
 	operationID := d.operationID
@@ -2651,7 +2659,7 @@ func (d *executionDriver) runRequestHookEffect(ctx context.Context, hook Request
 	if err != nil {
 		return err
 	}
-	resultID, err := h.beginRequestHookEffect(ctx, c, operationID, requestID, hook.ID, hook.ExtensionID, consumed)
+	resultID, err := h.beginRequestHookEffect(ctx, c, operationID, requestID, inv.request.Purpose, hook.ID, hook.ExtensionID, consumed)
 	if err != nil {
 		return err
 	}
@@ -2668,6 +2676,8 @@ func (d *executionDriver) runRequestHookEffect(ctx context.Context, hook Request
 	view.prompt, view.additions, view.names = consumed.Prompt, consumed.Messages, consumed.ToolNames
 	input := RequestHookInput{
 		RequestID:         requestID,
+		Purpose:           inv.request.Purpose,
+		Model:             inv.request.Model,
 		CanonicalMessages: cloneRequestMessages(view.canonical),
 		Messages:          cloneRequestMessages(view.currentCanonical()),
 		CheckpointEntryID: consumed.CheckpointEntryID,

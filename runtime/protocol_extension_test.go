@@ -83,22 +83,22 @@ func TestProtocolExtensionCatalogAndInvocation(t *testing.T) {
 	}
 	target := `{"kind":"harness"}`
 	rawArguments := "{\n  \"big\": 9007199254740993,\n  \"text\": \"line\\n\\t<>&\"\n}"
-	success := invoke(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"raw","target":` + target + `,"arguments":` + rawArguments + `,"request_id":"req-1"}`)
+	success := invoke(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"raw","target":` + target + `,"arguments":` + rawArguments + `,"request_id":"req-1"}`)
 	testassert.Require(t, success.StatusCode == http.StatusOK, "raw success status = %d", success.StatusCode)
 	successBody := readBody(t, success)
 	testassert.Require(t, strings.HasPrefix(successBody, `{"kind":"success","result":`) && strings.Contains(successBody, rawArguments), "raw success body lost bytes: %q", successBody)
 
-	nullSuccess := invoke(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"raw","target":` + target + `,"arguments":null,"request_id":"req-null"}`)
+	nullSuccess := invoke(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"raw","target":` + target + `,"arguments":null,"request_id":"req-null"}`)
 	nullBody := readBody(t, nullSuccess)
 	testassert.Require(t, nullSuccess.StatusCode == http.StatusOK, "null success status = %d body = %s", nullSuccess.StatusCode, nullBody)
 	testassert.Require(t, nullBody == `{"kind":"success","result":null}`, "null success body = %q, want the exact null result", nullBody)
 
-	failure := invoke(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"fail","target":` + target + `,"arguments":{},"request_id":"req-fail"}`)
+	failure := invoke(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"fail","target":` + target + `,"arguments":{},"request_id":"req-fail"}`)
 	testassert.Require(t, failure.StatusCode == http.StatusUnprocessableEntity, "declared failure status = %d", failure.StatusCode)
 	failureBody := readBody(t, failure)
 	testassert.Require(t, strings.Contains(failureBody, `"kind":"failure"`) && strings.Contains(failureBody, `"code":"guest_code"`) && strings.Contains(failureBody, `"message":"guest message"`) && strings.Contains(failureBody, "{\n  \"big\": 9007199254740993\n}") && strings.Contains(failureBody, `"partial_result":["partial", null, 1]`), "declared failure body lost exact payloads: %q", failureBody)
 
-	baseline := invoke(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"corrupt","target":` + target + `,"arguments":{},"request_id":"req-corrupt"}`)
+	baseline := invoke(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"corrupt","target":` + target + `,"arguments":{},"request_id":"req-corrupt"}`)
 	baselineBody := readBody(t, baseline)
 	testassert.Require(t, baseline.StatusCode == http.StatusUnprocessableEntity, "baseline 422 status = %d body = %s", baseline.StatusCode, baselineBody)
 	var baselineError protocol.Error
@@ -110,15 +110,15 @@ func TestProtocolExtensionCatalogAndInvocation(t *testing.T) {
 		body   string
 		status int
 	}{
-		{"unknown member", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"raw","target":` + target + `,"arguments":{},"request_id":"req-x","operation_id":"forged"}`, http.StatusBadRequest},
-		{"missing routing field", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"raw","target":` + target + `,"arguments":{}}`, http.StatusBadRequest},
-		{"missing target", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"raw","arguments":{},"request_id":"req-x"}`, http.StatusBadRequest},
-		{"target other member", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"raw","target":{"kind":"harness","session_id":"` + strings.Repeat("a", 32) + `"},"arguments":{},"request_id":"req-x"}`, http.StatusBadRequest},
-		{"contract mismatch", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"other/v1","contract_version":"2","method":"raw","target":` + target + `,"arguments":{},"request_id":"req-x"}`, http.StatusBadRequest},
-		{"previous contract version", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"1","method":"raw","target":` + target + `,"arguments":{},"request_id":"req-x"}`, http.StatusBadRequest},
-		{"arguments outside method schema", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"echo","target":` + target + `,"arguments":null,"request_id":"req-x"}`, http.StatusBadRequest},
-		{"unexposed method", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"assemble","target":` + target + `,"arguments":{},"request_id":"req-x"}`, http.StatusForbidden},
-		{"unknown capability", `{"extension_id":"fixture","capability_id":"fixture.unknown","contract_id":"fixture.unknown/v1","contract_version":"2","method":"x","target":` + target + `,"arguments":{},"request_id":"req-x"}`, http.StatusNotFound},
+		{"unknown member", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"raw","target":` + target + `,"arguments":{},"request_id":"req-x","operation_id":"forged"}`, http.StatusBadRequest},
+		{"missing routing field", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"raw","target":` + target + `,"arguments":{}}`, http.StatusBadRequest},
+		{"missing target", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"raw","arguments":{},"request_id":"req-x"}`, http.StatusBadRequest},
+		{"target other member", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"raw","target":{"kind":"harness","session_id":"` + strings.Repeat("a", 32) + `"},"arguments":{},"request_id":"req-x"}`, http.StatusBadRequest},
+		{"contract mismatch", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"other/v1","contract_version":"3","method":"raw","target":` + target + `,"arguments":{},"request_id":"req-x"}`, http.StatusBadRequest},
+		{"previous contract version", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"raw","target":` + target + `,"arguments":{},"request_id":"req-x"}`, http.StatusBadRequest},
+		{"arguments outside method schema", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"echo","target":` + target + `,"arguments":null,"request_id":"req-x"}`, http.StatusBadRequest},
+		{"unexposed method", `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"assemble","target":` + target + `,"arguments":{},"request_id":"req-x"}`, http.StatusForbidden},
+		{"unknown capability", `{"extension_id":"fixture","capability_id":"fixture.unknown","contract_id":"fixture.unknown/v1","contract_version":"3","method":"x","target":` + target + `,"arguments":{},"request_id":"req-x"}`, http.StatusNotFound},
 	} {
 		response := invoke(rejection.body)
 		testassert.Require(t, response.StatusCode == rejection.status, "%s status = %d, want %d; body = %s", rejection.name, response.StatusCode, rejection.status, readBody(t, response))
@@ -131,7 +131,7 @@ func TestProtocolExtensionCatalogAndInvocation(t *testing.T) {
 	testassert.Require(t, create.StatusCode == http.StatusCreated, "create session status = %d body = %s", create.StatusCode, createBody)
 	var session protocol.Session
 	testassert.NoError(t, json.Unmarshal([]byte(createBody), &session))
-	malformed := invoke(`{"extension_id":"fixture","capability_id":"fixture.commands","contract_id":"fixture.commands/v1","contract_version":"2","method":"command","target":{"kind":"session","session_id":"` + session.SessionId + `"},"arguments":{"method":"submit","arguments":{"session_id":"forged","operation_id":"op-x","mode":"regular","content":[]}},"request_id":"req-command"}`)
+	malformed := invoke(`{"extension_id":"fixture","capability_id":"fixture.commands","contract_id":"fixture.commands/v1","contract_version":"3","method":"command","target":{"kind":"session","session_id":"` + session.SessionId + `"},"arguments":{"method":"submit","arguments":{"session_id":"forged","operation_id":"op-x","mode":"regular","content":[]}},"request_id":"req-command"}`)
 	testassert.Require(t, malformed.StatusCode == http.StatusBadRequest, "malformed command status = %d body = %s", malformed.StatusCode, readBody(t, malformed))
 }
 
@@ -142,7 +142,7 @@ func TestProtocolExtensionUnmappedCallErrorRetainsPartial(t *testing.T) {
 	ctx := context.Background()
 	_, _, server := mountedOwner(t, ctx, extensionOwnerOptions(t))
 	invoke := func(mode string) (int, string) {
-		body := `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"2","method":"call_error","target":{"kind":"harness"},"arguments":{"mode":"` + mode + `"},"request_id":"req-call-error"}`
+		body := `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"3","method":"call_error","target":{"kind":"harness"},"arguments":{"mode":"` + mode + `"},"request_id":"req-call-error"}`
 		response := rawMounted(t, http.MethodPost, server.Endpoint()+"/v1/extensions/invoke", server.credential, body)
 		return response.StatusCode, readBody(t, response)
 	}

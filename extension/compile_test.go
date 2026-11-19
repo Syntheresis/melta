@@ -535,14 +535,14 @@ func TestFixedEffectfulHookSchemaCoversInputAndSuccess(t *testing.T) {
 		t.Fatal("before_tool accepted undeclared terminal failure data")
 	}
 	request := fixedCapabilityMethods(t, HookCapability("request", SingleHook(BoundaryRequest, HookModeEffectful)))
-	input := json.RawMessage(`{"request_id":"req-1","canonical_messages":[],"messages":[],"captured_prompt":"","prompt":"","catalog":[],"tools":[]}`)
+	input := json.RawMessage(`{"request_id":"req-1","purpose":"conversation","model":{"provider":"prov","model":"gpt-x"},"canonical_messages":[],"messages":[],"captured_prompt":"","prompt":"","catalog":[],"tools":[]}`)
 	if err := ValidateArguments(request, "request", input); err != nil {
 		t.Fatalf("request hook input: %v", err)
 	}
 	if err := ValidateArguments(request, "request", json.RawMessage(`{"request_id":"req-1","canonical_messages":[],"messages":[]}`)); err == nil {
 		t.Fatal("request hook accepted a missing prompt/catalog/tools shape")
 	}
-	if err := ValidateArguments(request, "request", json.RawMessage(`{"request_id":"req-1","canonical_messages":[],"messages":[],"captured_prompt":"","prompt":"","catalog":[],"tools":[],"extra":1}`)); err == nil {
+	if err := ValidateArguments(request, "request", json.RawMessage(`{"request_id":"req-1","purpose":"conversation","model":{"provider":"prov","model":"gpt-x"},"canonical_messages":[],"messages":[],"captured_prompt":"","prompt":"","catalog":[],"tools":[],"extra":1}`)); err == nil {
 		t.Fatal("request hook accepted an undeclared member")
 	}
 }

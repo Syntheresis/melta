@@ -103,7 +103,7 @@ func twoPassExecution(t *testing.T, first model.Usage, strategy *StrategyBinding
 		return streamOf(turnDelta("stop", "second output")), nil
 	}
 	exec := purposeExecution(quietConversation(), compact)
-	exec.Strategy = strategy
+	exec.ResolveStrategy = fixedStrategyResolver(strategy)
 	return exec, &calls
 }
 
@@ -189,7 +189,7 @@ func runCheckpointProposal(t *testing.T, fixture *testGraph, proposal func(PlanI
 	h := newTestHarness(t, store, nil)
 	c := leaseCoordinator(t, h, testSessionID)
 	exec := purposeExecution(quietConversation(), forbiddenMaintenanceModel(t))
-	exec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: proposal})
+	exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: proposal}))
 	err := runAutomaticMaintenance(t, h, c, exec)
 	graph, gerr := validateFixture(t, store, testSessionID)
 	return graph, errors.Join(err, gerr)
@@ -392,9 +392,9 @@ func TestStrategyContractPublicationFailure(t *testing.T) {
 	fixture := validTestGraph()
 	store := idleFixture(t, fixture, hexID(20))
 	priorExec := purposeExecution(forbiddenConversationModel(t), forbiddenMaintenanceModel(t))
-	priorExec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
+	priorExec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
 		return summaryCheckpoint(t, "prior summary", in.BoundaryEntryID)
-	}})
+	}}))
 	nextExec, _ := twoPassExecution(t, model.Usage{InputTokens: 3}, fixtureStrategyBinding(&fixtureStrategy{}))
 	priorPrepared := compactPrepared(captureForHandoff(), priorExec)
 	nextPrepared := compactPrepared(captureForHandoff(), nextExec)
@@ -698,7 +698,7 @@ func TestStrategyContractMalformedConsumeKeepsFinalInvocationThroughSettlement(t
 	exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "one pass"), usageDelta(model.Usage{InputTokens: 7, OutputTokens: 3})), nil
 	})
-	exec.Strategy = fixtureStrategyBinding(malformedConsumeStrategy{})
+	exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(malformedConsumeStrategy{}))
 	closes := 0
 	var closedStatus OperationState
 	var h *Harness
@@ -753,7 +753,7 @@ func TestStrategyContractNoneThenOrdinaryTerminal(t *testing.T) {
 	}, func(context.Context, model.Request) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "one pass"), usageDelta(model.Usage{InputTokens: 7, OutputTokens: 3})), nil
 	})
-	exec.Strategy = fixtureStrategyBinding(noneAfterModelStrategy{})
+	exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(noneAfterModelStrategy{}))
 	h, store, c, sessionID := strategyHarness(t, exec)
 	testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
 
@@ -838,7 +838,7 @@ func TestStrategyContractOwnedCallbackValues(t *testing.T) {
 	exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "owned pass"), usageDelta(model.Usage{InputTokens: 1})), nil
 	})
-	exec.Strategy = fixtureStrategyBinding(strategy)
+	exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(strategy))
 	fixture := validTestGraph()
 	fixture.ops[0].Admission.Execution = capture
 	fixture.entries[1].assistant.Usage = &UsageCount{InputTokens: 11}
@@ -887,13 +887,13 @@ func TestStrategyContractRepeatedPartialCheckpoints(t *testing.T) {
 	fixture := partialCutFixture()
 	store := idleFixture(t, fixture, hexID(20))
 	firstExec := purposeExecution(forbiddenConversationModel(t), forbiddenMaintenanceModel(t))
-	firstExec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: func(PlanInput) *CheckpointPlan {
+	firstExec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(PlanInput) *CheckpointPlan {
 		return &CheckpointPlan{BoundaryEntryID: hexID(5), Items: authoredItems(model.Message{Role: model.RoleUser, Content: admissionContent("first cut")})}
-	}})
+	}}))
 	secondExec := purposeExecution(forbiddenConversationModel(t), forbiddenMaintenanceModel(t))
-	secondExec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
+	secondExec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
 		return &CheckpointPlan{BoundaryEntryID: in.BoundaryEntryID, Items: retainItems(0)}
-	}})
+	}}))
 	firstPrepared := compactPrepared(captureForHandoff(), firstExec)
 	secondPrepared := compactPrepared(captureForHandoff(), secondExec)
 	queue := []PreparedExecution{firstPrepared, secondPrepared}
@@ -972,7 +972,7 @@ func TestPublicationHandoffAcrossEngineContract(t *testing.T) {
 					calls++
 					return streamOf(turnDelta("stop", "answer")), nil
 				}, forbiddenMaintenanceModel(t))
-				exec.Strategy = fixtureStrategyBinding(&noneStrategy{})
+				exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(&noneStrategy{}))
 				h, s, _, sid := newAdmittedHarness(t, context.Background(), PreparedExecution{
 					Capture: captureForHandoff(),
 					Open: func(context.Context, OperationAdmission) (Execution, error) {
@@ -1056,7 +1056,7 @@ func TestPublicationHandoffRetainsCheckpointPublicationAcrossDoneContext(t *test
 				return nil, nil
 			}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 		}}
-		exec.Strategy = binding
+		exec.ResolveStrategy = fixedStrategyResolver(binding)
 		return exec, nil
 	}
 	err := executeDirect(h, c, execCtx, testOpID, admitted)
@@ -1155,7 +1155,7 @@ func TestMaintenanceRequestMessageDomain(t *testing.T) {
 				)
 				if outcome == "none-success" {
 					exec := purposeExecution(forbiddenConversationModel(t), captureModel)
-					exec.Strategy = fixtureStrategyBinding(strategy)
+					exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(strategy))
 					store := emptyStore(t)
 					prepared := compactPrepared(captureForHandoff(), exec)
 					h := newCompactHarness(t, store, prepared)
@@ -1168,7 +1168,7 @@ func TestMaintenanceRequestMessageDomain(t *testing.T) {
 					published = settlementEntryOf(t, graph).Facts
 				} else {
 					exec := purposeExecution(quietConversation(), captureModel)
-					exec.Strategy = fixtureStrategyBinding(strategy)
+					exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(strategy))
 					h, store, c, sessionID := strategyHarness(t, exec)
 					runErr = runAutomaticMaintenance(t, h, c, exec)
 					var verr error
@@ -1244,7 +1244,7 @@ func TestMaintenanceMalformedRequestAfterOpeningCancellation(t *testing.T) {
 					}
 					return inv, nil
 				}
-				exec.Strategy = fixtureStrategyBinding(requestShapeStrategy{request: []model.Message{{Role: "bad"}}})
+				exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(requestShapeStrategy{request: []model.Message{{Role: "bad"}}}))
 
 				var (
 					store   *graphStorage
@@ -1481,22 +1481,20 @@ func TestStrategyContractMultiCallOccurrencePairing(t *testing.T) {
 }
 
 // TestAutomaticCheckpointRequestTransition proves the running-request state
-// at a checkpoint's first transition through real automatic rounds: an
-// automatic maintenance procedure publishes the conversation request it
-// consumed — with its actual rebuilt checkpoint/tail references — in the
-// checkpoint transaction when none is published yet; an already-published
-// request keeps its identity and its committed hook results while only its
-// references advance; a published request naming a different conversation
-// request rejects the proposal instead of being replaced; and manual
-// maintenance creates no conversation RunningRequest.
+// after an automatic checkpoint through real rounds: the maintenance
+// checkpoint itself publishes no conversation request because the conversation
+// request is minted only after the rebuilt projection; its first model intent
+// then publishes that request with the rebuilt checkpoint/tail references, and
+// committed hook results keep their identity while the references advance.
+// A model-free manual maintenance creates no RunningRequest at all.
 func TestAutomaticCheckpointRequestTransition(t *testing.T) {
 	checkpointStrategy := proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
 		return &CheckpointPlan{BoundaryEntryID: in.BoundaryEntryID, Items: authoredItems(model.Message{Role: model.RoleUser, Content: admissionContent("kept")})}
 	}}
-	t.Run("a pure hook-free automatic checkpoint publishes the conversation request", func(t *testing.T) {
+	t.Run("a pure hook-free automatic checkpoint precedes the conversation request", func(t *testing.T) {
 		arrived, release, conversation := parkedConversation(t)
 		exec := purposeExecution(conversation, forbiddenMaintenanceModel(t))
-		exec.Strategy = fixtureStrategyBinding(checkpointStrategy)
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(checkpointStrategy))
 		h, store, c, sessionID := strategyHarness(t, exec)
 		done := make(chan error, 1)
 		go func() { done <- runAutomaticMaintenance(t, h, c, exec) }()
@@ -1508,7 +1506,9 @@ func TestAutomaticCheckpointRequestTransition(t *testing.T) {
 		testassert.NoError(t, rerr)
 		testassert.Require(t, rec.State.Request != nil, "the first checkpoint transition published no running request: %+v", rec.State)
 		testassert.Require(t, rec.State.Request.RequestID != "", "running request = %+v, want the authoritative conversation request identity", rec.State.Request)
-		testassert.Require(t, rec.State.Request.CheckpointEntryID == comp.EntryID && rec.State.Request.BoundaryEntryID == rebuiltBoundary(graph.Entries, comp.BoundaryEntryID, comp.EntryID),
+		_, wantCheckpoint, wantBoundary, _, perr := h.projectContextRefs(c, testOpID)
+		testassert.NoError(t, perr)
+		testassert.Require(t, rec.State.Request.CheckpointEntryID == wantCheckpoint && rec.State.Request.BoundaryEntryID == wantBoundary && wantCheckpoint == comp.EntryID,
 			"running request refs = %+v, want the new checkpoint and the rebuilt tail boundary", rec.State.Request)
 		testassert.Equal(t, len(rec.State.Request.HookResults), 0)
 		close(release)
@@ -1528,7 +1528,7 @@ func TestAutomaticCheckpointRequestTransition(t *testing.T) {
 		}
 		arrived, release, conversation := parkedConversation(t)
 		exec := requestHookExecution(purposeExecution(conversation, forbiddenMaintenanceModel(t)), hooks...)
-		exec.Strategy = fixtureStrategyBinding(checkpointStrategy)
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(checkpointStrategy))
 		h, store, c, sessionID := strategyHarness(t, exec)
 		done := make(chan error, 1)
 		go func() { done <- runAutomaticMaintenance(t, h, c, exec) }()
@@ -1540,7 +1540,9 @@ func TestAutomaticCheckpointRequestTransition(t *testing.T) {
 		testassert.NoError(t, err)
 		testassert.Require(t, rec.State.Request != nil && rec.State.Request.RequestID != "" && len(rec.State.Request.HookResults) == 2,
 			"running request state after the hook effects = %+v, want the published request with both committed results", rec.State.Request)
-		testassert.Require(t, rec.State.Request.CheckpointEntryID == comp.EntryID && rec.State.Request.BoundaryEntryID == rebuiltBoundary(graph.Entries, comp.BoundaryEntryID, comp.EntryID),
+		_, wantCheckpoint, wantBoundary, _, perr := h.projectContextRefs(c, testOpID)
+		testassert.NoError(t, perr)
+		testassert.Require(t, rec.State.Request.CheckpointEntryID == wantCheckpoint && rec.State.Request.BoundaryEntryID == wantBoundary && wantCheckpoint == comp.EntryID,
 			"advanced refs = %+v, want the new checkpoint and the rebuilt tail boundary", rec.State.Request)
 		committed := hookGraphHookResults(t, store, sessionID)
 		testassert.Require(t, len(committed) == 2 && committed[0].HookID == "req.effectful.one" && committed[1].HookID == "req.effectful.two",
@@ -1553,42 +1555,10 @@ func TestAutomaticCheckpointRequestTransition(t *testing.T) {
 		testassert.NoError(t, <-done)
 	})
 
-	t.Run("a published request of a foreign conversation request rejects the proposal", func(t *testing.T) {
-		hooks := []RequestHook{
-			{ID: "req.effectful.one", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-				prompt := "first effect"
-				return RequestConsequence{Prompt: &prompt}, nil
-			}},
-		}
-		first := requestHookExecution(purposeExecution(forbiddenConversationModel(t), forbiddenMaintenanceModel(t)), hooks...)
-		first.Strategy = fixtureStrategyBinding(&noneStrategy{})
-		h, store, c, sessionID := strategyHarness(t, first)
-		injected := errors.New("injected model intent failure")
-		failEffectRegister(store,
-			func(ae *ActiveEffect) bool {
-				return ae.Kind == EffectModel && ae.Purpose == InvocationPurposeConversation
-			},
-			false, injected, nil)
-		err := runAutomaticMaintenance(t, h, c, first)
-		testassert.Require(t, err != nil && errors.Is(err, injected), "first round = %v, want the injected publication failure", err)
-		published, perr := h.ReadOperation(context.Background(), sessionID, testOpID)
-		testassert.NoError(t, perr)
-		testassert.Require(t, published.State.Request != nil, "the failed first round published no running request: %+v", published.State)
-
-		second := purposeExecution(forbiddenConversationModel(t), forbiddenMaintenanceModel(t))
-		second.Strategy = fixtureStrategyBinding(checkpointStrategy)
-		// The second round runs on the same admitted Operation and coordinator.
-		err = runAutomaticMaintenance(t, h, c, second)
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "consumed request"), "foreign-request rejection = %v, want the association rejection of published request %q", err, published.State.Request.RequestID)
-		graph, gerr := validateFixture(t, store, sessionID)
-		testassert.NoError(t, gerr)
-		assertNoCheckpointSettledFailureGraph(t, graph, testOpID)
-	})
-
 	t.Run("manual maintenance creates no conversation request", func(t *testing.T) {
 		store := idleFixture(t, validTestGraph(), hexID(20))
 		exec := purposeExecution(forbiddenConversationModel(t), forbiddenMaintenanceModel(t))
-		exec.Strategy = fixtureStrategyBinding(checkpointStrategy)
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(checkpointStrategy))
 		prepared := compactPrepared(captureForHandoff(), exec)
 		h := newCompactHarness(t, store, prepared)
 		c := leaseCoordinator(t, h, testSessionID)
@@ -1630,10 +1600,10 @@ func parkedConversation(t *testing.T) (arrived chan struct{}, release chan struc
 	}
 }
 
-// bindingMutatingStrategy rewrites the Strategy field of its own supplied
-// binding during Plan — to a replacement implementation or nil — exercising
-// that the maintenance procedure runs against the accepted binding value,
-// never a live re-read of the caller's pointer between Plan and Consume.
+// bindingMutatingStrategy rewrites the Strategy field of the binding the
+// resolver returned during Plan — to a replacement implementation or nil —
+// exercising that the maintenance procedure runs against the accepted binding
+// value, never a live re-read of the mutable value between Plan and Consume.
 type bindingMutatingStrategy struct {
 	binding     *StrategyBinding
 	replacement ContextStrategy
@@ -1655,7 +1625,7 @@ func (s *bindingMutatingStrategy) Consume(in ConsumeInput) (PlanOutput, error) {
 
 // TestStrategyContractAcceptedBindingValueSurvivesCallerMutation proves the
 // accepted binding value through a real automatic round: a strategy that
-// rewrites the caller's own supplied binding's implementation between Plan and
+// rewrites the resolver-returned binding's implementation between Plan and
 // Consume — with a replacement or nil — cannot re-dispatch Consume through the
 // replacement or a nil implementation; Consume still runs the accepted
 // implementation and its checkpoint commits under the original captured
@@ -1675,7 +1645,7 @@ func TestStrategyContractAcceptedBindingValueSurvivesCallerMutation(t *testing.T
 			exec := purposeExecution(quietConversation(), func(context.Context, model.Request) (model.Stream, error) {
 				return streamOf(turnDelta("stop", "binding snapshot pass")), nil
 			})
-			exec.Strategy = binding
+			exec.ResolveStrategy = fixedStrategyResolver(binding)
 			h, store, c, sessionID := strategyHarness(t, exec)
 			err := runAutomaticMaintenance(t, h, c, exec)
 			testassert.Require(t, err == nil, "the procedure under the mid-procedure binding rewrite = %v, want the accepted implementation still owning Consume", err)

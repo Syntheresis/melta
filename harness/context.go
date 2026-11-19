@@ -71,6 +71,69 @@ func newRequestView(capture ExecutionCapture, checkpoint, boundary string, canon
 	}
 }
 
+// newStrategyRequestView freezes one strategy-authored model request into a
+// live view for the same request hooks: the request's leading system message,
+// when present, is its prompt, the remaining messages are the frozen
+// canonical view, and the catalog and advertisement are empty because a
+// maintenance request is tool-free. A request with no leading system message
+// exposes no prompt.
+func newStrategyRequestView(capture ExecutionCapture, checkpoint, boundary string, request model.Request) *requestView {
+	prompt := ""
+	canonical := request.Messages
+	if len(request.Messages) > 0 && request.Messages[0].Role == model.RoleSystem {
+		prompt = request.Messages[0].TextContent()
+		canonical = request.Messages[1:]
+	}
+	toolFree := capture
+	toolFree.SystemPrompt = prompt
+	toolFree.Tools = nil
+	toolFree.InitialToolNames = []string{}
+	return &requestView{
+		capture:    toolFree,
+		canonical:  canonical,
+		checkpoint: checkpoint,
+		boundary:   boundary,
+		prompt:     prompt,
+		names:      []string{},
+	}
+}
+
+// shapeStrategyRequest applies the accepted live view to one frozen
+// strategy-authored request: a hook-changed prompt replaces or removes the
+// leading system message, request-only additions append, and every untouched
+// message — including its extras and any additional or empty system messages
+// — stays byte-for-byte as the strategy authored it. The request stays
+// tool-free.
+func shapeStrategyRequest(view *requestView, request model.Request) (model.Request, error) {
+	messages := cloneRequestMessages(request.Messages)
+	originalPrompt := ""
+	hasLeadingSystem := len(messages) > 0 && messages[0].Role == model.RoleSystem
+	if hasLeadingSystem {
+		originalPrompt = messages[0].TextContent()
+	}
+	if view.prompt != originalPrompt {
+		switch {
+		case hasLeadingSystem && view.prompt == "":
+			messages = messages[1:]
+		case hasLeadingSystem:
+			leading := messages[0]
+			leading.Content = []model.ContentPart{{Kind: model.PartText, Text: view.prompt}}
+			messages[0] = leading
+		case view.prompt != "":
+			system, err := model.NewMessage(model.Message{
+				Role:    model.RoleSystem,
+				Content: []model.ContentPart{{Kind: model.PartText, Text: view.prompt}},
+			})
+			if err != nil {
+				return model.Request{}, err
+			}
+			messages = append([]model.Message{system}, messages...)
+		}
+	}
+	messages = append(messages, cloneRequestMessages(view.additions)...)
+	return model.Request{Messages: messages}, nil
+}
+
 // currentCanonical renders the view's effective conversation messages for one
 // hook input: the frozen canonical projection plus the contributions accepted
 // so far. The captured prompt is carried separately as the rendered prompt.
@@ -270,11 +333,11 @@ func cloneMessageValue(m model.Message) model.Message {
 
 // requestSource returns the Agent request boundary of the bound conversation
 // invocation. Its order is the owning pipeline's: first steering, then the
-// frozen canonical projection and request identity, then the selected request
-// contributions, then the complete automatic maintenance procedure over
-// canonical-only input, then — after a published checkpoint — the rebuilt
-// projection with the frozen contributions applied exactly once, and finally
-// the model dispatch request. The first call projects the newly admitted input
+// frozen canonical projection and the complete automatic maintenance procedure
+// over canonical-only input, then — after a published checkpoint — the rebuilt
+// projection, then the conversation request identity minted in memory and
+// bound before contributions, then the selected request hooks, and finally the
+// model dispatch request. The first call projects the newly admitted input
 // only (first-request protection), and every later call selects the
 // conversation boundary — when steering waits it returns errSteeringBoundary
 // instead of supplying another request, leaving every head buffered for the
@@ -305,18 +368,6 @@ func (d *executionDriver) requestSource() agent.RequestSource {
 		if err != nil {
 			return model.Request{}, err
 		}
-		requestID, err := newHexID() // the request identity is minted in memory and bound before contributions
-		if err != nil {
-			return model.Request{}, fmt.Errorf("%w: %v", ErrStorage, err)
-		}
-		view := newRequestView(capture, checkpointID, boundaryID, canonical)
-		if err := d.runRequestHooks(ctx, requestID, view); err != nil {
-			return model.Request{}, err
-		}
-		contributions, err := acceptRequestEvidence(view.evidenceFor()) // the maintenance procedure consumes the frozen contribution evidence
-		if err != nil {
-			return model.Request{}, err
-		}
 		planInput := PlanInput{
 			Trigger:           triggerAutomatic,
 			Messages:          cloneRequestMessages(canonical),
@@ -324,34 +375,37 @@ func (d *executionDriver) requestSource() agent.RequestSource {
 			BoundaryEntryID:   boundaryID,
 			Instructions:      capture.Compact.SystemPrompt,
 			Tools:             cloneToolDefinitions(capture.Tools),
-			Contributions:     &contributions,
 			Measurement:       contextMeasurement(c),
 			ContextWindow:     capture.ContextWindow,
 			OutputReserve:     capture.OutputReserve,
 			Settings:          model.CloneRaw(capture.Strategy.Settings),
 		}
-		suspended := RunningRequest{
-			RequestID:         requestID,
-			CheckpointEntryID: checkpointID,
-			BoundaryEntryID:   boundaryID,
-		}
-		changed, err := d.completeMaintenance(ctx, planInput, &suspended, false)
+		changed, err := d.completeMaintenance(ctx, planInput, false)
 		if err != nil {
 			return model.Request{}, err // the original cause stands; the outer settled guard preserves the existing terminal
 		}
-		if changed {
+		if changed { // the committed checkpoint leads; the conversation view is rebuilt from it
 			canonical, checkpointID, boundaryID, err = h.projectCanonical(c, d.operationID)
 			if err != nil {
 				return model.Request{}, err
 			}
-			contributions.CheckpointEntryID, contributions.BoundaryEntryID = checkpointID, boundaryID
 		}
-		// The frozen contribution view is applied exactly once to the rebuilt
-		// projection; its references now name the new checkpoint and tail.
-		req := buildDispatchRequest(capture, canonical, contributions)
+		requestID, err := newHexID() // the request identity is minted in memory and bound before contributions
+		if err != nil {
+			return model.Request{}, fmt.Errorf("%w: %v", ErrStorage, err)
+		}
+		view := newRequestView(capture, checkpointID, boundaryID, canonical)
+		if err := d.runRequestHooks(ctx, inv, requestID, view); err != nil {
+			return model.Request{}, err
+		}
+		evidence, err := acceptRequestEvidence(view.evidenceFor())
+		if err != nil {
+			return model.Request{}, err
+		}
+		req := buildDispatchRequest(capture, canonical, evidence)
 		inv.round = conversationRound{
 			requestID: requestID,
-			net:       contributions,
+			net:       evidence,
 		}
 		return req, nil
 	}

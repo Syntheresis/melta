@@ -91,6 +91,20 @@ func resolveStrategyBinding(c *composition, scopes []*scope, selected harness.St
 	return &harness.StrategyBinding{ID: capability.ID, RequiresContextWindow: capability.Strategy.RequiresContextWindow, Strategy: strategy}, nil
 }
 
+// strategyLookup returns the per-procedure strategy lookup over the
+// execution's retained composition and scopes: no selection uses the host
+// default owned by the composition, while a selected capability is resolved
+// from those retained scopes at each procedure start. The Harness checks the
+// returned identity and window once at its boundary.
+func strategyLookup(c *composition, scopes []*scope, selected harness.StrategySelection) func(context.Context, string) (*harness.StrategyBinding, error) {
+	return func(ctx context.Context, _ string) (*harness.StrategyBinding, error) {
+		if selected.ID == "" {
+			return c.defaultStrategy, nil
+		}
+		return resolveStrategyBinding(c, scopes, selected, ctx)
+	}
+}
+
 func (c *composition) toolSpec(id string) (toolDeclaration, bool) {
 	export, ok := c.exports[id]
 	if !ok {

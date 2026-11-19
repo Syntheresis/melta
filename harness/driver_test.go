@@ -11,6 +11,14 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
+// fixedStrategyResolver yields one fixed strategy binding for any captured
+// identity; the Harness checks the returned identity and window once.
+func fixedStrategyResolver(binding *StrategyBinding) func(context.Context, string) (*StrategyBinding, error) {
+	return func(context.Context, string) (*StrategyBinding, error) {
+		return binding, nil
+	}
+}
+
 func fixtureToolLookup(prepare func(context.Context, model.ToolCall) PreparedTool, normalize func(context.Context, model.ToolCall) (json.RawMessage, error)) func(string) (ToolBinding, bool) {
 	if prepare == nil {
 		prepare = func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }

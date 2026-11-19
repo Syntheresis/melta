@@ -421,17 +421,11 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 	// progress.
 	warnings.publish(p.passive, admission.SessionID)
 	*artifactRelease = releaseArtifacts
-	strategyBinding, err := resolveStrategyBinding(snapshot.composition, []*scope{runtimeScope, workspaceScope, operation}, inputs.Strategy, ctx)
-	if err != nil {
-		releaseOperation()
-		err = errors.Join(err, operation.close())
-		releaseArtifacts()
-		return harness.Execution{}, err
-	}
+	lookup := strategyLookup(snapshot.composition, []*scope{runtimeScope, workspaceScope, operation}, inputs.Strategy)
 	return harness.Execution{
-		OpenInvocation: openInvocation,
-		Permissions:    evaluator,
-		Strategy:       strategyBinding,
+		OpenInvocation:  openInvocation,
+		Permissions:     evaluator,
+		ResolveStrategy: lookup,
 		Close: func() error {
 			releaseOperation()
 			err := operation.close()

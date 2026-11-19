@@ -148,15 +148,17 @@ func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 // maintenance acceptance site: its opened invocation carries all three hook
 // families, and the compact model callback — which runs strictly after the
 // acceptance boundary — replaces, nils, and zeroes the opener-retained arrays.
-// Maintenance never runs an accepted hook, so the ownership is preservation:
-// the procedure completes over its summary pass and no hook is ever invoked,
-// however the opener-retained arrays mutate afterwards.
+// Maintenance runs exactly the accepted request hooks over its summary
+// request; the tampered replacement and the argument/output families never
+// run, and the procedure completes over its summary pass however the
+// opener-retained arrays mutate afterwards.
 func TestMaintenanceOpenedInvocationDeclarationsArePreserved(t *testing.T) {
 	var sharedRequest []RequestHook
 	var sharedArgs []ToolArgumentsHook
 	var sharedOutput []ToolOutputHook
 
 	passes := 0
+	requestHooks := 0
 	// The compact callback tampers every opener-retained array the moment it
 	// runs — a replacement, a nil-out, and a zero-out — strictly after the
 	// acceptance boundary copied them.
@@ -172,13 +174,13 @@ func TestMaintenanceOpenedInvocationDeclarationsArePreserved(t *testing.T) {
 	}
 	noopTool := func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
 	exec := Execution{
-		Strategy: &StrategyBinding{ID: gapStrategyID, Strategy: &gapStrategy{t: t}},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: gapStrategyID, Strategy: &gapStrategy{t: t}}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeConversation {
 				return invocationExecution(quietConversation(), noopTool), nil
 			}
 			sharedRequest = []RequestHook{{ID: "own.req", ExtensionID: "own-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-				t.Errorf("a maintenance invocation request hook ran")
+				requestHooks++
 				return RequestConsequence{}, nil
 			}}}
 			sharedArgs = []ToolArgumentsHook{{ID: "own.arg", ExtensionID: "own-ext", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (json.RawMessage, error) {
@@ -200,6 +202,7 @@ func TestMaintenanceOpenedInvocationDeclarationsArePreserved(t *testing.T) {
 	h, store, c, sessionID := newGapHarness(t)
 	testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
 	testassert.Equal(t, passes, 1)
+	testassert.Equal(t, requestHooks, 1) // exactly the accepted maintenance request hook ran, before the tamper
 
 	testassert.Require(t, sharedRequest[0].ID == "tampered.req" && sharedArgs == nil && sharedOutput[0].ID == "",
 		"opener-retained arrays after the procedure = %+v / %v / %+v, want the tamper to have landed on the opener side", sharedRequest, sharedArgs, sharedOutput)

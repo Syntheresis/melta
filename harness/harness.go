@@ -153,15 +153,19 @@ type ToolArgumentsHook struct {
 }
 
 // RequestHookInput is one request hook's owned input: the bound request
-// identity, the frozen canonical conversation messages and canonical
-// references they were projected from, the captured rendered prompt, and the
-// captured eligible tool catalog. The CanonicalMessages are the round-frozen
-// projection without any request contribution, CapturedPrompt the captured
+// identity with its purpose and actual model, the frozen canonical messages
+// and canonical references they were projected from, the captured rendered
+// prompt, and the captured eligible tool catalog. The CanonicalMessages are
+// the round-frozen view without any request contribution, CapturedPrompt the
 // baseline the current Prompt evolved from, and Catalog the full eligible
-// catalog behind whatever Tools are currently visible. Every mutable member is
-// a deep-owned copy; the hook cannot reach the coordinator's state.
+// catalog behind whatever Tools are currently visible. A strategy-authored
+// request exposes its own leading system prompt and always an empty catalog
+// and advertisement. Every mutable member is a deep-owned copy; the hook
+// cannot reach the coordinator's state.
 type RequestHookInput struct {
 	RequestID         string
+	Purpose           InvocationPurpose
+	Model             model.ModelRef         // the actual model the request will dispatch on
 	CanonicalMessages []model.Message        // the round-frozen canonical view, contributions excluded
 	Messages          []model.Message        // the effective conversation view accepted so far
 	CheckpointEntryID string                 // the named current checkpoint, empty when uncompacted
@@ -185,7 +189,8 @@ type RequestConsequence struct {
 }
 
 // RequestHook is one selected request-boundary hook: it runs after steering
-// and before any model effect, receives the current effective request view,
+// and before the model effect of its own request, receives the current
+// effective request view with that invocation's purpose and actual model,
 // and contributes an optional complete prompt replacement, request-only
 // messages, and tool visibility. Run receives deep-owned values.
 type RequestHook struct {
@@ -327,11 +332,13 @@ type Execution struct {
 	// revision its capture records. Nil selects the included built-in
 	// policy (the zero PermissionPolicy).
 	Permissions PermissionEvaluator
-	// Strategy is the selected context strategy binding of this Operation,
-	// resolved from the same immutable configuration revision its capture
-	// records. Nil selects the included summary policy binding.
-	Strategy *StrategyBinding
-	Close    func() error
+	// ResolveStrategy resolves the captured strategy identity at one
+	// maintenance procedure start from the execution's own retained
+	// configuration and scopes. Nil supplies the included strategy for its own
+	// captured identity; a resolver owns the result the procedure holds through
+	// Plan and Consume.
+	ResolveStrategy func(context.Context, string) (*StrategyBinding, error)
+	Close           func() error
 }
 
 // ToolOutcome is one owned tool plan's complete outcome: the model-visible

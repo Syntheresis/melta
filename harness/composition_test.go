@@ -992,35 +992,38 @@ func TestRequestHookPureRestoreMatchesBaselineTransactions(t *testing.T) {
 }
 
 // TestRequestHooksRunBeforeCanonicalOnlyMaintenance proves the installed-hook
-// ordering through the full trigger pipeline: request hooks settle before the
-// maintenance procedure runs, the maintenance input stays canonical-only
-// without any hook contribution, the effectful hook's consumed evidence keeps
-// the pure intermediate it actually consumed, the committed consequence is
-// applied to the rebuilt projection exactly once, and the durable entries
-// commit in hook → checkpoint → assistant order.
+// ordering through the full trigger pipeline: the strategy's summary request
+// is shaped once by the maintenance invocation's own hooks, its model runs,
+// the checkpoint commits, and only then the rebuilt conversation request is
+// shaped once by the conversation invocation's hooks before its model. The
+// summary request exposes its own leading system prompt — never a second copy
+// of the configured summary instructions — and the durable entries commit in
+// summary-hook → checkpoint → conversation-hook → assistant order.
 func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 	seed := UsageCount{InputTokens: 13}
 	h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
 	var events []string
-	var consumedPrompt string
-	var adopted string
-	var summarySerialized string
-	var dispatchPrompt string
+	var summaryConsumedPrompt, conversationConsumedPrompt string
+	var summarySerialized, dispatchPrompt string
 	var dispatchHooked int
 	pure := RequestHook{ID: "req.pure", ExtensionID: "req-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
-		events = append(events, "pure")
+		events = append(events, "pure-"+string(in.Purpose))
 		changed := "hooked " + in.Prompt
 		return RequestConsequence{Prompt: &changed}, nil
 	}}
 	noop := RequestHook{ID: "req.effectful.noop", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
-		events = append(events, "effectful")
-		consumedPrompt = in.Prompt
+		events = append(events, "effectful-"+string(in.Purpose))
+		if in.Purpose == InvocationPurposeMaintenance {
+			summaryConsumedPrompt = in.Prompt
+		} else {
+			conversationConsumedPrompt = in.Prompt
+		}
 		reasserted := in.Prompt // the exact value the hook received: an effectful no-op
 		return RequestConsequence{Prompt: &reasserted}, nil
 	}}
 	exec := Execution{OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 		modelFn := func(_ context.Context, r model.Request) (model.Stream, error) {
-			events = append(events, "model")
+			events = append(events, "model-"+string(request.Purpose))
 			for _, m := range r.Messages {
 				if m.Role == model.RoleSystem {
 					dispatchPrompt = m.TextContent()
@@ -1031,7 +1034,7 @@ func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 		}
 		if request.Purpose == InvocationPurposeMaintenance {
 			modelFn = func(_ context.Context, r model.Request) (model.Stream, error) {
-				events = append(events, "maintenance")
+				events = append(events, "model-"+string(request.Purpose))
 				var sb strings.Builder
 				for _, m := range r.Messages {
 					sb.WriteString(m.TextContent())
@@ -1047,55 +1050,64 @@ func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 		}, nil
 	}}
 	testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
-	testassert.Require(t, len(events) == 4 && events[0] == "pure" && events[1] == "effectful" && events[2] == "maintenance" && events[3] == "model",
-		"pipeline events = %v, want hooks before maintenance before rebuild-and-model", events)
-	// The maintenance procedure ran over the canonical-only input: no hook
-	// contribution reached the summary request.
-	testassert.Require(t, !strings.Contains(summarySerialized, "hooked"), "maintenance input = %q, want the canonical-only projection without hook contributions", summarySerialized)
-	// The effectful no-op consumed the pure intermediate and reasserted it;
-	// the durable effect keeps that consumed evidence.
-	committed := hookGraphHookResults(t, store, sessionID)
-	testassert.Require(t, len(committed) == 1 && committed[0].HookID == "req.effectful.noop" && committed[0].Status == hookSucceeded,
-		"hook results = %+v, want only the effectful no-op's durable effect", committed)
-	testassert.Require(t, committed[0].InputEvidence != nil && committed[0].InputEvidence.Prompt == consumedPrompt &&
-		len(committed[0].InputEvidence.HookIDs) == 1 && committed[0].InputEvidence.HookIDs[0].HookID == "req.pure",
-		"consumed evidence = %+v, want the pure intermediate prompt and identity retained at the effect boundary", committed[0].InputEvidence)
-	adopted = *committed[0].Consequence.Prompt
-	testassert.Require(t, adopted == consumedPrompt, "committed consequence = %q, want the codec-adopted reasserted value", adopted)
-	// The frozen contribution applies exactly once to the rebuilt projection.
-	testassert.Require(t, dispatchPrompt == adopted, "dispatch prompt = %q, want the adopted contribution", dispatchPrompt)
+	testassert.Require(t, reflect.DeepEqual(events, []string{
+		"pure-maintenance", "effectful-maintenance", "model-maintenance",
+		"pure-conversation", "effectful-conversation", "model-conversation",
+	}), "pipeline events = %v, want the summary hooks and model before the rebuilt conversation hooks and model", events)
+	// The summary request is shaped from the strategy's own leading prompt:
+	// the configured instructions appear once and the hook contribution once.
+	testassert.Require(t, strings.Count(summarySerialized, "hooked") == 1 && strings.Count(summarySerialized, "summarize") == 1,
+		"maintenance input = %q, want one hooked strategy prompt over the configured instructions", summarySerialized)
+	// The effectful summary no-op consumed the pure intermediate.
+	testassert.Require(t, summaryConsumedPrompt == "hooked summarize", "summarized consumed prompt = %q, want the pure intermediate", summaryConsumedPrompt)
+	// The conversation request was shaped after the rebuilt projection.
+	testassert.Require(t, dispatchPrompt == conversationConsumedPrompt && strings.HasPrefix(dispatchPrompt, "hooked "), "dispatch prompt = %q, want the conversation hook contribution", dispatchPrompt)
 	testassert.Require(t, dispatchHooked == 1, "dispatch carries the contribution %d times, want exactly once", dispatchHooked)
-	// Durable committed order: hook effect, checkpoint, then the answering assistant.
+	committed := hookGraphHookResults(t, store, sessionID)
+	testassert.Require(t, len(committed) == 2, "hook results = %+v, want one effectful summary hook and one effectful conversation hook", committed)
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
-	hookSeq, compactionSeq, assistantSeq := -1, -1, -1
 	var checkpoint *contextCheckpointEntry
 	var answering *assistantEntry
 	for _, entry := range graph.Entries {
 		switch {
-		case entry.HookResult != nil && entry.HookResult.RequestID != "":
-			hookSeq = int(entry.Envelope.Sequence)
 		case entry.Compaction != nil:
-			compactionSeq = int(entry.Envelope.Sequence)
 			checkpoint = entry.Compaction
 		case entry.Assistant != nil:
-			if int(entry.Envelope.Sequence) > assistantSeq {
-				assistantSeq = int(entry.Envelope.Sequence) // the round's answering assistant is the last
-				answering = entry.Assistant
-			}
+			answering = entry.Assistant
 		}
 	}
-	testassert.Require(t, hookSeq >= 0 && compactionSeq >= 0 && assistantSeq >= 0 && hookSeq < compactionSeq && compactionSeq < assistantSeq,
-		"committed sequences = hook %d checkpoint %d assistant %d, want hooks before the checkpoint before the assistant", hookSeq, compactionSeq, assistantSeq)
-	testassert.Require(t, checkpoint != nil && checkpoint.Evidence != nil && answering != nil && answering.Evidence != nil, "missing checkpoint or assistant evidence")
-	advanced := copyRequestEvidence(*checkpoint.Evidence)
-	advanced.CheckpointEntryID, advanced.BoundaryEntryID = checkpoint.EntryID, checkpoint.EntryID
-	testassert.Require(t, reflect.DeepEqual(advanced, *answering.Evidence), "advanced contribution = %+v, want assistant evidence %+v", advanced, *answering.Evidence)
-	{
-		if _, err := validateFixture(t, store, sessionID); err != nil {
-			t.Fatalf("graph validation: %v", err)
+	testassert.Require(t, checkpoint != nil && answering != nil && len(checkpoint.Facts) == 1, "missing checkpoint, assistant or summary producer")
+	summaryRequestID := checkpoint.Facts[0].RequestID
+	var summaryHookSeq, conversationHookSeq, checkpointSeq, assistantSeq int64 = -1, -1, -1, -1
+	for _, entry := range graph.Entries {
+		switch {
+		case entry.HookResult != nil && entry.HookResult.RequestID == summaryRequestID:
+			summaryHookSeq = entry.Envelope.Sequence
+			testassert.Require(t, entry.HookResult.InputEvidence != nil && entry.HookResult.InputEvidence.Prompt == "hooked summarize",
+				"summary hook consumed evidence = %+v, want the strategy prompt it actually received", entry.HookResult.InputEvidence)
+		case entry.HookResult != nil && entry.HookResult.RequestID == answering.RequestID:
+			conversationHookSeq = entry.Envelope.Sequence
+			testassert.Require(t, entry.HookResult.InputEvidence != nil && len(entry.HookResult.InputEvidence.HookIDs) == 1 &&
+				entry.HookResult.InputEvidence.HookIDs[0].HookID == "req.pure",
+				"conversation hook consumed evidence = %+v, want the pure intermediate it consumed", entry.HookResult.InputEvidence)
+		case entry.Compaction != nil:
+			checkpointSeq = entry.Envelope.Sequence
+		case entry.Assistant != nil && entry.Assistant.RequestID == answering.RequestID:
+			assistantSeq = entry.Envelope.Sequence
 		}
 	}
+	testassert.Require(t, summaryHookSeq >= 0 && checkpointSeq >= 0 && conversationHookSeq >= 0 && assistantSeq >= 0 &&
+		summaryHookSeq < checkpointSeq && checkpointSeq < conversationHookSeq && conversationHookSeq < assistantSeq,
+		"committed sequences = summary hook %d checkpoint %d conversation hook %d assistant %d", summaryHookSeq, checkpointSeq, conversationHookSeq, assistantSeq)
+	// Maintenance evidence names only the frozen canonical references; the
+	// conversation request did not exist when it committed.
+	testassert.Require(t, checkpoint.Evidence != nil && len(checkpoint.Evidence.HookIDs) == 0 && checkpoint.Evidence.Prompt == "" && len(checkpoint.Evidence.ToolNames) == 0,
+		"checkpoint evidence = %+v, want only the frozen canonical references", checkpoint.Evidence)
+	// The conversation request's final evidence carries the accepted chain.
+	testassert.Require(t, answering.Evidence != nil && len(answering.Evidence.HookIDs) == 2 &&
+		answering.Evidence.HookIDs[0].HookID == "req.pure" && answering.Evidence.HookIDs[1].HookID == "req.effectful.noop",
+		"assistant evidence = %+v, want both accepted conversation hook identities", answering.Evidence)
 }
 
 // maintenanceHookedRound runs one hooked real automatic-maintenance round with
@@ -1191,131 +1203,34 @@ func removeStoredMember(t *testing.T, store *graphStorage, sessionID string, kin
 	t.Fatalf("no stored %s entry", kind)
 }
 
-// TestAutomaticMaintenanceEvidenceReconcilesEffectfulIdentities proves the
-// maintenance evidence is reconciled against the committed effectful hook
-// executions of the conversation request whose view it actually consumed:
-// omitting or reversing the recorded effectful identities in the durable
-// checkpoint or failure-terminal evidence is corruption under cold validation.
-func TestAutomaticMaintenanceEvidenceReconcilesEffectfulIdentities(t *testing.T) {
-	t.Run("checkpoint evidence omitting an effectful identity corrupts", func(t *testing.T) {
-		_, store, sessionID, _ := maintenanceHookedRound(t, nil, nil)
-		mutateStoredEvidenceHookIDs(t, store, sessionID, EntryCompaction, json.RawMessage(`[]`))
-		_, err := validateFixture(t, store, sessionID)
-		testassert.Require(t, err != nil && errors.Is(err, ErrCorrupt), "cold validation = %v, want the omission to corrupt", err)
-	})
-	t.Run("checkpoint evidence reversing effectful identities corrupts", func(t *testing.T) {
-		_, store, sessionID, _ := maintenanceHookedRound(t, nil, nil)
-		mutateStoredEvidenceHookIDs(t, store, sessionID, EntryCompaction, json.RawMessage(`[{"extension_id":"req-ext","hook_id":"req.effectful.two"},{"extension_id":"req-ext","hook_id":"req.effectful.one"}]`))
-		_, err := validateFixture(t, store, sessionID)
-		testassert.Require(t, err != nil && errors.Is(err, ErrCorrupt), "cold validation = %v, want the reversal to corrupt", err)
-	})
-	t.Run("failure terminal evidence omitting an effectful identity corrupts", func(t *testing.T) {
-		_, store, sessionID, _ := maintenanceHookedRound(t, errMaintenanceSummary, nil)
-		mutateStoredEvidenceHookIDs(t, store, sessionID, EntryOperationSettlement, json.RawMessage(`[]`))
-		_, err := validateFixture(t, store, sessionID)
-		testassert.Require(t, err != nil && errors.Is(err, ErrCorrupt), "cold validation = %v, want the omission to corrupt", err)
-	})
-	t.Run("checkpoint and failure terminal carry the conversation source apart from the producer", func(t *testing.T) {
-		committedSource := func(entries map[string][]Entry, want string) string {
-			for _, entry := range entries[want] {
-				if entry.Kind != EntryHookResult {
-					continue
-				}
-				h, err := decodeHookResultEntry(entry)
-				testassert.NoError(t, err)
-				if h.RequestID != "" {
-					return h.RequestID
-				}
-			}
-			t.Fatal("no committed request-bound hook result names the conversation request")
-			return ""
+// TestAutomaticMaintenanceEvidenceNamesFrozenInputAndSummaryProducer proves
+// the new maintenance boundary: the durable checkpoint evidence names only
+// the frozen canonical input references — no conversation request existed
+// before the procedure ran — while the summary request's own effectful hook
+// executions name the per-plan producer recorded on the maintenance facts.
+func TestAutomaticMaintenanceEvidenceNamesFrozenInputAndSummaryProducer(t *testing.T) {
+	_, store, sessionID, _ := maintenanceHookedRound(t, nil, nil)
+	graph, err := validateFixture(t, store, sessionID)
+	testassert.NoError(t, err)
+	comp := compactedEntryOf(t, graph)
+	testassert.Require(t, len(comp.Facts) == 1 && comp.Facts[0].RequestID != "", "checkpoint facts = %+v, want one per-plan producer", comp.Facts)
+	testassert.Require(t, comp.Evidence != nil && comp.Evidence.BoundaryEntryID != "", "checkpoint evidence = %+v, want the frozen canonical boundary", comp.Evidence)
+	testassert.Require(t, len(comp.Evidence.HookIDs) == 0 && comp.Evidence.Prompt == "" && len(comp.Evidence.ToolNames) == 0,
+		"checkpoint evidence = %+v, want only the frozen canonical references", comp.Evidence)
+	var summaryHooks int
+	for _, entry := range graph.Entries {
+		if entry.HookResult == nil || entry.HookResult.RequestID != comp.Facts[0].RequestID {
+			continue
 		}
-		_, store, sessionID, _ := maintenanceHookedRound(t, nil, nil)
-		sourceID := committedSource(store.entries, sessionID)
-		records := 0
-		for _, entry := range store.entries[sessionID] {
-			if entry.Kind != EntryCompaction {
-				continue
-			}
-			comp, err := decodeContextCheckpointEntry(entry)
-			testassert.NoError(t, err)
-			testassert.Require(t, comp.ConsumedRequestID == sourceID && comp.Facts[0].RequestID != "" && comp.Facts[0].RequestID != sourceID,
-				"checkpoint identity = producer %q consumed %q, want the source %q kept distinct from the maintenance producer", comp.Facts[0].RequestID, comp.ConsumedRequestID, sourceID)
-			records++
-		}
-		testassert.Equal(t, records, 1)
-		_, failStore, failSession, _ := maintenanceHookedRound(t, errMaintenanceSummary, nil)
-		failSource := committedSource(failStore.entries, failSession)
-		settlements := 0
-		for _, entry := range failStore.entries[failSession] {
-			if entry.Kind != EntryOperationSettlement {
-				continue
-			}
-			sett, err := decodeOperationSettlementEntry(entry)
-			testassert.NoError(t, err)
-			testassert.Require(t, len(sett.Facts) > 0 && sett.Evidence != nil, "maintenance failure settlement = %+v, want the retained facts", sett)
-			testassert.Require(t, sett.ConsumedRequestID == failSource && sett.RequestID != "" && sett.RequestID != failSource,
-				"settlement identity = producer %q consumed %q, want the source %q kept distinct from the maintenance producer", sett.RequestID, sett.ConsumedRequestID, failSource)
-			settlements++
-		}
-		testassert.Equal(t, settlements, 1)
-	})
-	t.Run("stored checkpoint without its consumed source corrupts", func(t *testing.T) {
-		_, store, sessionID, _ := maintenanceHookedRound(t, nil, nil)
-		removeStoredMember(t, store, sessionID, EntryCompaction, "consumed_request_id")
-		_, err := validateFixture(t, store, sessionID)
-		testassert.Require(t, err != nil && errors.Is(err, ErrCorrupt), "cold validation = %v, want the missing automatic source to corrupt", err)
-	})
-	t.Run("opener-failed maintenance retains the source evidence without actual input", func(t *testing.T) {
-		_, store, sessionID, dispatchCalls := maintenanceHookedRound(t, nil, errMaintenanceOpener)
-		testassert.Equal(t, dispatchCalls, 0)
-		graph, err := validateFixture(t, store, sessionID)
-		testassert.NoError(t, err) // the original graph stays valid
-		sourceID := ""
-		for _, entry := range store.entries[sessionID] {
-			if entry.Kind != EntryHookResult {
-				continue
-			}
-			h, herr := decodeHookResultEntry(entry)
-			testassert.NoError(t, herr)
-			if h.RequestID != "" {
-				sourceID = h.RequestID
-			}
-		}
-		testassert.Require(t, sourceID != "", "no committed request-bound hook result names the conversation request")
-		settlements := 0
-		for _, entry := range graph.Entries {
-			testassert.Require(t, entry.Compaction == nil, "an opener-failed maintenance committed a checkpoint: %+v", entry.Compaction)
-			if entry.Settlement == nil {
-				continue
-			}
-			sett := entry.Settlement
-			settlements++
-			testassert.Require(t, len(sett.Facts) == 0, "opener-failed settlement invented actual input: %+v", sett.Facts)
-			testassert.Require(t, sett.CompactionUsage && sett.Evidence != nil && len(sett.Evidence.HookIDs) == 2 &&
-				sett.Evidence.HookIDs[0].HookID == "req.effectful.one" && sett.Evidence.HookIDs[1].HookID == "req.effectful.two",
-				"opener-failed settlement = %+v, want the retained maintenance evidence provenance with both effectful contributors", sett)
-			testassert.Require(t, sett.ConsumedRequestID == sourceID && sett.RequestID != "" && sett.RequestID != sourceID,
-				"opener-failed settlement identity = producer %q consumed %q, want the source %q retained apart from the producer", sett.RequestID, sett.ConsumedRequestID, sourceID)
-		}
-		testassert.Equal(t, settlements, 1)
-	})
-	t.Run("opener-failed terminal evidence omitting its effectful provenance corrupts", func(t *testing.T) {
-		_, store, sessionID, _ := maintenanceHookedRound(t, nil, errMaintenanceOpener)
-		mutateStoredEvidenceHookIDs(t, store, sessionID, EntryOperationSettlement, json.RawMessage(`[]`))
-		_, err := validateFixture(t, store, sessionID)
-		testassert.Require(t, err != nil && errors.Is(err, ErrCorrupt), "cold validation = %v, want the opener-failure omission to corrupt", err)
-	})
-	t.Run("opener-failed terminal evidence reversing its effectful provenance corrupts", func(t *testing.T) {
-		_, store, sessionID, _ := maintenanceHookedRound(t, nil, errMaintenanceOpener)
-		mutateStoredEvidenceHookIDs(t, store, sessionID, EntryOperationSettlement, json.RawMessage(`[{"extension_id":"req-ext","hook_id":"req.effectful.two"},{"extension_id":"req-ext","hook_id":"req.effectful.one"}]`))
-		_, err := validateFixture(t, store, sessionID)
-		testassert.Require(t, err != nil && errors.Is(err, ErrCorrupt), "cold validation = %v, want the opener-failure reversal to corrupt", err)
-	})
-	t.Run("opener-failed terminal without its consumed source corrupts", func(t *testing.T) {
-		_, store, sessionID, _ := maintenanceHookedRound(t, nil, errMaintenanceOpener)
-		removeStoredMember(t, store, sessionID, EntryOperationSettlement, "consumed_request_id")
-		_, err := validateFixture(t, store, sessionID)
-		testassert.Require(t, err != nil && errors.Is(err, ErrCorrupt), "cold validation = %v, want the opener-failure missing source to corrupt", err)
-	})
+		summaryHooks++
+	}
+	testassert.Equal(t, summaryHooks, 2) // the two effectful hooks ran on the summary producer's own request
+	// The failure terminal keeps the same frozen-input evidence and facts.
+	_, failStore, failSession, _ := maintenanceHookedRound(t, errMaintenanceSummary, nil)
+	failGraph, gerr := validateFixture(t, failStore, failSession)
+	testassert.NoError(t, gerr)
+	settlement := settlementEntryOf(t, failGraph)
+	testassert.Require(t, len(settlement.Facts) > 0 && settlement.Evidence != nil, "failure settlement = %+v, want the retained facts and frozen input", settlement)
+	testassert.Require(t, len(settlement.Evidence.HookIDs) == 0 && settlement.Evidence.Prompt == "" && len(settlement.Evidence.ToolNames) == 0,
+		"failure evidence = %+v, want only the frozen canonical references", settlement.Evidence)
 }

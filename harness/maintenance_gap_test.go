@@ -114,7 +114,7 @@ func newGapHarness(t *testing.T) (*Harness, *graphStorage, *coordinator, string)
 func gapExecution(t *testing.T, strategy ContextStrategy, compact func(context.Context, model.Request) (model.Stream, error), conversation func(context.Context, model.Request) (model.Stream, error), tool func(context.Context, model.ToolCall) PreparedTool) Execution {
 	noop := func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
 	return Execution{
-		Strategy: &StrategyBinding{ID: gapStrategyID, Strategy: strategy},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: gapStrategyID, Strategy: strategy}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeConversation {
 				return invocationExecution(conversation, tool), nil

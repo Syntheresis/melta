@@ -850,14 +850,14 @@ func TestPublicManualStrategyExplicitOutcomes(t *testing.T) {
 						prepared.Open = func(ctx context.Context, admission harness.OperationAdmission) (harness.Execution, error) {
 							exec, err := open(ctx, admission)
 							if err == nil {
-								exec.Strategy = &harness.StrategyBinding{ID: "test.strategy/v1", Strategy: publicFailingStrategy{stage: stage, fail: func() error {
+								exec.ResolveStrategy = publicFixedStrategyResolver(&harness.StrategyBinding{ID: "test.strategy/v1", Strategy: publicFailingStrategy{stage: stage, fail: func() error {
 									if cancelDuring {
 										if err := f.h.Interrupt(context.Background(), session); err != nil {
 											t.Errorf("interrupt: %v", err)
 										}
 									}
 									return cause
-								}}}
+								}}})
 							}
 							return exec, err
 						}
@@ -934,7 +934,7 @@ func replacementStrategyPrepRecording(f *publicFixture, none bool, seen *[]*harn
 		if err != nil {
 			return exec, err
 		}
-		exec.Strategy = &harness.StrategyBinding{ID: "test.strategy/v1", Strategy: publicReplacementStrategy{none: none, seen: seen}}
+		exec.ResolveStrategy = publicFixedStrategyResolver(&harness.StrategyBinding{ID: "test.strategy/v1", Strategy: publicReplacementStrategy{none: none, seen: seen}})
 		return exec, nil
 	}
 }

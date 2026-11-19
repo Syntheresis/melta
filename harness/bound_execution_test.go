@@ -73,7 +73,7 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 	var stream *liveCheckStream
 	var closeOrder []string
 	exec := Execution{
-		Strategy: &StrategyBinding{ID: "test.callback/v1", Strategy: callbackStrategy{}},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.callback/v1", Strategy: callbackStrategy{}}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				return InvocationExecution{
@@ -380,7 +380,7 @@ func TestManualMaintenanceDisposalFollowsCompletionPublication(t *testing.T) {
 				return summaryStream("manual summary", model.Usage{InputTokens: 2}), nil
 			}
 			exec := Execution{
-				Strategy: &StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}},
+				ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}}),
 				OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 					return InvocationExecution{
 						Model:      modelFn,
@@ -484,7 +484,7 @@ func TestQuietCompletionSettlesUnmarkedStorageCallbackError(t *testing.T) {
 		capture := testCapture()
 		capture.Strategy = StrategyCapture{ID: "test.storage/v1"}
 		exec := Execution{
-			Strategy: &StrategyBinding{ID: "test.storage/v1", Strategy: &errStrategy{cause: planErr}},
+			ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.storage/v1", Strategy: &errStrategy{cause: planErr}}),
 			OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 				return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
 					return completedTurnStream(), nil
@@ -1005,7 +1005,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 	maintenanceCalls := 0
 	var events []string
 	exec := Execution{
-		Strategy: &StrategyBinding{ID: "test.multipass/v1", Strategy: strategy},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.multipass/v1", Strategy: strategy}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				maintenanceCalls++
@@ -1118,7 +1118,7 @@ func TestWaitRetainsManualPublicationBeforeLaterExecution(t *testing.T) {
 	cA := leaseCoordinator(t, race.h, testSessionID)
 	aClosed := make(chan struct{}, 1)
 	execA := Execution{
-		Strategy: &StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}}),
 		OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 			return InvocationExecution{
 				Model: func(context.Context, model.Request) (model.Stream, error) {
@@ -1174,7 +1174,7 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 	var race waitPublicationRace
 	race = newWaitPublicationRace(t, store, "", func(context.Context, PreparationRequest) (PreparedExecution, error) {
 		execA := Execution{
-			Strategy: &StrategyBinding{ID: "test.automatic/v1", Strategy: callbackStrategy{}},
+			ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.automatic/v1", Strategy: callbackStrategy{}}),
 			OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 				if request.Purpose == InvocationPurposeMaintenance {
 					return InvocationExecution{

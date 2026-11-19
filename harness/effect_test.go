@@ -3595,7 +3595,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 						}
 						mdl := testModelRef()
 						op.State.ActiveEffect = &ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(7), RequestID: "request-active", Model: &mdl, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: consumedBoundary}}
-						op.State.Request = &RunningRequest{RequestID: "request-active", BoundaryEntryID: consumedBoundary}
+						op.State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, BoundaryEntryID: consumedBoundary}
 						payload, err := encodeOperationRegister(op)
 						if err != nil {
 							return err

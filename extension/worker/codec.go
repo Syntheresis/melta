@@ -897,6 +897,8 @@ func DecodePrepareHookResult(raw json.RawMessage) (extension.PreparationConseque
 
 type requestHookInputJSON struct {
 	RequestID         string               `json:"request_id"`
+	Purpose           string               `json:"purpose"`
+	Model             modelRefJSON         `json:"model"`
 	CanonicalMessages []messageJSON        `json:"canonical_messages"`
 	Messages          []messageJSON        `json:"messages"`
 	CheckpointEntryID string               `json:"checkpoint_entry_id,omitempty"`
@@ -917,8 +919,14 @@ func EncodeRequestHookParams(v harness.RequestHookInput) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
+	modelRef, err := modelRefFrom(v.Model)
+	if err != nil {
+		return nil, err
+	}
 	return marshalValue(requestHookInputJSON{
 		RequestID:         v.RequestID,
+		Purpose:           string(v.Purpose),
+		Model:             modelRef,
 		CanonicalMessages: canonical,
 		Messages:          messages,
 		CheckpointEntryID: v.CheckpointEntryID,
@@ -938,6 +946,8 @@ func DecodeRequestHookParams(raw json.RawMessage) (harness.RequestHookInput, err
 	}
 	return harness.RequestHookInput{
 		RequestID:         wire.RequestID,
+		Purpose:           harness.InvocationPurpose(wire.Purpose),
+		Model:             modelRefValue(wire.Model),
 		CanonicalMessages: messagesValue(wire.CanonicalMessages),
 		Messages:          messagesValue(wire.Messages),
 		CheckpointEntryID: wire.CheckpointEntryID,
@@ -1034,51 +1044,6 @@ func DecodeAfterToolHookResult(raw json.RawMessage) (string, error) {
 	return wire.Content, nil
 }
 
-type requestEvidenceJSON struct {
-	CheckpointEntryID string                 `json:"checkpoint_entry_id,omitempty"`
-	BoundaryEntryID   string                 `json:"boundary_entry_id"`
-	Prompt            string                 `json:"prompt"`
-	Messages          []messageJSON          `json:"messages,omitempty"`
-	ToolNames         []string               `json:"tool_names"`
-	HookIDs           []harness.HookIdentity `json:"hook_ids,omitempty"`
-}
-
-func requestEvidenceFrom(v *harness.RequestEvidence) (*requestEvidenceJSON, error) {
-	if v == nil {
-		return nil, nil
-	}
-	messages, err := messagesFrom(v.Messages)
-	if err != nil {
-		return nil, err
-	}
-	tools := v.ToolNames
-	if tools == nil {
-		tools = []string{}
-	}
-	return &requestEvidenceJSON{
-		CheckpointEntryID: v.CheckpointEntryID,
-		BoundaryEntryID:   v.BoundaryEntryID,
-		Prompt:            v.Prompt,
-		Messages:          messages,
-		ToolNames:         tools,
-		HookIDs:           append([]harness.HookIdentity(nil), v.HookIDs...),
-	}, nil
-}
-
-func requestEvidenceValue(v *requestEvidenceJSON) *harness.RequestEvidence {
-	if v == nil {
-		return nil
-	}
-	return &harness.RequestEvidence{
-		CheckpointEntryID: v.CheckpointEntryID,
-		BoundaryEntryID:   v.BoundaryEntryID,
-		Prompt:            v.Prompt,
-		Messages:          messagesValue(v.Messages),
-		ToolNames:         v.ToolNames,
-		HookIDs:           append([]harness.HookIdentity(nil), v.HookIDs...),
-	}
-}
-
 type planInputJSON struct {
 	Trigger           string               `json:"trigger"`
 	Messages          []messageJSON        `json:"messages"`
@@ -1086,7 +1051,6 @@ type planInputJSON struct {
 	BoundaryEntryID   string               `json:"boundary_entry_id"`
 	Instructions      string               `json:"instructions"`
 	Tools             []toolDefinitionJSON `json:"tools"`
-	Contributions     *requestEvidenceJSON `json:"contributions,omitempty"`
 	Measurement       *harness.UsageCount  `json:"measurement,omitempty"`
 	ContextWindow     int                  `json:"context_window"`
 	OutputReserve     int                  `json:"output_reserve"`
@@ -1098,10 +1062,6 @@ func planInputFrom(v harness.PlanInput) (planInputJSON, error) {
 	if err != nil {
 		return planInputJSON{}, err
 	}
-	contributions, err := requestEvidenceFrom(v.Contributions)
-	if err != nil {
-		return planInputJSON{}, err
-	}
 	return planInputJSON{
 		Trigger:           v.Trigger,
 		Messages:          messages,
@@ -1109,7 +1069,6 @@ func planInputFrom(v harness.PlanInput) (planInputJSON, error) {
 		BoundaryEntryID:   v.BoundaryEntryID,
 		Instructions:      v.Instructions,
 		Tools:             toolDefinitionsFrom(v.Tools),
-		Contributions:     contributions,
 		Measurement:       v.Measurement,
 		ContextWindow:     v.ContextWindow,
 		OutputReserve:     v.OutputReserve,
@@ -1125,7 +1084,6 @@ func planInputValue(v planInputJSON) harness.PlanInput {
 		BoundaryEntryID:   v.BoundaryEntryID,
 		Instructions:      v.Instructions,
 		Tools:             toolDefinitionsValue(v.Tools),
-		Contributions:     requestEvidenceValue(v.Contributions),
 		Measurement:       v.Measurement,
 		ContextWindow:     v.ContextWindow,
 		OutputReserve:     v.OutputReserve,

@@ -50,17 +50,16 @@ func serializeCompactionMessages(messages []model.Message) ([]string, error) {
 // publication: the ordered per-request facts — the actual tool-free logical
 // Request messages each model plan's effect consumed (retained the moment the
 // effect gets its request, never invented before it), its producing model,
-// and its optional reported usage — plus the effective contribution evidence
-// the procedure consumed at its frozen canonical boundary and the producer
-// identity of the current maintenance attempt. Reported usage rides the
-// ordered facts on the existing settlement or checkpoint; this carrier is
-// neither a separate model-result entry nor a crash-survival guarantee before
-// that commit.
+// and its optional reported usage — plus the frozen canonical references the
+// procedure consumed and the identity of the current maintenance request, set
+// only when that request actually opened. Reported usage rides the ordered
+// facts on the existing settlement or checkpoint; this carrier is neither a
+// separate model-result entry nor a crash-survival guarantee before that
+// commit.
 type maintenanceFacts struct {
-	facts           []maintenanceFact
-	consumed        RequestEvidence
-	sourceRequestID string // the conversation request whose frozen view the maintenance procedure consumed; empty only for manual maintenance
-	maintenanceID   string // the producer identity of the current maintenance attempt
+	facts     []maintenanceFact
+	consumed  RequestEvidence
+	requestID string // the current maintenance request identity; empty before any request opens
 }
 
 func (f *maintenanceFacts) hasInput() bool { return f != nil && len(f.facts) > 0 }
@@ -108,13 +107,13 @@ func cloneMaintenanceFacts(facts []maintenanceFact) []maintenanceFact {
 	return out
 }
 
-// producer returns the procedure's own producer identity — the settlement
-// and checkpoint witness — for a possibly-nil carrier.
+// producer returns the current maintenance request identity — the settlement
+// witness — for a possibly-nil carrier. It is empty when no request opened.
 func (f *maintenanceFacts) producer() string {
 	if f == nil {
 		return ""
 	}
-	return f.maintenanceID
+	return f.requestID
 }
 
 // transferPending moves the carrier's uncommitted ordered facts to the
@@ -143,9 +142,8 @@ func (d *executionDriver) consumePendingFacts(facts *maintenanceFacts) *maintena
 	merged := &maintenanceFacts{}
 	if facts != nil {
 		merged = &maintenanceFacts{
-			consumed:        facts.consumed,
-			sourceRequestID: facts.sourceRequestID,
-			maintenanceID:   facts.maintenanceID,
+			consumed:  facts.consumed,
+			requestID: facts.requestID,
 		}
 	}
 	merged.facts = append(append([]maintenanceFact{}, pending...), factsList(facts)...)
@@ -159,18 +157,13 @@ func (d *executionDriver) completePending() {
 }
 
 // clonePlanInput returns an independent deep copy of one frozen plan input:
-// the strategy callback receives owned messages, tools, contributions,
-// measurement and settings and can never mutate the Harness's frozen source
-// copy used to resolve Retain, persisted facts, admission capture or a later
-// callback.
+// the strategy callback receives owned messages, tools, measurement and
+// settings and can never mutate the Harness's frozen source copy used to
+// resolve Retain, persisted facts, admission capture or a later callback.
 func clonePlanInput(in PlanInput) PlanInput {
 	out := in
 	out.Messages = cloneRequestMessages(in.Messages)
 	out.Tools = cloneToolDefinitions(in.Tools)
-	if in.Contributions != nil {
-		contributions := copyRequestEvidence(*in.Contributions)
-		out.Contributions = &contributions
-	}
 	if in.Measurement != nil {
 		measurement := *in.Measurement
 		out.Measurement = &measurement
@@ -385,32 +378,32 @@ func factsUsageContribution(facts []maintenanceFact) (UsageTotals, error) {
 // over the opened maintenance stage and the procedure's maintenance facts. The
 // shared active-effect intent transaction commits the same durable intent
 // carrying the maintenance producer's own request identity, the captured
-// compact model, and the maintenance purpose — never the suspended
-// conversation's identity — and publishes the supplied suspended conversation
-// request state inside that existing transition when none is published yet.
-// The in-memory intent's expected identity is the compact model, the assembly
-// source the agent's callback validates and the terminal usage model, because
-// the maintenance request runs on the compact transport while the durable
-// active-effect state is model-agnostic, and the intent is marked as
-// compaction so its terminal usage carries maintenance provenance. The
-// standard attempt-retry loop runs through the compact transport. The actual
-// tool-free logical maintenance request is retained on the carrier's ordered
-// facts the moment the effect receives it, and the assembled output's
+// compact model, and the maintenance purpose, and publishes the one summary
+// request state being shaped inside that existing transition when none is
+// published yet. The in-memory intent's expected identity is the compact
+// model, the assembly source the agent's callback validates and the terminal
+// usage model, because the maintenance request runs on the compact transport
+// while the durable active-effect state is model-agnostic, and the intent is
+// marked as compaction so its terminal usage carries maintenance provenance.
+// The standard attempt-retry loop runs through the compact transport. The
+// actual tool-free logical maintenance request is retained on the carrier's
+// ordered facts the moment the effect receives it, and the assembled output's
 // reported usage — nil-preserving, a reported zero stays known zero — lands on
 // that fact before that output settles. A completed output settles by the
-// empty running result — no entry, the active effect cleared, both registers
-// replaced with no usage, the reserved identity unused — and returns the
-// ready settlement whose output carries the completed result; the
-// orchestration folds it through the strategy's Consume after the settlement.
-// A maintenance failure and an interruption settle through the effect's own
-// terminal settlement with the retained maintenance facts — the conversation
-// effect's own shape, and the run's callback gate requires it whenever the
-// assembly callback ran — while pre-assembly failures and cancellations
-// return no output. The invocation's callbacks come from the opened
-// maintenance invocation; its retry classifier is the enclosing Operation's.
-func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maintenanceFacts, suspended *RunningRequest) agent.ModelEffect {
+// empty running result — no entry, the active effect cleared, the one summary
+// request cleared before the pure folding stage, both registers replaced with
+// no usage, the reserved identity unused — and returns the ready settlement
+// whose output carries the completed result; the orchestration folds it
+// through the strategy's Consume after the settlement. A maintenance failure
+// and an interruption settle through the effect's own terminal settlement with
+// the retained maintenance facts — the conversation effect's own shape, and
+// the run's callback gate requires it whenever the assembly callback ran —
+// while pre-assembly failures and cancellations return no output. The
+// invocation's callbacks come from the opened maintenance invocation; its
+// retry classifier is the enclosing Operation's.
+func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maintenanceFacts) agent.ModelEffect {
 	h := d.harness
-	maintenanceID := inv.request.ID // the actual issued stage owns the procedure-producer identity
+	maintenanceID := inv.request.ID // the actual issued stage owns this request identity
 	c := d.coordinator
 	operationID := d.operationID
 	capture := d.capture
@@ -420,7 +413,13 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		// carrier's ordered facts the moment the effect receives it,
 		// deep-owned.
 		facts.retainInput(maintenanceID, capture.Compact.Model, req)
-		intent, err := h.beginModelEffect(ctx, c, operationID, maintenanceID, InvocationPurposeMaintenance, capture.Compact.Model, nil, suspended)
+		running := &RunningRequest{
+			RequestID:         maintenanceID,
+			Purpose:           InvocationPurposeMaintenance,
+			CheckpointEntryID: facts.consumed.CheckpointEntryID,
+			BoundaryEntryID:   facts.consumed.BoundaryEntryID,
+		}
+		intent, err := h.beginModelEffect(ctx, c, operationID, maintenanceID, InvocationPurposeMaintenance, capture.Compact.Model, nil, running)
 		if err != nil {
 			// A marked publication failure propagates before any cancellation
 			// rule, regardless of a concurrent cancellation. Only an unmarked
@@ -544,9 +543,11 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 // so a mutating strategy can never rewrite the Harness's frozen source copy.
 // The selected binding is accepted and frozen once here — before any Plan
 // callback, for model-free and model-producing procedures alike — requiring
-// a nonnil implementation and the captured identity and requirement. A
-// returned plan is validated against the closed union before anything runs; a
-// malformed union, a strategy error, or a model failure settles the quiet
+// a nonnil implementation matching the captured identity and, when it
+// requires a known conversation window, a captured window the frozen inputs
+// actually carry. A changed requirement bit alone never rejects the binding.
+// A returned plan is validated against the closed union before anything runs;
+// a malformed union, a strategy error, or a model failure settles the quiet
 // running Operation through the direct terminal settlement carrying the
 // retained maintenance facts, while an actual publication failure propagates
 // with the running state retained and no guessed follow-up write. A procedure
@@ -557,43 +558,43 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 // the procedure's error: intermediate stages close after a valid successor
 // plan and before its opening, and on return the procedure's failure is
 // latched before its final stage closes.
-func (d *executionDriver) completeMaintenance(execCtx context.Context, input PlanInput, suspended *RunningRequest, manual bool) (changed bool, err error) {
+func (d *executionDriver) completeMaintenance(execCtx context.Context, input PlanInput, manual bool) (changed bool, err error) {
 	h := d.harness
 	c := d.coordinator
 	operationID := d.operationID
 	capture := d.capture
-	// The procedure's producer identity is minted before the first plan, so
-	// every early failure still carries a valid settlement witness.
-	maintenanceID, err := newHexID()
-	facts := &maintenanceFacts{maintenanceID: maintenanceID}
-	if err != nil {
-		return false, d.settleMaintenance(OperationFailure, fmt.Errorf("%w: %v", ErrStorage, err), facts)
-	}
-	// The consumed evidence names the frozen input references — never the
-	// proposed cut — and the frozen contribution view replaces it with the
-	// same references plus the effective contribution view.
-	facts.consumed = newRequestView(capture, input.CheckpointEntryID, input.BoundaryEntryID, nil).evidenceFor()
-	if input.Contributions != nil {
-		facts.consumed = *input.Contributions
-	}
-	if suspended != nil {
-		// Automatic maintenance records the conversation request its frozen
-		// input view belongs to before the maintenance opener runs, so its
-		// facts stay associated with that request even when the producer
-		// identity is minted later or never minted at all.
-		facts.sourceRequestID = suspended.RequestID
-	}
+	facts := &maintenanceFacts{}
+	// The consumed evidence names only the frozen canonical references —
+	// never the proposed cut, and never a conversation request that does not
+	// exist yet.
+	facts.consumed = RequestEvidence{CheckpointEntryID: input.CheckpointEntryID, BoundaryEntryID: input.BoundaryEntryID}
 	// The StrategyBinding is accepted and frozen once, before any Plan
 	// callback, as a local value copy: the accepted binding must provide its
-	// implementation and match the captured strategy inputs exactly, and a
-	// caller that mutates its own supplied binding afterwards can never
-	// re-point this procedure's Plan or Consume.
-	binding := *d.execution.Strategy
+	// implementation and match the captured strategy identity, and a caller
+	// that mutates its own supplied binding afterwards can never re-point this
+	// procedure's Plan or Consume. Its requirement is checked against the
+	// captured inputs the procedure will actually consume. A host-owned
+	// resolver looks the captured identity up at each procedure start from the
+	// retained execution configuration; those retained scopes are fixed for
+	// the configuration, as live registration replacement is not connected
+	// yet. This procedure holds its accepted result through Plan and Consume.
+	resolved, err := d.maintenanceStrategy(execCtx)
+	if err != nil {
+		terminal := OperationFailure
+		if EffectInterrupted(err) || errors.Is(err, errExecutionInterrupted) {
+			terminal = OperationInterruption
+		}
+		return false, d.settleMaintenance(terminal, err, facts)
+	}
+	binding := *resolved
 	if binding.Strategy == nil {
 		return false, d.settleMaintenance(OperationFailure, invalidInput("opened strategy binding %q carries no implementation", binding.ID), facts)
 	}
-	if binding.ID != capture.Strategy.ID || binding.RequiresContextWindow != capture.Strategy.RequiresContextWindow {
+	if binding.ID != capture.Strategy.ID {
 		return false, d.settleMaintenance(OperationFailure, invalidInput("opened strategy binding %q does not match the captured strategy %q", binding.ID, capture.Strategy.ID), facts)
+	}
+	if binding.RequiresContextWindow && capture.ContextWindow <= 0 {
+		return false, d.settleMaintenance(OperationFailure, invalidInput("opened strategy binding %q requires a known context window the captured inputs do not carry", binding.ID), facts)
 	}
 	if observeMaintenanceInterrupt(execCtx, c, operationID) {
 		// Before entering the unstarted pure planning stage the execution
@@ -602,8 +603,8 @@ func (d *executionDriver) completeMaintenance(execCtx context.Context, input Pla
 		// starts and the waiting conversation never dispatches.
 		return false, d.settleMaintenance(OperationInterruption, errors.New(executionInterruptedDetail), facts)
 	}
-	// The initial Plan carries the procedure's own producer identity, the
-	// maintenance purpose, and no invocation or effect yet.
+	// The initial Plan carries the maintenance purpose and no invocation or
+	// effect yet; a request identity exists only once a model plan opens one.
 	plan, err := binding.Strategy.Plan(clonePlanInput(input))
 	if err != nil {
 		terminal := OperationFailure
@@ -652,7 +653,7 @@ func (d *executionDriver) completeMaintenance(execCtx context.Context, input Pla
 		// stage. A plan that fails validation or ends at none/checkpoint
 		// retains the current stage through the settlement or consumption.
 		closeStage()
-		nextStage, output, err := d.runMaintenanceModel(execCtx, plan.Model, suspended, facts)
+		nextStage, output, err := d.runMaintenanceModel(execCtx, plan.Model, facts)
 		stage = nextStage
 		if err != nil {
 			return false, err
@@ -676,15 +677,37 @@ func (d *executionDriver) completeMaintenance(execCtx context.Context, input Pla
 	}
 }
 
+// maintenanceStrategy accepts one maintenance procedure's strategy binding
+// from the opened execution: a host-owned resolver looks the captured identity
+// up afresh from the execution's retained configuration, otherwise the
+// included strategy is supplied for its own captured identity. The returned
+// identity and window are checked once by the caller before Plan.
+func (d *executionDriver) maintenanceStrategy(ctx context.Context) (*StrategyBinding, error) {
+	if d.execution.ResolveStrategy != nil {
+		binding, err := d.execution.ResolveStrategy(ctx, d.capture.Strategy.ID)
+		if err != nil {
+			return nil, err
+		}
+		if binding == nil {
+			return nil, invalidInput("execution resolved no strategy for captured identity %q", d.capture.Strategy.ID)
+		}
+		return binding, nil
+	}
+	return IncludedStrategyBinding(), nil
+}
+
 // runMaintenanceModel executes one tool-free maintenance model plan through
 // its own opened maintenance invocation and the compact model effect: a fresh
 // per-plan producer identity, the maintenance purpose, and the captured
-// compact model. An invocation the opener rejects cleans its own provisional
-// resources. The completed output returns to the procedure; every failure and
-// run-level terminal settles durably here — inside the effect or through the
-// direct terminal settlement — and returns the original cause with the
-// invocation it left owned.
-func (d *executionDriver) runMaintenanceModel(execCtx context.Context, plan *ModelPlan, suspended *RunningRequest, facts *maintenanceFacts) (*openedInvocation, model.Output, error) {
+// compact model. The strategy's actual frozen request is shaped once by that
+// invocation's own request hooks over its leading system prompt, with an
+// empty tool catalog and advertisement, and the shaped request is what the
+// effect retains and dispatches. An invocation the opener rejects cleans its
+// own provisional resources. The completed output returns to the procedure;
+// every failure and run-level terminal settles durably here — inside the
+// effect or through the direct terminal settlement — and returns the original
+// cause with the invocation it left owned.
+func (d *executionDriver) runMaintenanceModel(execCtx context.Context, plan *ModelPlan, facts *maintenanceFacts) (*openedInvocation, model.Output, error) {
 	stage, err := d.openInvocation(execCtx, InvocationPurposeMaintenance, d.capture.Compact.Model)
 	if err != nil {
 		// An opener failure observed under a genuinely canceled execution is
@@ -698,7 +721,19 @@ func (d *executionDriver) runMaintenanceModel(execCtx context.Context, plan *Mod
 		}
 		return nil, model.Output{}, d.settleMaintenance(terminal, err, facts)
 	}
-	request := plan.Request
+	facts.requestID = stage.request.ID
+	view := newStrategyRequestView(d.capture, facts.consumed.CheckpointEntryID, facts.consumed.BoundaryEntryID, plan.Request)
+	if err := d.runRequestHooks(execCtx, stage, stage.request.ID, view); err != nil {
+		terminal := OperationFailure
+		if EffectInterrupted(err) || errors.Is(err, errExecutionInterrupted) {
+			terminal = OperationInterruption
+		}
+		return stage, model.Output{}, d.settleMaintenance(terminal, err, facts)
+	}
+	request, err := shapeStrategyRequest(view, plan.Request)
+	if err != nil {
+		return stage, model.Output{}, d.settleMaintenance(OperationFailure, err, facts)
+	}
 	res, runErr := agent.Run(execCtx, agent.Invocation{
 		ExpectedModel: d.capture.Compact.Model,
 		Request: func(context.Context) (agent.RequestResult, error) {
@@ -715,7 +750,7 @@ func (d *executionDriver) runMaintenanceModel(execCtx context.Context, plan *Mod
 			}
 			return agent.RequestResult{Request: &request}, nil
 		},
-		ModelEffect: d.compactModelEffect(stage, facts, suspended),
+		ModelEffect: d.compactModelEffect(stage, facts),
 		ToolEffect: func(context.Context, model.ToolCall, []string) (model.ToolResult, error) {
 			return model.ToolResult{}, &agent.ProtocolError{Boundary: "tool", Detail: "compact agent has no tools"}
 		},
@@ -752,8 +787,8 @@ func observeMaintenanceInterrupt(execCtx context.Context, c *coordinator, operat
 
 // settleMaintenance maps one maintenance domain terminal onto the shared
 // quiet gate. It contributes only the domain value — the terminal kind, its
-// detail, the procedure's retained facts and producer identity — and the
-// explicit interruption token; the gate alone owns the settled/active-effect
+// detail, the procedure's retained facts and its real request identity when
+// one opened — and the explicit interruption token; the gate alone owns the settled/active-effect
 // and publication-failure decision. The original cause is returned unchanged
 // when the gate reports no failure; an interruption proposal returns the
 // Harness's explicit interruption token only then, preserving a publication
@@ -886,9 +921,7 @@ func entryByID(entries []graphEntry, id string) (graphEntry, bool) {
 // proposed checkpoint. A proposed checkpoint must pass the resolution,
 // coverage and pairing validation before the commit transaction; a violation
 // is a strategy failure settled through the direct terminal settlement with
-// the retained facts, leaving the previous checkpoint current. So is an
-// automatic proposal whose published running request names a different
-// conversation request: the published request is never replaced. A manual
+// the retained facts, leaving the previous checkpoint current. A manual
 // procedure whose strategy planned none still settles its dedicated
 // Operation, carrying its actual ordered facts when model work was incurred.
 // An automatic procedure that planned none proceeds with no write at all.
@@ -898,26 +931,9 @@ func entryByID(entries []graphEntry, id string) (graphEntry, bool) {
 func (d *executionDriver) commitMaintenance(execCtx context.Context, input PlanInput, facts *maintenanceFacts, checkpoint *CheckpointPlan, manual bool) error {
 	h := d.harness
 	c := d.coordinator
-	operationID := d.operationID
 	materialized, err := h.validateCheckpointPlan(c, input, checkpoint)
 	if err != nil {
 		return d.settleMaintenance(OperationFailure, err, facts)
-	}
-	// The automatic procedure's authoritative request association: a published
-	// running request naming a conversation request other than the one the
-	// procedure consumed is a mismatched association — the proposal is rejected
-	// as a strategy failure before the commit, never a replacement of the
-	// published request. Manual maintenance names no conversation request.
-	if !manual && checkpoint != nil && facts != nil && facts.sourceRequestID != "" {
-		c.mu.Lock()
-		published := ""
-		if op, ok := c.graph.Operation(operationID); ok && op.State.Request != nil {
-			published = op.State.Request.RequestID
-		}
-		c.mu.Unlock()
-		if published != "" && published != facts.sourceRequestID {
-			return d.settleMaintenance(OperationFailure, invalidInput("operation %q publishes running request %q; the maintenance procedure consumed request %q", operationID, published, facts.sourceRequestID), facts)
-		}
 	}
 	if checkpoint == nil && !manual {
 		return nil
@@ -927,31 +943,28 @@ func (d *executionDriver) commitMaintenance(execCtx context.Context, input PlanI
 
 // commitCheckpoint commits the one atomic context checkpoint transaction: the
 // immutable checkpoint entry with its strategy provenance, owned messages,
-// ordered maintenance facts, and consumed contribution evidence, the Session
-// register's projection field, and the usage totals on the Operation and
-// Session registers — plus, on the manual shape, the dedicated Operation's
-// success settlement — all inside one transaction on the cancellation-free
-// Harness context. A published suspended conversation request state is
-// advanced in this same transaction to the new checkpoint entry and its
-// rebuilt projection tail, never replaced by the maintenance producer's
-// identity; when none is published yet the automatic procedure's checkpoint
-// transition publishes the conversation request it consumed with the rebuilt
-// references, while manual maintenance creates no conversation
-// RunningRequest. The entry's boundary names the covered boundary the
-// procedure proposed and the caller validated. The ordered facts' reported usage lands
-// keyed by each producing model on the entry and both register totals in the
-// same transaction. A failed transaction leaves every previous value durable
-// and the running state to recovery: it settles nothing and the caller
-// returns the error, so the waiting conversation request is never sent
-// uncompacted and no guessed follow-up terminal write is ever fabricated. A
-// manual procedure whose strategy planned none commits no checkpoint entry:
-// only the dedicated Operation's success settlement lands. The
-// checkpoint/manual-success publication selects interruption versus
-// prospective success under this same hold with the shared success
-// predicate: an interruption winning it publishes the ordinary interruption
-// settlement with all incurred facts, preserves the previous checkpoint, and
-// never dispatches the waiting conversation; once success has committed, a
-// later interruption never rewrites it.
+// ordered maintenance facts, and frozen canonical input references, the
+// Session register's projection field, and the usage totals on the Operation
+// and Session registers — plus, on the manual shape, the dedicated
+// Operation's success settlement — all inside one transaction on the
+// cancellation-free Harness context. No conversation request exists yet at
+// this boundary: the conversation request is minted after maintenance, so the
+// publication neither advances nor creates a running request state. The
+// entry's boundary names the covered boundary the procedure proposed and the
+// caller validated. The ordered facts' reported usage lands keyed by each
+// producing model on the entry and both register totals in the same
+// transaction. A failed transaction leaves every previous value durable and
+// the running state to recovery: it settles nothing and the caller returns
+// the error, so the waiting conversation request is never sent uncompacted
+// and no guessed follow-up terminal write is ever fabricated. A manual
+// procedure whose strategy planned none commits no checkpoint entry: only the
+// dedicated Operation's success settlement lands. The checkpoint/manual-
+// success publication selects interruption versus prospective success under
+// this same hold with the shared success predicate: an interruption winning
+// it publishes the ordinary interruption settlement with all incurred facts,
+// preserves the previous checkpoint, and never dispatches the waiting
+// conversation; once success has committed, a later interruption never
+// rewrites it.
 func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanInput, facts *maintenanceFacts, checkpoint *CheckpointPlan, materialized []model.Message, manual bool) error {
 	h := d.harness
 	c := d.coordinator
@@ -976,13 +989,6 @@ func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanIn
 	// or manual terminal publishes, and are consumed only after the
 	// transaction commits.
 	mergedFacts := d.consumePendingFacts(facts)
-
-	// The checkpoint transaction's authoritative conversation request
-	// association, resolved once from the procedure's facts.
-	consumedSource := ""
-	if facts != nil {
-		consumedSource = facts.sourceRequestID
-	}
 
 	var (
 		committedOp   OperationRecord
@@ -1042,15 +1048,16 @@ func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanIn
 			if err != nil {
 				return fmt.Errorf("%w: %v", ErrStorage, err)
 			}
-			// The consumed evidence names the frozen input references —
-			// never the proposed cut.
-			consumed := newRequestView(capture, input.CheckpointEntryID, input.BoundaryEntryID, nil).evidenceFor()
+			// The consumed evidence names only the frozen canonical input
+			// references — never the proposed cut and never a conversation
+			// contribution view, which does not exist before maintenance.
+			consumed := RequestEvidence{CheckpointEntryID: input.CheckpointEntryID, BoundaryEntryID: input.BoundaryEntryID}
 			// The merged carrier holds this checkpoint's facts exactly once,
 			// the accumulated uncommitted facts already in incurred order
 			// before the committing procedure's own.
 			factList := factsList(mergedFacts)
 			if mergedFacts.hasConsumed() {
-				consumed = mergedFacts.consumed // the effective contribution evidence the procedure consumed
+				consumed = mergedFacts.consumed // the frozen canonical input the procedure consumed
 			}
 			payload, err := encodeContextCheckpointEntry(contextCheckpointEntry{
 				SessionID:             sessionID,
@@ -1061,7 +1068,6 @@ func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanIn
 				BoundaryEntryID:       checkpoint.BoundaryEntryID,
 				ConfigurationRevision: capture.ConfigurationRevision,
 				Facts:                 factList,
-				ConsumedRequestID:     consumedSource,
 				Evidence:              &consumed,
 			})
 			if err != nil {
@@ -1095,30 +1101,10 @@ func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanIn
 			}
 
 			nextOp.State.Usage = opUsage
-			// The checkpoint transition names the complete rebuilt projection
-			// pair — the new checkpoint AND the rebuilt view's canonical tail
-			// boundary — in this same transaction, so the state names exactly
-			// the consumed projection the request source rebuilds after it. An
-			// automatic procedure publishes the authoritative conversation
-			// request when none is published yet; manual maintenance never
-			// creates the conversation RunningRequest. An already-published
-			// request keeps its identity and recorded hook results while only
-			// its references advance.
-			rebuilt := rebuiltBoundary(c.graph.Entries, checkpoint.BoundaryEntryID, entryID)
 			// The checkpoint publication records the merged maintenance facts, so it
 			// retires the incomplete-maintenance marker the completed model effects
 			// carried across the gap.
 			nextOp.State.UnreportedMaintenance = false
-			if nextOp.State.Request == nil {
-				if !manual && consumedSource != "" {
-					nextOp.State.Request = &RunningRequest{RequestID: consumedSource, CheckpointEntryID: entryID, BoundaryEntryID: rebuilt}
-				}
-			} else {
-				advanced := *nextOp.State.Request
-				advanced.CheckpointEntryID = entryID
-				advanced.BoundaryEntryID = rebuilt
-				nextOp.State.Request = &advanced
-			}
 			opPayload, err := encodeOperationRegister(nextOp)
 			if err != nil {
 				return err
@@ -1220,30 +1206,4 @@ func findCompactionCutoff(entries []graphEntry, namedID string) (*contextCheckpo
 		}
 	}
 	return nil, -1
-}
-
-// rebuiltBoundary names the canonical tail boundary of the rebuilt
-// projection one committed checkpoint produces: the newest
-// conversation-bearing entry the kept tail carries strictly after the covered
-// cut, and the new checkpoint entry itself when the entry tail carries none —
-// a rebuilt projection whose tail is the checkpoint names the checkpoint
-// entry as its canonical boundary.
-func rebuiltBoundary(entries []graphEntry, cutEntryID, checkpointEntryID string) string {
-	cut, ok := entryByID(entries, cutEntryID)
-	if !ok {
-		return checkpointEntryID
-	}
-	boundary := ""
-	for i := range entries {
-		if entries[i].Envelope.Sequence <= cut.Envelope.Sequence {
-			continue
-		}
-		if messageBearingEntryKind(entries[i]) {
-			boundary = entries[i].Envelope.ID
-		}
-	}
-	if boundary == "" {
-		return checkpointEntryID
-	}
-	return boundary
 }

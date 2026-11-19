@@ -34,9 +34,10 @@ const (
 	// version 17 adds the strict external-data owner list to the Session
 	// payload; version 18 adds extension provenance to input payloads. Version
 	// 19 records bound tool identity and moves effective arguments to results;
-	// 20 renames Session ownership lineage and member kinds. The SQL tables
-	// are unchanged.
-	sqliteSchemaVersion = 20
+	// 20 renames Session ownership lineage and member kinds; 21 removes the
+	// maintenance conversation-source association and requires the running
+	// request purpose. The SQL tables are unchanged.
+	sqliteSchemaVersion = 21
 
 	// sqlitePoolDSN configures every physical connection of the long-lived
 	// pool: write-ahead logging, full synchronous durability, immediate

@@ -103,7 +103,7 @@ func modelFreePrep(f *publicFixture, strategy harness.ContextStrategy, openParke
 		if err != nil {
 			return exec, err
 		}
-		exec.Strategy = &harness.StrategyBinding{ID: "test.strategy/v1", Strategy: strategy}
+		exec.ResolveStrategy = publicFixedStrategyResolver(&harness.StrategyBinding{ID: "test.strategy/v1", Strategy: strategy})
 		return exec, nil
 	}
 }

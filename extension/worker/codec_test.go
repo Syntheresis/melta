@@ -153,6 +153,8 @@ func testPreparationInput() extension.PreparationInput {
 func testRequestHookInput() harness.RequestHookInput {
 	return harness.RequestHookInput{
 		RequestID:         "request-1",
+		Purpose:           harness.InvocationPurposeConversation,
+		Model:             model.ModelRef{Provider: "prov", Model: "gpt-x"},
 		CanonicalMessages: []model.Message{testMessage()},
 		Messages:          []model.Message{testMessage()},
 		CheckpointEntryID: "checkpoint-1",
@@ -172,18 +174,10 @@ func testPlanInput() harness.PlanInput {
 		BoundaryEntryID:   "boundary-1",
 		Instructions:      "instructions",
 		Tools:             []model.ToolDefinition{testToolDefinition("tool")},
-		Contributions: &harness.RequestEvidence{
-			CheckpointEntryID: "checkpoint-1",
-			BoundaryEntryID:   "boundary-1",
-			Prompt:            "prompt",
-			Messages:          []model.Message{testMessage()},
-			ToolNames:         []string{"tool"},
-			HookIDs:           []harness.HookIdentity{{ExtensionID: "ext", HookID: "hook"}},
-		},
-		Measurement:   &harness.UsageCount{InputTokens: 10, CachedInputTokens: 2, OutputTokens: 3},
-		ContextWindow: 1000,
-		OutputReserve: 100,
-		Settings:      json.RawMessage("{\n  \"strategy\": \"settings\"\n}"),
+		Measurement:       &harness.UsageCount{InputTokens: 10, CachedInputTokens: 2, OutputTokens: 3},
+		ContextWindow:     1000,
+		OutputReserve:     100,
+		Settings:          json.RawMessage("{\n  \"strategy\": \"settings\"\n}"),
 	}
 }
 
@@ -763,14 +757,10 @@ func TestPresencePreservedExactly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encoding absent plan members: %v", err)
 	}
-	if _, present := members(absentRaw)["contributions"]; present {
-		t.Fatal("absent contributions were encoded")
-	}
 	if _, present := members(absentRaw)["measurement"]; present {
 		t.Fatal("absent measurement was encoded")
 	}
 	zeroMeasurement := &harness.UsageCount{}
-	absentPlan.Contributions = &harness.RequestEvidence{ToolNames: []string{}}
 	absentPlan.Measurement = zeroMeasurement
 	presentRaw, err := worker.EncodePlanParams(absentPlan)
 	if err != nil {
@@ -780,7 +770,7 @@ func TestPresencePreservedExactly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decoding present plan members: %v", err)
 	}
-	if decodedPlanInput.Contributions == nil || decodedPlanInput.Measurement == nil {
+	if decodedPlanInput.Measurement == nil {
 		t.Fatalf("present plan members decoded as %#v", decodedPlanInput)
 	}
 

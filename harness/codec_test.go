@@ -198,8 +198,7 @@ func validCompactionEntry(operationID string) contextCheckpointEntry {
 				{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "transcript"}}},
 			},
 		}},
-		ConsumedRequestID: "request-two",
-		Evidence:          &RequestEvidence{BoundaryEntryID: hexID(1)},
+		Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)},
 	}
 }
 
@@ -235,6 +234,7 @@ func validRequestBoundHookResult(status hookResultStatus) hookResultEntry {
 		HookID:        "cap.hook.one",
 		ExtensionID:   "ext.one",
 		RequestID:     "request-one",
+		Purpose:       InvocationPurposeConversation,
 		Status:        status,
 		Evidence:      ExecutionObserved,
 		InputEvidence: &RequestEvidence{BoundaryEntryID: hexID(1)},
@@ -773,7 +773,7 @@ func TestHookActiveEffectCodecRules(t *testing.T) {
 				if tc.effect.Kind != EffectModel {
 					record = op
 				} else {
-					record.State.Request = &RunningRequest{RequestID: tc.effect.RequestID, BoundaryEntryID: hexID(1)}
+					record.State.Request = &RunningRequest{RequestID: tc.effect.RequestID, Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1)}
 				}
 				record.State.ActiveEffect = &tc.effect
 				raw, err := encodeOperationRegister(record)
@@ -799,7 +799,7 @@ func TestHookActiveEffectCodecRules(t *testing.T) {
 			name   string
 			effect ActiveEffect
 		}{
-			{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
+			{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", Purpose: InvocationPurposeConversation, HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
 			{"conversation model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "request-one", Model: &model.ModelRef{Provider: "prov", Model: "m"}, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
 			{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance}},
 			{"concrete tool intent", ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`), Implementation: &ToolImplementation{ID: "echo"}}},
@@ -993,7 +993,7 @@ func TestOperationStateEncodingShape(t *testing.T) {
 	effect := validOperationRecord()
 	mdl := testModelRef()
 	effect.State.ActiveEffect = &ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(3), RequestID: "request-one", Model: &mdl, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}} // model effect: no tool call id
-	effect.State.Request = &RunningRequest{RequestID: "request-one", BoundaryEntryID: hexID(1)}
+	effect.State.Request = &RunningRequest{RequestID: "request-one", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1)}
 	raw, err = encodeOperationRegister(effect)
 	testassert.NoError(t, err)
 	stateObj, err = objectMember(wireObject(t, raw), "state", true)
@@ -2972,79 +2972,31 @@ func TestRequestConsequencePresenceDomain(t *testing.T) {
 	}
 }
 
-// TestMaintenanceConsumedRequestIdentityDomain proves the consumed source's
-// codec domain on both record families: absence is the valid manual shape, a
-// present value must be a non-empty identity (empty and null reject on the
-// wire, and a value set on the Go side encodes), and a present identity
-// round-trips unchanged.
-func TestMaintenanceConsumedRequestIdentityDomain(t *testing.T) {
+// TestMaintenanceRecordsRejectRetiredConsumedRequestIdentity proves the
+// retired conversation-source association on both record families: the
+// maintenance checkpoint and settlement schemas carry no such member, so a
+// stored value rejects through the exact-key rule rather than surviving as a
+// dead reference.
+func TestMaintenanceRecordsRejectRetiredConsumedRequestIdentity(t *testing.T) {
 	t.Run("compaction", func(t *testing.T) {
-		absent := validCompactionEntry(testOpID)
-		absent.ConsumedRequestID = ""
-		raw, err := encodeContextCheckpointEntry(absent)
+		entry := validCompactionEntry(testOpID)
+		raw, err := encodeContextCheckpointEntry(entry)
 		testassert.NoError(t, err)
-		testassert.Require(t, !strings.Contains(string(raw), "consumed_request_id"), "encode-side absence: %s", raw)
-		decoded, err := decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: absent.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: raw})
-		testassert.NoError(t, err)
-		testassert.Equal(t, decoded.ConsumedRequestID, "")
-		source := validCompactionEntry(testOpID)
-		source.ConsumedRequestID = "request-source"
-		raw, err = encodeContextCheckpointEntry(source)
-		testassert.NoError(t, err)
-		decoded, err = decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: source.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: raw})
-		testassert.NoError(t, err)
-		testassert.Equal(t, decoded.ConsumedRequestID, "request-source")
 		{
-			_, derr := decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: source.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`""`))})
-			testassert.Require(t, derr != nil, "a present-empty consumed source must reject")
-		}
-		{
-			_, derr := decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: source.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`null`))})
-			testassert.Require(t, derr != nil, "a null consumed source must reject")
+			_, derr := decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: entry.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`"request-source"`))})
+			testassert.Require(t, derr != nil, "a retired consumed source must reject")
 		}
 	})
 	t.Run("settlement", func(t *testing.T) {
 		base := validSettlementEntry()
 		base.RequestID = "request-producer"
-		base.ConsumedRequestID = "request-source"
 		base.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1)}
-		base.CompactionUsage = true // the maintenance provenance the consumed identity belongs to
+		base.CompactionUsage = true
 		raw, err := encodeOperationSettlementEntry(base)
 		testassert.NoError(t, err)
 		{
-			// Forbidden siblings: a consumed source attached to no evidence,
-			// or to an unmarked (non-maintenance) settlement.
-			noEvidence := base
-			noEvidence.Evidence = nil
-			_, cerr := encodeOperationSettlementEntry(noEvidence)
-			testassert.Require(t, cerr != nil && strings.Contains(cerr.Error(), "maintenance evidence provenance"), "encode = %v, want the source-evidence relation to reject", cerr)
-			unmarked := base
-			unmarked.CompactionUsage = false
-			_, cerr = encodeOperationSettlementEntry(unmarked)
-			testassert.Require(t, cerr != nil && strings.Contains(cerr.Error(), "maintenance evidence provenance"), "encode = %v, want the unmarked settlement to reject a consumed source", cerr)
-			valid := base
-			valid.ConsumedRequestID = ""
-			_, verr := encodeOperationSettlementEntry(valid)
-			testassert.NoError(t, verr) // the ordinary evidence-only maintenance settlement stays valid
-		}
-		env := Entry{SessionID: testSessionID, ID: base.EntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: raw}
-		decoded, err := decodeOperationSettlementEntry(env)
-		testassert.NoError(t, err)
-		testassert.Equal(t, decoded.ConsumedRequestID, "request-source")
-		{
-			_, derr := decodeOperationSettlementEntry(Entry{SessionID: testSessionID, ID: base.EntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`""`))})
-			testassert.Require(t, derr != nil, "a present-empty consumed source must reject")
-		}
-		{
-			_, derr := decodeOperationSettlementEntry(Entry{SessionID: testSessionID, ID: base.EntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`null`))})
-			testassert.Require(t, derr != nil, "a null consumed source must reject")
-		}
-		{
-			plain := base
-			plain.ConsumedRequestID = ""
-			plainRaw, err := encodeOperationSettlementEntry(plain)
-			testassert.NoError(t, err)
-			testassert.Require(t, !strings.Contains(string(plainRaw), "consumed_request_id"), "encode-side absence: %s", plainRaw)
+			_, derr := decodeOperationSettlementEntry(Entry{SessionID: testSessionID, ID: base.EntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`"request-source"`))})
+			testassert.Require(t, derr != nil, "a retired consumed source must reject")
 		}
 	})
 }
@@ -3077,7 +3029,7 @@ func TestForbiddenInputArgumentsMembershipReasonUniformity(t *testing.T) {
 		name   string
 		effect ActiveEffect
 	}{
-		{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
+		{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", Purpose: InvocationPurposeConversation, HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
 		{"conversation model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "request-one", Model: &model.ModelRef{Provider: "prov", Model: "m"}, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
 		{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance}},
 		{"concrete tool intent", ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`), Implementation: &ToolImplementation{ID: "echo"}}},
@@ -3521,5 +3473,131 @@ func TestImplementationCaptureSettingsUseCanonicalFraming(t *testing.T) {
 		} else {
 			testassert.Require(t, err != nil, "%s framing accepted", mutation.name)
 		}
+	}
+}
+
+// TestFrozenInputEvidenceShape proves checkpoint and maintenance-settlement
+// input evidence carries only canonical references: effective prompt, message,
+// tool-name or hook-identity members are rejected on encoding and cold
+// decoding, and a present maintenance settlement record requires its boundary.
+func TestFrozenInputEvidenceShape(t *testing.T) {
+	t.Run("checkpoint", func(t *testing.T) {
+		for _, row := range []struct {
+			name   string
+			mutate func(*RequestEvidence)
+		}{
+			{"prompt", func(v *RequestEvidence) { v.Prompt = "leaked" }},
+			{"messages", func(v *RequestEvidence) {
+				v.Messages = []model.Message{{Role: model.RoleUser, Content: admissionContent("leaked")}}
+			}},
+			{"tool names", func(v *RequestEvidence) { v.ToolNames = []string{"echo"} }},
+			{"hook ids", func(v *RequestEvidence) { v.HookIDs = []HookIdentity{{ExtensionID: "ext", HookID: "hook"}} }},
+		} {
+			t.Run(row.name+" encode", func(t *testing.T) {
+				entry := validCompactionEntry(testOpID)
+				row.mutate(entry.Evidence)
+				_, err := encodeContextCheckpointEntry(entry)
+				testassert.Require(t, err != nil && strings.Contains(err.Error(), "frozen input evidence"), "encode = %v, want the frozen-input shape rejection", err)
+			})
+		}
+		raw, err := encodeContextCheckpointEntry(validCompactionEntry(testOpID))
+		testassert.NoError(t, err)
+		env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryCompaction, Sequence: 1, CommittedAt: testTime}
+		obj := wireObject(t, raw)
+		evidence := wireObject(t, obj["evidence"])
+		evidence["prompt"] = mustMarshal("leaked")
+		obj["evidence"] = mustMarshal(evidence)
+		env.Payload = mustMarshal(obj)
+		_, err = decodeContextCheckpointEntry(env)
+		testassert.Require(t, err != nil && strings.Contains(err.Error(), "frozen input evidence"), "decode = %v, want the frozen-input shape rejection", err)
+	})
+
+	t.Run("maintenance settlement", func(t *testing.T) {
+		base := validSettlementEntry()
+		base.Status, base.Detail = OperationFailure, "summary failed"
+		base.CompactionUsage = true
+		base.RequestID = "request-one"
+		base.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1)}
+		raw, err := encodeOperationSettlementEntry(base)
+		testassert.NoError(t, err)
+		env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: raw}
+		got, err := decodeOperationSettlementEntry(env)
+		testassert.NoError(t, err)
+		testassert.Require(t, got.CompactionUsage && got.Evidence != nil && got.Evidence.BoundaryEntryID == hexID(1), "round trip = %+v, want the canonical reference only", got)
+
+		for _, row := range []struct {
+			name   string
+			mutate func(*RequestEvidence)
+		}{
+			{"missing boundary", func(v *RequestEvidence) { v.BoundaryEntryID = "" }},
+			{"prompt", func(v *RequestEvidence) { v.Prompt = "leaked" }},
+			{"messages", func(v *RequestEvidence) {
+				v.Messages = []model.Message{{Role: model.RoleUser, Content: admissionContent("leaked")}}
+			}},
+			{"tool names", func(v *RequestEvidence) { v.ToolNames = []string{"echo"} }},
+			{"hook ids", func(v *RequestEvidence) { v.HookIDs = []HookIdentity{{ExtensionID: "ext", HookID: "hook"}} }},
+		} {
+			t.Run(row.name+" encode", func(t *testing.T) {
+				candidate := base
+				evidence := *base.Evidence
+				row.mutate(&evidence)
+				candidate.Evidence = &evidence
+				_, err := encodeOperationSettlementEntry(candidate)
+				testassert.Require(t, err != nil && strings.Contains(err.Error(), "frozen input evidence"), "encode = %v, want the frozen-input shape rejection", err)
+			})
+		}
+		obj := wireObject(t, raw)
+		evidence := wireObject(t, obj["evidence"])
+		evidence["prompt"] = mustMarshal("leaked")
+		obj["evidence"] = mustMarshal(evidence)
+		env.Payload = mustMarshal(obj)
+		_, err = decodeOperationSettlementEntry(env)
+		testassert.Require(t, err != nil && strings.Contains(err.Error(), "frozen input evidence"), "decode = %v, want the frozen-input shape rejection", err)
+	})
+}
+
+// TestRequestBoundHookResultPurposeRequired proves a request-bound hook
+// result without its actual purpose is rejected on cold decoding; the purpose
+// is what makes empty-base summary evidence interpretable without a boundary.
+func TestRequestBoundHookResultPurposeRequired(t *testing.T) {
+	v := validRequestBoundHookResult(hookSucceeded)
+	raw, err := encodeHookResultEntry(v)
+	testassert.NoError(t, err)
+	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryHookResult}
+	for _, payload := range []json.RawMessage{
+		dropKey(raw, "purpose"),
+		setKey(raw, "purpose", json.RawMessage(`""`)),
+		setKey(raw, "purpose", json.RawMessage(`"other"`)),
+	} {
+		env.Payload = payload
+		_, err := decodeHookResultEntry(env)
+		testassert.Require(t, err != nil, "hook result without its actual purpose decoded: %s", payload)
+	}
+}
+
+// TestModelIntentRequiresRunningSlot proves every model intent, including a
+// maintenance summary on an empty base, requires its matching purpose-bound
+// running slot; the empty base permits no canonical boundary, not a missing
+// slot.
+func TestModelIntentRequiresRunningSlot(t *testing.T) {
+	for _, purpose := range []InvocationPurpose{InvocationPurposeConversation, InvocationPurposeMaintenance} {
+		t.Run(string(purpose), func(t *testing.T) {
+			record := validOperationRecord()
+			modelRef := model.ModelRef{Provider: "prov", Model: "m"}
+			record.State.ActiveEffect = &ActiveEffect{
+				Kind:          EffectModel,
+				ResultEntryID: hexID(9),
+				RequestID:     "request-one",
+				Model:         &modelRef,
+				Purpose:       purpose,
+			}
+			if purpose == InvocationPurposeConversation {
+				record.State.ActiveEffect.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1)}
+			}
+			record.State.Request = nil
+			_, err := encodeOperationRegister(record)
+			testassert.Require(t, err != nil && strings.Contains(err.Error(), "request-bound active effect requires the published running request state"),
+				"encode = %v, want the missing-slot rejection", err)
+		})
 	}
 }

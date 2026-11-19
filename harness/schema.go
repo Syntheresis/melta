@@ -121,16 +121,19 @@ type RequestEvidence struct {
 	HookIDs           []HookIdentity  `json:"hook_ids,omitempty"`
 }
 
-// RunningRequest is the one suspended conversation request state: the request
-// identity bound before contributions, the frozen canonical
-// boundary/checkpoint references, and the committed effectful request-hook
+// RunningRequest is the one suspended request state: the request identity
+// bound before contributions, the frozen canonical
+// boundary/checkpoint references of the projection or strategy request that
+// request is shaping, and the committed effectful request-hook
 // result references in commit order. It is published and advanced only inside
-// existing effect/checkpoint transactions.
+// existing effect/checkpoint transactions; a conversation request and a
+// maintenance summary request both use this one slot.
 type RunningRequest struct {
-	RequestID         string     `json:"request_id"`
-	CheckpointEntryID string     `json:"checkpoint_entry_id,omitempty"`
-	BoundaryEntryID   string     `json:"boundary_entry_id"`
-	HookResults       []EntryRef `json:"hook_results,omitempty"`
+	RequestID         string            `json:"request_id"`
+	Purpose           InvocationPurpose `json:"purpose"`
+	CheckpointEntryID string            `json:"checkpoint_entry_id,omitempty"`
+	BoundaryEntryID   string            `json:"boundary_entry_id"`
+	HookResults       []EntryRef        `json:"hook_results,omitempty"`
 }
 
 // operationRef addresses one Operation of one Session. It is a codec value
@@ -385,10 +388,11 @@ type OperationTerminal struct {
 // OperationCurrentState is the mutable state section of one Operation
 // register. Running forbids the settlement time and terminal section;
 // terminal states require both and forbid active and pending effects.
-// Request, when present, is the one suspended conversation request state
-// published with the first existing effect/checkpoint transition and cleared
-// at the conversation result without a pending batch, the final pending tool
-// result, or the terminal settlement. UnreportedMaintenance records the
+// Request, when present, is the one suspended request state published with
+// the first existing effect transition and cleared when its request settles
+// without a pending batch, at the final pending tool result, or at the
+// terminal settlement. A conversation request and a maintenance summary
+// request in flight share this one slot. UnreportedMaintenance records the
 // knowledge that a completed maintenance model intent's facts are not yet
 // durably recorded: set when the empty running result clears a completed
 // maintenance intent, preserved across every later transition and recovery,
@@ -522,6 +526,7 @@ type hookResultEntry struct {
 	ExtensionID string            `json:"extension_id"`
 	ToolCallID  string            `json:"tool_call_id,omitempty"`
 	RequestID   string            `json:"request_id,omitempty"`
+	Purpose     InvocationPurpose `json:"purpose,omitempty"`
 	Status      hookResultStatus  `json:"status"`
 	Evidence    ExecutionEvidence `json:"evidence"`
 	Arguments   json.RawMessage   `json:"arguments,omitempty"`
@@ -576,27 +581,24 @@ type maintenanceFact struct {
 // family directly and its ordered Facts carry the procedure's per-request
 // usage. RequestID is the
 // settlement's own request witness — the answered conversation request, a live
-// model intent's identity, or a maintenance settlement's producer identity;
-// ConsumedRequestID names the conversation request whose frozen view an
-// automatic maintenance settlement consumed, present only beside maintenance
-// evidence and distinct from that producer. Evidence is the final effective
-// request evidence owned by a no-output settlement, and Facts are the actual
-// tool-free logical maintenance requests the procedure reached with their
-// producing models and reported usage. Maintenance facts settle once on the
-// successful checkpoint or on the terminal settlement, never both.
+// model intent's identity, or a maintenance settlement's producer identity.
+// Evidence is the final effective request evidence owned by a no-output
+// settlement, and Facts are the actual tool-free logical maintenance requests
+// the procedure reached with their producing models and reported usage.
+// Maintenance facts settle once on the successful checkpoint or on the
+// terminal settlement, never both.
 type operationSettlementEntry struct {
-	SessionID         string            `json:"session_id"`
-	EntryID           string            `json:"entry_id"`
-	OperationID       string            `json:"operation_id"`
-	Status            OperationState    `json:"status"`
-	Detail            string            `json:"detail,omitempty"`
-	Model             *model.ModelRef   `json:"model,omitempty"`
-	Usage             *UsageCount       `json:"usage,omitempty"`
-	CompactionUsage   bool              `json:"compaction_usage,omitempty"`
-	RequestID         string            `json:"request_id,omitempty"`
-	ConsumedRequestID string            `json:"consumed_request_id,omitempty"`
-	Evidence          *RequestEvidence  `json:"evidence,omitempty"`
-	Facts             []maintenanceFact `json:"facts,omitempty"`
+	SessionID       string            `json:"session_id"`
+	EntryID         string            `json:"entry_id"`
+	OperationID     string            `json:"operation_id"`
+	Status          OperationState    `json:"status"`
+	Detail          string            `json:"detail,omitempty"`
+	Model           *model.ModelRef   `json:"model,omitempty"`
+	Usage           *UsageCount       `json:"usage,omitempty"`
+	CompactionUsage bool              `json:"compaction_usage,omitempty"`
+	RequestID       string            `json:"request_id,omitempty"`
+	Evidence        *RequestEvidence  `json:"evidence,omitempty"`
+	Facts           []maintenanceFact `json:"facts,omitempty"`
 }
 
 // contextCheckpointEntry is one immutable context checkpoint commit: the
@@ -604,11 +606,9 @@ type operationSettlementEntry struct {
 // frozen conversation up to its covered boundary entry, the selected strategy
 // identity that produced them, the governing configuration revision, and the
 // procedure's ordered maintenance facts — the producing request identities,
-// models, actual tool-free inputs and optional reported usage.
-// ConsumedRequestID names the conversation request whose frozen contribution
-// view the automatic procedure consumed (manual maintenance omits it), and
-// Evidence is the effective contribution evidence consumed at that frozen
-// canonical boundary.
+// models, actual tool-free inputs and optional reported usage. Evidence is the
+// frozen canonical input the procedure consumed; no conversation request
+// exists at that boundary.
 // Independently copied fork-prefix entries omit the owning Operation identity
 // and carry no source usage.
 type contextCheckpointEntry struct {
@@ -620,7 +620,6 @@ type contextCheckpointEntry struct {
 	BoundaryEntryID       string            `json:"boundary_entry_id"`
 	ConfigurationRevision string            `json:"configuration_revision"`
 	Facts                 []maintenanceFact `json:"facts"`
-	ConsumedRequestID     string            `json:"consumed_request_id,omitempty"`
 	Evidence              *RequestEvidence  `json:"evidence"`
 }
 

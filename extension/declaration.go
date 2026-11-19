@@ -26,7 +26,7 @@ const (
 	ContractCommands         = "melta.commands"
 
 	// ContractVersion is the one accepted version of every fixed contract.
-	ContractVersion = "2"
+	ContractVersion = "3"
 
 	// HostProvider identifies the host as a binding provider. It is reserved:
 	// no extension identity may use it.
