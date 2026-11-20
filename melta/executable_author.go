@@ -220,8 +220,8 @@ func (a *executableActivation) authorRegistration(frame worker.Frame) error {
 	case "request":
 		var mode extension.HookMode
 		if err = json.Unmarshal(params.Spec, &mode); err == nil {
-			handle, err = a.author.api.AttachRequest(mode, func(ctx context.Context, call extension.AuthorContext, input harness.RequestHookInput) (harness.RequestConsequence, error) {
-				args, err := worker.EncodeRequestHookParams(input)
+			handle, err = a.author.api.AttachRequest(mode, func(ctx context.Context, call extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+				args, err := worker.EncodeAuthorRequest(input)
 				if err != nil {
 					return harness.RequestConsequence{}, err
 				}

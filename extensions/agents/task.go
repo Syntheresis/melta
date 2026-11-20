@@ -239,14 +239,17 @@ func resolveSubagent(name string, roster []protocol.Agent) (harness.DefinitionRe
 // launchOutcome renders one launch failure through the uniform tool-error
 // path: the harness's rejection details are model-facing and arrive unwrapped.
 func launchOutcome(callID string, err error) harness.ToolOutcome {
+	return launchOutcomeWithKey(callID, err, "child_session_id")
+}
+
+func launchOutcomeWithKey(callID string, err error, key string) harness.ToolOutcome {
 	content := err.Error()
 	var callErr *extension.CallError
 	if errors.As(err, &callErr) && len(callErr.Partial) != 0 {
-		var partial struct {
-			ChildSessionID string `json:"child_session_id"`
-		}
-		if json.Unmarshal(callErr.Partial, &partial) == nil && partial.ChildSessionID != "" {
-			content += "\nSession ID: " + partial.ChildSessionID
+		var partial map[string]json.RawMessage
+		var id string
+		if json.Unmarshal(callErr.Partial, &partial) == nil && json.Unmarshal(partial[key], &id) == nil && id != "" {
+			content += "\nSession ID: " + id
 		}
 	}
 	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: content}}

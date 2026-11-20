@@ -277,8 +277,8 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 				problems = append(problems, rel+": internal/config imports "+imp+"; configuration may import only the standard library, "+atomicfsPkg+", and "+modelPkg)
 			}
 		case "extensions/agents":
-			if imp != modelPkg && imp != promptPkg && imp != harnessPkg && imp != extensionPkg && imp != protocolPkg && imp != toolargsPkg && !std[imp] {
-				problems = append(problems, rel+": extensions/agents imports "+imp+"; the supplied Agents extension may import only the standard library, "+modelPkg+", "+promptPkg+", "+harnessPkg+", "+extensionPkg+", "+protocolPkg+", and "+toolargsPkg+", never the Runtime owner")
+			if imp != modelPkg && imp != promptPkg && imp != harnessPkg && imp != extensionPkg && imp != protocolPkg && imp != toolargsPkg && imp != publicModule+"/internal/tool" && !std[imp] {
+				problems = append(problems, rel+": extensions/agents imports "+imp+"; the supplied Agents extension may import only the standard library, public contracts, and the retained tool and tool-argument helpers, never the Runtime owner")
 			}
 		case "internal/storage":
 			if imp != harnessPkg && imp != sqliteDriverPkg && !std[imp] {
@@ -289,8 +289,8 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 				problems = append(problems, rel+": internal/jobs imports "+imp+"; the jobs service may import only the standard library, "+harnessPkg+", and "+cmdoutputPkg+" — the Runtime owner consumes it, never the other way round")
 			}
 		case "extensions/adaptation":
-			if imp != modelPkg && imp != promptPkg && imp != extensionPkg && !std[imp] {
-				problems = append(problems, rel+": extensions/adaptation imports "+imp+"; the supplied Adaptation extension may import only the standard library, "+modelPkg+", "+promptPkg+", and "+extensionPkg+", never the Runtime owner or another concrete implementation package")
+			if imp != modelPkg && imp != promptPkg && imp != extensionPkg && imp != harnessPkg && !std[imp] {
+				problems = append(problems, rel+": extensions/adaptation imports "+imp+"; the supplied Adaptation extension may import only the standard library and public contracts, never the Runtime owner or another concrete implementation package")
 			}
 
 		case "internal/toolargs":
@@ -461,10 +461,10 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 	// concrete extension, storage, the driver, and sibling plugins never
 	// enter it.
 	{
-		problems := checkTrackedGoFile("extensions/adaptation/x.go", []string{"context", "encoding/json", publicModule + "/model", publicModule + "/prompt", publicModule + "/extension"}, std)
+		problems := checkTrackedGoFile("extensions/adaptation/x.go", []string{"context", "encoding/json", publicModule + "/model", publicModule + "/prompt", publicModule + "/extension", publicModule + "/harness"}, std)
 		testassert.Check(t, len(problems) == 0, "allowed extensions/adaptation imports flagged: %v", problems)
 	}
-	for _, imp := range []string{publicModule + "/agent", publicModule + "/runtime", publicModule + "/harness", publicModule + "/protocol", publicModule + "/internal/agent", publicModule + "/internal/storage", sqliteDriverPkg, publicModule + "/internal/plugins", publicModule + "/extensions/agents"} {
+	for _, imp := range []string{publicModule + "/agent", publicModule + "/runtime", publicModule + "/protocol", publicModule + "/internal/agent", publicModule + "/internal/storage", sqliteDriverPkg, publicModule + "/internal/plugins", publicModule + "/extensions/agents"} {
 		{
 			problems := checkTrackedGoFile("extensions/adaptation/x.go", []string{imp}, std)
 			testassert.Check(t, len(problems) == 1, "extensions/adaptation importing %q: %d problems, want 1: %v", imp, len(problems), problems)
@@ -502,14 +502,14 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 		problems := checkTrackedGoFile("extensions/agents/x.go", []string{
 			"encoding/json", "fmt",
 			publicModule + "/model", publicModule + "/harness", publicModule + "/prompt", publicModule + "/protocol",
-			publicModule + "/extension", publicModule + "/internal/toolargs",
+			publicModule + "/extension", publicModule + "/internal/toolargs", publicModule + "/internal/tool",
 		}, std)
 		testassert.Check(t, len(problems) == 0, "allowed extensions/agents imports flagged: %v", problems)
 	}
 	for _, imp := range []string{
 		publicModule + "/agent", publicModule + "/runtime", publicModule + "/internal/agent",
 		publicModule + "/internal/agents", publicModule + "/internal/plugins/tasks",
-		publicModule + "/internal/tool", publicModule + "/internal/storage", sqliteDriverPkg,
+		publicModule + "/internal/storage", sqliteDriverPkg,
 		publicModule + "/internal/plugins/sqlite", publicModule + "/internal/plugins",
 		publicModule + "/plugins/jobs",
 	} {

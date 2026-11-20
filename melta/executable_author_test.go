@@ -364,7 +364,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 				t.Fatal("missing request or result hook")
 			}
 			request := stage.hooks["request"][0].value.(nativeHook).handler.(extension.AuthorRequestHook)
-			consequence, err := request(context.Background(), extension.AuthorContext{}, harness.RequestHookInput{Model: model.ModelRef{Provider: "p", Model: "m"}})
+			consequence, err := request(context.Background(), extension.AuthorContext{}, extension.AuthorRequestInput{RequestHookInput: harness.RequestHookInput{Model: model.ModelRef{Provider: "p", Model: "m"}}})
 			if err != nil || consequence.Prompt == nil || *consequence.Prompt != "worker prompt" {
 				t.Fatalf("request: %+v, %v", consequence, err)
 			}

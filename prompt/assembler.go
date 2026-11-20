@@ -250,6 +250,13 @@ func writeAgentBody(b *strings.Builder, body string) {
 	b.WriteString("\n\n")
 }
 
+// FormatInstructions renders the default instruction heading and body.
+func FormatInstructions(body string) string {
+	var b strings.Builder
+	writeAgentBody(&b, body)
+	return strings.TrimSpace(b.String())
+}
+
 func startsWithAgentPromptHeading(body string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)

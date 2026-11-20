@@ -2,10 +2,45 @@ package tool
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Syntheresis/melta/internal/shellparse"
 )
+
+// ReadOnlyPreparedCommand checks the exact canonical script emitted by
+// ReadOnlyCommand, including its injected git configuration.
+func ReadOnlyPreparedCommand(script string) bool {
+	segments, err := shellparse.Parse(script)
+	if err != nil || len(segments) == 0 {
+		return false
+	}
+	var raw []string
+	prefix := []string{"git", "--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "core.pager=cat"}
+	for _, segment := range segments {
+		argv := segment.Argv
+		if len(argv) > 0 && argv[0] == "git" {
+			if len(argv) <= len(prefix) || !slices.Equal(argv[:len(prefix)], prefix) {
+				return false
+			}
+			subcommand := argv[len(prefix)]
+			rest := argv[len(prefix)+1:]
+			if gitMaterializesContent(subcommand) {
+				if len(rest) < 2 || rest[0] != "--no-ext-diff" || rest[1] != "--no-textconv" {
+					return false
+				}
+				rest = rest[2:]
+			}
+			argv = append([]string{"git", subcommand}, rest...)
+		}
+		raw = append(raw, quoteShellArgv(argv))
+		if segment.Separator != "" {
+			raw = append(raw, segment.Separator)
+		}
+	}
+	rewritten, err := ReadOnlyCommand(strings.Join(raw, " "))
+	return err == nil && rewritten == script
+}
 
 var simpleReadOnlyCommands = map[string]bool{
 	"ls": true, "cat": true, "grep": true, "head": true,

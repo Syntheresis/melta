@@ -7,6 +7,8 @@ import (
 	"fmt"
 
 	"github.com/Syntheresis/melta/extension"
+	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/prompt"
 )
 
@@ -14,6 +16,54 @@ import (
 const CapabilityID = "model_adaptation"
 
 const configSchema = `{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"},"entries":{"type":"array","items":{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string"},"prompt":{"type":"string"},"append":{"type":"array","items":{"type":"string"}},"exclude_tools":{"type":"array","items":{"type":"string"}},"tool_description_replacements":{"type":"object","propertyNames":{"minLength":1},"additionalProperties":{"type":"string"}}},"additionalProperties":true}}},"additionalProperties":true}`
+
+// Author registers request-local model adaptation.
+func Author() extension.Extension {
+	return extension.Extension{
+		Manifest: extension.Manifest{ID: "adaptation", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(configSchema)},
+		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			entries, err := decodeEntries(api.Settings())
+			if err != nil {
+				return nil, err
+			}
+			_, err = api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+				if input.Purpose != harness.InvocationPurposeConversation {
+					return harness.RequestConsequence{}, nil
+				}
+				matched := matchEntryIn(entries, input.Model.Model)
+				if matched == nil {
+					return harness.RequestConsequence{}, nil
+				}
+				result := harness.RequestConsequence{}
+				text := input.Prompt
+				changed := false
+				if matched.adapt.Prompt != nil {
+					text, changed = *matched.adapt.Prompt, true
+				}
+				if len(matched.adapt.Append) != 0 && (!matched.bundled || input.PromptAssembled) {
+					text, changed = TransformPrompt(text, &Adaptation{Append: matched.adapt.Append}), true
+				}
+				if changed {
+					result.Prompt = &text
+				}
+				excluded := make(map[string]bool, len(matched.adapt.ExcludeTools))
+				for _, name := range matched.adapt.ExcludeTools {
+					excluded[name] = true
+				}
+				replacer := newToolDescriptionReplacer(matched.adapt.ToolDescriptionReplacements)
+				result.Tools = make([]model.ToolDefinition, 0, len(input.Tools))
+				for _, tool := range input.Tools {
+					if !excluded[tool.Name] {
+						tool.Description = replacer.Replace(tool.Description)
+						result.Tools = append(result.Tools, tool)
+					}
+				}
+				return result, nil
+			}, nil)
+			return nil, err
+		},
+	}
+}
 
 // Native returns the Harness-scoped native whose single contribution is the
 // prepare-boundary hook. It has no dependencies and no settings of its own

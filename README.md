@@ -242,7 +242,7 @@ non-empty local Workspace; no optional extension or network listener is required
 [`extension/`](extension/) is the native contract (declarations, `extension.Compile`, typed callbacks and fixed host
   services), and [`extension/worker/`](extension/worker/) is the executable extension protocol. The running owner
   uses the declaration-based `worker.Serve` protocol; `worker.ServeAuthor` provides the newer activation-entry
-  adapter for explicitly constructed hosts using author API version 5 and is not yet connected to the installed Runtime
+  adapter for explicitly constructed hosts using author API version 6 and is not yet connected to the installed Runtime
   path. [`runtime/`](runtime/)
 is only the protocol host and first-run initialization; [`protocol/`](protocol/) is the generated contract and
 [`client/`](client/) the handwritten HTTP/SSE client.

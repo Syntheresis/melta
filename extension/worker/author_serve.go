@@ -76,7 +76,7 @@ type authorServer struct {
 	handlers  map[string]*authorRegistration
 }
 
-// ServeAuthor serves an extension entry over the version 5 worker protocol.
+// ServeAuthor serves an extension entry over the author worker protocol.
 func ServeAuthor(ctx context.Context, author extension.Extension, in io.Reader, out io.Writer) error {
 	if in == nil || out == nil || author.Activate == nil {
 		return errors.New("worker: author requires streams and an entry point")
@@ -232,7 +232,7 @@ func (s *server) admitAuthorRequest(frame Frame, ctx context.Context, cancel con
 				if params.Method != "request" {
 					return nil, badRoute("worker: invalid request hook method")
 				}
-				input, err := DecodeRequestHookParams(json.RawMessage(params.Arguments))
+				input, err := DecodeAuthorRequest(json.RawMessage(params.Arguments))
 				if err != nil {
 					return nil, err
 				}

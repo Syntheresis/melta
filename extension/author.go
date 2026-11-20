@@ -11,7 +11,7 @@ import (
 )
 
 // APIVersion is the exact activation authoring contract version.
-const APIVersion = "5"
+const APIVersion = "6"
 
 // Manifest is the metadata available before an extension is activated.
 type Manifest struct {
@@ -172,7 +172,14 @@ type AdmissionResult struct {
 }
 
 type AdmissionHook func(context.Context, AuthorContext, AdmissionInput) (AdmissionResult, error)
-type AuthorRequestHook func(context.Context, AuthorContext, harness.RequestHookInput) (harness.RequestConsequence, error)
+
+// AuthorRequestInput adds the admitted prompt choice to the request view.
+type AuthorRequestInput struct {
+	harness.RequestHookInput
+	PromptAssembled bool
+}
+
+type AuthorRequestHook func(context.Context, AuthorContext, AuthorRequestInput) (harness.RequestConsequence, error)
 
 // ArgumentsResult distinguishes unchanged arguments, replacement and refusal.
 type ArgumentsResult struct {
@@ -188,6 +195,7 @@ type AuthorizationInput struct {
 	ToolName           string
 	Arguments          json.RawMessage
 	CanonicalWorkspace string
+	ToolSettings       json.RawMessage // effective captured baseline settings, including defaults
 	Permissions        []harness.PermissionRequest
 }
 

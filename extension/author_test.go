@@ -9,7 +9,7 @@ import (
 )
 
 func TestRegistrationMethodAndManifestValidation(t *testing.T) {
-	manifest := Manifest{ID: "example", Version: "1", APIVersion: "5", SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	manifest := Manifest{ID: "example", Version: "1", APIVersion: APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
 	if err := ValidateManifest(manifest); err != nil {
 		t.Fatal(err)
 	}

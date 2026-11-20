@@ -16,7 +16,7 @@ import (
 
 func TestAuthorHandshake(t *testing.T) {
 	manifest := extension.Manifest{ID: "author", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object","default":null}`)}
-	for _, version := range []string{"4", "5"} {
+	for _, version := range []string{"5", extension.APIVersion} {
 		t.Run(version, func(t *testing.T) {
 			var called atomic.Bool
 			in, host := io.Pipe()
@@ -46,7 +46,7 @@ func TestAuthorHandshake(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if version == "4" {
+			if version != extension.APIVersion {
 				if reply.Error == nil || reply.Error.Class != worker.ClassIncompatible || called.Load() {
 					t.Fatalf("mismatched hello: %#v, called %v", reply, called.Load())
 				}

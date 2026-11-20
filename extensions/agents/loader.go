@@ -104,7 +104,7 @@ func parse(data []byte, declaredCapabilities, declaredTools map[string]struct{},
 // tool universe, preserving order and duplicates. An omitted list stays
 // omitted.
 func intersectCompiledTools(tools *[]string, declared map[string]struct{}) *[]string {
-	if tools == nil {
+	if tools == nil || declared == nil {
 		return tools
 	}
 	kept := make([]string, 0, len(*tools))
@@ -290,7 +290,7 @@ func validateCustom(name string, def Definition, declaredCapabilities, declaredT
 			if name == "" {
 				return fmt.Errorf("tool name is empty")
 			}
-			if _, ok := declaredTools[name]; !ok {
+			if _, ok := declaredTools[name]; declaredTools != nil && !ok {
 				return fmt.Errorf("unknown tool %q", name)
 			}
 		}
@@ -298,7 +298,7 @@ func validateCustom(name string, def Definition, declaredCapabilities, declaredT
 	if def.Capabilities != nil {
 		seen := make(map[string]bool, len(*def.Capabilities))
 		for _, id := range *def.Capabilities {
-			if _, ok := declaredCapabilities[id]; !ok {
+			if _, ok := declaredCapabilities[id]; declaredCapabilities != nil && !ok {
 				return fmt.Errorf("unknown capability %q", id)
 			}
 			if seen[id] {

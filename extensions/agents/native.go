@@ -200,6 +200,12 @@ func resolvedInputs(resolved Resolved) harness.AgentInputs {
 // field is preserved. The known-definition and model parsing failures are the
 // retained invalid-input errors.
 func (i *instance) setModel(_ context.Context, call extension.CallContext, arguments json.RawMessage) (extension.Result, error) {
+	return transformModel(call.Section, arguments, func(data []byte) (*Config, error) {
+		return ParseWithCapabilities(data, i.options.CapabilityIDs, i.options.ToolIDs, i.options.DefaultCapabilityIDs)
+	})
+}
+
+func transformModel(rawSection, arguments json.RawMessage, parseDefinitions func([]byte) (*Config, error)) (extension.Result, error) {
 	var request struct {
 		DefinitionID string `json:"definition_id"`
 		Model        string `json:"model"`
@@ -212,7 +218,7 @@ func (i *instance) setModel(_ context.Context, call extension.CallContext, argum
 			return extension.Result{}, fmt.Errorf("model ref %q: %v: %w", request.Model, err, harness.ErrInvalid)
 		}
 	}
-	section, err := decodeObject(call.Section, "agents section")
+	section, err := decodeObject(rawSection, "agents section")
 	if err != nil {
 		return extension.Result{}, err
 	}
@@ -227,7 +233,7 @@ func (i *instance) setModel(_ context.Context, call extension.CallContext, argum
 	if err != nil {
 		return extension.Result{}, err
 	}
-	parsed, err := ParseWithCapabilities(data, i.options.CapabilityIDs, i.options.ToolIDs, i.options.DefaultCapabilityIDs)
+	parsed, err := parseDefinitions(data)
 	if err != nil {
 		return extension.Result{}, fmt.Errorf("decode agent definitions: %w", err)
 	}

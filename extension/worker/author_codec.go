@@ -8,6 +8,30 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
+// EncodeAuthorRequest keeps the author-only prompt fact separate from v4.
+func EncodeAuthorRequest(input extension.AuthorRequestInput) (json.RawMessage, error) {
+	base, err := EncodeRequestHookParams(input.RequestHookInput)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		Request         JSONBytes `json:"request_base64"`
+		PromptAssembled bool      `json:"prompt_assembled"`
+	}{JSONBytes(base), input.PromptAssembled})
+}
+
+func DecodeAuthorRequest(raw json.RawMessage) (extension.AuthorRequestInput, error) {
+	var wire struct {
+		Request         JSONBytes `json:"request_base64"`
+		PromptAssembled bool      `json:"prompt_assembled"`
+	}
+	if err := unmarshalValue(raw, &wire); err != nil {
+		return extension.AuthorRequestInput{}, err
+	}
+	input, err := DecodeRequestHookParams(json.RawMessage(wire.Request))
+	return extension.AuthorRequestInput{RequestHookInput: input, PromptAssembled: wire.PromptAssembled}, err
+}
+
 type authorStartJSON struct {
 	Target       string    `json:"target"`
 	Inputs       JSONBytes `json:"inputs"`
@@ -200,11 +224,12 @@ type authorAuthorizationJSON struct {
 	ToolName           string                      `json:"tool_name"`
 	Arguments          JSONBytes                   `json:"arguments"`
 	CanonicalWorkspace string                      `json:"canonical_workspace"`
+	ToolSettings       JSONBytes                   `json:"tool_settings"`
 	Permissions        []harness.PermissionRequest `json:"permissions,omitempty"`
 }
 
 func EncodeAuthorAuthorization(v extension.AuthorizationInput) (json.RawMessage, error) {
-	return json.Marshal(authorAuthorizationJSON{v.ToolName, JSONBytes(v.Arguments), v.CanonicalWorkspace, v.Permissions})
+	return json.Marshal(authorAuthorizationJSON{v.ToolName, JSONBytes(v.Arguments), v.CanonicalWorkspace, JSONBytes(v.ToolSettings), v.Permissions})
 }
 
 func DecodeAuthorAuthorization(raw json.RawMessage) (extension.AuthorizationInput, error) {
@@ -212,7 +237,7 @@ func DecodeAuthorAuthorization(raw json.RawMessage) (extension.AuthorizationInpu
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return extension.AuthorizationInput{}, err
 	}
-	return extension.AuthorizationInput{ToolName: v.ToolName, Arguments: append(json.RawMessage(nil), v.Arguments...), CanonicalWorkspace: v.CanonicalWorkspace, Permissions: v.Permissions}, nil
+	return extension.AuthorizationInput{ToolName: v.ToolName, Arguments: append(json.RawMessage(nil), v.Arguments...), CanonicalWorkspace: v.CanonicalWorkspace, ToolSettings: append(json.RawMessage(nil), v.ToolSettings...), Permissions: v.Permissions}, nil
 }
 
 func EncodeAuthorRefusal(refusal *string) (json.RawMessage, error) {

@@ -134,7 +134,7 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, _ harness.RequestHookInput) (harness.RequestConsequence, error) {
+			_, err = api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				prompt := "worker prompt"
 				return harness.RequestConsequence{Prompt: &prompt}, nil
 			}, nil)

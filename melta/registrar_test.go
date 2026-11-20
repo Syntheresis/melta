@@ -1097,7 +1097,7 @@ func TestRegistrationAllContributions(t *testing.T) {
 			}, nil); err != nil {
 				return nil, err
 			}
-			if _, err := api.AttachRequest(extension.HookModeEffectful, func(context.Context, extension.AuthorContext, harness.RequestHookInput) (harness.RequestConsequence, error) {
+			if _, err := api.AttachRequest(extension.HookModeEffectful, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				return harness.RequestConsequence{}, nil
 			}, nil); err != nil {
 				return nil, err
@@ -1163,7 +1163,7 @@ func TestRegistrationRejectsInvalidAndForeignHandles(t *testing.T) {
 		if _, err := api.RegisterTool(model.ToolDefinition{Name: "bad", Parameters: []byte(`[]`)}, registrarTestTool{}, nil); err == nil {
 			t.Fatal("invalid tool accepted")
 		}
-		if _, err := api.AttachRequest(extension.HookMode("invalid"), func(context.Context, extension.AuthorContext, harness.RequestHookInput) (harness.RequestConsequence, error) {
+		if _, err := api.AttachRequest(extension.HookMode("invalid"), func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			return harness.RequestConsequence{}, nil
 		}, nil); err == nil {
 			t.Fatal("invalid hook mode accepted")
