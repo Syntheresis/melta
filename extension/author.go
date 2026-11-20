@@ -10,6 +10,9 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+// APIVersion is the exact activation authoring contract version.
+const APIVersion = "5"
+
 // Manifest is the metadata available before an extension is activated.
 type Manifest struct {
 	ID             string          `json:"id"`
@@ -42,7 +45,7 @@ func ValidateManifestSection(m Manifest, section json.RawMessage) error {
 }
 
 func compileManifest(m Manifest) (*jsonschema.Schema, error) {
-	if m.ID == "" || m.ID == HostProvider || m.Version == "" || m.APIVersion != ContractVersion {
+	if m.ID == "" || m.ID == HostProvider || m.Version == "" || m.APIVersion != APIVersion {
 		return nil, invalid("invalid extension identity or API version")
 	}
 	seen := make(map[string]bool)

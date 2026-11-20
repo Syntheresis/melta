@@ -81,6 +81,7 @@ type configurationService struct {
 	nativeMu         sync.Mutex
 	nativeCandidates map[*nativeCandidate]bool
 	nativeCurrent    *nativeCandidate
+	nativeFailures   map[string]error
 }
 
 // configurationCapture joins one published immutable configuration revision

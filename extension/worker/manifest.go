@@ -26,3 +26,14 @@ func EncodeManifest(declaration extension.Declaration, entryPoint string) ([]byt
 		Declaration:     NewDeclaration(declaration),
 	})
 }
+
+// AuthorManifest is the install metadata for a version 5 author worker.
+type AuthorManifest struct {
+	EntryPoint string             `json:"entry_point"`
+	Manifest   extension.Manifest `json:"manifest"`
+}
+
+// EncodeAuthorManifest renders author metadata and an install-relative entry.
+func EncodeAuthorManifest(manifest extension.Manifest, entryPoint string) ([]byte, error) {
+	return json.Marshal(AuthorManifest{EntryPoint: entryPoint, Manifest: manifest})
+}

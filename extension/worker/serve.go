@@ -52,6 +52,7 @@ type server struct {
 	ctx      context.Context
 	native   extension.Native
 	compiled *extension.Compiled
+	author   *authorServer
 	reader   *Reader
 	writer   *Writer
 
@@ -125,7 +126,13 @@ func (s *server) run() error {
 			}
 			if first {
 				first = false
-				if err := s.activate(event.frame); err != nil {
+				var err error
+				if s.author != nil {
+					err = s.authorHello(event.frame)
+				} else {
+					err = s.activate(event.frame)
+				}
+				if err != nil {
 					s.shutdown()
 					return err
 				}
@@ -169,6 +176,9 @@ func (s *server) shutdown() {
 	}
 	s.mu.Unlock()
 	s.handlers.Wait()
+	if s.author != nil && s.author.close != nil {
+		_ = s.author.close(context.Background())
+	}
 }
 
 func (s *server) fail(err error) {
@@ -248,6 +258,9 @@ func (s *server) admitRequest(frame Frame) error {
 		return fmt.Errorf("worker: duplicate request id %q", frame.ID)
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
+	if s.author != nil {
+		return s.admitAuthorRequest(frame, ctx, cancel)
+	}
 	switch frame.Method {
 	case MethodActivate:
 		cancel()
@@ -811,7 +824,11 @@ func (s *server) hostcall(ctx context.Context, scope context.Context, wire Conte
 	if err := combined.Err(); err != nil {
 		return extension.Result{}, err
 	}
-	encoded, err := json.Marshal(HostcallParams{Context: wire, Binding: binding, Method: method, Arguments: JSONBytes(arguments)})
+	var params any = HostcallParams{Context: wire, Binding: binding, Method: method, Arguments: JSONBytes(arguments)}
+	if s.author != nil {
+		params = AuthorHostcallParams{Token: wire.Token, Service: binding, Method: method, Arguments: JSONBytes(arguments)}
+	}
+	encoded, err := json.Marshal(params)
 	if err != nil {
 		return extension.Result{}, err
 	}
@@ -876,6 +893,21 @@ func (s *server) nextRequestID() string {
 func (s *server) routeResponse(frame Frame) error {
 	if frame.ID == "" {
 		return errors.New("worker: response without an id")
+	}
+	if s.author != nil {
+		s.mu.Lock()
+		pending := s.author.pending[frame.ID]
+		if pending != nil {
+			delete(s.author.pending, frame.ID)
+		}
+		s.mu.Unlock()
+		if pending != nil {
+			if (frame.Result == nil) == (frame.Error == nil) || (frame.Error != nil && !frame.Error.Class.valid()) {
+				return fmt.Errorf("worker: invalid response %q", frame.ID)
+			}
+			pending <- frame
+			return nil
+		}
 	}
 	s.mu.Lock()
 	outcomes, known := s.pending[frame.ID]

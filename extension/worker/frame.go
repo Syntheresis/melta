@@ -29,6 +29,7 @@ const (
 
 // The closed request methods.
 const (
+	MethodHello    = "hello"
 	MethodActivate = "activate"
 	MethodOpen     = "open"
 	MethodCall     = "call"

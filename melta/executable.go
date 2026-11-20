@@ -178,6 +178,7 @@ type requestOutcome struct {
 // executableActivation is one supervised worker process and its protocol state.
 type executableActivation struct {
 	declaration extension.Declaration
+	author      *executableAuthor
 	entryPoint  string
 	environment func(context.Context, []string) ([]string, error)
 	process     executableProcess
@@ -241,12 +242,16 @@ func (a *executableActivation) start(ctx context.Context, excluded []string) (er
 	}
 	environment, err := a.environment(ctx, excluded)
 	if err != nil {
-		a.startTermination(err, false)
+		if a.author == nil {
+			a.startTermination(err, false)
+		}
 		return err
 	}
 	process, err := spawnExecutable(ctx, a.entryPoint, environment)
 	if err != nil {
-		a.startTermination(err, false)
+		if a.author == nil {
+			a.startTermination(err, false)
+		}
 		return err
 	}
 	a.mu.Lock()
@@ -270,6 +275,10 @@ func (a *executableActivation) start(ctx context.Context, excluded []string) (er
 	defer cancel()
 	activated := make(chan requestOutcome, 1)
 	go func() {
+		if a.author != nil {
+			activated <- a.authorHandshake(activateCtx)
+			return
+		}
 		activated <- a.request(activateCtx, worker.MethodActivate, func(string) (any, error) {
 			return worker.ActivateParams{ContractVersion: extension.ContractVersion}, nil
 		}, nil, a.activateResponse)
@@ -621,6 +630,9 @@ func (a *executableActivation) readLoop(reader *worker.Reader) {
 func (a *executableActivation) handleFrame(frame worker.Frame) error {
 	switch frame.Kind {
 	case worker.KindRequest:
+		if a.author != nil && (frame.Method == "register" || frame.Method == "remove") {
+			return a.authorRegistration(frame)
+		}
 		if frame.Method != worker.MethodHostcall {
 			return fmt.Errorf("worker: request method %q is not a hostcall", frame.Method)
 		}
@@ -680,8 +692,17 @@ func (a *executableActivation) hostcall(frame worker.Frame) error {
 		return errors.New("worker: hostcall without an id")
 	}
 	var params worker.HostcallParams
-	if err := json.Unmarshal(frame.Params, &params); err != nil {
-		return fmt.Errorf("worker: hostcall params: %w", err)
+	if a.author != nil {
+		var author worker.AuthorHostcallParams
+		if err := json.Unmarshal(frame.Params, &author); err != nil {
+			return fmt.Errorf("worker: hostcall params: %w", err)
+		}
+		params.Context.Token = author.Token
+		params.Binding, params.Method, params.Arguments = author.Service, author.Method, author.Arguments
+	} else {
+		if err := json.Unmarshal(frame.Params, &params); err != nil {
+			return fmt.Errorf("worker: hostcall params: %w", err)
+		}
 	}
 	if params.Context.Token == "" {
 		return errors.New("worker: hostcall without a context token")
@@ -794,6 +815,9 @@ func (a *executableActivation) startTermination(cause error, cooperative bool) {
 		cause = extension.ErrClosed
 	}
 	a.failed = cause
+	if !cooperative && a.author != nil && a.author.native != nil {
+		a.author.native.markLost(cause)
+	}
 	a.mu.Unlock()
 	go a.terminateRun(cause, cooperative)
 }

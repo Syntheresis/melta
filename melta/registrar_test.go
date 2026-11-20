@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
@@ -25,14 +26,14 @@ func (c registrarContext) Err() error {
 }
 
 func registrarManifest(id string) extension.Manifest {
-	return extension.Manifest{ID: id, Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)}
+	return extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)}
 }
 
 func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 	owner := &configurationService{}
 	var api extension.API
 	var old extension.Registration
-	e := extension.Extension{Manifest: extension.Manifest{ID: "a", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+	e := extension.Extension{Manifest: extension.Manifest{ID: "a", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error
@@ -78,6 +79,66 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 	}
 	if err := api.Remove(cleanup); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRegistrarRegistrationReleaseAfterStageAndPlan(t *testing.T) {
+	owner := &configurationService{}
+	var api extension.API
+	var original extension.Registration
+	e := extension.Extension{Manifest: registrarManifest("release"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
+		api = a
+		var err error
+		original, err = a.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		return nil, err
+	}}
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.release()
+	released := 0
+	original.(*nativeRegistration).release = func() { released++ }
+	stage := candidate.snapshot()
+	binding := stage.bindTool("tool")
+	if _, err := api.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool{}, original); err != nil {
+		t.Fatal(err)
+	}
+	if released != 0 {
+		t.Fatal("registration released while stage and plan hold it")
+	}
+	stage.release()
+	if released != 0 {
+		t.Fatal("registration released while plan holds it")
+	}
+	binding.release()
+	if released != 1 {
+		t.Fatalf("release count = %d", released)
+	}
+}
+
+func TestRegistrarCandidateCredentialHolds(t *testing.T) {
+	owner := &configurationService{}
+	e := extension.Extension{Manifest: registrarManifest("credential"), Activate: func(_ context.Context, _ extension.API) (func(context.Context) error, error) {
+		if !slices.Contains(owner.heldCredentialNames(), "CANDIDATE_SECRET") {
+			t.Error("candidate secret was not held before activation")
+		}
+		return nil, nil
+	}}
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{
+		extension: e, section: []byte(`{}`), bindings: map[string]declaredBinding{"/secret": {name: "CANDIDATE_SECRET"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := candidate.snapshot()
+	candidate.release()
+	if !slices.Contains(owner.heldCredentialNames(), "CANDIDATE_SECRET") {
+		t.Fatal("captured stage lost secret exclusion")
+	}
+	stage.release()
+	if slices.Contains(owner.heldCredentialNames(), "CANDIDATE_SECRET") {
+		t.Fatal("secret exclusion leaked after final release")
 	}
 }
 
@@ -163,7 +224,7 @@ func TestRegistrarActivationOrder(t *testing.T) {
 	var order []string
 	spec := func(id string, installed bool) nativeActivationSpec {
 		return nativeActivationSpec{installed: installed, section: []byte(`{}`), extension: extension.Extension{
-			Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+			Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 			Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
 				order = append(order, id)
 				return nil, nil
@@ -185,7 +246,7 @@ func TestRegistrarActivationOrder(t *testing.T) {
 func TestRegistrarAmbiguousIdentityInactive(t *testing.T) {
 	owner := &configurationService{}
 	starts := 0
-	e := extension.Extension{Manifest: extension.Manifest{ID: "same", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+	e := extension.Extension{Manifest: extension.Manifest{ID: "same", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(context.Context, extension.API) (func(context.Context) error, error) { starts++; return nil, nil }}
 	c, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}, {extension: e, section: []byte(`{}`)}})
 	if err != nil {
@@ -255,7 +316,7 @@ func TestRegistrarCredentialBindingReuseIsPerExtension(t *testing.T) {
 	makeSpec := func(id, value string) nativeActivationSpec {
 		return nativeActivationSpec{
 			section: []byte(`{}`), bindings: map[string]declaredBinding{"/key": {name: "key", value: value}},
-			extension: extension.Extension{Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+			extension: extension.Extension{Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 				Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
 					starts[id]++
 					return nil, nil
@@ -323,7 +384,7 @@ func TestRegistrarReusedConflictsRemainPrivate(t *testing.T) {
 	owner := &configurationService{}
 	native := func(id string) nativeActivationSpec {
 		return nativeActivationSpec{extension: extension.Extension{
-			Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+			Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 			Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 				_, err := api.RegisterTool(model.ToolDefinition{Name: "same", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
 				return nil, err
@@ -363,7 +424,7 @@ func TestRegistrarSuccessiveActivationsCanShareNames(t *testing.T) {
 	owner := &configurationService{}
 	starts := 0
 	e := extension.Extension{
-		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			starts++
 			_, err := api.RegisterTool(model.ToolDefinition{Name: "shared", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
@@ -394,7 +455,7 @@ func TestRegistrarSuccessiveActivationsCanShareNames(t *testing.T) {
 func TestRegistrarReenableDoesNotReuseRetiredActivation(t *testing.T) {
 	owner := &configurationService{}
 	starts := 0
-	e := extension.Extension{Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+	e := extension.Extension{Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(context.Context, extension.API) (func(context.Context) error, error) { starts++; return nil, nil }}
 	spec := []nativeActivationSpec{{extension: e, section: []byte(`{}`)}}
 	first, err := owner.prepareNativeCandidate(context.Background(), spec)
@@ -605,7 +666,7 @@ func TestRegistrarNestedServiceScope(t *testing.T) {
 		return extension.Method{Name: name, Mode: mode, Input: []byte(`{}`), Success: []byte(`{}`)}
 	}
 	e := extension.Extension{
-		Manifest: extension.Manifest{ID: "provider", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+		Manifest: extension.Manifest{ID: "provider", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "service", Methods: []extension.RegisteredMethod{
 				{Method: method("nested", extension.ModePure), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
@@ -631,7 +692,7 @@ func TestRegistrarNestedServiceScope(t *testing.T) {
 			return nil, err
 		},
 	}
-	caller := extension.Extension{Manifest: extension.Manifest{ID: "caller", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)}, Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+	caller := extension.Extension{Manifest: extension.Manifest{ID: "caller", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)}, Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 		if _, err := api.Call(ctx, "service", "outer", []byte(`{}`)); err != nil {
 			return nil, err
 		}
@@ -656,7 +717,7 @@ func TestRegistrarReentrantReplacementDoesNotWait(t *testing.T) {
 	var api extension.API
 	var handle extension.Registration
 	e := extension.Extension{
-		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error
@@ -737,7 +798,7 @@ func TestRegistrarCancellationReleasesOnlyCandidateHolds(t *testing.T) {
 func TestRegistrarCloseMayReenter(t *testing.T) {
 	owner := &configurationService{}
 	closed := make(chan error, 1)
-	e := extension.Extension{Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+	e := extension.Extension{Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			return func(context.Context) error {
 				_, err := api.RegisterTool(model.ToolDefinition{Name: "late", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
@@ -847,7 +908,7 @@ func TestRegistrationAllContributions(t *testing.T) {
 	}
 	method := extension.Method{Name: "run", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)}
 	e := extension.Extension{
-		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			if _, err := api.RegisterTool(model.ToolDefinition{Name: "custom", Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err != nil {
 				return nil, err
@@ -970,7 +1031,7 @@ func TestRegistrarPreparedToolRetainsIdentity(t *testing.T) {
 	var closed bool
 	definition := model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}
 	e := extension.Extension{
-		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.ContractVersion, SettingsSchema: []byte(`{}`)},
+		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error

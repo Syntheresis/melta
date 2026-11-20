@@ -23,11 +23,14 @@ type nativeActivationSpec struct {
 }
 
 type nativeCandidate struct {
-	owner       *configurationService
-	activations []*nativeActivation
-	ready       map[*nativeActivation]bool
-	inactive    map[string]error
-	holds       int
+	owner             *configurationService
+	activations       []*nativeActivation
+	ready             map[*nativeActivation]bool
+	inactive          map[string]error
+	holds             int
+	heldNames         []string
+	enabled           map[string]bool
+	attemptedFailures map[string]error
 }
 
 type nativeActivation struct {
@@ -42,6 +45,8 @@ type nativeActivation struct {
 	closed    bool
 	construct *nativeCandidate
 	entry     nativeCallLifetime
+	lost      error
+	installed bool
 }
 
 type nativeRegistration struct {
@@ -50,9 +55,35 @@ type nativeRegistration struct {
 	name       string
 	value      any
 	current    bool
+	holds      int
+	release    func()
 }
 
 type nativeAPI struct{ activation *nativeActivation }
+
+func (a *nativeActivation) markLost(cause error) {
+	s := a.owner
+	s.nativeMu.Lock()
+	defer s.nativeMu.Unlock()
+	if a.lost != nil || a.closed {
+		return
+	}
+	a.lost = cause
+	current := s.nativeCurrent
+	if current == nil {
+		return
+	}
+	for _, member := range current.activations {
+		if member == a && current.ready[a] {
+			if s.nativeFailures == nil {
+				s.nativeFailures = make(map[string]error)
+			}
+			s.nativeFailures[a.id] = cause
+			current.inactive[a.id] = cause
+			return
+		}
+	}
+}
 
 func (api nativeAPI) Settings() json.RawMessage {
 	return bytes.Clone(api.activation.section)
@@ -86,9 +117,15 @@ type nativeSnapshot struct {
 	hooks      map[string][]*nativeRegistration
 }
 
+type nativeAdmissionCapture struct {
+	nativeCaptureHold
+	activations []*nativeActivation
+}
+
 type nativeCaptureHold struct {
 	candidate *nativeCandidate
 	released  bool
+	entries   []*nativeRegistration
 }
 
 type nativeOperationKey struct {
@@ -113,7 +150,8 @@ func (s *nativeSnapshot) bindTool(name string) *nativeToolBinding {
 		return nil
 	}
 	s.candidate.holds++
-	return &nativeToolBinding{nativeCaptureHold: nativeCaptureHold{candidate: s.candidate}, entry: entry}
+	entry.holds++
+	return &nativeToolBinding{nativeCaptureHold: nativeCaptureHold{candidate: s.candidate, entries: []*nativeRegistration{entry}}, entry: entry}
 }
 
 func (h *nativeCaptureHold) release() error {
@@ -124,8 +162,28 @@ func (h *nativeCaptureHold) release() error {
 		return nil
 	}
 	h.released = true
+	var releases []func()
+	for _, entry := range h.entries {
+		entry.holds--
+		if release := entry.takeRelease(); release != nil {
+			releases = append(releases, release)
+		}
+	}
 	owner.nativeMu.Unlock()
+	for _, release := range releases {
+		release()
+	}
 	return h.candidate.release()
+}
+
+// takeRelease is called with the registration owner's mutex held.
+func (r *nativeRegistration) takeRelease() func() {
+	if r.current || r.holds != 0 {
+		return nil
+	}
+	release := r.release
+	r.release = nil
+	return release
 }
 
 // prepareNativeCandidate holds exactly the activations selected by this
@@ -144,7 +202,17 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 		}
 		return 0
 	})
-	c := &nativeCandidate{owner: s, ready: make(map[*nativeActivation]bool), inactive: make(map[string]error), holds: 1}
+	c := &nativeCandidate{owner: s, ready: make(map[*nativeActivation]bool), inactive: make(map[string]error), holds: 1, enabled: make(map[string]bool), attemptedFailures: make(map[string]error)}
+	seenNames := make(map[string]bool)
+	for _, spec := range specs {
+		for _, binding := range spec.bindings {
+			if binding.name != "" && !seenNames[binding.name] {
+				seenNames[binding.name] = true
+				c.heldNames = append(c.heldNames, binding.name)
+			}
+		}
+	}
+	s.holdCredentialNames(c.heldNames)
 	s.nativeMu.Lock()
 	if s.nativeCandidates == nil {
 		s.nativeCandidates = make(map[*nativeCandidate]bool)
@@ -156,6 +224,7 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 	counts := make(map[string]int)
 	for _, spec := range specs {
 		counts[spec.extension.Manifest.ID]++
+		c.enabled[spec.extension.Manifest.ID] = true
 	}
 	reused := make(map[*nativeActivation]bool)
 	entries := make(map[*nativeActivation]extension.Extension)
@@ -164,6 +233,13 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 			return nil, errors.Join(err, c.release())
 		}
 		id := spec.extension.Manifest.ID
+		s.nativeMu.Lock()
+		failure := s.nativeFailures[id]
+		s.nativeMu.Unlock()
+		if failure != nil {
+			c.inactive[id] = failure
+			continue
+		}
 		if counts[id] > 1 {
 			c.inactive[id] = fmt.Errorf("duplicate extension ID %q", id)
 			continue
@@ -181,7 +257,7 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 		var activation *nativeActivation
 		if previous != nil {
 			for _, a := range previous.activations {
-				if a != nil && previous.ready[a] && !a.closed && a.id == id && a.version == manifest.Version &&
+				if a != nil && previous.ready[a] && !a.closed && a.lost == nil && a.id == id && a.version == manifest.Version &&
 					bytes.Equal(a.section, spec.section) && maps.Equal(a.bindings, spec.bindings) {
 					activation = a
 					break
@@ -189,7 +265,7 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 			}
 		}
 		if activation == nil {
-			activation = &nativeActivation{owner: s, id: id, version: manifest.Version, section: bytes.Clone(spec.section), bindings: maps.Clone(spec.bindings), construct: c}
+			activation = &nativeActivation{owner: s, id: id, version: manifest.Version, section: bytes.Clone(spec.section), bindings: maps.Clone(spec.bindings), construct: c, installed: spec.installed}
 			activation.entry.ctx, activation.entry.cancel = context.WithCancel(ctx)
 		}
 		activation.holds++
@@ -226,6 +302,9 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 		c.activations[i] = nil
 		activation.holds--
 		activation.closed = true
+		if activation.installed && err != nil {
+			c.attemptedFailures[activation.id] = err
+		}
 		s.nativeMu.Unlock()
 		activation.close = closeFn
 		err = errors.Join(err, closeNativeActivation(activation))
@@ -242,6 +321,29 @@ func (c *nativeCandidate) publish() error {
 	defer c.owner.nativeMu.Unlock()
 	if c.holds == 0 {
 		return extension.ErrClosed
+	}
+	if c.owner.nativeFailures == nil {
+		c.owner.nativeFailures = make(map[string]error)
+	}
+	for id := range c.owner.nativeFailures {
+		if !c.enabled[id] {
+			delete(c.owner.nativeFailures, id)
+		}
+	}
+	for id, err := range c.attemptedFailures {
+		if err != nil {
+			c.owner.nativeFailures[id] = err
+		}
+	}
+	for _, activation := range c.activations {
+		if activation != nil && activation.lost != nil {
+			c.owner.nativeFailures[activation.id] = activation.lost
+		}
+	}
+	for id, err := range c.owner.nativeFailures {
+		if c.enabled[id] {
+			c.inactive[id] = err
+		}
 	}
 	c.owner.nativeCurrent = c
 	return nil
@@ -288,12 +390,45 @@ func (c *nativeCandidate) release() error {
 	for _, a := range closing {
 		err = errors.Join(err, closeNativeActivation(a))
 	}
+	s.releaseCredentialNames(c.heldNames)
 	if err != nil {
 		s.cleanupMu.Lock()
 		s.cleanupErr = errors.Join(s.cleanupErr, err)
 		s.cleanupMu.Unlock()
 	}
 	return err
+}
+
+func (c *nativeCandidate) capture() *nativeAdmissionCapture {
+	s := c.owner
+	s.nativeMu.Lock()
+	defer s.nativeMu.Unlock()
+	if c.holds == 0 || s.nativeCurrent != c {
+		return nil
+	}
+	c.holds++
+	capture := &nativeAdmissionCapture{nativeCaptureHold: nativeCaptureHold{candidate: c}}
+	for _, a := range c.activations {
+		if a != nil && c.ready[a] && a.lost == nil && s.nativeFailures[a.id] == nil {
+			capture.activations = append(capture.activations, a)
+		}
+	}
+	return capture
+}
+
+func (c *nativeAdmissionCapture) stage() (*nativeSnapshot, error) {
+	owner := c.candidate.owner
+	owner.nativeMu.Lock()
+	defer owner.nativeMu.Unlock()
+	if c.released {
+		return nil, extension.ErrClosed
+	}
+	for _, a := range c.activations {
+		if a.lost != nil {
+			return nil, a.lost
+		}
+	}
+	return c.candidate.snapshotLocked(c.activations), nil
 }
 
 func (c *nativeCandidate) snapshot() *nativeSnapshot {
@@ -303,13 +438,22 @@ func (c *nativeCandidate) snapshot() *nativeSnapshot {
 	if c.holds == 0 {
 		return nil
 	}
+	var activations []*nativeActivation
+	for _, a := range c.activations {
+		if a != nil && c.ready[a] {
+			activations = append(activations, a)
+		}
+	}
+	return c.snapshotLocked(activations)
+}
+
+func (c *nativeCandidate) snapshotLocked(activations []*nativeActivation) *nativeSnapshot {
 	c.holds++
 	out := &nativeSnapshot{nativeCaptureHold: nativeCaptureHold{candidate: c}, tools: make(map[string]*nativeRegistration), strategies: make(map[string]*nativeRegistration), services: make(map[string]*nativeRegistration), operations: make(map[nativeOperationKey]*nativeRegistration), hooks: make(map[string][]*nativeRegistration)}
-	for _, a := range c.activations {
-		if a == nil || !c.ready[a] {
-			continue
-		}
+	for _, a := range activations {
 		for _, r := range a.entries {
+			r.holds++
+			out.nativeCaptureHold.entries = append(out.nativeCaptureHold.entries, r)
 			switch r.kind {
 			case "tool":
 				out.tools[r.name] = r
@@ -330,7 +474,13 @@ func (c *nativeCandidate) snapshot() *nativeSnapshot {
 func (api nativeAPI) Remove(handle extension.Registration) error {
 	a := api.activation
 	a.owner.nativeMu.Lock()
-	defer a.owner.nativeMu.Unlock()
+	var release func()
+	defer func() {
+		a.owner.nativeMu.Unlock()
+		if release != nil {
+			release()
+		}
+	}()
 	if a.closed {
 		return extension.ErrClosed
 	}
@@ -345,6 +495,7 @@ func (api nativeAPI) Remove(handle extension.Registration) error {
 		if entry == r {
 			a.entries = append(a.entries[:i], a.entries[i+1:]...)
 			r.current = false
+			release = r.takeRelease()
 			break
 		}
 	}
@@ -355,7 +506,13 @@ func (api nativeAPI) register(kind, name string, value any, replace extension.Re
 	a := api.activation
 	s := a.owner
 	s.nativeMu.Lock()
-	defer s.nativeMu.Unlock()
+	var release func()
+	defer func() {
+		s.nativeMu.Unlock()
+		if release != nil {
+			release()
+		}
+	}()
 	if a.closed {
 		return nil, extension.ErrClosed
 	}
@@ -407,6 +564,7 @@ func (api nativeAPI) register(kind, name string, value any, replace extension.Re
 			if entry == old {
 				a.entries = append(a.entries[:i], a.entries[i+1:]...)
 				old.current = false
+				release = old.takeRelease()
 				break
 			}
 		}
@@ -541,6 +699,7 @@ func (c *nativeCandidate) callService(ctx context.Context, service, method strin
 	s.nativeMu.Lock()
 	var target *nativeActivation
 	var binding nativeServiceMethod
+	var registration *nativeRegistration
 	for _, other := range c.activations {
 		if other == nil || !c.ready[other] {
 			continue
@@ -549,13 +708,26 @@ func (c *nativeCandidate) callService(ctx context.Context, service, method strin
 			if r.kind == "service" && r.name == service {
 				target = other
 				binding = r.value.(registeredService).methods[method]
+				registration = r
 			}
 		}
+	}
+	if target != nil && binding.contract != nil {
+		registration.holds++
 	}
 	s.nativeMu.Unlock()
 	if target == nil || binding.contract == nil {
 		return extension.Result{}, errors.New("service unavailable")
 	}
+	defer func() {
+		s.nativeMu.Lock()
+		registration.holds--
+		release := registration.takeRelease()
+		s.nativeMu.Unlock()
+		if release != nil {
+			release()
+		}
+	}()
 	args, err := acceptNativeMethod(binding.contract, args, pure)
 	if err != nil {
 		return extension.Result{}, err
