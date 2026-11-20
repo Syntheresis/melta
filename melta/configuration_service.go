@@ -77,6 +77,10 @@ type configurationService struct {
 	// set. Only names live here; no value, token or public manager.
 	heldMu    sync.Mutex
 	heldNames map[string]int
+
+	nativeMu         sync.Mutex
+	nativeCandidates map[*nativeCandidate]bool
+	nativeCurrent    *nativeCandidate
 }
 
 // configurationCapture joins one published immutable configuration revision

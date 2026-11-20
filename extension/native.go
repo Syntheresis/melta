@@ -185,6 +185,7 @@ type ToolPlan struct {
 	CanonicalWriteDir  string
 	Immediate          *harness.ToolOutcome
 	Data               []byte
+	Start              *SessionStart
 }
 
 // Owned returns an independent copy of the plan and its byte fields.
@@ -198,6 +199,16 @@ func (p ToolPlan) Owned() ToolPlan {
 		out.Immediate = &immediate
 	}
 	out.Data = append([]byte(nil), p.Data...)
+	if p.Start != nil {
+		start := *p.Start
+		start.Inputs = p.Start.Inputs.Owned()
+		start.InitialState = append(harness.SessionStateValue(nil), p.Start.InitialState...)
+		start.Input = append([]model.ContentPart(nil), p.Start.Input...)
+		for i := range start.Input {
+			start.Input[i].Extra = start.Input[i].Extra.Clone()
+		}
+		out.Start = &start
+	}
 	return out
 }
 

@@ -61,6 +61,7 @@ func secretValuesFrom(ctx context.Context) secretValues {
 // closes admission, cancels the view origin, joins every nested call, then
 // releases the admission it borrowed.
 type nativeView struct {
+	nativeCallLifetime
 	composition *composition
 	component   *extension.CompiledComponent
 	targets     map[string]*capabilityValue
@@ -68,8 +69,6 @@ type nativeView struct {
 	grant       nativeGrant
 
 	origin    context.Context
-	ctx       context.Context
-	cancel    context.CancelFunc
 	release   func()
 	lease     *artifactCallLease
 	ownsLease bool
@@ -78,10 +77,57 @@ type nativeView struct {
 	// values; operationSecrets are the enclosing Operation's captured values.
 	activationSecrets map[string]string
 	operationSecrets  map[string]map[string]string
+}
 
-	mu   sync.Mutex
-	done bool
-	wg   sync.WaitGroup
+// nativeCallLifetime closes admission before canceling and joining borrowed calls.
+type nativeCallLifetime struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	done   bool
+	wg     sync.WaitGroup
+}
+
+func (v *nativeCallLifetime) admit(supplied context.Context) (context.Context, func(), error) {
+	v.mu.Lock()
+	if v.done {
+		v.mu.Unlock()
+		return nil, nil, extension.ErrClosed
+	}
+	v.wg.Add(1)
+	v.mu.Unlock()
+	if supplied == nil {
+		supplied = context.Background()
+	}
+	finish := func() { v.wg.Done() }
+	if err := v.ctx.Err(); err != nil {
+		finish()
+		return nil, nil, err
+	}
+	if err := supplied.Err(); err != nil {
+		finish()
+		return nil, nil, err
+	}
+	merged, cancel := context.WithCancel(supplied)
+	stop := context.AfterFunc(v.ctx, cancel)
+	finish = func() { stop(); cancel(); v.wg.Done() }
+	if err := v.ctx.Err(); err != nil {
+		finish()
+		return nil, nil, err
+	}
+	if err := supplied.Err(); err != nil {
+		finish()
+		return nil, nil, err
+	}
+	return merged, finish, nil
+}
+
+func (v *nativeCallLifetime) end() {
+	v.mu.Lock()
+	v.done = true
+	v.mu.Unlock()
+	v.cancel()
+	v.wg.Wait()
 }
 
 // newView creates one callback view over value and returns its authoring call
@@ -117,17 +163,16 @@ func (c *composition) newView(value *capabilityValue, parent context.Context, id
 		ctx = context.WithValue(ctx, artifactLeaseKey{}, lease)
 	}
 	view := &nativeView{
-		composition:       c,
-		component:         value.component,
-		targets:           value.targets,
-		grant:             identity.grant,
-		origin:            parent,
-		ctx:               ctx,
-		cancel:            cancel,
-		lease:             lease,
-		ownsLease:         ownsLease,
-		activationSecrets: value.activationSecrets,
-		operationSecrets:  identity.operationSecrets,
+		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
+		composition:        c,
+		component:          value.component,
+		targets:            value.targets,
+		grant:              identity.grant,
+		origin:             parent,
+		lease:              lease,
+		ownsLease:          ownsLease,
+		activationSecrets:  value.activationSecrets,
+		operationSecrets:   identity.operationSecrets,
 	}
 	operationID := identity.operationID
 	if operationID == "" {
@@ -172,35 +217,11 @@ func (c *composition) newView(value *capabilityValue, parent context.Context, id
 // narrow the call with its own deadline or cancellation, but Background can
 // never detach the host origin. The merge links are stopped on return.
 func (v *nativeView) call(supplied context.Context, binding, method string, arguments json.RawMessage) (extension.Result, error) {
-	v.mu.Lock()
-	if v.done {
-		v.mu.Unlock()
-		return extension.Result{}, extension.ErrClosed
-	}
-	v.wg.Add(1)
-	v.mu.Unlock()
-	defer v.wg.Done()
-	if supplied == nil {
-		supplied = context.Background()
-	}
-	if err := v.ctx.Err(); err != nil {
+	merged, finish, err := v.nativeCallLifetime.admit(supplied)
+	if err != nil {
 		return extension.Result{}, err
 	}
-	if err := supplied.Err(); err != nil {
-		return extension.Result{}, err
-	}
-	merged, cancel := context.WithCancel(supplied)
-	stop := context.AfterFunc(v.ctx, cancel)
-	defer func() {
-		stop()
-		cancel()
-	}()
-	if err := v.ctx.Err(); err != nil {
-		return extension.Result{}, err
-	}
-	if err := supplied.Err(); err != nil {
-		return extension.Result{}, err
-	}
+	defer finish()
 	return v.composition.dispatch(merged, v.auth, v.grant, v.component, v.targets, binding, method, arguments, v.lease, secretValues{activation: v.activationSecrets, operation: v.operationSecrets})
 }
 
@@ -210,11 +231,7 @@ func (v *nativeView) end() {
 	if v == nil {
 		return
 	}
-	v.mu.Lock()
-	v.done = true
-	v.mu.Unlock()
-	v.cancel()
-	v.wg.Wait()
+	v.nativeCallLifetime.end()
 	if v.release != nil {
 		v.release()
 	}
@@ -246,11 +263,11 @@ func (c *composition) dispatch(ctx context.Context, Caller extension.CallContext
 	if !ok {
 		return extension.Result{}, fmt.Errorf("binding %q: method %q is not declared: %w", bindingName, methodName, ErrComposition)
 	}
-	if grant.pure && method.Mode != extension.ModePure {
-		return extension.Result{}, fmt.Errorf("binding %q: pure callback cannot invoke %s method %q: %w", bindingName, method.Mode, methodName, ErrComposition)
-	}
-	arguments = append(json.RawMessage(nil), arguments...)
-	if err := method.ValidateArguments(arguments); err != nil {
+	arguments, err := acceptNativeMethod(method, arguments, grant.pure)
+	if err != nil {
+		if errors.Is(err, ErrComposition) {
+			return extension.Result{}, fmt.Errorf("binding %q: %w", bindingName, err)
+		}
 		return extension.Result{}, fmt.Errorf("%w: %w", ErrComposition, err)
 	}
 	if binding.Host {
@@ -268,7 +285,7 @@ func (c *composition) dispatch(ctx context.Context, Caller extension.CallContext
 		if lease != nil {
 			hostCtx = context.WithValue(hostCtx, artifactLeaseKey{}, lease)
 		}
-		return executeProvider(hostCtx, hostCaller, method, handler, "host service", binding.CapabilityID, arguments)
+		return executeNativeProvider(hostCtx, hostCaller, method, handler, "host service", binding.CapabilityID, arguments)
 	}
 	provider := targets[bindingName]
 	if provider == nil {
@@ -302,12 +319,12 @@ func (c *composition) invokeProvider(ctx context.Context, provider *capabilityVa
 	if provider == nil {
 		return extension.Result{}, ErrClosed
 	}
-	arguments = append(json.RawMessage(nil), arguments...)
 	contract, ok := methods[method]
 	if !ok {
 		return extension.Result{}, fmt.Errorf("%w: %w: method %q is not declared", ErrComposition, extension.ErrInvalid, method)
 	}
-	if err := contract.ValidateArguments(arguments); err != nil {
+	arguments, err := acceptNativeMethod(contract, arguments, false)
+	if err != nil {
 		return extension.Result{}, fmt.Errorf("%w: %w", ErrComposition, err)
 	}
 	return c.invokeAcceptedProvider(ctx, provider, contract, arguments, section, identity, lifecycle)
@@ -342,10 +359,21 @@ func (c *composition) invokeAcceptedProvider(ctx context.Context, provider *capa
 	if handler == nil {
 		return extension.Result{}, fmt.Errorf("capability %q: method %q has no implementation: %w", provider.capability.ID, method, ErrComposition)
 	}
-	return executeProvider(child.ctx, childCall, accepted, handler, "capability", provider.capability.ID, arguments)
+	return executeNativeProvider(child.ctx, childCall, accepted, handler, "capability", provider.capability.ID, arguments)
 }
 
-func executeProvider(ctx context.Context, call extension.CallContext, method *extension.CompiledMethod, handler extension.Handler, kind, id string, arguments json.RawMessage) (extension.Result, error) {
+func acceptNativeMethod(method *extension.CompiledMethod, args json.RawMessage, pure bool) (json.RawMessage, error) {
+	if pure && method.Mode != extension.ModePure {
+		return nil, fmt.Errorf("pure callback cannot invoke %s method %q: %w", method.Mode, method.Name, ErrComposition)
+	}
+	args = append(json.RawMessage(nil), args...)
+	if err := method.ValidateArguments(args); err != nil {
+		return nil, err
+	}
+	return args, nil
+}
+
+func executeNativeProvider[C any](ctx context.Context, call C, method *extension.CompiledMethod, handler func(context.Context, C, json.RawMessage) (extension.Result, error), kind, id string, arguments json.RawMessage) (extension.Result, error) {
 	result, err := handler(ctx, call, arguments)
 	if err != nil {
 		return extension.Result{}, ownCallError(err)
