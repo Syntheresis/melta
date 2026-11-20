@@ -84,7 +84,7 @@ func (r *Melta) cleanupDeletedSessions(ctx context.Context, deletions []deletedS
 			if registered != nil && registered.hasActivation(owner) {
 				failure = registered.cleanupOwner(ctx, deletion.sessionID, owner)
 			} else {
-				failure = r.cleanupExternalOwner(ctx, snapshot, deletion.sessionID, owner)
+				failure = ownerUnavailable(owner)
 			}
 			if failure != nil {
 				failures = append(failures, *failure)
@@ -137,45 +137,18 @@ func (s *nativeSnapshot) cleanupOwner(ctx context.Context, sessionID, owner stri
 func appendOwnerFailures(failures []protocol.CleanupFailure, deletions []deletedSession) []protocol.CleanupFailure {
 	for _, deletion := range deletions {
 		for _, owner := range deletion.owners {
-			extensionID := owner
-			failures = append(failures, protocol.CleanupFailure{ExtensionId: &extensionID, Code: "unavailable", Message: cleanupUnavailableMessage})
+			failures = append(failures, *ownerUnavailable(owner))
 		}
 	}
 	return failures
 }
 
-// cleanupExternalOwner invokes one recorded owner's declared cleanup method
-// through the ordinary guarded provider guard. A disabled, uninstalled or
-// missing provider/capability and a failed call are the same unavailable
-// outcome; the deleted identity is an argument only, never Session binding.
-func (r *Melta) cleanupExternalOwner(ctx context.Context, snapshot *configuration, sessionID, owner string) *protocol.CleanupFailure {
+// ownerUnavailable is the fixed unavailable outcome for one recorded external
+// data owner: a disabled, retired or unregistered owner and a failed cleanup
+// call are the same reported result.
+func ownerUnavailable(owner string) *protocol.CleanupFailure {
 	extensionID := owner
-	failure := &protocol.CleanupFailure{ExtensionId: &extensionID, Code: "unavailable", Message: cleanupUnavailableMessage}
-	composition := snapshot.composition
-	if composition == nil || composition.compiled == nil || snapshot.resources.runtime == nil {
-		return failure
-	}
-	capability, ok := composition.compiled.CleanupCapability(owner)
-	if !ok {
-		return failure
-	}
-	provider := snapshot.resources.runtime.capabilities[capability.ID]
-	if provider == nil {
-		return failure
-	}
-	arguments, err := json.Marshal(struct {
-		SessionID string `json:"session_id"`
-	}{SessionID: sessionID})
-	if err != nil {
-		return failure
-	}
-	callCtx, cancel := context.WithTimeout(ctx, cleanupCallDeadline)
-	defer cancel()
-	result, err := composition.invokeProvider(callCtx, provider, capability.Methods, "cleanup", arguments, nil, callIdentity{revision: snapshot.resources.revisionString()}, false)
-	if err != nil || result.Failure != nil {
-		return failure
-	}
-	return nil
+	return &protocol.CleanupFailure{ExtensionId: &extensionID, Code: "unavailable", Message: cleanupUnavailableMessage}
 }
 
 // cleanupFailureText renders one reported failure for the sweep's retained

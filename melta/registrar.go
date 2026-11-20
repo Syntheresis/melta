@@ -56,6 +56,7 @@ type nativeActivation struct {
 }
 
 type nativeRegistration struct {
+	id         string
 	activation *nativeActivation
 	kind       string
 	name       string
@@ -344,12 +345,7 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 	return c, nil
 }
 
-func (c *nativeCandidate) publish() error {
-	c.owner.nativeMu.Lock()
-	defer c.owner.nativeMu.Unlock()
-	if c.holds == 0 {
-		return extension.ErrClosed
-	}
+func (c *nativeCandidate) preparePublishLocked() {
 	if c.owner.nativeFailures == nil {
 		c.owner.nativeFailures = make(map[string]error)
 	}
@@ -373,23 +369,18 @@ func (c *nativeCandidate) publish() error {
 			c.inactive[id] = err
 		}
 	}
-	publish := func() []Event {
-		c.owner.nativeCurrent = c
-		changed := false
-		for _, activation := range c.activations {
-			if activation != nil && c.ready[activation] && activation.lost == nil {
-				changed = activation.warnings.commitWarnings() || changed
-			}
+}
+
+func (c *nativeCandidate) publishLocked() []Event {
+	c.owner.nativeCurrent = c
+	changed := false
+	for _, activation := range c.activations {
+		if activation != nil && c.ready[activation] && activation.lost == nil {
+			changed = activation.warnings.commitWarnings() || changed
 		}
-		if changed {
-			return []Event{warningChangedEvent(c.owner.instance, runtimeEventScope(), c.owner.warnings.storeRevision())}
-		}
-		return nil
 	}
-	if c.owner.obs != nil {
-		c.owner.obs.publish(publish)
-	} else {
-		publish()
+	if changed {
+		return []Event{warningChangedEvent(c.owner.instance, runtimeEventScope(), c.owner.warnings.storeRevision())}
 	}
 	return nil
 }
@@ -448,6 +439,11 @@ func (c *nativeCandidate) capture() *nativeAdmissionCapture {
 	s := c.owner
 	s.nativeMu.Lock()
 	defer s.nativeMu.Unlock()
+	return c.captureLocked()
+}
+
+func (c *nativeCandidate) captureLocked() *nativeAdmissionCapture {
+	s := c.owner
 	if c.holds == 0 || s.nativeCurrent != c {
 		return nil
 	}
@@ -474,22 +470,6 @@ func (c *nativeAdmissionCapture) stage() (*nativeSnapshot, error) {
 		}
 	}
 	return c.candidate.snapshotLocked(c.activations), nil
-}
-
-func (c *nativeCandidate) snapshot() *nativeSnapshot {
-	s := c.owner
-	s.nativeMu.Lock()
-	defer s.nativeMu.Unlock()
-	if c.holds == 0 {
-		return nil
-	}
-	var activations []*nativeActivation
-	for _, a := range c.activations {
-		if a != nil && c.ready[a] {
-			activations = append(activations, a)
-		}
-	}
-	return c.snapshotLocked(activations)
 }
 
 func (c *nativeCandidate) snapshotLocked(activations []*nativeActivation) *nativeSnapshot {
@@ -548,6 +528,10 @@ func (api nativeAPI) Remove(handle extension.Registration) error {
 }
 
 func (api nativeAPI) register(kind, name string, value any, replace extension.Registration) (extension.Registration, error) {
+	id, err := newInstanceID()
+	if err != nil {
+		return nil, err
+	}
 	a := api.activation
 	s := a.owner
 	s.nativeMu.Lock()
@@ -603,7 +587,7 @@ func (api nativeAPI) register(kind, name string, value any, replace extension.Re
 			}
 		}
 	}
-	r := &nativeRegistration{activation: a, kind: kind, name: name, value: value, current: true}
+	r := &nativeRegistration{id: id, activation: a, kind: kind, name: name, value: value, current: true}
 	if old != nil {
 		for i, entry := range a.entries {
 			if entry == old {
@@ -734,6 +718,27 @@ func (api nativeAPI) Call(ctx context.Context, service, method string, args json
 		}
 		return a.reportWarning(callCtx, method, args)
 	}
+	if service == extension.ContractCredentials {
+		if !a.services[service] {
+			return extension.Result{}, ErrDenied
+		}
+		args, err = acceptHostMethod(service, method, args, false)
+		if err != nil {
+			return extension.Result{}, err
+		}
+		var input struct {
+			Field string `json:"field"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return extension.Result{}, err
+		}
+		values := make(map[string]string, len(a.bindings))
+		for field, binding := range a.bindings {
+			values[field] = binding.value
+		}
+		callCtx = context.WithValue(callCtx, secretValuesKey{}, secretValues{activation: values})
+		return declaredCredentialHandler(callCtx, hostCall{ExtensionID: a.id}, input.Field, a.manifest.Secrets)
+	}
 	return c.callServiceScoped(callCtx, service, method, args, &nativeCallScope{candidate: c, activation: a})
 }
 
@@ -746,12 +751,21 @@ type nativeCallScope struct {
 	workspaceBind    bool
 	permissions      []harness.PermissionRequest
 	session          harness.SessionIdentity
+	requestID        string
 	states           map[string]harness.SessionStateValue
 	host             *composition
 	lease            *artifactCallLease
 	operationSecrets map[string]map[string]string
 	commandScope     CallerScope
 	receipt          *nativeReceipt
+	start            *nativeSessionStart
+}
+
+type nativeSessionStart struct {
+	mu          sync.Mutex
+	consumed    bool
+	extensionID string
+	plan        extension.SessionStart
 }
 
 type nativeReceipt struct {
@@ -817,6 +831,93 @@ func (scope *nativeCallScope) call(ctx context.Context, service, method string, 
 			return extension.Result{}, err
 		}
 	}
+	if service == extension.ContractSession {
+		if scope.activation == nil || !scope.activation.services[service] || scope.session.SessionID == "" {
+			return extension.Result{}, ErrDenied
+		}
+		if scope.host == nil || scope.host.hosts == nil || scope.host.hosts.background == nil || scope.host.hosts.background.h == nil {
+			return extension.Result{}, extension.ErrClosed
+		}
+		if method == "start" && (scope.pure || scope.workspaceBind || scope.start == nil) {
+			return extension.Result{}, ErrDenied
+		}
+		args, err = acceptHostMethod(service, method, args, scope.pure)
+		if err != nil {
+			return extension.Result{}, err
+		}
+		h := scope.host.hosts.background.h
+		switch method {
+		case "members":
+			members, err := h.SessionMembers(callCtx, scope.session.SessionID)
+			return commandResult(members, err)
+		case "start":
+			start := scope.start
+			start.mu.Lock()
+			if start.consumed {
+				start.mu.Unlock()
+				return extension.Result{}, fmt.Errorf("session start already consumed: %w", harness.ErrConflict)
+			}
+			start.consumed = true
+			start.mu.Unlock()
+			operationID, err := mintInstance()
+			if err != nil {
+				return extension.Result{}, err
+			}
+			var states map[string]harness.SessionStateValue
+			if start.plan.InitialState != nil {
+				states = map[string]harness.SessionStateValue{start.extensionID: bytes.Clone(start.plan.InitialState)}
+			}
+			launched, err := h.LaunchChildSession(callCtx, harness.LaunchChildRequest{
+				ParentSessionID: scope.session.SessionID, ExtensionID: start.extensionID,
+				OperationID: operationID, Inputs: start.plan.Inputs, ExtensionState: states,
+				Content: start.plan.Input, Report: start.plan.Report, OutputLimit: start.plan.OutputLimit,
+			})
+			value, marshalErr := json.Marshal(struct {
+				SessionID string `json:"session_id"`
+			}{launched.ChildSessionID})
+			if marshalErr != nil {
+				return extension.Result{}, marshalErr
+			}
+			if err != nil {
+				if launched.ChildSessionID != "" {
+					return extension.Result{}, &extension.CallError{Err: err, Partial: value}
+				}
+				return extension.Result{}, err
+			}
+			return extension.Result{Value: value}, nil
+		}
+	}
+	if service == extension.ContractState {
+		if scope.activation == nil || !scope.activation.services[service] || scope.pure || scope.session.SessionID == "" {
+			return extension.Result{}, ErrDenied
+		}
+		if scope.host == nil || scope.host.hosts == nil || scope.host.hosts.background == nil || scope.host.hosts.background.h == nil {
+			return extension.Result{}, extension.ErrClosed
+		}
+		args, err = acceptHostMethod(service, method, args, false)
+		if err != nil {
+			return extension.Result{}, err
+		}
+		h := scope.host.hosts.background.h
+		var callErr error
+		switch method {
+		case "set":
+			var input struct {
+				Value json.RawMessage `json:"value"`
+			}
+			if err := json.Unmarshal(args, &input); err != nil {
+				return extension.Result{}, fmt.Errorf("state value: %v: %w", err, harness.ErrInvalid)
+			}
+			_, callErr = h.SetSessionExtensionState(callCtx, scope.session.SessionID, scope.activation.id, harness.SessionStateValue(input.Value))
+		case "clear":
+			_, callErr = h.ClearSessionExtensionState(callCtx, scope.session.SessionID, scope.activation.id)
+		}
+		if callErr != nil {
+			return extension.Result{}, callErr
+		}
+		scope.receipt.mark()
+		return extension.Result{Value: json.RawMessage("null")}, nil
+	}
 	if service == "melta.workspace" {
 		if scope.activation == nil || !scope.activation.services[service] || scope.workspace == nil {
 			return extension.Result{}, ErrDenied
@@ -875,7 +976,7 @@ func (scope *nativeCallScope) call(ctx context.Context, service, method string, 
 			return extension.Result{}, fmt.Errorf("command method %q: %w", method, harness.ErrNotFound)
 		}
 		callCtx = context.WithValue(callCtx, grantContextKey{}, nativeGrant{commands: true, commandScope: scope.commandScope})
-		result, err := handler(callCtx, extension.CallContext{ExtensionID: scope.activation.id, SessionID: scope.session.SessionID, Workspace: scope.session.Workspace}, args)
+		result, err := handler(callCtx, hostCall{ExtensionID: scope.activation.id, SessionID: scope.session.SessionID, Workspace: scope.session.Workspace}, args)
 		scope.receipt.command(result, err)
 		return result, err
 	}
@@ -939,8 +1040,8 @@ func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method
 		return extension.Result{}, err
 	}
 	childCtx, cancel := context.WithCancel(ctx)
-	scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, pure: parent.pure || binding.contract.Mode == extension.ModePure, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, receipt: parent.receipt}
-	return executeNativeProvider(childCtx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+	scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, pure: parent.pure || binding.contract.Mode == extension.ModePure, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, receipt: parent.receipt, start: parent.start, requestID: parent.requestID}
+	return executeNativeProvider(childCtx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call, RequestID: scope.requestID}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 		defer scope.end()
 		return binding.handler(ctx, call, args)
 	}, "service", service, args)

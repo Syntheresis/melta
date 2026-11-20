@@ -33,7 +33,7 @@ Choices the user made or confirmed. Constraints they stated. Things they rejecte
 Be specific — include file paths, function names, error messages, line numbers. Do not generalize. If the user said "don't use React," write that exactly, not "user has framework preferences."`
 
 func TestResolveBuiltinsInheritThroughPrimary(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{"primary":{"model":"test/base-model"},"secondary":{"model":"test/secondary-model"}}`), nil, StandardTools, nil)
+	cfg, err := parse([]byte(`{"primary":{"model":"test/base-model"},"secondary":{"model":"test/secondary-model"}}`))
 	testassert.NoError(t, err)
 
 	secondary, err := cfg.Resolve("secondary")
@@ -50,7 +50,7 @@ func TestResolveBuiltinsInheritThroughPrimary(t *testing.T) {
 }
 
 func TestRetainedBuiltinRosterOrderAndResolution(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{}`), nil, StandardTools, nil)
+	cfg, err := parse([]byte(`{}`))
 	testassert.NoError(t, err)
 	wantOrder := []string{"primary", "secondary", "explore", "review", "compact"}
 	got := namesOf(cfg.All())
@@ -68,10 +68,10 @@ func TestRetainedBuiltinRosterOrderAndResolution(t *testing.T) {
 }
 
 func TestCustomTypeNamedPlanFollowsOrdinaryRules(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{
+	cfg, err := parse([]byte(`{
   "primary": {"model":"test/base-model"},
   "plan": {"prompt":"Write design notes.","tools":["read_file"],"readonly":true,"write_dir":"docs","description":"Notes writer."}
-}`), nil, StandardTools, nil)
+}`))
 	testassert.NoError(t, err)
 
 	resolved, err := cfg.Resolve("plan")
@@ -89,48 +89,8 @@ func TestCustomTypeNamedPlanFollowsOrdinaryRules(t *testing.T) {
 	testassert.Require(t, reflect.DeepEqual(all, wantOrder), "All = %v, want builtins in order then the custom type", all)
 }
 
-func TestSubmitPlanToolIsRejectedInCustomDefinitions(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{
-  "planner": {"tools":["read_file","submit_plan"]},
-  "reader": {"tools":["read_file"]}
-}`), nil, StandardTools, nil)
-	testassert.NoError(t, err)
-
-	{
-		_, err := cfg.Resolve("planner")
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), `unknown agent type`), `Resolve(planner with submit_plan) error = %v, want the entry dropped as unknown`, err)
-	}
-	reader, err := cfg.Resolve("reader")
-	testassert.NoError(t, err)
-	testassert.Require(t, reflect.DeepEqual(reader.Tools, []string{"read_file"}), "known-tool custom definition tools = %v, want it retained", reader.Tools)
-
-	warnings := cfg.Warnings()
-	testassert.Require(t, len(warnings) == 1 && warnings[0].Kind == "invalid_agent_type" && warnings[0].Name == "planner", "warnings = %#v, want one invalid custom warning naming planner", warnings)
-	testassert.Require(t, strings.Contains(warnings[0].Message, `unknown tool "submit_plan"`), `warning message = %q, want the unknown submit_plan tool named`, warnings[0].Message)
-}
-
-func TestExecutePendingToolIsRejectedInCustomDefinitions(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{
-  "stager": {"tools":["read_file","execute_pending"]},
-  "reader": {"tools":["read_file"]}
-}`), nil, StandardTools, nil)
-	testassert.NoError(t, err)
-
-	{
-		_, err := cfg.Resolve("stager")
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), `unknown agent type`), `Resolve(stager with execute_pending) error = %v, want the entry dropped as unknown`, err)
-	}
-	reader, err := cfg.Resolve("reader")
-	testassert.NoError(t, err)
-	testassert.Require(t, reflect.DeepEqual(reader.Tools, []string{"read_file"}), "known-tool custom definition tools = %v, want it retained", reader.Tools)
-
-	warnings := cfg.Warnings()
-	testassert.Require(t, len(warnings) == 1 && warnings[0].Kind == "invalid_agent_type" && warnings[0].Name == "stager", "warnings = %#v, want one invalid custom warning naming stager", warnings)
-	testassert.Require(t, strings.Contains(warnings[0].Message, `unknown tool "execute_pending"`), `warning message = %q, want the unknown execute_pending tool named`, warnings[0].Message)
-}
-
 func TestBuiltinsExposeConcreteRootAndCodeOnlyCompact(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{}`), nil, StandardTools, nil)
+	cfg, err := parse([]byte(`{}`))
 	testassert.NoError(t, err)
 
 	primary, err := cfg.Resolve("primary")
@@ -143,10 +103,10 @@ func TestBuiltinsExposeConcreteRootAndCodeOnlyCompact(t *testing.T) {
 }
 
 func TestToolsPresenceControlsInheritanceEmptyAndSubset(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{
+	cfg, err := parse([]byte(`{
   "empty": {"tools": []},
   "reader": {"tools": ["read_file", "run_command"]}
-}`), nil, StandardTools, nil)
+}`))
 	testassert.NoError(t, err)
 
 	empty, err := cfg.Resolve("empty")
@@ -161,7 +121,7 @@ func TestToolsPresenceControlsInheritanceEmptyAndSubset(t *testing.T) {
 }
 
 func TestBuiltinLockedFieldsIgnoredAndModelHonored(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{
+	cfg, err := parse([]byte(`{
   "explore": {
     "model": "test/explore-model",
     "system_prompt": "none",
@@ -169,7 +129,7 @@ func TestBuiltinLockedFieldsIgnoredAndModelHonored(t *testing.T) {
     "readonly": false,
     "description": "override"
   }
-}`), nil, StandardTools, nil)
+}`))
 	testassert.NoError(t, err)
 	explore, err := cfg.Resolve("explore")
 	testassert.NoError(t, err)
@@ -180,34 +140,33 @@ func TestBuiltinLockedFieldsIgnoredAndModelHonored(t *testing.T) {
 }
 
 func TestInvalidCustomDropsOnlyBadEntryWithWarning(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{
+	cfg, err := parse([]byte(`{
   "good": {"tools": ["read_file"], "system_prompt": "simple", "model": "test/good"},
-  "bad_tool": {"tools": ["does_not_exist"]},
   "bad_prompt": {"system_prompt": "huge"},
   "bad_model": {"model": "not-prefixed"},
   "bad_shape": "not an object",
   "bad_tools_shape": {"tools": "read_file"}
-}`), nil, StandardTools, nil)
+}`))
 	testassert.NoError(t, err)
 	{
 		_, err := cfg.Resolve("good")
 		testassert.NoError(t, err)
 	}
-	for _, name := range []string{"bad_tool", "bad_prompt", "bad_model", "bad_shape", "bad_tools_shape"} {
+	for _, name := range []string{"bad_prompt", "bad_model", "bad_shape", "bad_tools_shape"} {
 		{
 			_, err := cfg.Resolve(name)
 			testassert.Require(t, err != nil, "Resolve(%s) succeeded, want dropped", name)
 		}
 	}
 	warnings := cfg.Warnings()
-	testassert.Require(t, len(warnings) == 5, "warnings = %#v, want 5 invalid custom warnings", warnings)
+	testassert.Require(t, len(warnings) == 4, "warnings = %#v, want 4 invalid custom warnings", warnings)
 	for _, warning := range warnings {
 		testassert.Equal(t, warning.Kind, "invalid_agent_type")
 	}
 }
 
 func TestBuiltinNameWinsOverUserLockedFields(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{"explore":{"prompt":"custom prompt","description":"custom","subagent":false}}`), nil, StandardTools, nil)
+	cfg, err := parse([]byte(`{"explore":{"prompt":"custom prompt","description":"custom","subagent":false}}`))
 	testassert.NoError(t, err)
 	explore, err := cfg.Resolve("explore")
 	testassert.NoError(t, err)
@@ -231,196 +190,56 @@ func namesOf(values []Resolved) []string {
 	return out
 }
 
-// TestParseWithCapabilitiesSelection pins capability and tool selection
-// against the declared universes: declared values are retained in order, an
-// empty capability list clears the inherited selection, and a non-declared
-// capability value, a duplicate capability and a wrong-typed capabilities
-// member each drop the definition with the retained invalid_agent_type
-// warning. Configured tool names are retained in order, duplicates included.
-func TestParseWithCapabilitiesSelection(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{
+// TestParseCapabilityAndToolSelection pins the definitions' own selection
+// lists: order, explicit empty clearing, duplicate and invalid-shape drops,
+// and tool names retained as configured, duplicates included.
+func TestParseCapabilityAndToolSelection(t *testing.T) {
+	cfg, err := parse([]byte(`{
   "plan": {"capabilities": ["cap-b", "cap-a"], "tools": ["own_tool"]},
   "sweeper": {"capabilities": []},
   "plain": {},
-  "unknown_cap": {"capabilities": ["ghost"]},
   "duplicate_cap": {"capabilities": ["cap-a", "cap-a"]},
   "broken": {"capabilities": "not-a-list"},
-  "custom_tools": {"tools": ["own_tool", "own_tool", "read_file"]}
-}`), []string{"cap-a", "cap-b"}, []string{"own_tool", "read_file"}, nil)
+  "custom_tools": {"tools": ["own_tool", "own_tool", "read_file"]},
+  "omitted": {},
+  "empty": {"tools": []}
+}`))
 	testassert.NoError(t, err)
-	for _, drop := range []string{"unknown_cap", "duplicate_cap", "broken"} {
-		{
-			_, err := cfg.Resolve(drop)
-			testassert.Require(t, err != nil, "Resolve(%s) succeeded, want dropped", drop)
-		}
+	for _, drop := range []string{"duplicate_cap", "broken"} {
+		_, err := cfg.Resolve(drop)
+		testassert.Require(t, err != nil, "Resolve(%s) succeeded, want dropped", drop)
 	}
 	warnings := cfg.Warnings()
-	testassert.Require(t, len(warnings) == 3, "warnings = %#v, want three invalid_agent_type drops", warnings)
+	testassert.Require(t, len(warnings) == 2, "warnings = %#v, want two invalid_agent_type drops", warnings)
 	for _, warning := range warnings {
 		testassert.Equal(t, warning.Kind, "invalid_agent_type")
 	}
-
 	plan, err := cfg.Resolve("plan")
 	testassert.NoError(t, err)
-	{
-		want := []string{"cap-b", "cap-a"}
-		testassert.Require(t, reflect.DeepEqual(plan.Capabilities, want), "plan capabilities = %q, want the selected order", plan.Capabilities)
-	}
-	{
-		want := []string{"own_tool"}
-		testassert.Require(t, reflect.DeepEqual(plan.Tools, want), "plan tools = %q, want the declared selection", plan.Tools)
-	}
-	// A custom type inherits through secondary and primary; the built-ins
-	// keep their locked fields and an empty capability default because this
-	// caller supplies no default list.
+	testassert.Require(t, reflect.DeepEqual(plan.Capabilities, []string{"cap-b", "cap-a"}), "plan capabilities = %q, want the selected order", plan.Capabilities)
+	testassert.Require(t, reflect.DeepEqual(plan.Tools, []string{"own_tool"}), "plan tools = %q, want the configured selection", plan.Tools)
 	for _, name := range []string{"sweeper", "plain", "secondary"} {
 		resolved, err := cfg.Resolve(name)
 		testassert.Require(t, err == nil, "Resolve(%s): %v", name, err)
 		testassert.Require(t, resolved.Capabilities == nil, "%s capabilities = %q, want absent, cleared, or inherited-empty", name, resolved.Capabilities)
 	}
-	for _, resolved := range cfg.All() {
-		testassert.Require(t, !resolved.Builtin || resolved.Capabilities == nil, "builtin %s capabilities = %q, want the empty default", resolved.Name, resolved.Capabilities)
-	}
-	// Configured tool names are retained without an available-tool list,
-	// duplicates included; a repeated name neither drops the definition nor
-	// changes the resolved order.
 	worker, err := cfg.Resolve("custom_tools")
 	testassert.NoError(t, err)
-	{
-		want := []string{"own_tool", "own_tool", "read_file"}
-		testassert.Require(t, reflect.DeepEqual(worker.Tools, want), "custom_tools = %q, want %q retained", worker.Tools, want)
-	}
+	testassert.Require(t, reflect.DeepEqual(worker.Tools, []string{"own_tool", "own_tool", "read_file"}), "custom_tools = %q, want the configured names retained", worker.Tools)
+	testassert.Require(t, cfg.defs["omitted"].Tools == nil, "omitted definition tools = %v, want nil", cfg.defs["omitted"].Tools)
+	emptyDef := cfg.defs["empty"]
+	testassert.Require(t, emptyDef.Tools != nil && len(*emptyDef.Tools) == 0, "empty definition tools = %#v, want an explicit empty list", emptyDef.Tools)
+	primary, err := cfg.Resolve("primary")
+	testassert.NoError(t, err)
+	testassert.Require(t, reflect.DeepEqual(primary.Tools, StandardTools), "primary default tools = %q, want the standard roster", primary.Tools)
 }
 
-func TestParseWithCapabilitiesRejectsEmptyToolNames(t *testing.T) {
-	// A list containing only the empty name: the empty-name rule is the
-	// only one that can fire.
-	cfg, err := ParseWithCapabilities([]byte(`{"bad": {"tools": [""]}}`), nil, nil, nil)
+func TestParseRejectsEmptyToolNames(t *testing.T) {
+	cfg, err := parse([]byte(`{"bad": {"tools": [""]}}`))
 	testassert.NoError(t, err)
-	{
-		_, err := cfg.Resolve("bad")
-		testassert.Require(t, err != nil, "Resolve(bad) succeeded, want dropped for an empty tool name")
-	}
+	_, err = cfg.Resolve("bad")
+	testassert.Require(t, err != nil, "Resolve(bad) succeeded, want dropped for an empty tool name")
 	warnings := cfg.Warnings()
 	testassert.Require(t, len(warnings) == 1 && warnings[0].Kind == "invalid_agent_type", "warnings = %#v, want one invalid_agent_type drop", warnings)
 	testassert.Equal(t, warnings[0].Message, "tool name is empty")
-}
-
-// TestParseWithCapabilitiesToolUniverseValidation proves the compiled-tool
-// rows: an unknown explicit custom tool name drops that definition with the
-// retained warning, duplicates remain valid input, omitted and empty tool
-// lists are preserved, and default and inherited tool lists are intersected
-// with the compiled universe while the retained roster input itself keeps
-// process and task.
-func TestParseWithCapabilitiesToolUniverseValidation(t *testing.T) {
-	doc := []byte(`{
-  "unknown_tool": {"tools": ["own_tool", "not_compiled"]},
-  "duplicate_tools": {"tools": ["own_tool", "own_tool", "read_file"]},
-  "omitted": {},
-  "empty": {"tools": []}
-}`)
-	cfg, err := ParseWithCapabilities(doc, nil, []string{"own_tool", "read_file", "write_file"}, nil)
-	testassert.NoError(t, err)
-	{
-		_, err := cfg.Resolve("unknown_tool")
-		testassert.Require(t, err != nil, "Resolve(unknown_tool) succeeded, want dropped for an uncompiled tool name")
-	}
-	warnings := cfg.Warnings()
-	testassert.Require(t, len(warnings) == 1 && warnings[0].Kind == "invalid_agent_type" && warnings[0].Name == "unknown_tool", "warnings = %#v, want one invalid_agent_type drop for unknown_tool", warnings)
-	testassert.Require(t, strings.Contains(warnings[0].Message, "not_compiled"), "warning message = %q, want the unknown tool name", warnings[0].Message)
-	// Duplicates remain valid and keep their resolved order and repetition.
-	worker, err := cfg.Resolve("duplicate_tools")
-	testassert.NoError(t, err)
-	{
-		want := []string{"own_tool", "own_tool", "read_file"}
-		testassert.Require(t, reflect.DeepEqual(worker.Tools, want), "duplicate_tools = %q, want %q retained", worker.Tools, want)
-	}
-	// Omitted stays omitted at the definition level (its resolved value still
-	// inherits) and an explicit empty list stays empty.
-	testassert.Require(t, cfg.defs["omitted"].Tools == nil, "omitted definition tools = %v, want nil", cfg.defs["omitted"].Tools)
-	// The explicit empty list stays empty at the definition level (its
-	// resolved projection normalizes zero-length slices to nil, the package's
-	// empty form).
-	{
-		emptyDef := cfg.defs["empty"]
-		testassert.Require(t, emptyDef.Tools != nil && len(*emptyDef.Tools) == 0, "empty definition tools = %#v, want an explicit empty list", emptyDef.Tools)
-	}
-	{
-		empty, err := cfg.Resolve("empty")
-		testassert.Require(t, err == nil && empty.Tools == nil, "resolved empty tools = %#v (%v), want the normalized empty form", empty.Tools, err)
-	}
-}
-
-func TestParseWithCapabilitiesIntersectsDefaultTools(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{}`), nil, []string{"read_file", "run_command", "sleep"}, nil)
-	testassert.NoError(t, err)
-	primary, err := cfg.Resolve("primary")
-	testassert.NoError(t, err)
-	// Default and inherited tools are intersected with the compiled universe:
-	// process and task stay in the retained roster input but are not
-	// fabricated as executable placeholders, and nothing outside the universe
-	// survives.
-	{
-		want := []string{"read_file", "run_command", "sleep"}
-		testassert.Require(t, reflect.DeepEqual(primary.Tools, want), "primary default tools = %q, want the intersected roster %q", primary.Tools, want)
-	}
-	secondary, err := cfg.Resolve("secondary")
-	testassert.NoError(t, err)
-	testassert.Require(t, reflect.DeepEqual(secondary.Tools, primary.Tools), "secondary inherited tools = %q, want the intersected default %q", secondary.Tools, primary.Tools)
-	// The retained roster input itself is unchanged.
-	for _, name := range []string{"process", "task", "edit_file", "apply_patch"} {
-		testassert.Require(t, contains(StandardTools, name), "StandardTools lost %q: %q", name, StandardTools)
-	}
-	// An empty compiled universe leaves the defaults empty, not fabricated.
-	none, err := ParseWithCapabilities([]byte(`{}`), nil, nil, nil)
-	testassert.NoError(t, err)
-	nonePrimary, err := none.Resolve("primary")
-	testassert.NoError(t, err)
-	testassert.Require(t, len(nonePrimary.Tools) == 0, "primary tools under an empty universe = %q, want none fabricated", nonePrimary.Tools)
-}
-
-func TestParseWithCapabilitiesDefaultProjection(t *testing.T) {
-	cfg, err := ParseWithCapabilities([]byte(`{
-	  "plan": {"capabilities": ["cap-a"]},
-	  "sweeper": {"capabilities": []},
-	  "plain": {},
-	  "model_a": {"model": "prov/a"},
-	  "model_b": {"model": "prov/b"}
-	}`), []string{"cap-a", "cap-b", "model_adaptation"}, []string{"read_file"}, []string{"model_adaptation"})
-	testassert.NoError(t, err)
-	// The default list installs on the built-in primary definition alone;
-	// ordinary inheritance propagates it through secondary to customs.
-	want := []string{"model_adaptation"}
-	primary, err := cfg.Resolve("primary")
-	testassert.NoError(t, err)
-	testassert.Require(t, reflect.DeepEqual(primary.Capabilities, want), "primary capabilities = %q, want the default %q", primary.Capabilities, want)
-	for _, name := range []string{"secondary", "explore", "review", "compact", "plain", "model_a", "model_b"} {
-		resolved, err := cfg.Resolve(name)
-		testassert.Require(t, err == nil, "Resolve(%s): %v", name, err)
-		testassert.Require(t, reflect.DeepEqual(resolved.Capabilities, want), "%s capabilities = %q, want the inherited default %q", name, resolved.Capabilities, want)
-	}
-	// An explicit selection overrides the default and an explicit empty list
-	// clears it.
-	plan, err := cfg.Resolve("plan")
-	testassert.NoError(t, err)
-	{
-		want := []string{"cap-a"}
-		testassert.Require(t, reflect.DeepEqual(plan.Capabilities, want), "plan capabilities = %q, want the explicit selection %q", plan.Capabilities, want)
-	}
-	sweeper, err := cfg.Resolve("sweeper")
-	testassert.NoError(t, err)
-	testassert.Require(t, sweeper.Capabilities == nil, "sweeper capabilities = %q, want the explicit empty clear", sweeper.Capabilities)
-}
-
-func TestParseWithCapabilitiesEmptyDefaultsLeaveBaseline(t *testing.T) {
-	const doc = `{"plain": {}}`
-	nilDefaults, err := ParseWithCapabilities([]byte(doc), []string{"cap-a"}, nil, nil)
-	testassert.NoError(t, err)
-	emptyDefaults, err := ParseWithCapabilities([]byte(doc), []string{"cap-a"}, nil, []string{})
-	testassert.NoError(t, err)
-	testassert.Require(t, reflect.DeepEqual(nilDefaults.All(), emptyDefaults.All()), "an empty default list changed the resolved definitions")
-	// Both stay byte-identical to the built-ins' empty capability default.
-	for _, resolved := range nilDefaults.All() {
-		testassert.Require(t, resolved.Capabilities == nil, "%s capabilities = %q, want the empty default", resolved.Name, resolved.Capabilities)
-	}
 }

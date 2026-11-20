@@ -185,7 +185,7 @@ func TestRuntimeObservationPublishesCommittedTransitionsInOrder(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
 	r, err := e.open(context.Background(),
-		e.ordinaryPlugin("w", ScopeWorkspace, "w.cap"))
+		e.ordinaryPlugin("w", "w.cap"))
 	testassert.NoError(t, err)
 	sub, err := r.Subscribe(16)
 	testassert.NoError(t, err)
@@ -219,7 +219,7 @@ func TestObservationPausedPublisherOrdersTheNextPublication(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
 	r, err := e.open(context.Background(),
-		e.ordinaryPlugin("w", ScopeWorkspace, "w.cap"))
+		e.ordinaryPlugin("w", "w.cap"))
 	testassert.NoError(t, err)
 	defer func() {
 		{
@@ -461,7 +461,7 @@ func TestRuntimeShutdownDoesNotWaitForUndrainedObservers(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
 	r, err := e.open(context.Background(),
-		e.ordinaryPlugin("w", ScopeWorkspace, "w.cap"))
+		e.ordinaryPlugin("w", "w.cap"))
 	testassert.NoError(t, err)
 	stalled, err := r.Subscribe(1)
 	testassert.NoError(t, err)
@@ -499,7 +499,7 @@ func TestObservationSubscriberLossDoesNotAffectExecution(t *testing.T) {
 		e := newOwnerEnv(t)
 		e.fixtureStore(store)
 		r, err := e.open(context.Background(),
-			e.ordinaryPlugin("w", ScopeWorkspace, "w.cap"))
+			e.ordinaryPlugin("w", "w.cap"))
 		testassert.NoError(t, err)
 		session, err := r.createSession(context.Background(), e.dataDir, "solo")
 		testassert.NoError(t, err)

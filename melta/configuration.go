@@ -22,22 +22,21 @@ import (
 
 // configuration is the immutable snapshot of one effective input set: the
 // assembled catalog with its build warnings and each model's source label,
-// the immutable Agent roster projection supplied by the active definition
-// resolvers, the session policy, every compiled plugin's owned raw
-// configuration section, the owned decoded provider user layer this same
-// build consumed, and the captured global and Workspace permission inputs.
-// Input documents are discarded once the snapshot is built; later consumers
-// add their own fields when they land.
+// the session policy, every enabled extension's owned raw configuration
+// section, the owned decoded provider user layer this same build consumed,
+// and the captured global and Workspace permission inputs. Input documents
+// are discarded once the snapshot is built.
 type configuration struct {
-	// model is the file choice; baselineModel falls back to the host choice.
+	// model is the file choice; baselineModel is the one default model used
+	// for admission and fallback.
 	model                model.ModelRef
 	baselineModel        model.ModelRef
 	generation           uint64
 	resources            *resourceSet
+	native               *nativeCandidate
 	composition          *composition
 	catalog              *catalog.Catalog
 	catalogWarnings      []catalog.Warning
-	definitions          []agentDefinition
 	sessions             config.SessionConfig
 	tools                json.RawMessage
 	jobs                 json.RawMessage
@@ -115,26 +114,21 @@ func (c *configuration) declaredSecretNames() []string {
 	return names
 }
 
-// resolveDeclaredSecrets inspects the SecretRef metadata of every active
-// installed declaration against its captured section and records the
-// non-secret credential names without executing extension code.
-func resolveDeclaredSecrets(declarations []extension.Native, sections map[string]json.RawMessage) []declaredSecret {
+// resolveAuthorSecrets inspects the SecretRef metadata of every active author
+// extension against its captured section and records the non-secret credential
+// names without executing extension code.
+func resolveAuthorSecrets(authors []nativeActivationSpec, sections map[string]json.RawMessage) []declaredSecret {
 	var out []declaredSecret
-	for _, native := range declarations {
-		declaration := native.Declaration
-		if len(declaration.Secrets) == 0 {
-			continue
-		}
-		section := sections[declaration.ID]
+	for _, spec := range authors {
+		manifest := spec.extension.Manifest
+		section := sections[manifest.ID]
 		if !sectionEnabled(section) {
 			continue
 		}
-		for _, secret := range declaration.Secrets {
-			name, ok := extension.SecretName(section, secret.Field)
-			if !ok {
-				continue
+		for _, secret := range manifest.Secrets {
+			if name, ok := extension.SecretName(section, secret.Field); ok {
+				out = append(out, declaredSecret{extensionID: manifest.ID, field: secret.Field, lifetime: secret.Lifetime, name: name})
 			}
-			out = append(out, declaredSecret{extensionID: declaration.ID, field: secret.Field, lifetime: secret.Lifetime, name: name})
 		}
 	}
 	return out
@@ -164,10 +158,10 @@ func decodeCapturedConfig(configData []byte) (capturedConfigDocument, error) {
 // newConfiguration assembles the complete snapshot from one decoded captured
 // document, the provider assembly already performed for the captured
 // providers layer (a catalog entry never rereads the main configuration), and
-// the captured Workspace permission bytes. Agent definitions are not parsed
-// here: the active resolver extensions supply the roster projection after
-// their Harness resources are ready. Plugin-section validation belongs to the
-// publisher, not here.
+// the captured Workspace permission bytes. Nothing here parses Agent
+// definitions: the Agents activation owns its definition section and supplies
+// the current roster through its registered operations and admission hook.
+// Plugin-section validation belongs to the publisher, not here.
 func newConfiguration(generation uint64, doc capturedConfigDocument, built catalog.BuildResult, workspacePermissions map[string]json.RawMessage) (*configuration, error) {
 	ref, err := config.ParseOptionalModel(doc.Model)
 	if err != nil {

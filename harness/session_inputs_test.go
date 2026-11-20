@@ -2,8 +2,10 @@ package harness
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -123,5 +125,69 @@ func TestSessionStateValueCodec(t *testing.T) {
 	var got SessionStateValue
 	if err := json.Unmarshal([]byte(`"`+base64.StdEncoding.EncodeToString(oversize)+`"`), &got); err == nil {
 		t.Fatal("accepted decoded state over 1 MiB")
+	}
+}
+
+func TestSessionRegisterInputsAndExtensionState(t *testing.T) {
+	for _, inputs := range []string{`{}`, `{"tools":[]}`} {
+		t.Run(inputs, func(t *testing.T) {
+			raw := `{"lifecycle":"open","inputs":` + inputs + `,"extension_state":{"dormant":"ICB7Im4iOjEyMzQ1Njc4OTAxMjM0NTY3ODkwMX0gIA=="},"usage":{"by_model":[]},"last_activity":"2026-01-01T00:00:00Z","external_data_owners":[]}`
+			obj, err := decodePayloadObject([]byte(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := decodeSessionState(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := encodeSessionState(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var members map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &members); err != nil {
+				t.Fatal(err)
+			}
+			if string(members["inputs"]) != inputs || string(members["extension_state"]) != `{"dormant":"ICB7Im4iOjEyMzQ1Njc4OTAxMjM0NTY3ODkwMX0gIA=="}` {
+				t.Fatalf("round trip lost inputs or state: %s", encoded)
+			}
+			if _, ok := members["agent_selection"]; ok {
+				t.Fatalf("legacy selection persisted: %s", encoded)
+			}
+		})
+	}
+	for _, raw := range []string{
+		`{"lifecycle":"open","agent_selection":{},"inputs":{},"extension_state":{},"usage":{"by_model":[]},"last_activity":"2026-01-01T00:00:00Z","external_data_owners":[]}`,
+		`{"lifecycle":"open","inputs":{},"extension_state":{"dormant":null},"usage":{"by_model":[]},"last_activity":"2026-01-01T00:00:00Z","external_data_owners":[]}`,
+	} {
+		obj, err := decodePayloadObject([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeSessionState(obj); err == nil {
+			t.Fatalf("accepted invalid session state: %s", raw)
+		}
+	}
+}
+
+func TestPreparationSessionOwnsInputsAndState(t *testing.T) {
+	sentinel := errors.New("stop after observing preparation")
+	original := PreparationSession{
+		Inputs:         SessionInputs{Tools: []string{"read"}},
+		ExtensionState: map[string]SessionStateValue{"dormant": []byte(` {"n":1} `)},
+	}
+	h := &Harness{ctx: context.Background(), deps: Dependencies{
+		Prepare: func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
+			req.Session.Inputs.Tools[0] = "changed"
+			req.Session.ExtensionState["dormant"][0] = 'x'
+			return PreparedExecution{}, sentinel
+		},
+	}}
+	_, _, _, _, err := h.prepareExecution(context.Background(), original, RequestKindMessage, nil)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("preparation error: %v", err)
+	}
+	if original.Inputs.Tools[0] != "read" || string(original.ExtensionState["dormant"]) != ` {"n":1} ` {
+		t.Fatalf("preparation mutated source: %#v", original)
 	}
 }

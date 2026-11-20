@@ -41,6 +41,27 @@ type launchInfo struct {
 	report       bool   // the start requested a completion report
 }
 
+// SessionMember is a live member of a Session's ownership group.
+type SessionMember struct {
+	Kind    string `json:"kind"`
+	ID      string `json:"id"`
+	Starter string `json:"starter"`
+}
+
+// SessionMembers returns the currently live ownership group.
+func (h *Harness) SessionMembers(ctx context.Context, sessionID string) ([]SessionMember, error) {
+	members := []SessionMember{}
+	err := h.withSessionRead(ctx, sessionID, func(c *coordinator) error {
+		if c.group != nil {
+			for _, member := range c.group.members {
+				members = append(members, SessionMember{Kind: string(member.kind), ID: member.id, Starter: member.starter})
+			}
+		}
+		return nil
+	})
+	return members, err
+}
+
 // stopInterval is one stop's join handle: err is written before done closes
 // (the workspaceAttempt pattern, runtime/composition.go:673-677).
 type stopInterval struct {
@@ -57,13 +78,12 @@ func memberStopping(c *coordinator) bool {
 // admitBackgroundMember registers one background member on the Session's
 // group. It runs under the caller-held c.mu and rejects a non-open Session
 // lifecycle, harness cancellation (the raw error, Submit's entry-gate shape),
-// and a stopping group or Session member; with a positive cap the kind's live
-// count must stay below it. The returned member is the caller's handle —
-// member.completionID is the completion identity every later step consumes —
-// and it owns no graph residency: a member keeps only its group membership,
-// so its Session's graph is bounded like any other inactive graph while the
-// member is live.
-func (h *Harness) admitBackgroundMember(c *coordinator, kind memberKind, id string, cap int) (*backgroundMember, error) {
+// and a stopping group or Session member. The returned member is the caller's
+// handle — member.completionID is the completion identity every later step
+// consumes — and it owns no graph residency: a member keeps only its group
+// membership, so its Session's graph is bounded like any other inactive graph
+// while the member is live.
+func (h *Harness) admitBackgroundMember(c *coordinator, kind memberKind, id string) (*backgroundMember, error) {
 	if c.graph.Session.State.Lifecycle != LifecycleOpen {
 		return nil, invalidInput("session %q is archived; admission requires an open Session", c.graph.Session.Identity.SessionID)
 	}
@@ -75,17 +95,6 @@ func (h *Harness) admitBackgroundMember(c *coordinator, kind memberKind, id stri
 	}
 	if c.group == nil {
 		c.group = &backgroundGroup{members: map[string]*backgroundMember{}}
-	}
-	if cap > 0 {
-		count := 0
-		for _, m := range c.group.members {
-			if m.kind == kind {
-				count++
-			}
-		}
-		if count >= cap {
-			return nil, invalidInput("background group is full (%d/%d). Wait for a background member to complete, then retry", count, cap)
-		}
 	}
 	completionID, err := newHexID()
 	if err != nil {
@@ -569,7 +578,7 @@ func childCompletionContent(g *sessionGraph, outputLimit int) string {
 		body = settlement.Detail
 	}
 	limit := outputLimit
-	if whole := maxCompletionReportBytes - len(header) - 1; limit > whole {
+	if whole := maxCompletionReportBytes - len(header) - 1; limit <= 0 || limit > whole {
 		limit = whole
 	}
 	if body = truncateCompletionText(body, limit); body == "" {
@@ -584,18 +593,29 @@ const maxCompletionReportBytes = 1048576
 
 // truncateCompletionText caps one rendered report body at limit UTF-8 bytes,
 // retaining the longest complete-character prefix that leaves room for the
-// trailing marker. The accepted launch limits are far larger than the marker,
-// so the reservation always fits.
+// trailing marker. A zero limit is no smaller request than the 1 MiB report
+// bound; every positive limit includes the marker bytes, and a limit below the
+// marker leaves the marker's own prefix.
 func truncateCompletionText(text string, limit int) string {
 	const marker = "\n[truncated]"
+	if limit <= 0 {
+		limit = maxCompletionReportBytes
+	}
 	if len(text) <= limit {
 		return text
 	}
 	max := limit - len(marker)
-	for text[max]&0xC0 == 0x80 { // back off to a complete-character boundary
+	if max < 0 {
+		max = 0
+	}
+	for max > 0 && text[max]&0xC0 == 0x80 { // back off to a complete-character boundary
 		max--
 	}
-	return text[:max] + marker
+	truncated := text[:max] + marker
+	if len(truncated) > limit {
+		truncated = truncated[:limit]
+	}
+	return truncated
 }
 
 // backgroundHandoffFailure re-checks one starter's handoff set under the
@@ -816,7 +836,7 @@ func (h *Harness) StartJob(ctx context.Context, sessionID, jobID string, spawn f
 	}
 	defer release()
 	c.mu.Lock()
-	member, err := h.admitBackgroundMember(c, memberJob, jobID, 0)
+	member, err := h.admitBackgroundMember(c, memberJob, jobID)
 	c.mu.Unlock()
 	if err != nil {
 		return err
@@ -838,18 +858,18 @@ func (h *Harness) StartJob(ctx context.Context, sessionID, jobID string, spawn f
 }
 
 // LaunchChildRequest is the input of one child launch: the open root parent
-// Session, the requested Agent type and message, the caller-generated
+// Session, the requested Session inputs and message, the caller-generated
 // globally unique Operation identity, the calling extension's attribution,
-// the parent's child concurrency cap, the requested report body limit, and
-// whether the start requests a completion report.
+// the requested report body limit, and whether the start requests a completion
+// report.
 type LaunchChildRequest struct {
 	ParentSessionID string
-	AgentSelection  AgentSelection
+	Inputs          SessionInputs
+	ExtensionState  map[string]SessionStateValue
 	Content         []model.ContentPart
 	OperationID     string // caller-generated, globally unique
 	ExtensionID     string // the calling extension's attribution
-	MaxConcurrent   int    // 1..20
-	OutputLimit     int    // 1024..1048576 UTF-8 bytes
+	OutputLimit     int    // maximum report body size in UTF-8 bytes; 0 keeps the 1 MiB report bound
 	Report          bool   // whether the settled child hands the parent a report
 }
 
@@ -862,11 +882,10 @@ type LaunchChildResult struct {
 // LaunchChildSession launches one child Session as an ordinary Session
 // through the shared admission path: it validates the request, refuses child
 // parents, prepares the child through the one preparation callback with the
-// complete child identity, admits the child member under the requested cap,
-// publishes child and admission in one transaction against the re-read
-// parent register, performs the common handoff, materializes the child,
-// installs the pending completion under the reserved identity, and starts the
-// child execution. The caller's context ends at the launch transaction: a
+// complete child identity, admits the child member, publishes child and
+// admission in one transaction against the re-read parent register, performs
+// the common handoff, materializes the child, installs the pending completion
+// under the reserved identity, and starts the child execution. The caller's context ends at the launch transaction: a
 // caller canceled before it publishes nothing, and after it the Harness owns
 // the child, so materialization and settlement run under the Harness context.
 // A rejected handoff or failed start settles its member — a
@@ -875,15 +894,13 @@ type LaunchChildResult struct {
 // running Operation for recovery. A committed Session identity is returned
 // even if the start could not be completed.
 func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest) (LaunchChildResult, error) {
-	if err := validateAgentSelection(req.AgentSelection); err != nil {
-		return LaunchChildResult{}, invalidInput("agent selection: %v", err)
+	if _, err := req.Inputs.normalized(); err != nil {
+		return LaunchChildResult{}, invalidInput("inputs: %v", err)
 	}
-	req.AgentSelection = ownAgentSelection(req.AgentSelection)
-	if req.MaxConcurrent < 1 || req.MaxConcurrent > 20 {
-		return LaunchChildResult{}, invalidInput("max concurrent %d is outside 1..20", req.MaxConcurrent)
-	}
-	if req.OutputLimit < 1024 || req.OutputLimit > 1048576 {
-		return LaunchChildResult{}, invalidInput("output limit %d is outside 1024..1048576 UTF-8 bytes", req.OutputLimit)
+	req.Inputs = req.Inputs.Owned()
+	req.ExtensionState = ownSessionStateValues(req.ExtensionState)
+	if req.OutputLimit < 0 || req.OutputLimit > 1048576 {
+		return LaunchChildResult{}, invalidInput("output limit %d is outside 0..1048576 UTF-8 bytes", req.OutputLimit)
 	}
 	if err := validateHexID(req.ParentSessionID, "parent session id"); err != nil {
 		return LaunchChildResult{}, invalidInput("parent session id: %v", err)
@@ -898,10 +915,6 @@ func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest
 	}
 	defer release()
 	c.mu.Lock()
-	if c.graph.Session.Identity.OwnerSessionID != "" { // the retained recursion rule: no depth counters
-		c.mu.Unlock()
-		return LaunchChildResult{}, invalidInput("child sessions cannot launch child sessions")
-	}
 	view := c.graph.Session // the state the launch transaction re-reads
 	c.mu.Unlock()
 
@@ -918,7 +931,8 @@ func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest
 	}
 	prepared, capture, prepCtx, cleanup, err := h.prepareExecution(ctx, PreparationSession{
 		Identity:       childIdentity,
-		AgentSelection: req.AgentSelection,
+		Inputs:         req.Inputs,
+		ExtensionState: req.ExtensionState,
 	}, RequestKindMessage, content)
 	if err != nil {
 		return LaunchChildResult{}, err
@@ -926,13 +940,13 @@ func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest
 	defer cleanup() // the combined context stays live until publication returns
 
 	c.mu.Lock()
-	member, err := h.admitBackgroundMember(c, memberSession, childID, req.MaxConcurrent)
+	member, err := h.admitBackgroundMember(c, memberSession, childID)
 	if err == nil {
 		member.starter = req.ExtensionID
 	}
 	c.mu.Unlock()
 	if err != nil {
-		h.releasePrepared(&prepared) // the cap rejection drops the prepared child execution
+		h.releasePrepared(&prepared) // the rejection drops the prepared child execution
 		return LaunchChildResult{}, err
 	}
 	h.observeInvalidation(c) // the child member admission carries no Job identity
@@ -941,7 +955,8 @@ func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest
 		Identity: childIdentity,
 		State: SessionState{
 			Lifecycle:      LifecycleOpen,
-			AgentSelection: req.AgentSelection,
+			Inputs:         req.Inputs.Owned(),
+			ExtensionState: ownSessionStateValues(req.ExtensionState),
 			Usage:          UsageTotals{},
 			LastActivity:   now,
 		},

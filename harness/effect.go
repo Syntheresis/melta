@@ -1361,29 +1361,23 @@ func authorizationRequired(p PreparedTool) bool {
 // boundary: every declared pair must be a nonempty permission/target pair;
 // file.read/file.write targets must be canonical and their prepared canonical
 // Workspace root must be a required canonical that is nonempty, absolute and
-// lexically clean; a readonly Agent with no configured write_dir denies every
-// file.write pair; any configured write_dir confines every file.write pair to
-// the prepared canonical write directory through Rel containment
-// independently of permission allow, requiring its canonical root as a second
-// required canonical. Constraints and target preparation are never
-// delegated. Only then does the evaluator decide the complete prepared
+// lexically clean. Target preparation is never delegated. Only then does the
+// evaluator decide the complete prepared
 // action, and the plan is allowed exactly when it returns allow without
 // error: a deny, a decision outside the closed set, or an error denies the
 // call alike. A nil evaluator selects the included built-in policy.
-func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, capture ExecutionCapture, plan PreparedTool, name string, args json.RawMessage) bool {
+func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, plan PreparedTool, name string, args json.RawMessage) bool {
 	if len(plan.Permissions) == 0 {
 		return false
 	}
-	var hasFile, hasWrite bool
+	var hasFile bool
 	for _, req := range plan.Permissions {
 		if req.Permission == "" || req.Target == "" {
 			return false
 		}
 		switch req.Permission {
-		case PermissionFileRead:
+		case PermissionFileRead, PermissionFileWrite:
 			hasFile = true
-		case PermissionFileWrite:
-			hasFile, hasWrite = true, true
 		}
 		if (req.Permission == PermissionFileRead || req.Permission == PermissionFileWrite) && !canonicalPathValue(req.Target) {
 			return false
@@ -1392,21 +1386,6 @@ func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, capture
 	if hasFile && !canonicalPathValue(plan.CanonicalWorkspace) {
 		return false
 	}
-	if hasWrite {
-		if capture.Readonly && capture.WriteDir == "" {
-			return false
-		}
-		if capture.WriteDir != "" {
-			if !canonicalPathValue(plan.CanonicalWriteDir) {
-				return false
-			}
-			for _, req := range plan.Permissions {
-				if req.Permission == PermissionFileWrite && !containsPath(plan.CanonicalWriteDir, req.Target) {
-					return false
-				}
-			}
-		}
-	}
 	if evaluator == nil {
 		evaluator = PermissionPolicy{}
 	}
@@ -1414,7 +1393,6 @@ func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, capture
 		ToolName:           name,
 		Arguments:          append(json.RawMessage(nil), args...),
 		CanonicalWorkspace: plan.CanonicalWorkspace,
-		CanonicalWriteDir:  plan.CanonicalWriteDir,
 		Permissions:        append([]PermissionRequest(nil), plan.Permissions...),
 	})
 	return err == nil && decision == PermissionAllow
@@ -1474,7 +1452,7 @@ func authorizeHooks(ctx context.Context, inv InvocationExecution, callID, name s
 			checks = append(checks, check)
 			return canonical, nil
 		}
-		action := PreparedAction{ToolName: name, Arguments: append(json.RawMessage(nil), args...), CanonicalWorkspace: root, CanonicalWriteDir: plan.CanonicalWriteDir, Permissions: append([]PermissionRequest(nil), plan.Permissions...)}
+		action := PreparedAction{ToolName: name, Arguments: append(json.RawMessage(nil), args...), CanonicalWorkspace: root, Permissions: append([]PermissionRequest(nil), plan.Permissions...)}
 		reason, err := hook.Run(ctx, action, bind)
 		mu.Lock()
 		open = false
@@ -1614,7 +1592,6 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 	h := d.harness
 	c := d.coordinator
 	inv := d.conversation
-	capture := d.capture
 	return func(ctx context.Context, call model.ToolCall, names []string) (model.ToolResult, error) {
 		resolved, err := pendingToolCallRecord(c, d.operationID, call.ID)
 		if err != nil {
@@ -1648,8 +1625,24 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 			return model.ToolResult{}, err
 		}
 		selection := toolSelection{arguments: raw}
-		if len(inv.callbacks.ToolHooks) > 0 {
-			chain, settled, herr := d.runArgumentHooks(ctx, settleCtx, resolved, inv.callbacks.ToolHooks, raw)
+		hooks := inv.callbacks.ToolHooks
+		if inv.callbacks.ArgumentStage != nil {
+			stage := inv.callbacks.ArgumentStage()
+			if stage.Release != nil {
+				defer stage.Release()
+			}
+			if stage.Error != nil {
+				return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: validationToolResult(call.ID, stage.Error), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+			}
+			check := inv.callbacks
+			check.ToolHooks = stage.Hooks
+			if err := validateOpenedInvocation(check); err != nil {
+				return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: validationToolResult(call.ID, err), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+			}
+			hooks = stage.Hooks
+		}
+		if len(hooks) > 0 {
+			chain, settled, herr := d.runArgumentHooks(ctx, settleCtx, resolved, hooks, raw)
 			if herr != nil {
 				return model.ToolResult{}, herr
 			}
@@ -1664,6 +1657,9 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		binding, ok := inv.callbacks.LookupTool(record.Name)
 		if !ok {
 			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: unavailableToolResult(call.ID, record.Name), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+		}
+		if binding.Release != nil {
+			defer binding.Release()
 		}
 		if binding.Identity.ID == "" || binding.Normalize == nil || binding.Prepare == nil {
 			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: invalidToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
@@ -1701,11 +1697,25 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		}
 		var recheck func() error
 		if authorizationRequired(plan) {
-			if !toolCallAllowed(ctx, d.execution.Permissions, capture, plan, record.Name, selection.arguments) {
+			if !toolCallAllowed(ctx, d.execution.Permissions, plan, record.Name, selection.arguments) {
 				return settle(ToolOutcome{Result: permissionDeniedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
 			}
+			callbacks := inv.callbacks
+			if callbacks.AuthorizationStage != nil {
+				stage := callbacks.AuthorizationStage()
+				if stage.Release != nil {
+					defer stage.Release()
+				}
+				if stage.Error != nil {
+					return settle(ToolOutcome{Result: authorizationFailure(ctx, call.ID, stage.Error), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+				}
+				callbacks.AuthorizationHooks = stage.Hooks
+				if err := validateOpenedInvocation(callbacks); err != nil {
+					return settle(ToolOutcome{Result: authorizationFailure(ctx, call.ID, err), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+				}
+			}
 			var result *model.ToolResult
-			recheck, result = authorizeHooks(prepareCtx, inv.callbacks, call.ID, record.Name, selection.arguments, plan)
+			recheck, result = authorizeHooks(prepareCtx, callbacks, call.ID, record.Name, selection.arguments, plan)
 			if result != nil {
 				return settle(ToolOutcome{Result: *result, Evidence: ExecutionNotStarted}, nil, false, selection, false)
 			}
@@ -2041,6 +2051,21 @@ type toolShaping struct {
 // Shaping is text only and never changes status, evidence, usage or metadata.
 func (d *executionDriver) shapeToolOutput(ctx context.Context, inv *openedInvocation, outcome ToolOutcome, callID, effectID string) *toolShaping {
 	hooks := inv.callbacks.ToolOutputHooks
+	if inv.callbacks.ResultStage != nil {
+		stage := inv.callbacks.ResultStage()
+		if stage.Release != nil {
+			defer stage.Release()
+		}
+		if stage.Error != nil {
+			return &toolShaping{base: outcome.Result.Content, failure: shapingFailureDiagnostic(stage.Error)}
+		}
+		check := inv.callbacks
+		check.ToolOutputHooks = stage.Hooks
+		if err := validateOpenedInvocation(check); err != nil {
+			return &toolShaping{base: outcome.Result.Content, failure: shapingFailureDiagnostic(err)}
+		}
+		hooks = stage.Hooks
+	}
 	if len(hooks) == 0 {
 		return nil
 	}

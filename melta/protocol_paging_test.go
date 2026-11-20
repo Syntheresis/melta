@@ -288,15 +288,17 @@ const (
 // with every unavailable resolution reporting 0. The capture of that window
 // from a durably current Operation is the composed view's own observation.
 func TestSessionContextWindowPureClocks(t *testing.T) {
-	captured, err := assembleConfiguration(t, 2, usageWindowConfig, usageWindowAgents, nil)
+	captured, err := assembleConfiguration(t, 2, usageWindowConfig, usageWindowAgents)
 	testassert.NoError(t, err)
 	window := func(view harness.SessionReadView) int {
-		return sessionContextWindow(view, resolveSessionSelection(view.Header.AgentSelection, captured))
+		return sessionContextWindow(view, resolveSessionSelection(view.Header.Inputs, captured))
 	}
+	modelRef := model.ModelRef{Provider: "prov", Model: "m"}
+	unknown := model.ModelRef{Provider: "prov", Model: "missing"}
 
 	// The active Operation's capture wins over the distinct catalog window.
 	active := harness.SessionReadView{
-		Header:              harness.SessionHeader{CurrentOperationID: "op-1", AgentSelection: suppliedDefinition("solo")},
+		Header:              harness.SessionHeader{CurrentOperationID: "op-1", Inputs: harness.SessionInputs{Model: &modelRef}},
 		ActiveContextWindow: 4096,
 	}
 	testassert.Equal(t, window(active), 4096)
@@ -304,15 +306,15 @@ func TestSessionContextWindowPureClocks(t *testing.T) {
 	// The busy fact and a retiring run alone are not an active Operation:
 	// with no durably running current Operation the idle clock applies.
 	retiring := harness.SessionReadView{
-		Header:  harness.SessionHeader{AgentSelection: suppliedDefinition("solo")},
+		Header:  harness.SessionHeader{Inputs: harness.SessionInputs{Model: &modelRef}},
 		History: harness.HistoryReadView{ExecutionBusy: true},
 	}
 	testassert.Equal(t, window(retiring), 8192)
 
-	idle := harness.SessionReadView{Header: harness.SessionHeader{AgentSelection: suppliedDefinition("solo")}}
+	idle := harness.SessionReadView{Header: harness.SessionHeader{Inputs: harness.SessionInputs{Model: &modelRef}}}
 	testassert.Equal(t, window(idle), 8192)
-	testassert.Equal(t, window(harness.SessionReadView{Header: harness.SessionHeader{AgentSelection: suppliedDefinition("modelless")}}), 0)
-	testassert.Equal(t, window(harness.SessionReadView{Header: harness.SessionHeader{AgentSelection: suppliedDefinition("unknown")}}), 0)
+	testassert.Equal(t, window(harness.SessionReadView{Header: harness.SessionHeader{Inputs: harness.SessionInputs{}}}), 0)
+	testassert.Equal(t, window(harness.SessionReadView{Header: harness.SessionHeader{Inputs: harness.SessionInputs{Model: &unknown}}}), 0)
 }
 
 // --- the live composed-Melta rows ---
@@ -360,13 +362,14 @@ func derefUsage(u *harness.UsageCount) harness.UsageCount {
 // usageSeedSessionState is the mutable state section of one seeded usage
 // fixture's Session register.
 type usageSeedSessionState struct {
-	Lifecycle          harness.SessionLifecycle `json:"lifecycle"`
-	AgentSelection     harness.AgentSelection   `json:"agent_selection"`
-	CurrentOperationID string                   `json:"current_operation_id,omitempty"`
-	CheckpointEntryID  string                   `json:"checkpoint_entry_id,omitempty"`
-	Usage              usageWireTotals          `json:"usage"`
-	LastActivity       time.Time                `json:"last_activity"`
-	ExternalDataOwners []string                 `json:"external_data_owners"`
+	Lifecycle          harness.SessionLifecycle             `json:"lifecycle"`
+	Inputs             harness.SessionInputs                `json:"inputs"`
+	ExtensionState     map[string]harness.SessionStateValue `json:"extension_state"`
+	CurrentOperationID string                               `json:"current_operation_id,omitempty"`
+	CheckpointEntryID  string                               `json:"checkpoint_entry_id,omitempty"`
+	Usage              usageWireTotals                      `json:"usage"`
+	LastActivity       time.Time                            `json:"last_activity"`
+	ExternalDataOwners []string                             `json:"external_data_owners"`
 }
 
 type usageSeedSessionRegister struct {
@@ -379,11 +382,16 @@ type usageSeedSessionRegister struct {
 func usageSeedSession(t *testing.T, store harness.Storage, sessionID, currentOp, compactionID, agentType string, totals usageWireTotals) {
 	t.Helper()
 	now := time.Now().UTC()
+	var inputs harness.SessionInputs
+	if agentType == "solo" {
+		inputs.Model = &model.ModelRef{Provider: "prov", Model: "m"}
+	}
 	payload, err := json.Marshal(usageSeedSessionRegister{
 		Identity: harness.SessionIdentity{SessionID: sessionID, Workspace: "/tmp/usage-works", CreatedAt: now},
 		State: usageSeedSessionState{
 			Lifecycle:          harness.LifecycleOpen,
-			AgentSelection:     suppliedDefinition(agentType),
+			Inputs:             inputs,
+			ExtensionState:     agentState(agentType),
 			CurrentOperationID: currentOp,
 			CheckpointEntryID:  compactionID,
 			Usage:              totals,
@@ -990,9 +998,11 @@ func TestHydrationSelectedModelFollowsNextAdmission(t *testing.T) {
 		// An idle Session resolves the selected definition in the captured
 		// catalog: one shared selection supplies the model and the window.
 		solo := projectionSession(t, r, "/tmp/selection-solo", "solo").Identity.SessionID
+		_, err = r.SetSessionModel(context.Background(), testCaller(r), solo, "prov/m")
+		testassert.NoError(t, err)
 		idle, err := r.GetHydration(context.Background(), testCaller(r), solo)
 		testassert.NoError(t, err)
-		testassert.Require(t, idle.SelectedModel != nil && *idle.SelectedModel == "prov/m" && idle.Usage.Context.ContextWindow == 4096 && idle.Session.AgentSelection.Definition.DefinitionId == "solo", "idle selection = model %v window %d, want prov/m under 4096; got %v, want %v", idle.SelectedModel, idle.Usage.Context.ContextWindow, idle.Session.AgentSelection.Definition.DefinitionId, "solo")
+		testassert.Require(t, idle.SelectedModel != nil && *idle.SelectedModel == "prov/m" && idle.Usage.Context.ContextWindow == 4096 && idle.Session.Inputs.Model != nil && *idle.Session.Inputs.Model == "prov/m", "idle selection = model %v window %d inputs %+v", idle.SelectedModel, idle.Usage.Context.ContextWindow, idle.Session.Inputs)
 
 		// No configured ref and an unresolvable type both yield null rather
 		// than a fallback model.
@@ -1006,6 +1016,8 @@ func TestHydrationSelectedModelFollowsNextAdmission(t *testing.T) {
 		// A configured but unavailable ref stays identifiable while admission
 		// still refuses it: the window is 0, the model is not invented away.
 		gone := projectionSession(t, r, "/tmp/selection-gone", "gone").Identity.SessionID
+		_, err = r.SetSessionModel(context.Background(), testCaller(r), gone, "prov/gone")
+		testassert.NoError(t, err)
 		goneHydration, err := r.GetHydration(context.Background(), testCaller(r), gone)
 		testassert.NoError(t, err)
 		testassert.Require(t, goneHydration.SelectedModel != nil && *goneHydration.SelectedModel == "prov/gone" && goneHydration.Usage.Context.ContextWindow == 0, "gone selection = model %v window %d, want the configured prov/gone identifiable at 0", goneHydration.SelectedModel, goneHydration.Usage.Context.ContextWindow)
@@ -1019,15 +1031,17 @@ func TestHydrationSelectedModelFollowsNextAdmission(t *testing.T) {
 		release := sync.OnceFunc(func() { close(gate) })
 		defer release()
 		active := projectionSession(t, r, "/tmp/selection-active", "solo").Identity.SessionID
+		_, err = r.SetSessionModel(context.Background(), testCaller(r), active, "prov/m")
+		testassert.NoError(t, err)
 		submitThroughRuntime(t, r, active, "op-1", "running")
 		awaitModelArrival(t, e)
 		testassert.NoError(t, r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
-			_, err := h.ChangeAgentType(ctx, active, suppliedDefinition("alternate"))
+			_, err := h.SetSessionModel(ctx, active, model.ModelRef{Provider: "prov", Model: "m2"})
 			return err
 		}))
 		activeHydration, err := r.GetHydration(context.Background(), testCaller(r), active)
 		testassert.NoError(t, err)
-		testassert.Require(t, activeHydration.ActiveOperation != nil && activeHydration.ActiveOperation.Model == "prov/m" && activeHydration.Usage.Context.ContextWindow == 4096 && activeHydration.SelectedModel != nil && *activeHydration.SelectedModel == "prov/m2" && activeHydration.Session.AgentSelection.Definition.DefinitionId == "alternate" && activeHydration.SessionRevision == activeHydration.Session.SessionRevision, "active hydration = active %+v window %d, want the captured prov/m under 4096; active next selection = %v, want the changed prov/m2; got %v, want %v; got %v, want %v", activeHydration.ActiveOperation, activeHydration.Usage.Context.ContextWindow, activeHydration.SelectedModel, activeHydration.Session.AgentSelection.Definition.DefinitionId, "alternate", activeHydration.SessionRevision, activeHydration.Session.SessionRevision)
+		testassert.Require(t, activeHydration.ActiveOperation != nil && activeHydration.ActiveOperation.Model == "prov/m" && activeHydration.Usage.Context.ContextWindow == 4096 && activeHydration.SelectedModel != nil && *activeHydration.SelectedModel == "prov/m2" && activeHydration.Session.Inputs.Model != nil && *activeHydration.Session.Inputs.Model == "prov/m2" && activeHydration.SessionRevision == activeHydration.Session.SessionRevision, "active hydration = active %+v window %d next model %v inputs %+v", activeHydration.ActiveOperation, activeHydration.Usage.Context.ContextWindow, activeHydration.SelectedModel, activeHydration.Session.Inputs)
 
 		// Once idle, the shared resolution supplies the new model's window.
 		release()
@@ -1047,11 +1061,14 @@ func TestHydrationSelectedModelFollowsNextAdmission(t *testing.T) {
 		defer releaseSecond()
 		submitThroughRuntime(t, r, active, "op-2", "running again")
 		awaitModelArrival(t, e)
-		writeAgentDefinitions(t, e.configPath, `{"solo":{"model":"prov/m","system_prompt":"simple"},"alternate":{"model":"prov/m","system_prompt":"simple"},"modelless":{"system_prompt":"simple"},"gone":{"model":"prov/gone","system_prompt":"simple"}}`)
+		writeServiceFile(t, e.configPath, `{"model":"prov/m","providers":{"prov":`+nominalProvMember(e.server.URL, "", `{"m":{"name":"M","context_window":4096,"max_output_tokens":1024},"m2":{"name":"M2","context_window":8192,"max_output_tokens":1024}}`)+`}}`)
+		writeAgentDefinitions(t, e.configPath, `{"solo":{"model":"prov/m"},"alternate":{"model":"prov/m"}}`)
 		{
 			_, err := r.Reload(context.Background(), testCaller(r))
 			testassert.NoError(t, err)
 		}
+		_, err = r.SetSessionModel(context.Background(), testCaller(r), active, "")
+		testassert.NoError(t, err)
 		reloaded, err := r.GetHydration(context.Background(), testCaller(r), active)
 		testassert.NoError(t, err)
 		testassert.Require(t, reloaded.ActiveOperation != nil && reloaded.ActiveOperation.Model == "prov/m2" && reloaded.Usage.Context.ContextWindow == 8192 && reloaded.SelectedModel != nil && *reloaded.SelectedModel == "prov/m" && reloaded.ConfigurationRevision.Generation == "2", "reloaded active capture = active %+v window %d, want the captured prov/m2 under its captured 8192; reloaded selected model = %v, want the re-pointed prov/m; reloaded configuration revision = %+v, want generation 2", reloaded.ActiveOperation, reloaded.Usage.Context.ContextWindow, reloaded.SelectedModel, reloaded.ConfigurationRevision)
@@ -1101,6 +1118,10 @@ func TestHydrationAndPageReturnedValueOwnership(t *testing.T) {
 		r, _ := openProjectionRuntime(t, store)
 		defer closeProjectionRuntime(r)
 		session := projectionSession(t, r, "/tmp/paging-owned", "solo").Identity.SessionID
+		modelRef := protocol.ModelRef("prov/m")
+		tools := []string{"read_file"}
+		_, err := r.SetSessionInputs(context.Background(), testCaller(r), session, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Model: &modelRef, Tools: &tools}})
+		testassert.NoError(t, err)
 		submitConvergedThroughRuntime(t, r, session, "op-1", "work", harness.OperationSuccess)
 		// The run slot retires after the terminal is durably visible, and its
 		// retirement is a coordinator-local publication: the immutable
@@ -1123,7 +1144,7 @@ func TestHydrationAndPageReturnedValueOwnership(t *testing.T) {
 		testassert.NoError(t, err)
 		wantHydration, err := json.Marshal(hydration)
 		testassert.NoError(t, err)
-		hydration.Session.AgentSelection.Definition.DefinitionId = "mutated"
+		(*hydration.Session.Inputs.Tools)[0] = "mutated"
 		hydration.Conversation.Items = nil
 		hydration.Pending.Steering = append(hydration.Pending.Steering, protocol.PendingInput{OperationId: "mutated"})
 		hydration.Operations[0].OperationId = "mutated"

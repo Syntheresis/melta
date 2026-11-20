@@ -743,7 +743,7 @@ func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
 		}
 		prepared := compactPrepared(capture, exec)
 		h = newCompactHarness(t, store, prepared)
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, err)
 		sessionID = session.Identity.SessionID
 		c := leaseCoordinator(t, h, session.Identity.SessionID)
@@ -799,7 +799,7 @@ func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
 		}
 		prepared := compactPrepared(capture, exec)
 		h := newCompactHarness(t, store, prepared)
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, err)
 		c := leaseCoordinator(t, h, session.Identity.SessionID)
 		failed := false

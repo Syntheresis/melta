@@ -74,7 +74,7 @@ func TestComposedSettingsMutationThroughRealValidators(t *testing.T) {
 	// The valid write: the real validators accept the marshaled sections.
 	settings := composedMutationSettings()
 	settings.Extensions = view.Settings.Extensions
-	mutation, err := r.UpdateSettings(ctx, composedCaller(t, r), protocol.UpdateSettingsRequest{Settings: &settings})
+	mutation, err := r.UpdateSettings(ctx, composedCaller(t, r), protocol.UpdateSettingsRequest{Settings: settings})
 	testassert.NoError(t, err)
 	testassert.Require(t, mutation.ConfigurationRevision.Generation == "2" && mutation.Result.Sessions.ArchiveAfterDays == 14 && compactComposed(t, mutation.Result.Tools) == compactComposed(t, composedMutationSettings().Tools) && compactComposed(t, mutation.Result.Jobs) == compactComposed(t, composedMutationSettings().Jobs), "mutation revision = %+v, want generation 2; mutation result = %+v, want the written shape", mutation.ConfigurationRevision, mutation.Result)
 	data, err := os.ReadFile(e.configPath)
@@ -103,7 +103,7 @@ func TestComposedSettingsMutationThroughRealValidators(t *testing.T) {
 	rejected.Extensions = view.Settings.Extensions
 	rejected.Tools = json.RawMessage(`{"command_timeout":0,"max_output_bytes":0,"read_line_max_chars":0,"read_max_lines":0}`)
 	{
-		mutation, err := r.UpdateSettings(ctx, composedCaller(t, r), protocol.UpdateSettingsRequest{Settings: &rejected})
+		mutation, err := r.UpdateSettings(ctx, composedCaller(t, r), protocol.UpdateSettingsRequest{Settings: rejected})
 		testassert.Require(t, err != nil, "rejected mutation = %+v, want the real tools validator's failure", mutation)
 	}
 	after, err := os.ReadFile(e.configPath)
@@ -121,11 +121,12 @@ func TestComposedSettingsMutationThroughRealValidators(t *testing.T) {
 	}
 }
 
-// TestComposedAgentModelMutationThroughRealRoster proves the set_model edit
-// over the real roster: a builtin type that needs no explicit user entry is
-// addressable and the written override lands in the owning agents file,
-// while an unknown type fails invalid without creating a bare entry.
-func TestComposedAgentModelMutationThroughRealRoster(t *testing.T) {
+// TestComposedAgentModelMutationThroughRealDefinitions proves the set_model
+// operation over the real builtin definitions: a builtin type that needs no
+// explicit user entry is addressable and the written override lands in the
+// owning agents file, while an unknown type fails invalid without creating a
+// bare entry.
+func TestComposedAgentModelMutationThroughRealDefinitions(t *testing.T) {
 	ctx := context.Background()
 	e := newMutationEnv(t)
 	r, err := openComposed(ctx, e.dataDir, e.configPath, e.home, builtin.Plugins())
@@ -134,18 +135,17 @@ func TestComposedAgentModelMutationThroughRealRoster(t *testing.T) {
 	before, err := os.ReadFile(agentsPath)
 	testassert.NoError(t, err)
 
-	mutation, err := setAgentDefinitionModelComposed(t, ctx, r, "primary", "prov/m")
-	testassert.NoError(t, err)
-	testassert.Require(t, mutation.ConfigurationRevision.Generation == "2", "mutation = %+v, want the primary override at generation 2", mutation)
+	testassert.NoError(t, setAgentDefinitionModelComposed(t, ctx, r, "primary", "prov/m"))
 	view, err := r.GetConfiguration(ctx, composedCaller(t, r))
 	testassert.NoError(t, err)
-	primaryFound := false
-	for _, agent := range view.Agents {
-		if agent.Definition.DefinitionId == "primary" && agent.Model == "prov/m" {
-			primaryFound = true
-		}
+	testassert.Require(t, view.ConfigurationRevision.Generation == "2", "configuration revision = %+v, want the primary override at generation 2", view.ConfigurationRevision)
+	var section struct {
+		Definitions map[string]struct {
+			Model string `json:"model"`
+		} `json:"definitions"`
 	}
-	testassert.Require(t, primaryFound, "roster = %+v, want the primary model override", view.Agents)
+	testassert.NoError(t, json.Unmarshal([]byte(view.Settings.Extensions["agents"]), &section))
+	testassert.Require(t, section.Definitions["primary"].Model == "prov/m", "agents section = %s, want the primary model override", view.Settings.Extensions["agents"])
 	var root struct {
 		Extensions map[string]struct {
 			Definitions map[string]json.RawMessage `json:"definitions"`
@@ -167,7 +167,7 @@ func TestComposedAgentModelMutationThroughRealRoster(t *testing.T) {
 	testassert.Equal(t, compactComposed(t, after.Extensions["agents"].Definitions["primary"]), `{"model":"prov/m"}`)
 
 	{
-		_, err := setAgentDefinitionModelComposed(t, ctx, r, "ghost", "prov/m")
+		err := setAgentDefinitionModelComposed(t, ctx, r, "ghost", "prov/m")
 		testassert.Require(t, errors.Is(err, harness.ErrInvalid), "unknown type = %v, want the shared invalid failure", err)
 	}
 	final, err := os.ReadFile(agentsPath)
@@ -195,18 +195,22 @@ func compactComposed(t *testing.T, data []byte) string {
 	return out.String()
 }
 
-// setAgentDefinitionModelComposed drives the supplied set_model
-// configuration edit through the public UpdateSettings extension-edit arm.
-func setAgentDefinitionModelComposed(t *testing.T, ctx context.Context, r *melta.Melta, definitionID, modelRef string) (protocol.SettingsMutation, error) {
+// setAgentDefinitionModelComposed drives the supplied set_model operation
+// through its registered harness exposure.
+func setAgentDefinitionModelComposed(t *testing.T, ctx context.Context, r *melta.Melta, definitionID, modelRef string) error {
 	t.Helper()
 	arguments, err := json.Marshal(struct {
 		DefinitionID string `json:"definition_id"`
 		Model        string `json:"model"`
 	}{DefinitionID: definitionID, Model: modelRef})
 	testassert.NoError(t, err)
-	return r.UpdateSettings(ctx, composedCaller(t, r), protocol.UpdateSettingsRequest{ExtensionEdit: &protocol.ExtensionEdit{
+	raw := json.RawMessage(arguments)
+	_, err = r.InvokeExtension(ctx, composedCaller(t, r), protocol.ExtensionInvocationRequest{
 		ExtensionId: "agents",
-		EditId:      "set_model",
-		Arguments:   string(arguments),
-	}})
+		Operation:   "set_model",
+		Target:      protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness},
+		Arguments:   &raw,
+		RequestId:   "req-set-model-" + definitionID,
+	})
+	return err
 }

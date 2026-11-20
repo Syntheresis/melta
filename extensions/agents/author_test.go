@@ -21,6 +21,7 @@ type authorAPI struct {
 	authorization extension.AuthorizationHook
 	settings      json.RawMessage
 	service       extension.Service
+	tool          extension.RegisteredTool
 }
 
 func (a *authorAPI) Settings() json.RawMessage {
@@ -37,7 +38,8 @@ func (a *authorAPI) RegisterService(s extension.Service, _ extension.Registratio
 	a.service = s
 	return nil, nil
 }
-func (a *authorAPI) RegisterTool(model.ToolDefinition, extension.RegisteredTool, extension.Registration) (extension.Registration, error) {
+func (a *authorAPI) RegisterTool(_ model.ToolDefinition, tool extension.RegisteredTool, _ extension.Registration) (extension.Registration, error) {
+	a.tool = tool
 	return nil, nil
 }
 func (a *authorAPI) AttachAdmission(h extension.AdmissionHook, _ extension.Registration) (extension.Registration, error) {
@@ -207,7 +209,7 @@ func TestAuthorWriteRoot(t *testing.T) {
 }
 
 func TestAuthorPromptModesAndWriteRoot(t *testing.T) {
-	api := &authorAPI{operations: map[string]extension.Operation{}, settings: []byte(`{"enabled":true,"definitions":{"writer":{"system_prompt":"simple","prompt":"work","write_dir":"allowed","readonly":true},"blank":{"system_prompt":"none","prompt":""}}}`)}
+	api := &authorAPI{operations: map[string]extension.Operation{}, settings: []byte(`{"enabled":true,"definitions":{"writer":{"system_prompt":"simple","prompt":"work","write_dir":"allowed","readonly":true},"blank":{"system_prompt":"none","prompt":""},"full":{"system_prompt":"full","prompt":"full body"},"headed":{"system_prompt":"full","prompt":"# your-role-and-instructions\n\nalready headed"}}}`)}
 	if _, err := Author().Activate(context.Background(), api); err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +237,14 @@ func TestAuthorPromptModesAndWriteRoot(t *testing.T) {
 	result, err = api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"blank"}`)}, input)
 	if err != nil || reads != 1 || result.Candidate.Prompt == nil || *result.Candidate.Prompt != "" {
 		t.Fatalf("empty complete prompt: %#v %v reads=%d", result, err, reads)
+	}
+	result, err = api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"full"}`)}, input)
+	if err != nil || reads != 1 || result.Candidate.Prompt != nil || result.Candidate.Instructions != "## Your Role and Instructions\n\nfull body" {
+		t.Fatalf("full instructions: %#v %v reads=%d", result, err, reads)
+	}
+	result, err = api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"headed"}`)}, input)
+	if err != nil || reads != 1 || result.Candidate.Prompt != nil || result.Candidate.Instructions != "# your-role-and-instructions\n\nalready headed" {
+		t.Fatalf("already-headed instructions: %#v %v reads=%d", result, err, reads)
 	}
 	explicit := ""
 	input.Choices.Instructions = &explicit
@@ -340,5 +350,40 @@ func TestAuthorModelUpdateTransform(t *testing.T) {
 	result, err := api.operations["set_model"].Handler(context.Background(), call, []byte(`{"definition_id":"primary","model":"p/m"}`))
 	if err != nil || string(result.Value) != "null" {
 		t.Fatalf("set model = %s %v", result.Value, err)
+	}
+}
+
+// TestPromptModesLiteralOutput pins the exact text each system-prompt mode
+// supplies: full hands the default assembler one already-headed Instructions
+// block, while simple and none carry their complete prompt literally.
+func TestPromptModesLiteralOutput(t *testing.T) {
+	api := &authorAPI{operations: map[string]extension.Operation{}, settings: []byte(`{"enabled":true,"definitions":{"full":{"system_prompt":"full","prompt":"role body"},"simple":{"system_prompt":"simple","prompt":"role body"},"none":{"system_prompt":"none","prompt":"role body"}}}`)}
+	if _, err := Author().Activate(context.Background(), api); err != nil {
+		t.Fatal(err)
+	}
+	input := extension.AdmissionInput{Prompt: extension.PromptAccess{
+		Sections: func() []prompt.Section {
+			return []prompt.Section{{Name: "identity", Text: "identity"}, {Name: "core_rules", Text: "core"}, {Name: "rules_file_guide", Text: "omit"}, {Name: "compaction_awareness", Text: "compact"}}
+		},
+		Environment: func() string { return "environment" },
+		Rules: func() (string, []prompt.Section, error) {
+			return "rules", []prompt.Section{{Name: "safety", Text: "safe"}}, nil
+		},
+	}}
+	full, err := api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"full"}`)}, input)
+	if err != nil || full.Candidate == nil || full.Candidate.Prompt != nil || full.Candidate.Instructions != "## Your Role and Instructions\n\nrole body" {
+		t.Fatalf("full = %#v, %v", full, err)
+	}
+	assembled := prompt.Assemble(prompt.AssemblyInput{Instructions: full.Candidate.Instructions})
+	if strings.Count(assembled, "## Your Role and Instructions") != 1 {
+		t.Fatalf("assembled full prompt heading count = %d, want 1\n%s", strings.Count(assembled, "## Your Role and Instructions"), assembled)
+	}
+	simple, err := api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"simple"}`)}, input)
+	if err != nil || simple.Candidate == nil || simple.Candidate.Prompt == nil || *simple.Candidate.Prompt != "identity\n\ncore\n\ncompact\n\nenvironment\n\nsafe\n\n## Your Role and Instructions\n\nrole body\n\nrules" {
+		t.Fatalf("simple = %#v, %v", simple, err)
+	}
+	none, err := api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"none"}`)}, input)
+	if err != nil || none.Candidate == nil || none.Candidate.Prompt == nil || *none.Candidate.Prompt != "role body" {
+		t.Fatalf("none = %#v, %v", none, err)
 	}
 }

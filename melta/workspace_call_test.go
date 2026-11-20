@@ -105,7 +105,7 @@ func TestWorkspaceRegisteredNativeTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer candidate.release()
-	stage := candidate.snapshot()
+	stage := candidate.snapshotForTest()
 	defer stage.release()
 	binding := stage.bindTool("workspace-test")
 	defer binding.release()
@@ -165,9 +165,9 @@ func TestWorkspaceRestrictionWitnessCannotRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer candidate.release()
-	stage := candidate.snapshot()
+	stage := candidate.snapshotForTest()
 	defer stage.release()
-	hooks := stage.authorizationHooks(ToolContext{Workspace: root}, nil)
+	hooks := stage.authorizationHooks(ToolContext{Workspace: root}, nil, nil, nil, nil, nil)
 	_, err = hooks[0].Run(context.Background(), harness.PreparedAction{}, func(path string) (string, error) {
 		called = true
 		return filepath.Join(root, path), nil
@@ -198,7 +198,7 @@ func TestWorkspaceRegisteredWorkerTool(t *testing.T) {
 	if len(candidate.inactive) != 0 {
 		t.Fatal(candidate.inactive)
 	}
-	stage := candidate.snapshot()
+	stage := candidate.snapshotForTest()
 	defer stage.release()
 	binding := stage.bindTool("workspace-worker")
 	if binding == nil {
@@ -229,7 +229,7 @@ func TestWorkspaceRegisteredWorkerTool(t *testing.T) {
 	if prepared.Immediate != nil {
 		t.Fatalf("prepare: %+v", prepared.Immediate)
 	}
-	hooks := stage.authorizationHooks(tc, nil)
+	hooks := stage.authorizationHooks(tc, nil, nil, nil, nil, nil)
 	bound := false
 	if len(hooks) != 1 {
 		t.Fatalf("worker restrictions: %d", len(hooks))
@@ -271,7 +271,7 @@ func TestWorkspaceRegisteredWorkerTool(t *testing.T) {
 		t.Fatalf("lost worker activation: %v", err)
 	}
 	defer lostCandidate.release()
-	lostStage := lostCandidate.snapshot()
+	lostStage := lostCandidate.snapshotForTest()
 	defer lostStage.release()
 	lostBinding := lostStage.bindTool("workspace-worker")
 	defer lostBinding.release()
@@ -300,7 +300,7 @@ func TestWorkspaceRegisteredWorkerTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restricted.release()
-	restrictedStage := restricted.snapshot()
+	restrictedStage := restricted.snapshotForTest()
 	defer restrictedStage.release()
 	restrictedBinding := restrictedStage.bindTool("workspace-worker")
 	defer restrictedBinding.release()

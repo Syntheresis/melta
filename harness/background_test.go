@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 )
@@ -18,10 +20,10 @@ func (stubJobStopper) StopJob(string, string) {}
 
 var _ JobStopper = (*stubJobStopper)(nil)
 
-func admitLocked(h *Harness, c *coordinator, kind memberKind, id string, cap int) (*backgroundMember, error) {
+func admitLocked(h *Harness, c *coordinator, kind memberKind, id string) (*backgroundMember, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return h.admitBackgroundMember(c, kind, id, cap)
+	return h.admitBackgroundMember(c, kind, id)
 }
 
 func claimLocked(h *Harness, c *coordinator, completionID string) (*backgroundMember, bool) {
@@ -50,7 +52,7 @@ func TestDependenciesAcceptJobStopper(t *testing.T) {
 func TestAdmitBackgroundMemberInitializesGroup(t *testing.T) {
 	h := newTestHarness(t, freshSessionStore(t), nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	first, err := admitLocked(h, c, memberSession, "child-1", 0)
+	first, err := admitLocked(h, c, memberSession, "child-1")
 	testassert.NoError(t, err)
 	testassert.Require(t, c.group != nil && len(c.group.members) == 1, "first admission did not initialize the group: %+v", c.group)
 	testassert.Require(t, first.kind == memberSession && first.id == "child-1", "member = %+v", first)
@@ -60,7 +62,7 @@ func TestAdmitBackgroundMemberInitializesGroup(t *testing.T) {
 		t.Fatalf("fresh member done channel is closed")
 	default:
 	}
-	second, err := admitLocked(h, c, memberJob, "job-1", 0)
+	second, err := admitLocked(h, c, memberJob, "job-1")
 	testassert.NoError(t, err)
 	testassert.Require(t, len(c.group.members) == 2 && (c.group.members[first.completionID] == first && c.group.members[second.completionID] == second), "got %v, want %v; members are not keyed by completion id", len(c.group.members), 2)
 }
@@ -69,30 +71,11 @@ func TestAdmitBackgroundMemberInitializesGroup(t *testing.T) {
 // site starts the background lifecycle open.
 func TestCreateSessionStartsOpenLifecycle(t *testing.T) {
 	h := newTestHarness(t, emptyStore(t), nil)
-	rec, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	rec, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	c := leaseCoordinator(t, h, rec.Identity.SessionID)
-	_, err = admitLocked(h, c, memberJob, "job-1", 0)
+	_, err = admitLocked(h, c, memberJob, "job-1")
 	testassert.NoError(t, err)
-}
-
-// TestAdmitBackgroundMemberCapRejection proves the child concurrency cap: with
-// cap 2 the third member is rejected with the limit text and no member exists
-// for it.
-func TestAdmitBackgroundMemberCapRejection(t *testing.T) {
-	h := newTestHarness(t, freshSessionStore(t), nil)
-	c := leaseCoordinator(t, h, testSessionID)
-	for i := 0; i < 2; i++ {
-		{
-			_, err := admitLocked(h, c, memberSession, "child", 2)
-			testassert.Require(t, err == nil, "admission %d: %v", i+1, err)
-		}
-	}
-	_, err := admitLocked(h, c, memberSession, "child", 2)
-	testassert.Require(t, errors.Is(err, ErrInvalid), "third admission = %v, want ErrInvalid", err)
-	want := "background group is full (2/2). Wait for a background member to complete, then retry"
-	testassert.Require(t, err != nil && err.Error() == "harness: invalid storage request: "+want, "third admission error = %q, want %q", err, want)
-	testassert.Equal(t, len(c.group.members), 2)
 }
 
 // TestAdmitBackgroundMemberClosedAndArchivedRejection proves the lifecycle
@@ -106,7 +89,7 @@ func TestAdmitBackgroundMemberClosedAndArchivedRejection(t *testing.T) {
 	h := newTestHarness(t, (&testGraph{session: archived}).storage(t), nil)
 	c := leaseCoordinator(t, h, testSessionID)
 	for _, kind := range []memberKind{memberSession, memberJob} {
-		_, err := admitLocked(h, c, kind, "member", 0)
+		_, err := admitLocked(h, c, kind, "member")
 		want := invalidInput("session %q is archived; admission requires an open Session", testSessionID)
 		testassert.Require(t, err != nil && err.Error() == want.Error(), "%s admission on archived session = %v, want %v", kind, err, want)
 		testassert.Require(t, c.group == nil, "rejected admission created a group")
@@ -117,7 +100,7 @@ func TestAdmitBackgroundMemberClosedAndArchivedRejection(t *testing.T) {
 	c2.mu.Lock()
 	c2.stop = &stopInterval{done: make(chan struct{})}
 	c2.mu.Unlock()
-	_, err := admitLocked(h2, c2, memberSession, "child", 0)
+	_, err := admitLocked(h2, c2, memberSession, "child")
 	testassert.Require(t, err != nil && err.Error() == "harness: invalid storage request: background group is closed or stopping", "stopping group admission = %v", err)
 	testassert.Require(t, c2.group == nil, "rejected admission created a group")
 }
@@ -137,7 +120,7 @@ func TestAdmitBackgroundMemberAfterHarnessCancellation(t *testing.T) {
 	cancel()
 	c := leaseCoordinator(t, h, testSessionID)
 	c.mu.Lock()
-	_, admitErr := h.admitBackgroundMember(c, memberSession, "child", 0)
+	_, admitErr := h.admitBackgroundMember(c, memberSession, "child")
 	c.mu.Unlock()
 	testassert.Require(t, errors.Is(admitErr, context.Canceled) && admitErr.Error() == "context canceled", "admission after cancellation = %v, want the raw context.Canceled", admitErr)
 	testassert.Require(t, c.group == nil, "rejected admission created a member")
@@ -153,7 +136,7 @@ func TestClaimBackgroundMember(t *testing.T) {
 		m, ok := claimLocked(h, c, "absent")
 		testassert.Require(t, m == nil && !ok, "unknown claim = (%v, %v), want (nil, false)", m, ok)
 	}
-	m, err := admitLocked(h, c, memberJob, "job-1", 0)
+	m, err := admitLocked(h, c, memberJob, "job-1")
 	testassert.NoError(t, err)
 	got, ok := claimLocked(h, c, m.completionID)
 	testassert.Require(t, ok && got == m, "first claim = (%v, %v), want the member", got, ok)
@@ -173,7 +156,7 @@ func TestClaimBackgroundMember(t *testing.T) {
 func TestFinishBackgroundMember(t *testing.T) {
 	h := newTestHarness(t, freshSessionStore(t), nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	m, err := admitLocked(h, c, memberSession, "child-1", 0)
+	m, err := admitLocked(h, c, memberSession, "child-1")
 	testassert.NoError(t, err)
 	h.finishBackgroundMember(c, m)
 	select {
@@ -192,4 +175,42 @@ func TestFinishBackgroundMember(t *testing.T) {
 	_, present = c.group.members[m.completionID]
 	c.mu.Unlock()
 	testassert.Require(t, !present, "no-op finish re-inserted the member")
+}
+
+// TestTruncateCompletionTextBounds proves the one report-body bound: a
+// positive request bounds the body including the marker bytes, a zero request
+// applies the 1 MiB bound, a multibyte cut retains a complete character, and
+// every result is valid UTF-8.
+func TestTruncateCompletionTextBounds(t *testing.T) {
+	const marker = "\n[truncated]"
+	for _, tc := range []struct {
+		name  string
+		text  string
+		limit int
+		want  string
+	}{
+		{"one byte", "text", 1, marker[:1]},
+		{"below the marker", strings.Repeat("x", 20), 11, marker[:11]},
+		{"marker exactly", strings.Repeat("x", 20), 12, marker},
+		{"one prefix byte", strings.Repeat("x", 20), 13, "x" + marker},
+		{"multibyte cut", "a" + strings.Repeat("é", 10), 14, "a" + marker},
+		{"multibyte lead", strings.Repeat("é", 7), 13, marker},
+		{"fits", "text", 4, "text"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateCompletionText(tc.text, tc.limit)
+			if got != tc.want {
+				t.Fatalf("truncate(%q, %d) = %q, want %q", tc.text, tc.limit, got, tc.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("truncate(%q, %d) is not valid UTF-8: %q", tc.text, tc.limit, got)
+			}
+		})
+	}
+	t.Run("zero applies the 1 MiB bound", func(t *testing.T) {
+		text := strings.Repeat("x", maxCompletionReportBytes+1)
+		got := truncateCompletionText(text, 0)
+		testassert.Equal(t, len(got), maxCompletionReportBytes)
+		testassert.Require(t, strings.HasSuffix(got, marker), "zero-bound truncation lost the marker")
+	})
 }

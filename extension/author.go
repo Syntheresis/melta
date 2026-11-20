@@ -11,7 +11,7 @@ import (
 )
 
 // APIVersion is the exact activation authoring contract version.
-const APIVersion = "6"
+const APIVersion = "7"
 
 // Manifest is the metadata available before an extension is activated.
 type Manifest struct {
@@ -78,7 +78,7 @@ func CompileMethod(m Method) (*CompiledMethod, error) {
 	m.Success = append(json.RawMessage(nil), m.Success...)
 	m.Error = append(json.RawMessage(nil), m.Error...)
 	m.Partial = append(json.RawMessage(nil), m.Partial...)
-	return compileMethod("", m)
+	return compileMethod(m)
 }
 
 // Registration identifies one immutable registration.
@@ -103,6 +103,7 @@ type API interface {
 
 // AuthorContext supplies the values and scoped service calls of one callback.
 type AuthorContext struct {
+	RequestID   string
 	ExtensionID string
 	Settings    json.RawMessage
 	Session     harness.SessionIdentity

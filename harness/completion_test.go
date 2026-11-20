@@ -207,7 +207,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		defer cancel()
 		session := createSession(t, h)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		{
 			_, err := submitText(t, h, session, "op-1", MessageModeRegular, "hello")
@@ -247,7 +247,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		session := createSession(t, h)
 		watch := watchSettlements(store)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 
 		{
@@ -280,7 +280,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		session := createSession(t, h)
 		watch := watchSettlements(store)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		{
 			_, err := submitText(t, h, session, "op-1", MessageModeRegular, "hello")
@@ -332,7 +332,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		session := createSession(t, h)
 		watch := watchSettlements(store)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		{
 			_, err := submitText(t, h, session, "op-1", MessageModeRegular, "hello")
@@ -366,7 +366,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		defer cancel()
 		session := createSession(t, h)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 
 		{
@@ -395,7 +395,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		defer cancel()
 		session := createSession(t, h)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 
 		{
@@ -422,7 +422,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		defer cancel()
 		session := createSession(t, h)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 
 		{
@@ -447,7 +447,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		defer cancel()
 		session := createSession(t, h)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 
 		err = h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "refused report")
@@ -467,7 +467,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		h := newTestHarness(t, store, nil)
 		cP := leaseCoordinator(t, h, completionParentID)
 		cC := leaseCoordinator(t, h, completionChildID)
-		member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, cP, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		cC.mu.Lock()
 		cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
@@ -495,7 +495,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		session := createSession(t, h)
 		watch := watchSettlements(store)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 
 		stopDone := make(chan error, 1)
@@ -526,7 +526,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 		defer cancel()
 		session := createSession(t, h)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		store.entryHook = func(draft EntryDraft) error {
 			if draft.Kind == EntrySignal {
@@ -556,7 +556,7 @@ func TestDeliverBackgroundCompletionModes(t *testing.T) {
 func TestDeliverBackgroundCompletionEmptyContentRejected(t *testing.T) {
 	h := newTestHarness(t, freshSessionStore(t), nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	member, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
 	{
 		err := h.DeliverBackgroundCompletion(context.Background(), testSessionID, member.completionID, "")
@@ -580,7 +580,7 @@ func TestDeliverBackgroundCompletionSecondDeliveryIsNoOp(t *testing.T) {
 	session := createSession(t, h)
 	watch := watchSettlements(store)
 	c := leaseCoordinator(t, h, session)
-	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	member, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
 
 	{
@@ -627,7 +627,7 @@ func TestDeliverBackgroundCompletionSecondDeliveryIsNoOp(t *testing.T) {
 		defer cancel()
 		session := createSession(t, h)
 		c := leaseCoordinator(t, h, session)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 
 		{
@@ -655,9 +655,9 @@ func TestDeliverBackgroundCompletionCorruptParent(t *testing.T) {
 	store := freshSessionStore(t)
 	h := newTestHarness(t, store, nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	childMember, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	childMember, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
-	jobMember, err := admitLocked(h, c, memberJob, jobFixtureID, 0)
+	jobMember, err := admitLocked(h, c, memberJob, jobFixtureID)
 	testassert.NoError(t, err)
 	h.mu.Lock()
 	c.corru = corruptSession(testSessionID, "injected corruption")
@@ -692,7 +692,7 @@ func TestDeliverBackgroundCompletionIdleRaceReRoutesToSteering(t *testing.T) {
 	defer cancel()
 	session := createSession(t, h)
 	c := leaseCoordinator(t, h, session)
-	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	member, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
 
 	submitted := make(chan error, 1)
@@ -775,7 +775,7 @@ func TestDeliverBackgroundCompletionReserveFailureTakesClosedPath(t *testing.T) 
 	defer cancel()
 	session := createSession(t, h)
 	c := leaseCoordinator(t, h, session)
-	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	member, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
 
 	release, err := h.reserve(context.Background(), c) // the test holds the admission reservation
@@ -825,7 +825,7 @@ func TestDeliverBackgroundCompletionAdmissionFailuresFinal(t *testing.T) {
 				return validPrepared(), nil
 			})
 			c := leaseCoordinator(t, h, testSessionID)
-			member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+			member, err := admitLocked(h, c, memberSession, completionChildID)
 			testassert.NoError(t, err)
 
 			store.txHook = func(string) error { return tc.err } // the delivery's admission transaction fails once
@@ -864,7 +864,7 @@ func TestClosedDeliveryCommitsBeforeDoneCloses(t *testing.T) {
 	defer cancel()
 	session := createSession(t, h)
 	c := leaseCoordinator(t, h, session)
-	member, err := admitLocked(h, c, memberJob, jobFixtureID, 0)
+	member, err := admitLocked(h, c, memberJob, jobFixtureID)
 	testassert.NoError(t, err)
 	closeBackgroundMode(c)
 
@@ -913,7 +913,7 @@ func TestClosedDeliveryFailureRetainedBeforeMemberFinish(t *testing.T) {
 	defer cancel()
 	session := createSession(t, h)
 	c := leaseCoordinator(t, h, session)
-	member, err := admitLocked(h, c, memberJob, jobFixtureID, 0)
+	member, err := admitLocked(h, c, memberJob, jobFixtureID)
 	testassert.NoError(t, err)
 
 	// The closed delivery's signal insert fails before any durable write with
@@ -986,9 +986,9 @@ func TestConcurrentClosedDeliveriesSerialize(t *testing.T) {
 	defer cancel()
 	session := createSession(t, h)
 	c := leaseCoordinator(t, h, session)
-	memberA, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	memberA, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
-	memberB, err := admitLocked(h, c, memberJob, jobFixtureID, 0)
+	memberB, err := admitLocked(h, c, memberJob, jobFixtureID)
 	testassert.NoError(t, err)
 	closeBackgroundMode(c)
 
@@ -1068,7 +1068,7 @@ func TestClosedDeliveryRevisionDrift(t *testing.T) {
 		h, cancel := newCancelableHarness(t, store, modelPrepared(script.model), nil)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		closeBackgroundMode(c)
 		advanceRevision(t, store)
@@ -1092,7 +1092,7 @@ func TestClosedDeliveryRevisionDrift(t *testing.T) {
 		h, cancel := newCancelableHarness(t, store, modelPrepared(script.model), nil)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		closeBackgroundMode(c)
 		advanceRevision(t, store)
@@ -1125,7 +1125,7 @@ func TestClosedDeliveryRevisionDrift(t *testing.T) {
 		h, cancel := newCancelableHarness(t, store, modelPrepared(script.model), nil)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		closeBackgroundMode(c)
 		advanceRevision(t, store)
@@ -1172,12 +1172,12 @@ func TestJobCompletionWaitsForChildSuccessorRetirement(t *testing.T) {
 			watch := watchSettlements(store)
 			cP := leaseCoordinator(t, h, completionParentID)
 			cC := leaseCoordinator(t, h, completionChildID)
-			member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
+			member, err := admitLocked(h, cP, memberSession, completionChildID)
 			testassert.NoError(t, err)
 			cC.mu.Lock()
 			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
 			cC.mu.Unlock()
-			jobMember, err := admitLocked(h, cC, memberJob, jobFixtureID, 0)
+			jobMember, err := admitLocked(h, cC, memberJob, jobFixtureID)
 			testassert.NoError(t, err)
 
 			{
@@ -1248,7 +1248,7 @@ func TestChildCompletionSettledAbandonment(t *testing.T) {
 		h := newTestHarness(t, store, nil)
 		cC := leaseCoordinator(t, h, completionChildID)
 		cP := leaseCoordinator(t, h, completionParentID)
-		member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, cP, memberSession, completionChildID)
 		testassert.NoError(t, err)
 		cC.mu.Lock()
 		cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
@@ -1296,7 +1296,7 @@ func TestChildCompletionSettledWaitsForBuffers(t *testing.T) {
 			h := newTestHarness(t, store, nil)
 			cP := leaseCoordinator(t, h, completionParentID)
 			cC := leaseCoordinator(t, h, completionChildID)
-			member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
+			member, err := admitLocked(h, cP, memberSession, completionChildID)
 			testassert.NoError(t, err)
 			closeBackgroundMode(cP) // the closed path records the report without a model
 			cC.mu.Lock()
@@ -1361,7 +1361,7 @@ func TestChildCompletionRendersParentFacingText(t *testing.T) {
 			watch := watchSettlements(store)
 			cC := leaseCoordinator(t, h, completionChildID)
 			cP := leaseCoordinator(t, h, completionParentID)
-			member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
+			member, err := admitLocked(h, cP, memberSession, completionChildID)
 			testassert.NoError(t, err)
 			cC.mu.Lock()
 			cC.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
@@ -1409,7 +1409,7 @@ func TestChildCompletionTruncatesAtOutputLimit(t *testing.T) {
 			h := newTestHarness(t, store, nil)
 			cC := leaseCoordinator(t, h, completionChildID)
 			cP := leaseCoordinator(t, h, completionParentID)
-			member, err := admitLocked(h, cP, memberSession, completionChildID, 0)
+			member, err := admitLocked(h, cP, memberSession, completionChildID)
 			testassert.NoError(t, err)
 			closeBackgroundMode(cP) // the closed path records the rendered content verbatim
 			cC.mu.Lock()
@@ -1445,6 +1445,10 @@ func TestChildCompletionWholeReportBound(t *testing.T) {
 	testassert.Require(t, strings.HasSuffix(got, "\n[truncated]"), "whole report does not carry the truncation marker")
 	body := strings.TrimPrefix(got, header+"\n")
 	testassert.Equal(t, len(body), maxCompletionReportBytes-len(header)-1)
+
+	zero := childCompletionContent(graph, 0)
+	testassert.Require(t, len(zero) <= maxCompletionReportBytes, "zero-limit report = %d bytes, want at most %d", len(zero), maxCompletionReportBytes)
+	testassert.Require(t, strings.HasSuffix(zero, "\n[truncated]"), "zero-limit report does not carry the truncation marker")
 }
 
 // TestShutdownContendedRetirementDiscardsBuffers proves the shutdown case of the
@@ -1467,7 +1471,7 @@ func TestShutdownContendedRetirementDiscardsBuffers(t *testing.T) {
 	child := res.ChildSessionID
 	childC := leaseCoordinator(t, h, child)
 
-	jobMember, err := admitLocked(h, childC, memberJob, jobFixtureID, 0)
+	jobMember, err := admitLocked(h, childC, memberJob, jobFixtureID)
 	testassert.NoError(t, err)
 	{
 		err := h.DeliverBackgroundCompletion(context.Background(), child, jobMember.completionID, "discarded report")
@@ -1530,7 +1534,7 @@ func TestBufferedCompletionSignalRemovesItsHead(t *testing.T) {
 	store := freshSessionStore(t)
 	h := newTestHarness(t, store, nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	member, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
 	item := completionItem(member, admissionContent("buffered report"))
 	c.mu.Lock()

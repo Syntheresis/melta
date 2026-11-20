@@ -11,6 +11,8 @@ import (
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/extension/worker"
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/storage"
+	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
@@ -43,7 +45,7 @@ func TestRegistrarServiceAuthorityChangeReplacesActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.release()
-	if err := first.publish(); err != nil {
+	if err := first.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	e.Manifest.Services = []string{"melta.second"}
@@ -106,7 +108,7 @@ func TestRegistrarServiceAuthorityNarrowingReplacesActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.release()
-	if err := first.publish(); err != nil {
+	if err := first.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	second, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`), approvedServices: []string{}}})
@@ -212,7 +214,7 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 	if _, err := api.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool{}, old); err == nil {
 		t.Fatal("conflicting replacement accepted")
 	}
-	current := c.snapshot()
+	current := c.snapshotForTest()
 	if current.tools["old"] == nil {
 		t.Fatal("failed replacement removed old registration")
 	}
@@ -221,7 +223,7 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current = c.snapshot()
+	current = c.snapshotForTest()
 	if current.tools["old"] != nil || current.tools["new"] == nil {
 		t.Fatal("rename did not replace")
 	}
@@ -230,7 +232,7 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current = c.snapshot()
+	current = c.snapshotForTest()
 	defer current.release()
 	if current.tools["new"] != nil || len(current.hooks["cleanup"]) != 1 {
 		t.Fatal("cross-kind replacement failed")
@@ -260,7 +262,7 @@ func TestRegistrarRegistrationReleaseAfterStageAndPlan(t *testing.T) {
 	defer candidate.release()
 	released := 0
 	original.(*nativeRegistration).release = func() { released++ }
-	stage := candidate.snapshot()
+	stage := candidate.snapshotForTest()
 	binding := stage.bindTool("tool")
 	if _, err := api.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool{}, original); err != nil {
 		t.Fatal(err)
@@ -292,7 +294,7 @@ func TestRegistrarCandidateCredentialHolds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stage := candidate.snapshot()
+	stage := candidate.snapshotForTest()
 	candidate.release()
 	if !slices.Contains(owner.heldCredentialNames(), "CANDIDATE_SECRET") {
 		t.Fatal("captured stage lost secret exclusion")
@@ -338,7 +340,7 @@ func TestRegistrarOperationTupleAndCleanupAttachments(t *testing.T) {
 	if len(c.inactive) != 0 {
 		t.Fatal(c.inactive)
 	}
-	stage := c.snapshot()
+	stage := c.snapshotForTest()
 	defer stage.release()
 	for _, key := range []nativeOperationKey{{"a", "shared"}, {"a\x00b", "shared"}, {"a", "b\x00c"}, {"a\x00b", "c"}} {
 		if stage.operations[key] == nil {
@@ -445,7 +447,7 @@ func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.release()
-	if err := first.publish(); err != nil {
+	if err := first.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	a.Activate = func(_ context.Context, api extension.API) (func(context.Context) error, error) {
@@ -489,7 +491,7 @@ func TestRegistrarCredentialBindingReuseIsPerExtension(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.release()
-	if err := first.publish(); err != nil {
+	if err := first.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	second, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{makeSpec("a", "1"), makeSpec("b", "2")})
@@ -523,7 +525,7 @@ func TestRegistrarSharedActivationChecksEveryHeldConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.release()
-	if err := first.publish(); err != nil {
+	if err := first.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	second, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: a, section: []byte(`{}`)}, {extension: b, section: []byte(`{"v":2}`)}})
@@ -563,7 +565,7 @@ func TestRegistrarReusedConflictsRemainPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.release()
-	if err := second.publish(); err != nil {
+	if err := second.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	combined, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{a, b})
@@ -574,7 +576,7 @@ func TestRegistrarReusedConflictsRemainPrivate(t *testing.T) {
 	if combined.inactive["a"] == nil {
 		t.Fatalf("conflicting held activation published: %v", combined.inactive)
 	}
-	stage := combined.snapshot()
+	stage := combined.snapshotForTest()
 	defer stage.release()
 	if got := stage.tools["same"].activation.id; got != "b" {
 		t.Fatalf("holder displaced by %q", got)
@@ -605,7 +607,7 @@ func TestRegistrarSuccessiveActivationsCanShareNames(t *testing.T) {
 	if len(first.inactive) != 0 || len(second.inactive) != 0 || starts != 2 {
 		t.Fatalf("%v %v starts %d", first.inactive, second.inactive, starts)
 	}
-	a, b := first.snapshot(), second.snapshot()
+	a, b := first.snapshotForTest(), second.snapshotForTest()
 	defer a.release()
 	defer b.release()
 	if a.tools["shared"].activation == b.tools["shared"].activation {
@@ -624,7 +626,7 @@ func TestRegistrarReenableDoesNotReuseRetiredActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.release()
-	if err := first.publish(); err != nil {
+	if err := first.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	disabled, err := owner.prepareNativeCandidate(context.Background(), nil)
@@ -632,7 +634,7 @@ func TestRegistrarReenableDoesNotReuseRetiredActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer disabled.release()
-	if err := disabled.publish(); err != nil {
+	if err := disabled.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	again, err := owner.prepareNativeCandidate(context.Background(), spec)
@@ -907,7 +909,7 @@ func TestRegistrarReentrantReplacementDoesNotWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.release()
-	stage := c.snapshot()
+	stage := c.snapshotForTest()
 	defer stage.release()
 	h := stage.hooks["arguments"][0].value.(nativeHook).handler.(extension.ArgumentsHook)
 	go func() { _, err := h(context.Background(), extension.AuthorContext{}, model.ToolCall{}); done <- err }()
@@ -941,7 +943,7 @@ func TestRegistrarCancellationReleasesOnlyCandidateHolds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.publish(); err != nil {
+	if err := first.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -984,10 +986,10 @@ func TestRegistrarCloseMayReenter(t *testing.T) {
 	if err := <-closed; !errors.Is(err, extension.ErrClosed) {
 		t.Fatal(err)
 	}
-	if err := c.publish(); !errors.Is(err, extension.ErrClosed) {
+	if err := c.publishForTest(); !errors.Is(err, extension.ErrClosed) {
 		t.Fatal(err)
 	}
-	if c.snapshot() != nil {
+	if c.snapshotForTest() != nil {
 		t.Fatal("released candidate produced a snapshot")
 	}
 }
@@ -1021,7 +1023,7 @@ func TestRegistrarParkedStageReplacementAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parked := candidate.snapshot()
+	parked := candidate.snapshotForTest()
 	replacement, err := api.AttachArguments(extension.HookModePure, hook("new"), old)
 	if err != nil {
 		t.Fatal(err)
@@ -1032,7 +1034,7 @@ func TestRegistrarParkedStageReplacementAndRelease(t *testing.T) {
 	if _, err := api.AttachArguments(extension.HookModePure, hook("bad"), old); err == nil {
 		t.Fatal("stale replacement accepted")
 	}
-	current := candidate.snapshot()
+	current := candidate.snapshotForTest()
 	labels := func(s *nativeSnapshot) []string {
 		var out []string
 		for _, entry := range s.hooks["arguments"] {
@@ -1131,7 +1133,7 @@ func TestRegistrationAllContributions(t *testing.T) {
 	if len(c.inactive) != 0 {
 		t.Fatal(c.inactive)
 	}
-	stage := c.snapshot()
+	stage := c.snapshotForTest()
 	defer stage.release()
 	if len(stage.tools) != 1 || len(stage.strategies) != 1 || len(stage.services) != 1 || len(stage.operations) != 1 {
 		t.Fatal(stage)
@@ -1187,7 +1189,7 @@ func TestRegistrationRejectsInvalidAndForeignHandles(t *testing.T) {
 	if len(c.inactive) != 0 {
 		t.Fatal(c.inactive)
 	}
-	stage := c.snapshot()
+	stage := c.snapshotForTest()
 	defer stage.release()
 	if len(stage.tools) != 1 || stage.tools["custom"].activation.id != "a" {
 		t.Fatal("holder displaced")
@@ -1213,7 +1215,7 @@ func TestRegistrarPreparedToolRetainsIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stage := c.snapshot()
+	stage := c.snapshotForTest()
 	binding := stage.bindTool("tool")
 	if binding == nil {
 		t.Fatal("missing binding")
@@ -1268,9 +1270,64 @@ func TestRegistrarCandidateIsolation(t *testing.T) {
 	if !errors.Is(candidate.inactive["first"], fail) || candidate.inactive["second"] != nil {
 		t.Fatalf("inactive: %v", candidate.inactive)
 	}
-	stage := candidate.snapshot()
+	stage := candidate.snapshotForTest()
 	defer stage.release()
 	if got := stage.tools["example"]; got == nil {
 		t.Fatal("successful entry was not published")
 	}
+}
+
+// TestScopedStateAndSessionArgumentsValidateByContract proves the scoped host
+// branches reject invalid documents through the declared method schemas before
+// touching Session state or membership.
+func TestScopedStateAndSessionArgumentsValidateByContract(t *testing.T) {
+	e := newOwnerEnv(t)
+	enableFixturePlugin(t, e.configPath, "gate")
+	e.fixtureStore(storage.NewMemory())
+	gate := extension.Extension{Manifest: extension.Manifest{ID: "gate", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{}`), Services: []string{extension.ContractState, extension.ContractSession}}, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		for _, row := range []struct {
+			method, service, serviceMethod, arguments string
+		}{
+			{"set-state", extension.ContractState, "set", `{"value":1,"x":1}`},
+			{"members", extension.ContractSession, "members", `{"a":1}`},
+		} {
+			row := row
+			if _, err := api.RegisterOperation(extension.Operation{
+				Target: extension.ExposedTargetSession,
+				Method: extension.Method{Name: row.method, Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
+					return call.Call(ctx, row.service, row.serviceMethod, json.RawMessage(row.arguments))
+				},
+			}, nil); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}}
+	ctx := context.Background()
+	r, err := e.open(ctx, gate)
+	testassert.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close(context.Background()) })
+	session, err := r.createSession(ctx, e.dataDir, "")
+	testassert.NoError(t, err)
+	before := sessionExtensionStates(t, r, session.Identity.SessionID)
+	for _, method := range []string{"set-state", "members"} {
+		_, err := r.invokeRegisteredOperation(ctx, testCaller(r), "gate", method, protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindSession, SessionId: &session.Identity.SessionID}, json.RawMessage(`{}`), "")
+		testassert.Require(t, errors.Is(err, harness.ErrInvalid), "%s = %v, want harness.ErrInvalid", method, err)
+	}
+	after := sessionExtensionStates(t, r, session.Identity.SessionID)
+	testassert.Require(t, reflect.DeepEqual(before, after), "invalid scoped calls changed Session state: %v -> %v", before, after)
+}
+
+// sessionExtensionStates reads one Session's extension-state map.
+func sessionExtensionStates(t *testing.T, r *Melta, sessionID string) map[string]harness.SessionStateValue {
+	t.Helper()
+	var states map[string]harness.SessionStateValue
+	err := r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
+		var err error
+		states, err = h.SessionExtensionStates(ctx, sessionID)
+		return err
+	})
+	testassert.NoError(t, err)
+	return states
 }

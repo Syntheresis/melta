@@ -259,6 +259,7 @@ func TestConversationRawObjectFieldsShareOneComponent(t *testing.T) {
 		"Message.extra=JSONObject",
 		"MessageToolCall.extra=JSONObject",
 		"OpaquePart.extra=JSONObject",
+		"OperationTool.parameters=JSONObject",
 		"TextPart.extra=JSONObject",
 		"ToolCallView.extra=JSONObject",
 		"ToolCallView.metadata=ToolMetadata",

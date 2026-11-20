@@ -44,7 +44,7 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 					t.Fatalf("activation: %v %v", err, candidate.inactive)
 				}
 				defer candidate.release()
-				stage := candidate.snapshot()
+				stage := candidate.snapshotForTest()
 				defer stage.release()
 				if entry.Manifest.ID == "adaptation" {
 					hook := stage.hooks["request"][0].value.(nativeHook).handler.(extension.AuthorRequestHook)
@@ -206,9 +206,9 @@ func TestAgentsRegisteredWriteWitness(t *testing.T) {
 		t.Fatalf("activation: %v %v", err, candidate.inactive)
 	}
 	defer candidate.release()
-	stage := candidate.snapshot()
+	stage := candidate.snapshotForTest()
 	defer stage.release()
-	hooks := stage.authorizationHooks(ToolContext{Workspace: root}, map[string]harness.SessionStateValue{"agents": []byte(`{"agent":"writer"}`)})
+	hooks := stage.authorizationHooks(ToolContext{Workspace: root}, map[string]harness.SessionStateValue{"agents": []byte(`{"agent":"writer"}`)}, nil, nil, nil, nil)
 	binds := 0
 	bind := func(path string) (string, error) {
 		binds++

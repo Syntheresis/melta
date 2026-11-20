@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	agents "github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/jobs"
 	"github.com/Syntheresis/melta/internal/testassert"
@@ -38,8 +37,7 @@ func baselineSettingsPrep(t *testing.T, agentsDoc, endpoint string) (configurati
 	enableFixturePlugin(t, sh.configPath, "compacttools")
 	owner, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	compact := compactToolsPlugin()
-	svc := sh.preparedService(owner, compact, fixtureAgentPlugin(compact))
+	svc := sh.preparedService(owner, compactToolsPlugin(), fixtureAgentPlugin())
 	captured, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	return captured, newPreparation(svc, sh.locations(), "", nil, nil, nil, nil, nil)
@@ -47,27 +45,11 @@ func baselineSettingsPrep(t *testing.T, agentsDoc, endpoint string) (configurati
 
 // TestBaselineSettingsDriveToolsJobsAndCompaction proves the top-level
 // baseline sections reach the actual services without any optional plugin,
-// while the selectable compact Agent keeps its own independent overlay.
+// while the top-level compaction section stays the compact capture's owner.
 func TestBaselineSettingsDriveToolsJobsAndCompaction(t *testing.T) {
 	agentsDoc := agentsWithCompact(`{"model":"prov/m3"}`)
 	captured, prep := baselineSettingsPrep(t, agentsDoc, "https://prov.test/v1")
 	snapshot := captured.snapshot
-
-	// The five builtin Agent positions remain, and the compact definition
-	// keeps its own overlay.
-	roster := projectAgents(snapshot)
-	var builtinNames []string
-	for _, builtin := range []string{"primary", "secondary", "explore", "review", "compact"} {
-		for _, agent := range roster {
-			if agent.Name == builtin {
-				builtinNames = append(builtinNames, builtin)
-				break
-			}
-		}
-	}
-	testassert.Equal(t, strings.Join(builtinNames, ","), "primary,secondary,explore,review,compact")
-	compact := compactAgent(t, snapshot)
-	testassert.Require(t, compact.name == "compact" && compact.inputs.Model.String() == "prov/m3" && compact.inputs.Instructions == retainedSummarizerPrompt, "compact definition = %+v, want its independent model overlay and the builtin instructions", compact)
 
 	invocation := Invocation{snapshot: snapshot}
 
@@ -98,8 +80,7 @@ func TestBaselineSettingsDriveToolsJobsAndCompaction(t *testing.T) {
 	testassert.Require(t, len(jobsInst.started) == 1, "jobs starts = %d, want one", len(jobsInst.started))
 	testassert.Equal(t, compactJSON(t, jobsInst.started[0].Config), `{"max_output_bytes":1024,"unknown_jobs_member":1}`)
 
-	// The compact capture consumes the top-level compaction section, not the
-	// selectable compact Agent's overlay.
+	// The compact capture consumes the top-level compaction section.
 	selection := compactPrepSelection(t, captured, "solo")
 	capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), selection)
 	testassert.NoError(t, err)
@@ -109,12 +90,12 @@ func TestBaselineSettingsDriveToolsJobsAndCompaction(t *testing.T) {
 	testassert.Require(t, capture.Compact.Pricing != nil && capture.Compact.Pricing.Input != nil && *capture.Compact.Pricing.Input == 0.5, "compact pricing = %+v, want the top-level compact model's rates", capture.Compact.Pricing)
 }
 
-// TestBaselineCompactionAndCompactAgentEditIndependently proves the two
-// owners stay separate across real mutations: editing the selectable compact
-// Agent's model leaves the baseline compaction values unchanged, and a
-// settings save replacing the baseline compaction section leaves the compact
-// Agent definition unchanged.
-func TestBaselineCompactionAndCompactAgentEditIndependently(t *testing.T) {
+// TestBaselineCompactionAndAgentsSectionEditIndependently proves the two
+// owners stay separate across real mutations: editing the compact builtin's
+// Agents definition leaves the baseline compaction values unchanged, and a
+// settings save replacing the baseline compaction section leaves the Agents
+// section unchanged.
+func TestBaselineCompactionAndAgentsSectionEditIndependently(t *testing.T) {
 	sh := newServiceHarness(t)
 	configDoc := strings.Replace(baselineSettingsConfigDocument("https://prov.test/v1"), `"prompt":"baseline summary"`, `"prompt":"baseline edit"`, 1)
 	writeServiceFile(t, sh.configPath, configDoc)
@@ -128,16 +109,14 @@ func TestBaselineCompactionAndCompactAgentEditIndependently(t *testing.T) {
 	}
 	snapshot := svc.current()
 	testassert.Require(t, snapshot.compactionValues.model == (model.ModelRef{Provider: "prov", Model: "m2"}) && snapshot.compactionValues.prompt == "baseline edit", "published compaction = %+v, want the baseline section", snapshot.compactionValues)
-	compactBefore := compactAgent(t, snapshot)
-	testassert.Require(t, compactBefore.inputs.Model.IsZero(), "compact Agent model = %s, want the builtin fallback", compactBefore.inputs.Model.String())
 
 	{
-		_, err := svc.mutate(context.Background(), svc.editAgentModel("compact", "prov/m3"))
+		_, err := svc.editAgentModel(context.Background(), "compact", "prov/m3")
 		testassert.NoError(t, err)
 	}
 	snapshot = svc.current()
-	testassert.Require(t, compactAgent(t, snapshot).inputs.Model == (model.ModelRef{Provider: "prov", Model: "m3"}), "compact Agent model = %s, want the saved definition override", compactAgent(t, snapshot).inputs.Model.String())
-	testassert.Require(t, snapshot.compactionValues.model == (model.ModelRef{Provider: "prov", Model: "m2"}) && snapshot.compactionValues.prompt == "baseline edit", "compaction after the Agent edit = %+v, want the baseline values unchanged", snapshot.compactionValues)
+	testassert.Require(t, strings.Contains(string(snapshot.extensions["agents"]), `"compact":{"model":"prov/m3"}`), "agents section = %s, want the saved compact override", snapshot.extensions["agents"])
+	testassert.Require(t, snapshot.compactionValues.model == (model.ModelRef{Provider: "prov", Model: "m2"}) && snapshot.compactionValues.prompt == "baseline edit", "compaction after the Agents edit = %+v, want the baseline values unchanged", snapshot.compactionValues)
 
 	settings := projectSettings(snapshot)
 	settings.Compaction = json.RawMessage(`{"model":"prov/mzero","prompt":"settings edit"}`)
@@ -147,14 +126,7 @@ func TestBaselineCompactionAndCompactAgentEditIndependently(t *testing.T) {
 	}
 	snapshot = svc.current()
 	testassert.Require(t, snapshot.compactionValues.model == (model.ModelRef{Provider: "prov", Model: "mzero"}) && snapshot.compactionValues.prompt == "settings edit", "compaction after the settings save = %+v, want the written baseline section", snapshot.compactionValues)
-	testassert.Require(t, compactAgent(t, snapshot).inputs.Model == (model.ModelRef{Provider: "prov", Model: "m3"}), "compact Agent model after the settings save = %s, want the saved override unchanged", compactAgent(t, snapshot).inputs.Model.String())
-}
-
-func compactAgent(t *testing.T, snapshot *configuration) agentDefinition {
-	t.Helper()
-	agent, ok := snapshot.projectedDefinition(harness.DefinitionRef{ExtensionID: agents.ExtensionID, CapabilityID: agents.DefinitionsCapabilityID, DefinitionID: "compact"})
-	testassert.Require(t, ok, "compact definition is absent from the roster projection")
-	return agent
+	testassert.Require(t, strings.Contains(string(snapshot.extensions["agents"]), `"compact":{"model":"prov/m3"}`), "agents section after the settings save = %s, want the saved override unchanged", snapshot.extensions["agents"])
 }
 
 // TestCompactionSettingsResetRestoresFallbackDefaults proves a settings save
@@ -162,26 +134,11 @@ func compactAgent(t *testing.T, snapshot *configuration) agentDefinition {
 // defaults at the next admission: the conversation-model fallback and the
 // unchanged builtin prompt.
 func TestCompactionSettingsResetRestoresFallbackDefaults(t *testing.T) {
-	sh := newServiceHarness(t)
-	t.Setenv("PREP_COMPACT_KEY", "compact-secret")
-	writeServiceFile(t, sh.configPath, baselineSettingsConfigDocument("https://prov.test/v1"))
-	writeAgentDefinitions(t, sh.configPath, compactAgentsDocument)
-	owner, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	enableFixturePlugin(t, sh.configPath, "compacttools")
-	compact := compactToolsPlugin()
-	svc := sh.preparedService(owner, compact, fixtureAgentPlugin(compact))
-	captured, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	prep := newPreparation(svc, sh.locations(), "", nil, nil, nil, nil, nil)
+	_, svc, prep, captured := newBaselineSettingsService(t, baselineSettingsConfigDocument("https://prov.test/v1"))
 
 	prepare := func(t *testing.T, captured configurationCapture) harness.ExecutionCapture {
 		t.Helper()
-		selection := compactPrepSelection(t, captured, "solo")
-		capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), selection)
-		testassert.NoError(t, err)
-		testassert.Require(t, opener != nil, "concretePrepare returned no opener")
-		return capture
+		return prepareCompactCapture(t, prep, captured)
 	}
 	before := prepare(t, captured)
 	testassert.Require(t, before.Compact.Model.String() == "prov/m2" && before.Compact.SystemPrompt == "baseline summary", "custom compaction capture = %+v, want the configured model and prompt", before.Compact)
@@ -211,8 +168,7 @@ func newBaselineSettingsService(t *testing.T, configDoc string) (*serviceHarness
 	owner, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	enableFixturePlugin(t, sh.configPath, "compacttools")
-	compact := compactToolsPlugin()
-	svc := sh.preparedService(owner, compact, fixtureAgentPlugin(compact))
+	svc := sh.preparedService(owner, compactToolsPlugin(), fixtureAgentPlugin())
 	captured, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	return sh, svc, newPreparation(svc, sh.locations(), "", nil, nil, nil, nil, nil), captured
@@ -222,8 +178,16 @@ func newBaselineSettingsService(t *testing.T, configDoc string) (*serviceHarness
 // from the supplied capture.
 func prepareCompactCapture(t *testing.T, prep *preparation, captured configurationCapture) harness.ExecutionCapture {
 	t.Helper()
-	selection := compactPrepSelection(t, captured, "solo")
-	capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), selection)
+	return prepareCompactSelection(t, prep, compactPrepSelection(t, captured, "solo"))
+}
+
+// prepareCompactSelection runs one concrete preparation over a retained
+// selection: the native admission capture is taken when the selection is
+// built, so a selection built before a later settings publication stays a
+// valid frozen input.
+func prepareCompactSelection(t *testing.T, prep *preparation, sel selection) harness.ExecutionCapture {
+	t.Helper()
+	capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), sel)
 	testassert.NoError(t, err)
 	testassert.Require(t, opener != nil, "concretePrepare returned no opener")
 	return capture
@@ -281,7 +245,8 @@ func TestBaselineCapturesStayFrozenAcrossSettingsPublication(t *testing.T) {
 	testassert.Require(t, strings.Contains(oldRead, "(Showing lines 1-77 of 120."), "old read = %q, want the captured 77-line window", oldRead)
 	oldJob := startBackgroundForTest(t, oldInvocation)
 	testassert.Equal(t, compactJSON(t, oldJob.Config), `{"max_output_bytes":1024,"unknown_jobs_member":1}`)
-	oldCompact := prepareCompactCapture(t, prep, oldCaptured)
+	oldSelection := compactPrepSelection(t, oldCaptured, "solo")
+	oldCompact := prepareCompactSelection(t, prep, oldSelection)
 	testassert.Require(t, oldCompact.Compact.Model.String() == "prov/m2" && oldCompact.Compact.SystemPrompt == "baseline summary", "old compact = %+v, want the retained revision", oldCompact.Compact)
 
 	settings := projectSettings(oldCaptured.snapshot)
@@ -306,7 +271,7 @@ func TestBaselineCapturesStayFrozenAcrossSettingsPublication(t *testing.T) {
 	againOld := read(t, oldInvocation)
 	testassert.Require(t, strings.Contains(againOld, "(Showing lines 1-77 of 120."), "retained read after publication = %q, want the old window", againOld)
 	testassert.Equal(t, compactJSON(t, startBackgroundForTest(t, oldInvocation).Config), `{"max_output_bytes":1024,"unknown_jobs_member":1}`)
-	againOldCompact := prepareCompactCapture(t, prep, oldCaptured)
+	againOldCompact := prepareCompactSelection(t, prep, oldSelection)
 	testassert.Require(t, againOldCompact.Compact.Model.String() == "prov/m2" && againOldCompact.Compact.SystemPrompt == "baseline summary", "retained compact after publication = %+v, want the old revision", againOldCompact.Compact)
 }
 
@@ -370,11 +335,9 @@ func TestBaselinePartialObjectSettingsUseAbsentDefaults(t *testing.T) {
 	testassert.Require(t, compact.Compact.Pricing != nil && compact.Compact.Pricing.Input != nil && *compact.Compact.Pricing.Input == 1.5, "omitted compaction model pricing = %+v, want the conversation model's rates", compact.Compact.Pricing)
 }
 
-// TestConcretePrepareCompactionWithoutRoster proves compaction preparation
-// consumes only the captured compaction settings: the selection's Invocation
-// points at an owned configuration copy whose definitions are nil, while the
-// published snapshot and its backing roster remain untouched.
-func TestConcretePrepareCompactionWithoutRoster(t *testing.T) {
+// TestConcretePrepareCompactionConsumesCapturedSettings proves compaction
+// preparation consumes only the captured compaction settings.
+func TestConcretePrepareCompactionConsumesCapturedSettings(t *testing.T) {
 	endpoint := "https://prov.test/v1"
 	for _, tc := range []struct {
 		name       string
@@ -389,20 +352,9 @@ func TestConcretePrepareCompactionWithoutRoster(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, prep, captured := newBaselineSettingsService(t, tc.configDoc)
-			publishedRoster := len(projectAgents(captured.snapshot))
-			testassert.Require(t, publishedRoster != 0, "published roster is empty before the owned copy")
-
-			owned := *captured.snapshot
-			owned.definitions = nil
-			testassert.Equal(t, len(projectAgents(&owned)), 0)
-			selection := compactPrepSelection(t, captured, "solo")
-			selection.invocation = Invocation{snapshot: &owned}
-			capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), selection)
-			testassert.NoError(t, err)
-			testassert.Require(t, opener != nil, "concretePrepare returned no opener")
-			testassert.Require(t, capture.Compact.Model.String() == tc.wantModel && capture.Compact.SystemPrompt == tc.wantPrompt, "rosterless compact capture = %+v, want %s with %q", capture.Compact, tc.wantModel, tc.wantPrompt)
-			testassert.Require(t, capture.Compact.Pricing != nil && capture.Compact.Pricing.Input != nil && *capture.Compact.Pricing.Input == tc.wantInput, "rosterless compact pricing = %+v, want input %v", capture.Compact.Pricing, tc.wantInput)
-			testassert.Equal(t, len(projectAgents(captured.snapshot)), publishedRoster)
+			capture := prepareCompactCapture(t, prep, captured)
+			testassert.Require(t, capture.Compact.Model.String() == tc.wantModel && capture.Compact.SystemPrompt == tc.wantPrompt, "compact capture = %+v, want %s with %q", capture.Compact, tc.wantModel, tc.wantPrompt)
+			testassert.Require(t, capture.Compact.Pricing != nil && capture.Compact.Pricing.Input != nil && *capture.Compact.Pricing.Input == tc.wantInput, "compact pricing = %+v, want input %v", capture.Compact.Pricing, tc.wantInput)
 		})
 	}
 }

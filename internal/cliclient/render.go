@@ -289,14 +289,29 @@ func (c *CLI) frameLocked(content string) string {
 	}
 	if r != nil && r.hydration != nil {
 		h := r.hydration
-		model := "not selected"
+		model := "none"
 		if h.SelectedModel != nil {
 			model = *h.SelectedModel
 		}
-		status := fmt.Sprintf("Future: %s / %s", selectionName(h.Session.AgentSelection), model)
+		status := fmt.Sprintf("Model choice: %s", model)
+		ran := ""
 		if h.ActiveOperation != nil {
 			op := h.ActiveOperation
-			status += fmt.Sprintf(" · Active %s, captured conversation: %s / %s", op.RequestKind, selectionName(op.AgentSelection), op.Model)
+			status += fmt.Sprintf(" · Active %s", op.RequestKind)
+			ran = op.Model
+		} else {
+			var latest *protocol.Operation
+			for i := range h.Operations {
+				if latest == nil || h.Operations[i].AdmittedAt.After(latest.AdmittedAt) {
+					latest = &h.Operations[i]
+				}
+			}
+			if latest != nil {
+				ran = latest.Model
+			}
+		}
+		if ran != "" {
+			status += fmt.Sprintf(" · ran with: %s", ran)
 		}
 		if c.childID != "" {
 			status += " · child inspection, read only"

@@ -175,14 +175,17 @@ func TestACPMountedRuntimeDepartureKeepsAcceptedWork(t *testing.T) {
 		t.Fatalf("initialize runtime instance = %q, want the mounted owner %q", description.Runtime.InstanceId, direct.InstanceID())
 	}
 
-	created := b.call(t, "2", "runtime/CreateSession", fmt.Sprintf(`{"body":{"workspace":%q,"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"integrated"}}}}`, workspace))
-	var session struct {
-		SessionID string `json:"session_id"`
+	created := b.call(t, "2", "runtime/InvokeExtension", fmt.Sprintf(`{"body":{"extension_id":"agents","operation":"create","target":{"kind":"workspace","workspace":%q},"arguments":{"agent":"integrated"},"request_id":"acp-create"}}`, workspace))
+	var receipt struct {
+		Result struct {
+			SessionID string `json:"session_id"`
+		} `json:"result"`
 	}
-	if err := json.Unmarshal([]byte(resultOf(t, created)), &session); err != nil || session.SessionID == "" {
+	if err := json.Unmarshal([]byte(resultOf(t, created)), &receipt); err != nil || receipt.Result.SessionID == "" {
 		t.Fatalf("CreateSession result = %s (%v)", resultOf(t, created), err)
 	}
-	b.call(t, "3", "runtime/SubmitSession", fmt.Sprintf(`{"session_id":%q,"body":{"operation_id":"op-depart","mode":"regular","content":[{"kind":"text","text":"depart"}]}}`, session.SessionID))
+	sessionID := receipt.Result.SessionID
+	b.call(t, "3", "runtime/SubmitSession", fmt.Sprintf(`{"session_id":%q,"body":{"operation_id":"op-depart","mode":"regular","content":[{"kind":"text","text":"depart"}]}}`, sessionID))
 	select {
 	case <-model.arrived:
 	case <-time.After(30 * time.Second):
@@ -195,7 +198,7 @@ func TestACPMountedRuntimeDepartureKeepsAcceptedWork(t *testing.T) {
 	testassert.Require(t, !model.wasCanceled(), "the departing bridge canceled the accepted model work")
 
 	model.unblock()
-	awaitOperationSuccess(t, direct, session.SessionID, "op-depart")
+	awaitOperationSuccess(t, direct, sessionID, "op-depart")
 	testassert.Require(t, !model.wasCanceled(), "the accepted model work was canceled during settlement")
 }
 

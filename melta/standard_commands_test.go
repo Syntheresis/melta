@@ -12,7 +12,7 @@ import (
 
 func TestRunCommandNormalization(t *testing.T) {
 	byID := directTools(t.TempDir())
-	tc := callToolContext(t.TempDir(), ToolConstraints{})
+	tc := callToolContext(t.TempDir())
 	runCommand := byID["run_command"]
 
 	t.Run("applies the default timeout and strips private fields", func(t *testing.T) {

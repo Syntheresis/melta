@@ -45,19 +45,19 @@ func TestAdditionalRecheckAtEveryMutationCapture(t *testing.T) {
 			switch tc.name {
 			case "write":
 				var call *PreparedCall
-				call, err = PrepareWriteCall(root, root, "", CapabilityOptions{}, store, map[string]any{"path": "old.txt", "content": "after"})
+				call, err = PrepareWriteCall(root, root, store, map[string]any{"path": "old.txt", "content": "after"})
 				if err == nil {
 					_, err = call.Execute(context.Background(), check)
 				}
 			case "edit":
 				var call *PreparedCall
-				call, err = PrepareEditCall(root, root, "", CapabilityOptions{}, store, map[string]any{"path": "old.txt", "old_string": "before", "new_string": "after"})
+				call, err = PrepareEditCall(root, root, store, map[string]any{"path": "old.txt", "old_string": "before", "new_string": "after"})
 				if err == nil {
 					_, err = call.Execute(context.Background(), check)
 				}
 			default:
 				var call *PreparedPatchCall
-				call, err = PreparePatchCall(root, root, "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, tc.patch)})
+				call, err = PreparePatchCall(root, root, store, map[string]any{"input": applyPatchInput(t, tc.patch)})
 				if err == nil {
 					_, err = call.Execute(context.Background(), check)
 				}

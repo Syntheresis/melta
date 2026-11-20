@@ -554,7 +554,7 @@ func TestSubmitRejectsClosedActiveChild(t *testing.T) {
 	childC := leaseCoordinator(t, h, completionChildID)
 	parentC := leaseCoordinator(t, h, completionParentID)
 	parentC.mu.Lock()
-	member, err := h.admitBackgroundMember(parentC, memberSession, completionChildID, 0)
+	member, err := h.admitBackgroundMember(parentC, memberSession, completionChildID)
 	parentC.mu.Unlock()
 	testassert.NoError(t, err)
 	stopped := make(chan error, 1)
@@ -902,7 +902,7 @@ func TestStopChildJoinsReservationAndRun(t *testing.T) {
 	childC := leaseCoordinator(t, h, completionChildID)
 	parentC := leaseCoordinator(t, h, testSessionID)
 	parentC.mu.Lock()
-	member, err := h.admitBackgroundMember(parentC, memberSession, completionChildID, 0)
+	member, err := h.admitBackgroundMember(parentC, memberSession, completionChildID)
 	parentC.mu.Unlock()
 	testassert.NoError(t, err)
 	childC.mu.Lock()
@@ -1049,7 +1049,7 @@ func TestStopConcurrentCallersJoinSameError(t *testing.T) {
 	h, cancel := newCancelableHarness(t, store, modelPrepared(quickModel()), nil)
 	defer cancel()
 	c := leaseCoordinator(t, h, testSessionID)
-	member, err := admitLocked(h, c, memberSession, childID, 0)
+	member, err := admitLocked(h, c, memberSession, childID)
 	testassert.NoError(t, err)
 	corruptKey := RegisterKey{SessionID: childID, Kind: RegisterSession}
 	corruptBefore, err := store.ReadRegister(context.Background(), corruptKey)
@@ -1152,7 +1152,7 @@ func TestStopReportsChildErrorAndWaitsForNaturalDelivery(t *testing.T) {
 		insertMalformedChildSession(t, store, childID)
 		h := newTestHarness(t, store, nil)
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberSession, childID, 0)
+		member, err := admitLocked(h, c, memberSession, childID)
 		testassert.NoError(t, err)
 		err = h.Stop(context.Background(), testSessionID)
 		var corrupt *CorruptionError
@@ -1171,7 +1171,7 @@ func TestStopReportsChildErrorAndWaitsForNaturalDelivery(t *testing.T) {
 		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
 		testassert.NoError(t, err)
 
 		store.mu.Lock()
@@ -1352,7 +1352,7 @@ func TestArchiveGateRejectsLiveMembers(t *testing.T) {
 	store := freshSessionStore(t)
 	h := newTestHarness(t, store, nil)
 	c := leaseCoordinator(t, h, testSessionID)
-	member, err := admitLocked(h, c, memberJob, jobFixtureID, 0)
+	member, err := admitLocked(h, c, memberJob, jobFixtureID)
 	testassert.NoError(t, err)
 	{
 		_, ok := claimLocked(h, c, member.completionID)

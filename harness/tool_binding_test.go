@@ -39,7 +39,7 @@ func TestToolBindingSettlement(t *testing.T) {
 		{name: "executor", callName: "echo", executor: true, wantStatus: model.ResultSuccess, wantBound: true, wantArgs: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lookups, normalizations, prepares, executions := 0, 0, 0, 0
+			lookups, normalizations, prepares, executions, releases := 0, 0, 0, 0, 0
 			identity := ToolImplementation{ID: "actual-capability", ExtensionID: "actual-extension"}
 			inv := InvocationExecution{LookupTool: func(name string) (ToolBinding, bool) {
 				lookups++
@@ -48,6 +48,7 @@ func TestToolBindingSettlement(t *testing.T) {
 				}
 				binding := ToolBinding{
 					Identity: identity,
+					Release:  func() { releases++ },
 					Normalize: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 						normalizations++
 						if tc.invalid {
@@ -113,6 +114,11 @@ func TestToolBindingSettlement(t *testing.T) {
 			}
 			if !tc.executor {
 				testassert.Equal(t, executions, 0)
+			}
+			if tc.callName == "ghost" || tc.missing {
+				testassert.Equal(t, releases, 0)
+			} else {
+				testassert.Equal(t, releases, 1)
 			}
 		})
 	}

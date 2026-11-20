@@ -10,9 +10,9 @@ import (
 )
 
 func acceptHostMethod(service, method string, args json.RawMessage, pure bool) (json.RawMessage, error) {
-	definition, ok := extension.HostCapability(service)
+	definitions, ok := extension.HostService(service)
 	if ok {
-		for _, m := range definition.Methods {
+		for _, m := range definitions {
 			if m.Name == method {
 				contract, err := extension.CompileMethod(m)
 				if err != nil {
@@ -32,12 +32,12 @@ func (scope *nativeCallScope) callGuardedHost(ctx context.Context, service, meth
 	if scope.host == nil {
 		return extension.Result{}, extension.ErrClosed
 	}
-	definition, ok := extension.HostCapability(service)
+	definitions, ok := extension.HostService(service)
 	if !ok {
 		return extension.Result{}, extension.ErrClosed
 	}
 	var contract *extension.CompiledMethod
-	for _, m := range definition.Methods {
+	for _, m := range definitions {
 		if m.Name == method {
 			var err error
 			contract, err = extension.CompileMethod(m)
@@ -54,18 +54,18 @@ func (scope *nativeCallScope) callGuardedHost(ctx context.Context, service, meth
 	if err != nil {
 		return extension.Result{}, err
 	}
-	call := extension.CallContext{ExtensionID: scope.activation.id, SessionID: scope.session.SessionID, Workspace: scope.session.Workspace}
+	call := hostCall{ExtensionID: scope.activation.id, SessionID: scope.session.SessionID, Workspace: scope.session.Workspace}
 	if scope.lease != nil {
 		ctx = context.WithValue(ctx, artifactLeaseKey{}, scope.lease)
 	}
-	var handler extension.Handler
+	var handler hostHandler
 	if service == extension.ContractCredentials {
 		values := make(map[string]string)
 		for field, binding := range scope.activation.bindings {
 			values[field] = binding.value
 		}
 		ctx = context.WithValue(ctx, secretValuesKey{}, secretValues{activation: values, operation: scope.operationSecrets})
-		handler = func(ctx context.Context, call extension.CallContext, args json.RawMessage) (extension.Result, error) {
+		handler = func(ctx context.Context, call hostCall, args json.RawMessage) (extension.Result, error) {
 			var input struct {
 				Field string `json:"field"`
 			}
@@ -85,7 +85,7 @@ func (scope *nativeCallScope) callGuardedHost(ctx context.Context, service, meth
 			}
 		}
 		owner.nativeMu.Unlock()
-		handler = func(ctx context.Context, call extension.CallContext, _ json.RawMessage) (extension.Result, error) {
+		handler = func(ctx context.Context, call hostCall, _ json.RawMessage) (extension.Result, error) {
 			return scope.host.claimExternalData(ctx, call, cleanup)
 		}
 	} else {

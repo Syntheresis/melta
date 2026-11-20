@@ -14,6 +14,21 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
+// publishNativeCandidate publishes one test-built native candidate and
+// attaches it to the published configuration snapshot, the pair a production
+// build commits together.
+func publishNativeCandidate(t *testing.T, r *Melta, candidate *nativeCandidate) {
+	t.Helper()
+	if err := candidate.publishForTest(); err != nil {
+		t.Fatal(err)
+	}
+	r.config.nativeMu.Lock()
+	if snapshot := r.config.current(); snapshot != nil {
+		snapshot.native = candidate
+	}
+	r.config.nativeMu.Unlock()
+}
+
 func TestScopedServiceReadVersusForkReceiptAfterDeletion(t *testing.T) {
 	r, env := openProjectionRuntime(t, storage.NewMemory())
 	defer closeProjectionRuntime(r)
@@ -82,23 +97,21 @@ func TestScopedServiceReadVersusForkReceiptAfterDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer candidate.release()
-	if err := candidate.publish(); err != nil {
-		t.Fatal(err)
-	}
+	publishNativeCandidate(t, r, candidate)
 	readDone, forkDone, fakeDone := make(chan extensionOutcome, 1), make(chan extensionOutcome, 1), make(chan extensionOutcome, 1)
 	go func() {
-		result, err := r.invokeRegisteredOperation(ctx, testCaller(r), "operation", "read", sessionTarget(session), []byte(`{}`), nil)
+		result, err := r.invokeRegisteredOperation(ctx, testCaller(r), "operation", "read", sessionTarget(session), []byte(`{}`), "")
 		readDone <- extensionOutcome{result: result, err: err}
 	}()
 	<-readEntered
 	go func() {
-		result, err := r.invokeRegisteredOperation(ctx, testCaller(r), "operation", "fake", sessionTarget(session), []byte(`{}`), nil)
+		result, err := r.invokeRegisteredOperation(ctx, testCaller(r), "operation", "fake", sessionTarget(session), []byte(`{}`), "")
 		fakeDone <- extensionOutcome{result: result, err: err}
 	}()
 	<-fakeEntered
 	args, _ := json.Marshal(map[string]any{"operation_id": "fork-op", "boundary_item_id": boundary, "content": []map[string]string{{"kind": "text", "text": "fork"}}})
 	go func() {
-		result, err := r.invokeRegisteredOperation(ctx, testCaller(r), "operation", "fork", sessionTarget(session), args, nil)
+		result, err := r.invokeRegisteredOperation(ctx, testCaller(r), "operation", "fork", sessionTarget(session), args, "")
 		forkDone <- extensionOutcome{result: result, err: err}
 	}()
 	<-forkEntered
@@ -191,9 +204,7 @@ func TestScopedServiceBufferedSubmitReceiptSurvivesCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer candidate.release()
-	if err := candidate.publish(); err != nil {
-		t.Fatal(err)
-	}
+	publishNativeCandidate(t, r, candidate)
 	args, err := json.Marshal(commandSubmitRequest(t, "buffered", "buffered"))
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +212,7 @@ func TestScopedServiceBufferedSubmitReceiptSurvivesCancellation(t *testing.T) {
 	callCtx, cancel := context.WithCancel(ctx)
 	done := make(chan extensionOutcome, 1)
 	go func() {
-		result, err := r.invokeRegisteredOperation(callCtx, testCaller(r), "submitter", "submit", sessionTarget(session), args, nil)
+		result, err := r.invokeRegisteredOperation(callCtx, testCaller(r), "submitter", "submit", sessionTarget(session), args, "")
 		done <- extensionOutcome{result: result, err: err}
 	}()
 	<-entered
@@ -217,7 +228,7 @@ func TestScopedServiceBufferedSubmitReceiptSurvivesCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = r.invokeRegisteredOperation(ctx, testCaller(r), "submitter", "partial", sessionTarget(session), partialArgs, nil)
+	_, err = r.invokeRegisteredOperation(ctx, testCaller(r), "submitter", "partial", sessionTarget(session), partialArgs, "")
 	var partial *extension.CallError
 	if !errors.As(err, &partial) || string(partial.Partial) != `{"declared":true}` {
 		t.Fatalf("declared partial lost after committed submit: %v", err)
@@ -229,7 +240,7 @@ func TestScopedServiceBufferedSubmitReceiptSurvivesCancellation(t *testing.T) {
 	successCtx, successCancel := context.WithCancel(ctx)
 	successDone := make(chan extensionOutcome, 1)
 	go func() {
-		result, err := r.invokeRegisteredOperation(successCtx, testCaller(r), "submitter", "submit-success", sessionTarget(session), successArgs, nil)
+		result, err := r.invokeRegisteredOperation(successCtx, testCaller(r), "submitter", "submit-success", sessionTarget(session), successArgs, "")
 		successDone <- extensionOutcome{result: result, err: err}
 	}()
 	<-successEntered
@@ -275,12 +286,12 @@ func TestScopedServiceOperationSelfReplacementRetainsHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer candidate.release()
-	if err := candidate.publish(); err != nil {
+	if err := candidate.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	target := protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}
 	for _, want := range []string{`"old"`, `"new"`} {
-		result, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "self", "replace", target, []byte(`{}`), nil)
+		result, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "self", "replace", target, []byte(`{}`), "")
 		if err != nil || string(result.Value) != want {
 			t.Fatalf("operation = %s, %v; want %s", result.Value, err, want)
 		}

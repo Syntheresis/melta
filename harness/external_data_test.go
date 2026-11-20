@@ -286,10 +286,10 @@ func TestClaimExternalDataNoopDoesNotObserve(t *testing.T) {
 	before := sessionRegister(t, store, session)
 	testassert.NoError(t, h.ClaimExternalData(context.Background(), session, "owner"))
 	testassert.Require(t, len(facts) == count && sessionRegister(t, store, session).Revision == before.Revision, "duplicate claim advanced or emitted an observation")
-	first, err := h.ChangeAgentType(context.Background(), session, testSelection("same"))
+	first, err := h.SetSessionInputs(context.Background(), session, testInputs("same"))
 	testassert.NoError(t, err)
 	count = len(facts)
-	second, err := h.ChangeAgentType(context.Background(), session, testSelection("same"))
+	second, err := h.SetSessionInputs(context.Background(), session, testInputs("same"))
 	testassert.NoError(t, err)
 	testassert.Require(t, len(facts) == count+1 && second.Revision == first.Revision+1, "identical selection did not advance and observe")
 }

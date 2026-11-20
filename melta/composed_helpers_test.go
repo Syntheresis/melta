@@ -95,7 +95,7 @@ func composedCaller(t *testing.T, r *melta.Melta) melta.Caller {
 }
 
 // composedOptions builds explicit construction inputs over one test home.
-func composedOptions(dataDir, configPath, home string, plugins []extension.Native) melta.Options {
+func composedOptions(dataDir, configPath, home string, plugins []extension.Extension) melta.Options {
 	dataRoot := filepath.Join(home, ".melta")
 	return melta.Options{
 		DataDir:       dataDir,
@@ -111,7 +111,7 @@ func composedOptions(dataDir, configPath, home string, plugins []extension.Nativ
 }
 
 // openComposed opens the public owner over one test home.
-func openComposed(ctx context.Context, dataDir, configPath, home string, plugins []extension.Native) (*melta.Melta, error) {
+func openComposed(ctx context.Context, dataDir, configPath, home string, plugins []extension.Extension) (*melta.Melta, error) {
 	return melta.Open(ctx, composedOptions(dataDir, configPath, home, plugins))
 }
 
@@ -154,7 +154,7 @@ func writeAgentDefinitionsForTest(t *testing.T, configPath, content string) {
 
 // openComposedHost opens the public owner with a protocol host release
 // callback so closing the owner also withdraws the mounted listener.
-func openComposedHost(ctx context.Context, dataDir, configPath, home string, plugins []extension.Native) (*melta.Melta, *runtime.ProtocolHost, error) {
+func openComposedHost(ctx context.Context, dataDir, configPath, home string, plugins []extension.Extension) (*melta.Melta, *runtime.ProtocolHost, error) {
 	host := runtime.NewProtocolHost()
 	options := composedOptions(dataDir, configPath, home, plugins)
 	options.BeforeRelease = host.BeforeRelease

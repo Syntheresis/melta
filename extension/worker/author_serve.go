@@ -48,6 +48,7 @@ type AuthorActivateParams struct {
 
 type AuthorCallContext struct {
 	Token       string                  `json:"token"`
+	RequestID   string                  `json:"request_id,omitempty"`
 	ExtensionID string                  `json:"extension_id"`
 	Settings    JSONBytes               `json:"settings"`
 	Session     harness.SessionIdentity `json:"session"`
@@ -76,8 +77,8 @@ type authorServer struct {
 	handlers  map[string]*authorRegistration
 }
 
-// ServeAuthor serves an extension entry over the author worker protocol.
-func ServeAuthor(ctx context.Context, author extension.Extension, in io.Reader, out io.Writer) error {
+// Serve serves an extension entry over the author worker protocol.
+func Serve(ctx context.Context, author extension.Extension, in io.Reader, out io.Writer) error {
 	if in == nil || out == nil || author.Activate == nil {
 		return errors.New("worker: author requires streams and an entry point")
 	}
@@ -87,7 +88,6 @@ func ServeAuthor(ctx context.Context, author extension.Extension, in io.Reader, 
 	s := &server{
 		ctx: ctx, author: &authorServer{extension: author, pending: make(map[string]chan Frame), handlers: make(map[string]*authorRegistration)},
 		reader: NewReader(in), writer: NewWriter(out),
-		instances: make(map[string]*openInstance), reserved: make(map[string]bool),
 		requests: make(map[string]context.CancelFunc), pending: make(map[string]chan hostcallOutcome),
 		done: make(chan struct{}), fatal: make(chan error, 1),
 	}
@@ -148,8 +148,9 @@ func (s *server) admitAuthorRequest(frame Frame, ctx context.Context, cancel con
 		s.launch(frame.ID, ctx, cancel, func(ctx context.Context) (json.RawMessage, error) {
 			call := extension.AuthorContext{
 				ExtensionID: params.Context.ExtensionID, Settings: bytes.Clone(params.Context.Settings),
-				Session: params.Context.Session, State: bytes.Clone(params.Context.State),
-				Call: s.callFunc(ctx, Context{Token: params.Context.Token}),
+				RequestID: params.Context.RequestID,
+				Session:   params.Context.Session, State: bytes.Clone(params.Context.State),
+				Call: s.callFunc(ctx, params.Context.Token),
 			}
 			switch registration.kind {
 			case "admission":
@@ -382,7 +383,7 @@ type authorAPI struct {
 
 func (a *authorAPI) Settings() json.RawMessage { return bytes.Clone(a.section) }
 func (a *authorAPI) Call(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
-	return a.server.hostcall(ctx, a.entry, Context{Token: a.token}, service, method, args)
+	return a.server.hostcall(ctx, a.entry, a.token, service, method, args)
 }
 
 type authorRegistration struct {

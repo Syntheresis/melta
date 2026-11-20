@@ -1,4 +1,4 @@
-package tool
+package agents
 
 import (
 	"fmt"
@@ -87,11 +87,6 @@ const ReadOnlyRunCommandDescription = `Executes a read-only shell command and re
 - Do not use this tool to read file contents — use read_file.`
 
 const ReadOnlyRunCommandRejected = "You are a read-only agent, so `run_command` only accepts a fixed allowlist of read-only commands, and this command is not allowed. Commands outside the list are rejected even when harmless. Allowed: ls, cat, grep, find, head, tail, wc, stat, which, pwd, echo, printf, and read-only git/rg/find."
-
-func isReadOnlyCommand(command string) bool {
-	_, err := ReadOnlyCommand(command)
-	return err == nil
-}
 
 // ReadOnlyCommand validates one command against the read-only allowlist and
 // returns its safely quoted rewritten form. The rewritten text is the

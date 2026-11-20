@@ -113,6 +113,7 @@ type StrategyBinding struct {
 	ID                    string
 	RequiresContextWindow bool
 	Strategy              ContextStrategy
+	Release               func()
 }
 
 // IncludedStrategyID is the included summary policy's fixed identity.

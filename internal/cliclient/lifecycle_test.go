@@ -35,7 +35,7 @@ func liveFixture(t *testing.T, active bool, special func(http.ResponseWriter, *h
 	t.Helper()
 	live := &liveRuntime{feeds: make(chan protocol.Event, 1024), streams: make(chan struct{}, 32), hydration: hydration(rootA, "1", []protocol.ConversationItem{assistant("canonical", "canonical clipboard", false)}, nil), special: special}
 	if active {
-		live.hydration.ActiveOperation = &protocol.Operation{OperationId: strings.Repeat("2", 32), RequestKind: "message", Status: "running", AgentSelection: fixtureSelection("captured"), Model: "captured/model"}
+		live.hydration.ActiveOperation = &protocol.Operation{OperationId: strings.Repeat("2", 32), RequestKind: "message", Status: "running", Model: "captured/model"}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		live.mu.Lock()
@@ -68,6 +68,8 @@ func liveFixture(t *testing.T, active bool, special func(http.ResponseWriter, *h
 			}
 		case r.URL.Path == "/v1/configuration":
 			_ = json.NewEncoder(w).Encode(configuration("1"))
+		case r.URL.Path == "/v1/extensions":
+			_ = json.NewEncoder(w).Encode([]protocol.RegisteredExtension{})
 		case r.URL.Path == "/v1/warnings":
 			_ = json.NewEncoder(w).Encode(warnings("1"))
 		case r.URL.Path == "/v1/sessions":

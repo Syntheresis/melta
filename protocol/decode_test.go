@@ -19,7 +19,7 @@ func TestDecodeValueExactRequestMembersButOpaquePayloads(t *testing.T) {
 	}
 
 	var invocation protocol.ExtensionInvocationRequest
-	body := []byte(`{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"1","method":"raw","target":{"kind":"harness"},"arguments":{"Code":"guest","RESULT":9007199254740993},"request_id":"req"}`)
+	body := []byte(`{"extension_id":"fixture","operation":"raw","target":{"kind":"harness"},"arguments":{"Code":"guest","RESULT":9007199254740993},"request_id":"req"}`)
 	if err := protocol.DecodeValue(body, &invocation); err != nil {
 		t.Fatalf("opaque arguments: %v", err)
 	}

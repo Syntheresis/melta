@@ -35,7 +35,7 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 	if len(section.Definitions) == 0 {
 		section.Definitions = []byte(`{}`)
 	}
-	definitions, err := parse(section.Definitions, nil, nil, nil)
+	definitions, err := parse(section.Definitions)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 				return extension.Result{}, err
 			}
 			return transformModel(input.Section, input.Arguments, func(data []byte) (*Config, error) {
-				return parse(data, nil, nil, nil)
+				return parse(data)
 			})
 		},
 	}}}

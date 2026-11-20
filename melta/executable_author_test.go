@@ -21,7 +21,7 @@ import (
 )
 
 func TestExecutableAuthorPromptTokenIsolation(t *testing.T) {
-	a := newExecutableActivation(executableExtension{}, nil)
+	a := newExecutableActivation("unused", nil)
 	calls := 0
 	a.author = &executableAuthor{}
 	grant, end := authorPromptGrant(context.Background(), extension.AuthorContext{}, extension.PromptAccess{Default: func() (string, error) { calls++; return "prompt", nil }})
@@ -59,7 +59,7 @@ func TestExecutableAuthorPromptTokenIsolation(t *testing.T) {
 }
 
 func TestExecutableAuthorHostcallTokenIsolation(t *testing.T) {
-	a := newExecutableActivation(executableExtension{}, nil)
+	a := newExecutableActivation("unused", nil)
 	a.author = &executableAuthor{registrations: map[string]extension.Registration{"handle": struct{}{}}}
 	calls := 0
 	a.tokens["valid"] = func(_ context.Context, _, _ string, args json.RawMessage) (extension.Result, error) {
@@ -150,7 +150,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(source, "worker"), binaryBytes, 0700); err != nil {
 				t.Fatal(err)
 			}
-			manifestBytes, err := worker.EncodeAuthorManifest(selected, "worker")
+			manifestBytes, err := worker.EncodeManifest(selected, "worker")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -158,7 +158,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 				t.Fatal(err)
 			}
 			manager := newPackageManager(dataDir)
-			if _, err := manager.installAuthor(source); err != nil {
+			if _, err := manager.install(source); err != nil {
 				t.Fatal(err)
 			}
 			selection, ok, err := readSelection(filepath.Join(dataDir, "extensions", extensionDataHash(selected.ID)))
@@ -210,7 +210,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 				if _, err := os.Stat(marker); !os.IsNotExist(err) {
 					t.Fatalf("entry ran before manifest accepted: %v", err)
 				}
-				if err := candidate.publish(); err != nil {
+				if err := candidate.publishForTest(); err != nil {
 					t.Fatal(err)
 				}
 				corrected := executableAuthorExtension(manifest, entry, environment)
@@ -230,7 +230,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if len(candidate.inactive) != 0 {
 				t.Fatal(candidate.inactive)
 			}
-			if err := candidate.publish(); err != nil {
+			if err := candidate.publishForTest(); err != nil {
 				t.Fatal(err)
 			}
 			result, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"value":123}`), &nativeCallScope{pure: true})
@@ -339,7 +339,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if releases.Load() != 1 {
 				t.Fatalf("release count = %d", releases.Load())
 			}
-			stage := candidate.snapshot()
+			stage := candidate.snapshotForTest()
 			defer stage.release()
 			strategy := stage.strategies["worker-strategy"]
 			if strategy == nil {
@@ -470,7 +470,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if changed.inactive[selected.ID] == nil || spawns != 1 {
 				t.Fatalf("failure lost on settings/credential change: inactive %v, spawns %d", changed.inactive, spawns)
 			}
-			if err := changed.publish(); err != nil {
+			if err := changed.publishForTest(); err != nil {
 				t.Fatal(err)
 			}
 			discarded := makeCandidate(`{}`, "", false)
@@ -482,7 +482,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}
 			disabled := makeCandidate(`{}`, "", false)
 			defer disabled.release()
-			if err := disabled.publish(); err != nil {
+			if err := disabled.publishForTest(); err != nil {
 				t.Fatal(err)
 			}
 			reenabled := makeCandidate(`{}`, "AUTHOR_FIXTURE_SECRET", true)
@@ -490,7 +490,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if reenabled.inactive[selected.ID] != nil || spawns != 2 {
 				t.Fatalf("published re-enable: inactive %v, spawns %d", reenabled.inactive, spawns)
 			}
-			if err := reenabled.publish(); err != nil {
+			if err := reenabled.publishForTest(); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -501,10 +501,10 @@ func TestExecutableAuthorManifestInstallRejectsInvalid(t *testing.T) {
 	manifest := extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
 	for _, test := range []struct {
 		name string
-		edit func(*worker.AuthorManifest)
+		edit func(*worker.Manifest)
 	}{
-		{"api", func(m *worker.AuthorManifest) { m.Manifest.APIVersion = "4" }},
-		{"entry", func(m *worker.AuthorManifest) { m.EntryPoint = "../worker" }},
+		{"api", func(m *worker.Manifest) { m.Manifest.APIVersion = "4" }},
+		{"entry", func(m *worker.Manifest) { m.EntryPoint = "../worker" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source, dataDir := t.TempDir(), t.TempDir()
@@ -512,7 +512,7 @@ func TestExecutableAuthorManifestInstallRejectsInvalid(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(source, "worker"), []byte("#!/bin/sh\ntouch "+marker+"\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			pkg := worker.AuthorManifest{EntryPoint: "worker", Manifest: manifest}
+			pkg := worker.Manifest{EntryPoint: "worker", Manifest: manifest}
 			test.edit(&pkg)
 			raw, err := json.Marshal(pkg)
 			if err != nil {
@@ -521,7 +521,7 @@ func TestExecutableAuthorManifestInstallRejectsInvalid(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(source, "manifest.json"), raw, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := newPackageManager(dataDir).installAuthor(source); err == nil {
+			if _, err := newPackageManager(dataDir).install(source); err == nil {
 				t.Fatal("invalid package accepted")
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -579,12 +579,12 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 		t.Fatalf("invalid settings: inactive %v, spawns %d", invalid.inactive, spawns)
 	}
 	defer invalid.release()
-	if err := invalid.publish(); err != nil {
+	if err := invalid.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	old := build(`{}`)
 	defer old.release()
-	if err := old.publish(); err != nil {
+	if err := old.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	captured := old.capture()
@@ -613,7 +613,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	}
 	successor := build(`{"revision":2}`)
 	defer successor.release()
-	if err := successor.publish(); err != nil {
+	if err := successor.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	if spawns != 2 {
@@ -655,7 +655,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer disabled.release()
-	if err := disabled.publish(); err != nil {
+	if err := disabled.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	failed, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{
@@ -669,7 +669,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 		t.Fatalf("activation failure: inactive %v, spawns %d", failed.inactive, spawns)
 	}
 	defer failed.release()
-	if err := failed.publish(); err != nil {
+	if err := failed.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	sticky, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{
@@ -706,7 +706,7 @@ func TestExecutableAuthorPreHelloFailureSticky(t *testing.T) {
 	if invalid.inactive[manifest.ID] == nil || attempts != 0 {
 		t.Fatalf("invalid section: %v, attempts %d", invalid.inactive, attempts)
 	}
-	if err := invalid.publish(); err != nil {
+	if err := invalid.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	failed := build(`{}`)
@@ -714,7 +714,7 @@ func TestExecutableAuthorPreHelloFailureSticky(t *testing.T) {
 	if failed.inactive[manifest.ID] == nil || attempts != 1 {
 		t.Fatalf("environment failure: %v, attempts %d", failed.inactive, attempts)
 	}
-	if err := failed.publish(); err != nil {
+	if err := failed.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	edited := build(`{"changed":true}`)

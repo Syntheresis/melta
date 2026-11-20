@@ -20,8 +20,6 @@ import (
 
 const (
 	externalExtensionID    = "external.ext"
-	externalCapabilityID   = "external.ext.api"
-	externalContractID     = "external.ext.api/v1"
 	externalFailureCode    = "external_declared"
 	externalFailureMessage = "line one\nline two \"quoted\""
 
@@ -42,49 +40,31 @@ type externalCalls struct {
 	opens atomic.Int32
 }
 
-// externalExtension is the public native extension of this module: one
-// Harness-scoped service with the fixed data and command host bindings. Its
-// work method is a concrete Session-target session_work method; fail and raw
-// are concrete Harness-target queries.
-func externalExtension(calls *externalCalls) extension.Native {
-	data, _ := extension.HostCapability(extension.ContractData)
-	commands, _ := extension.HostCapability(extension.ContractCommands)
-	return extension.Native{
-		Declaration: extension.Declaration{
-			ID:           externalExtensionID,
-			Version:      "1.0.0",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}`),
-			Components: []extension.Component{{
-				ID:       "external.ext.component",
-				Lifetime: extension.LifetimeHarness,
-				Provides: []string{externalCapabilityID},
-				Requires: []extension.Binding{
-					{Name: "data", Provider: extension.HostProvider, CapabilityID: extension.ContractData, Definition: data},
-					{Name: "commands", Provider: extension.HostProvider, CapabilityID: extension.ContractCommands, Definition: commands},
-				},
-			}},
-			Capabilities: []extension.Capability{extension.ServiceCapability(externalCapabilityID, externalContractID,
-				extension.ServiceMethod("work", extension.ModeServiceIO,
-					`{"type":"object","required":["submit"],"properties":{"submit":{"type":"object"}},"additionalProperties":false}`,
-					`{"type":"object"}`, "", ""),
-				extension.ServiceMethod("fail", extension.ModeServiceIO, `{}`, `{}`, `{}`, `{}`),
-				extension.ServiceMethod("raw", extension.ModeServiceIO, `{}`, `{}`, "", ""),
-			)},
-			Exposed: []extension.ExposedMethod{
-				{Method: extension.MethodKey{CapabilityID: externalCapabilityID, Method: "work"}, Kind: extension.ExposedSessionWork, Target: extension.ExposedTargetSession},
-				{Method: extension.MethodKey{CapabilityID: externalCapabilityID, Method: "fail"}, Kind: extension.ExposedQuery, Target: extension.ExposedTargetHarness},
-				{Method: extension.MethodKey{CapabilityID: externalCapabilityID, Method: "raw"}, Kind: extension.ExposedQuery, Target: extension.ExposedTargetHarness},
-			},
+// externalExtension is the public extension of this module: the host data and
+// command services plus the work/fail/raw operations. Its work method is a
+// concrete Session-targeted operation; fail and raw are Harness-targeted.
+func externalExtension(calls *externalCalls) extension.Extension {
+	workInput := `{"type":"object","required":["submit"],"properties":{"submit":{"type":"object"}},"additionalProperties":false}`
+	return extension.Extension{
+		Manifest: extension.Manifest{
+			ID:             externalExtensionID,
+			Version:        "1.0.0",
+			APIVersion:     extension.APIVersion,
+			SettingsSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"}},"additionalProperties":false}`),
+			Services:       []string{extension.ContractData, extension.ContractCommands},
 		},
-		Open: func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			calls.opens.Add(1)
-			return extension.Instance{Capabilities: map[string]extension.Implementation{
-				externalCapabilityID: {Service: map[string]extension.Handler{
-					"work": externalWork,
-					"fail": externalFail,
-					"raw":  externalRaw,
-				}},
-			}}, nil
+			for _, operation := range []extension.Operation{
+				{Target: extension.ExposedTargetSession, Method: extension.ServiceIOMethod("work", workInput, `{"type":"object"}`), Handler: externalWork},
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("fail", extension.ModeServiceIO, `{}`, `{}`, `{}`, `{}`), Handler: externalFail},
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceIOMethod("raw", `{}`, `{}`), Handler: externalRaw},
+			} {
+				if _, err := api.RegisterOperation(operation, nil); err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
 		},
 	}
 }
@@ -92,7 +72,7 @@ func externalExtension(calls *externalCalls) extension.Native {
 // externalWork obtains the extension's own Session and cache directories
 // through the declared host data service, writes one sentinel into each, and
 // submits ordinary admitted work through the fixed command bridge.
-func externalWork(ctx context.Context, call extension.CallContext, arguments json.RawMessage) (extension.Result, error) {
+func externalWork(ctx context.Context, call extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
 	var request struct {
 		Submit json.RawMessage `json:"submit"`
 	}
@@ -116,7 +96,7 @@ func externalWork(ctx context.Context, call extension.CallContext, arguments jso
 	if err := os.WriteFile(filepath.Join(cacheDirectory, "cache.sentinel"), []byte("cache"), 0o600); err != nil {
 		return extension.Result{}, err
 	}
-	submitted, err := call.Call(ctx, "commands", "submit", request.Submit)
+	submitted, err := call.Call(ctx, extension.ContractCommands, "submit", request.Submit)
 	if err != nil {
 		return extension.Result{}, err
 	}
@@ -134,8 +114,8 @@ func externalWork(ctx context.Context, call extension.CallContext, arguments jso
 	return extension.Result{Value: value}, nil
 }
 
-func externalNamespace(ctx context.Context, call extension.CallContext, method string) (string, error) {
-	result, err := call.Call(ctx, "data", method, json.RawMessage(`{}`))
+func externalNamespace(ctx context.Context, call extension.AuthorContext, method string) (string, error) {
+	result, err := call.Call(ctx, extension.ContractData, method, json.RawMessage(`{}`))
 	if err != nil {
 		return "", err
 	}
@@ -154,7 +134,7 @@ func externalNamespace(ctx context.Context, call extension.CallContext, method s
 	return value.Directory, nil
 }
 
-func externalFail(context.Context, extension.CallContext, json.RawMessage) (extension.Result, error) {
+func externalFail(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 	return extension.Result{Failure: &extension.Failure{
 		Code:    externalFailureCode,
 		Message: externalFailureMessage,
@@ -163,7 +143,7 @@ func externalFail(context.Context, extension.CallContext, json.RawMessage) (exte
 	}}, nil
 }
 
-func externalRaw(_ context.Context, _ extension.CallContext, arguments json.RawMessage) (extension.Result, error) {
+func externalRaw(_ context.Context, _ extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
 	return extension.Result{Value: append(json.RawMessage(nil), arguments...)}, nil
 }
 
@@ -180,17 +160,14 @@ func externalExtensionConfiguration(endpoint string) []byte {
 	return encoded
 }
 
-func externalRequest(capabilityID, contractID, method string, target protocol.ExtensionInvocationTarget, arguments, requestID string) protocol.ExtensionInvocationRequest {
+func externalRequest(operation string, target protocol.ExtensionInvocationTarget, arguments, requestID string) protocol.ExtensionInvocationRequest {
 	rawArguments := json.RawMessage(arguments)
 	return protocol.ExtensionInvocationRequest{
-		ExtensionId:     externalExtensionID,
-		CapabilityId:    capabilityID,
-		ContractId:      contractID,
-		ContractVersion: extension.ContractVersion,
-		Method:          method,
-		Target:          target,
-		Arguments:       &rawArguments,
-		RequestId:       requestID,
+		ExtensionId: externalExtensionID,
+		Operation:   operation,
+		Target:      target,
+		Arguments:   &rawArguments,
+		RequestId:   requestID,
 	}
 }
 
@@ -235,9 +212,9 @@ func TestPublicExtensionIntegration(t *testing.T) {
 	credentials := &memoryCredentials{values: map[string]melta.CredentialValue{
 		externalKeyEnv: {Value: externalKey, Defined: true, Managed: true},
 	}}
-	inputs := melta.DefaultAgentInputs()
-	inputs.Model = model.ModelRef{Provider: "prov", Model: "m"}
-	inputs.Instructions = "The external extension module."
+	ref := model.ModelRef{Provider: "prov", Model: "m"}
+	instructions := "The external extension module."
+	inputs := harness.SessionInputs{Model: &ref, Instructions: &instructions}
 	calls := &externalCalls{}
 	options := melta.Options{
 		DataDir:       dataDir,
@@ -249,8 +226,8 @@ func TestPublicExtensionIntegration(t *testing.T) {
 			WorkspacePolicyDir: filepath.Join(t.TempDir(), "projects"),
 		},
 		Identity:   "external extension application",
-		Agent:      &inputs,
-		Extensions: []extension.Native{externalExtension(calls)},
+		Defaults:   inputs,
+		Extensions: []extension.Extension{externalExtension(calls)},
 	}
 	ctx := context.Background()
 	owner := openOwner(t, options)
@@ -269,11 +246,11 @@ func TestPublicExtensionIntegration(t *testing.T) {
 		t.Fatalf("Session Caller: %v", err)
 	}
 
-	catalog, err := owner.ListExtensionCapabilities(ctx, bound)
+	catalog, err := owner.ListExtensions(ctx, bound)
 	if err != nil {
-		t.Fatalf("ListExtensionCapabilities: %v", err)
+		t.Fatalf("ListExtensions: %v", err)
 	}
-	var entry *protocol.ExtensionCapabilityCatalog
+	var entry *protocol.RegisteredExtension
 	for i := range catalog {
 		if catalog[i].ExtensionId == externalExtensionID {
 			entry = &catalog[i]
@@ -286,32 +263,22 @@ func TestPublicExtensionIntegration(t *testing.T) {
 	if entry.Version != "1.0.0" || !strings.Contains(entry.Settings, `"enabled":true`) {
 		t.Fatalf("catalog entry = version %q settings %q", entry.Version, entry.Settings)
 	}
-	var discoveredCapability bool
-	for _, capability := range entry.Capabilities {
-		if capability.CapabilityId != externalCapabilityID {
-			continue
-		}
-		discoveredCapability = capability.ContractId == externalContractID && capability.ContractVersion == extension.ContractVersion && capability.Kind == protocol.ExtensionCapabilityKindService
-	}
-	if !discoveredCapability {
-		t.Fatalf("catalog capabilities = %+v, want the declared service capability", entry.Capabilities)
-	}
 	var discoveredWork, discoveredFail, discoveredRaw bool
-	for _, exposed := range entry.Exposed {
-		switch exposed.Method {
+	for _, exposed := range entry.Operations {
+		switch exposed.Method.Name {
 		case "work":
-			discoveredWork = exposed.CapabilityId == externalCapabilityID && exposed.Kind == protocol.SessionWork && exposed.Target == protocol.ExtensionExposureTargetSession
+			discoveredWork = exposed.Target == protocol.RegisteredExtensionOperationTargetSession
 		case "fail":
-			discoveredFail = exposed.Kind == protocol.Query && exposed.Target == protocol.ExtensionExposureTargetHarness
+			discoveredFail = exposed.Target == protocol.RegisteredExtensionOperationTargetHarness
 		case "raw":
-			discoveredRaw = exposed.Kind == protocol.Query && exposed.Target == protocol.ExtensionExposureTargetHarness
+			discoveredRaw = exposed.Target == protocol.RegisteredExtensionOperationTargetHarness
 		}
 	}
 	if !discoveredWork || !discoveredFail || !discoveredRaw {
-		t.Fatalf("catalog exposures = %+v, want the work/fail/raw entries", entry.Exposed)
+		t.Fatalf("catalog operations = %+v, want the work/fail/raw entries", entry.Operations)
 	}
 
-	raw, err := owner.InvokeExtension(ctx, bound, externalRequest(externalCapabilityID, externalContractID, "raw", externalHarnessTarget(), externalRawValue, "req-external-raw"))
+	raw, err := owner.InvokeExtension(ctx, bound, externalRequest("raw", externalHarnessTarget(), externalRawValue, "req-external-raw"))
 	if err != nil {
 		t.Fatalf("raw invocation: %v", err)
 	}
@@ -319,7 +286,7 @@ func TestPublicExtensionIntegration(t *testing.T) {
 		t.Fatalf("raw result = %+v, want the exact %q", raw, externalRawValue)
 	}
 
-	failure, err := owner.InvokeExtension(ctx, bound, externalRequest(externalCapabilityID, externalContractID, "fail", externalHarnessTarget(), `{}`, "req-external-fail"))
+	failure, err := owner.InvokeExtension(ctx, bound, externalRequest("fail", externalHarnessTarget(), `{}`, "req-external-fail"))
 	if err != nil {
 		t.Fatalf("declared failure invocation = %v, want a nil Go error", err)
 	}
@@ -328,7 +295,7 @@ func TestPublicExtensionIntegration(t *testing.T) {
 	}
 
 	workArguments := `{"submit":{"operation_id":"op-external-extension","mode":"regular","content":[{"kind":"text","text":"external work"}]}}`
-	work, err := owner.InvokeExtension(ctx, sessionCaller, externalRequest(externalCapabilityID, externalContractID, "work", externalSessionTarget(sessionID), workArguments, "req-external-work"))
+	work, err := owner.InvokeExtension(ctx, sessionCaller, externalRequest("work", externalSessionTarget(sessionID), workArguments, "req-external-work"))
 	if err != nil {
 		t.Fatalf("Session-target work invocation: %v", err)
 	}
@@ -379,9 +346,9 @@ func TestPublicExtensionIntegration(t *testing.T) {
 	reopened := openOwner(t, options)
 	defer func() { _ = reopened.Close(ctx) }()
 	reopenedCaller := caller(t, reopened)
-	catalog, err = reopened.ListExtensionCapabilities(ctx, reopenedCaller)
+	catalog, err = reopened.ListExtensions(ctx, reopenedCaller)
 	if err != nil {
-		t.Fatalf("reopened ListExtensionCapabilities: %v", err)
+		t.Fatalf("reopened ListExtensions: %v", err)
 	}
 	for _, candidate := range catalog {
 		if candidate.ExtensionId == externalExtensionID {
@@ -391,7 +358,7 @@ func TestPublicExtensionIntegration(t *testing.T) {
 	if got := calls.opens.Load(); got != 1 {
 		t.Fatalf("extension opened %d times after removal, want no replay", got)
 	}
-	_, err = reopened.InvokeExtension(ctx, reopenedCaller, externalRequest(externalCapabilityID, externalContractID, "work", externalSessionTarget(sessionID), workArguments, "req-external-removed"))
+	_, err = reopened.InvokeExtension(ctx, reopenedCaller, externalRequest("work", externalSessionTarget(sessionID), workArguments, "req-external-removed"))
 	if !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("invocation after removal = %v, want not-found", err)
 	}

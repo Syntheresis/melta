@@ -16,7 +16,7 @@ func TestApplyPatchPreviewMetadataEmitsEditPreviewFiles(t *testing.T) {
 	store := newTempCodeGroupStore(t)
 
 	input := applyPatchInput(t, "*** Add File: new.txt\n+hi\n*** Update File: x.txt\n@@\n alpha\n-BEFORE\n+AFTER\n beta\n*** Delete File: a.txt")
-	res, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	res, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.NoError(t, err)
 
 	md := ApplyPatchPreviewMetadata(res.Previews)
@@ -46,7 +46,7 @@ func TestApplyPatchPreviewMetadataMoveTwoEntries(t *testing.T) {
 	store := newTempCodeGroupStore(t)
 
 	input := applyPatchInput(t, "*** Update File: old.go\n*** Move to: new.go\n@@\n a\n-B\n+B2\n c")
-	res, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	res, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.NoError(t, err)
 
 	md := ApplyPatchPreviewMetadata(res.Previews)
@@ -62,7 +62,7 @@ func TestApplyPatchFailureEmitsNoPreviewMetadata(t *testing.T) {
 	store := newTempCodeGroupStore(t)
 
 	input := applyPatchInput(t, "*** Delete File: ghost.txt")
-	res, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	res, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil, "Execute err = nil, want non-nil for delete-of-missing")
 	{
 		md := ApplyPatchPreviewMetadata(res.Previews)

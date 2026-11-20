@@ -7,19 +7,18 @@ import (
 
 // resolveApplyPatchTargetsFromParsed resolves every op (and Move
 // destination) of an already-parsed patch into canonical targets. This is
-// pure path/stat/canonicalization plus the collision and write-dir checks;
-// no content is read. The V4A patch is parsed exactly once per call by the
-// caller.
-func resolveApplyPatchTargetsFromParsed(root string, p *patch, approved approvedBinding) ([]boundCall, error) {
+// pure path/stat/canonicalization plus the collision check; no content is
+// read. The V4A patch is parsed exactly once per call by the caller.
+func resolveApplyPatchTargetsFromParsed(root string, p *patch, rootCanonical string) ([]boundCall, error) {
 	targets := make([]boundCall, 0, len(p.ops)*2)
 	for _, op := range p.ops {
-		target, err := bindCanonicalTarget(root, "apply_patch", op.path, approved)
+		target, err := bindCanonicalTarget(root, "apply_patch", op.path, rootCanonical)
 		if err != nil {
 			return nil, err
 		}
 		targets = append(targets, target)
 		if op.movePath != "" {
-			target, err := bindCanonicalTarget(root, "apply_patch", op.movePath, approved)
+			target, err := bindCanonicalTarget(root, "apply_patch", op.movePath, rootCanonical)
 			if err != nil {
 				return nil, err
 			}

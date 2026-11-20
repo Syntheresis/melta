@@ -421,7 +421,7 @@ func TestPrepareWriteRevalidatesRepointedWorkspaceRoot(t *testing.T) {
 
 	args, err := NormalizeWriteArgs(map[string]any{"path": filepath.Join(realA, "f.txt"), "content": "y"})
 	testassert.NoError(t, err)
-	prepared, err := PrepareWriteCall(root, "", "", CapabilityOptions{}, store, args)
+	prepared, err := PrepareWriteCall(root, "", store, args)
 	testassert.NoError(t, err)
 	repointWorkspaceRoot(t, root, realB)
 	{
@@ -445,7 +445,7 @@ func TestPreparePatchRevalidatesRepointedWorkspaceRoot(t *testing.T) {
 	testassert.NoError(t, err)
 	rootCanonical, err := bindWorkspaceRoot(root)
 	testassert.NoError(t, err)
-	prepared, err := PreparePatchCall(root, rootCanonical, "", CapabilityOptions{}, store, args)
+	prepared, err := PreparePatchCall(root, rootCanonical, store, args)
 	testassert.NoError(t, err)
 	repointWorkspaceRoot(t, root, realB)
 	{
@@ -523,7 +523,7 @@ func TestPreparedEditAndWritePaths(t *testing.T) {
 	// target path) overwrites content.
 	args, err := NormalizeWriteArgs(map[string]any{"path": path, "content": "changed"})
 	testassert.NoError(t, err)
-	prepared, err := PrepareWriteCall(dir, "", "", CapabilityOptions{}, store, args)
+	prepared, err := PrepareWriteCall(dir, "", store, args)
 	testassert.NoError(t, err)
 	testassert.Require(t, len(prepared.Targets) == 1 && prepared.Targets[0].CanonicalPath == path, "targets = %+v, want the single canonical write target", prepared.Targets)
 	{
@@ -535,7 +535,7 @@ func TestPreparedEditAndWritePaths(t *testing.T) {
 	// Prepared edit through the exported entry applies the replacement.
 	editArgs, err := NormalizeEditArgs(map[string]any{"path": path, "old_string": "changed", "new_string": "final"})
 	testassert.NoError(t, err)
-	editPrepared, err := PrepareEditCall(dir, "", "", CapabilityOptions{}, store, editArgs)
+	editPrepared, err := PrepareEditCall(dir, "", store, editArgs)
 	testassert.NoError(t, err)
 	testassert.Require(t, len(editPrepared.Targets) == 1 && editPrepared.Targets[0].CanonicalPath == path, "edit targets = %+v, want the single canonical edit target", editPrepared.Targets)
 	{
@@ -548,7 +548,7 @@ func TestPreparedEditAndWritePaths(t *testing.T) {
 	// without mutating.
 	missing, err := NormalizeEditArgs(map[string]any{"path": path, "old_string": "absent", "new_string": "x"})
 	testassert.NoError(t, err)
-	missingPrepared, err := PrepareEditCall(dir, "", "", CapabilityOptions{}, store, missing)
+	missingPrepared, err := PrepareEditCall(dir, "", store, missing)
 	testassert.NoError(t, err)
 	{
 		_, err := missingPrepared.Execute(context.Background(), nil)
@@ -561,7 +561,7 @@ func TestPreparedEditAndWritePaths(t *testing.T) {
 	nested := filepath.Join(dir, "created", "deep", "new.txt")
 	nestedArgs, err := NormalizeWriteArgs(map[string]any{"path": nested, "content": "made"})
 	testassert.NoError(t, err)
-	nestedPrepared, err := PrepareWriteCall(dir, "", "", CapabilityOptions{}, store, nestedArgs)
+	nestedPrepared, err := PrepareWriteCall(dir, "", store, nestedArgs)
 	testassert.NoError(t, err)
 	{
 		_, err := nestedPrepared.Execute(context.Background(), nil)
@@ -602,7 +602,7 @@ func TestPrepareWriteAndEditDiscardSnapshotClaimOnPostSnapshotRevalidationFailur
 	}}
 	args, err := NormalizeWriteArgs(map[string]any{"path": link, "content": "after"})
 	testassert.NoError(t, err)
-	prepared, err := PrepareWriteCall(dir, "", "", CapabilityOptions{}, store, args)
+	prepared, err := PrepareWriteCall(dir, "", store, args)
 	testassert.NoError(t, err)
 	{
 		_, err := prepared.Execute(context.Background(), nil)
@@ -623,7 +623,7 @@ func TestPrepareWriteAndEditDiscardSnapshotClaimOnPostSnapshotRevalidationFailur
 	}}
 	editArgs, err := NormalizeEditArgs(map[string]any{"path": link, "old_string": "before", "new_string": "after"})
 	testassert.NoError(t, err)
-	editPrepared, err := PrepareEditCall(dir, "", "", CapabilityOptions{}, store2, editArgs)
+	editPrepared, err := PrepareEditCall(dir, "", store2, editArgs)
 	testassert.NoError(t, err)
 	{
 		_, err := editPrepared.Execute(context.Background(), nil)
@@ -643,7 +643,7 @@ func TestPreparePatchExecutesParsedPatchWithoutReparse(t *testing.T) {
 	input := applyPatchInput(t, "*** Update File: a.txt\n@@\n-hi\n+bye")
 
 	args := map[string]any{"input": input}
-	prepared, err := PreparePatchCall(dir, "", "", CapabilityOptions{}, store, args)
+	prepared, err := PreparePatchCall(dir, "", store, args)
 	testassert.NoError(t, err)
 	testassert.Require(t, len(prepared.Targets) == 1 && prepared.Targets[0].CanonicalPath == filepath.Join(dir, "a.txt"), "targets = %+v, want the single canonical patch target", prepared.Targets)
 
@@ -670,7 +670,7 @@ func TestPreparePatchClosureRevalidatesRepointedTarget(t *testing.T) {
 	store := newTempCodeGroupStore(t)
 	input := applyPatchInput(t, "*** Update File: link.txt\n@@\n-hi\n+bye")
 
-	prepared, err := PreparePatchCall(dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	prepared, err := PreparePatchCall(dir, "", store, map[string]any{"input": input})
 	testassert.NoError(t, err)
 	// Repoint the approved leaf after preparation: the closure must refuse
 	// the changed canonical target instead of silently substituting it.
@@ -701,79 +701,13 @@ func TestPreparePatchPartialFailureReportsCommittedFiles(t *testing.T) {
 	}
 	input := applyPatchInput(t, "*** Update File: first.txt\n@@\n-one\n+ONE\n*** Update File: second.txt\n@@\n-two\n+TWO")
 
-	prepared, err := PreparePatchCall(dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	prepared, err := PreparePatchCall(dir, "", store, map[string]any{"input": input})
 	testassert.NoError(t, err)
 	_, err = prepared.Execute(context.Background(), nil)
 	testassert.Require(t, err != nil, "Execute succeeded, want partial-failure error")
 	testassert.Require(t, strings.Contains(err.Error(), "M first.txt") && strings.Contains(err.Error(), "changed after validation"), "Execute error = %v, want committed-files summary plus validation failure", err)
 	assertFileContent(t, first, "ONE")
 	assertFileContent(t, second, "tampered")
-}
-
-func TestPrepareWriteRevalidatesWriteDirWitness(t *testing.T) {
-	root := t.TempDir()
-	realA := filepath.Join(root, "realA")
-	realB := filepath.Join(root, "realB")
-	testassert.NoError(t, os.Mkdir(realA, 0o755))
-	testassert.NoError(t, os.Mkdir(realB, 0o755))
-	wd := filepath.Join(root, "wd")
-	testassert.NoError(t, os.Symlink(realA, wd))
-	store := newTempCodeGroupStore(t)
-
-	// The target is addressed directly through the real directory while the
-	// write-dir witness goes through the symlink; the target canonical path
-	// is inside the witness boundary at preparation.
-	args, err := NormalizeWriteArgs(map[string]any{"path": filepath.Join(realA, "file.txt"), "content": "x"})
-	testassert.NoError(t, err)
-	prepared, err := PrepareWriteCall(root, "", "", CapabilityOptions{WriteDir: wd}, store, args)
-	testassert.NoError(t, err)
-	{
-		_, err := prepared.Execute(context.Background(), nil)
-		testassert.NoError(t, err)
-	}
-	assertFileContent(t, filepath.Join(realA, "file.txt"), "x")
-
-	// Prepare a second write while the witness still resolves to realA,
-	// then flip the symlink to the other directory before execution: the
-	// target canonical path is unchanged, but the closure must refuse it:
-	// the bound canonical write-dir boundary changed.
-	args, err = NormalizeWriteArgs(map[string]any{"path": filepath.Join(realA, "file.txt"), "content": "y"})
-	testassert.NoError(t, err)
-	prepared, err = PrepareWriteCall(root, "", "", CapabilityOptions{WriteDir: wd}, store, args)
-	testassert.NoError(t, err)
-	testassert.NoError(t, os.Remove(wd))
-	testassert.NoError(t, os.Symlink(realB, wd))
-	{
-		_, err := prepared.Execute(context.Background(), nil)
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical write_dir changed"), "Execute error = %v, want write-dir revalidation refusal", err)
-	}
-	assertFileContent(t, filepath.Join(realA, "file.txt"), "x")
-
-	// A repointed write-dir symlink fails even when the target would sit
-	// inside both the old and the new directory: the canonical boundary
-	// comparison catches it where a fresh containment check would pass.
-	// Restore the witness first so preparation binds the old boundary.
-	testassert.NoError(t, os.Remove(wd))
-	testassert.NoError(t, os.Symlink(realA, wd))
-	nested := filepath.Join(realA, "B")
-	testassert.NoError(t, os.Mkdir(nested, 0o755))
-	args, err = NormalizeWriteArgs(map[string]any{"path": filepath.Join(nested, "f.txt"), "content": "n"})
-	testassert.NoError(t, err)
-	prepared, err = PrepareWriteCall(root, "", "", CapabilityOptions{WriteDir: wd}, store, args)
-	testassert.NoError(t, err)
-	// wd still points at realA during preparation: boundary realA, target
-	// realA/B/f.txt inside it. Flip wd to the nested realA/B — the target
-	// stays inside both boundaries.
-	testassert.NoError(t, os.Remove(wd))
-	testassert.NoError(t, os.Symlink(nested, wd))
-	{
-		_, err := prepared.Execute(context.Background(), nil)
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical write_dir changed"), "Execute error = %v, want write-dir canonical change refusal (target inside both boundaries)", err)
-	}
-	{
-		_, err := os.Stat(filepath.Join(nested, "f.txt"))
-		testassert.Require(t, os.IsNotExist(err), "nested f.txt stat err = %v, want absent (no mutation)", err)
-	}
 }
 
 func TestNormalizePatchArgsStrictInputType(t *testing.T) {
@@ -792,118 +726,7 @@ func TestNormalizePatchArgsStrictInputType(t *testing.T) {
 	args, err = NormalizePatchArgs(map[string]any{})
 	testassert.NoError(t, err)
 	{
-		_, err := PreparePatchCall(t.TempDir(), "", "", CapabilityOptions{}, newTempCodeGroupStore(t), args)
+		_, err := PreparePatchCall(t.TempDir(), "", newTempCodeGroupStore(t), args)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "input is empty"), "PreparePatchCall error = %v, want patch-syntax error", err)
 	}
-}
-
-// patchWriteDirWitnessFixture builds the repointed-write-dir scenario shared
-// by the preparation and receipt oracles: the target realA/B/a.txt sits
-// inside both the original boundary (realA) and the repointed one (realA/B),
-// so a fresh containment check would pass and only the bound canonical
-// write-dir witness can refuse the change.
-type patchWriteDirWitnessFixture struct {
-	root   string
-	target string
-	wd     string
-	flip   func()
-}
-
-func newPatchWriteDirWitnessFixture(t *testing.T) patchWriteDirWitnessFixture {
-	t.Helper()
-	root := t.TempDir()
-	realA := filepath.Join(root, "realA")
-	nested := filepath.Join(realA, "B")
-	testassert.NoError(t, os.MkdirAll(nested, 0o755))
-	target := filepath.Join(nested, "a.txt")
-	testassert.NoError(t, os.WriteFile(target, []byte("x"), 0o644))
-	wd := filepath.Join(root, "wd")
-	testassert.NoError(t, os.Symlink(realA, wd))
-	return patchWriteDirWitnessFixture{
-		root:   root,
-		target: target,
-		wd:     wd,
-		flip: func() {
-			testassert.NoError(t, os.Remove(wd))
-			testassert.NoError(t, os.Symlink(nested, wd))
-		},
-	}
-}
-
-func patchWriteDirWitnessInput(t *testing.T, target string) string {
-	t.Helper()
-	return applyPatchInput(t, "*** Update File: "+target+"\n@@\n-x\n+bye")
-}
-
-// TestPreparePatchRevalidatesWriteDirWitness proves apply_patch obeys the
-// same canonical write-dir binding rule as the file tools: a write-dir
-// symlink repointed after preparation fails execution with the
-// binding-change error even when the repointed directory still contains the
-// target — and nothing is mutated.
-func TestPreparePatchRevalidatesWriteDirWitness(t *testing.T) {
-	t.Run("prepared_closure", func(t *testing.T) {
-		f := newPatchWriteDirWitnessFixture(t)
-		store := newTempCodeGroupStore(t)
-		rootCanonical, err := bindWorkspaceRoot(f.root)
-		testassert.NoError(t, err)
-		writeDirCanonical, err := bindWriteDir(f.root, "apply_patch", f.wd)
-		testassert.NoError(t, err)
-		prepared, err := PreparePatchCall(f.root, rootCanonical, writeDirCanonical, CapabilityOptions{WriteDir: f.wd}, store, map[string]any{"input": patchWriteDirWitnessInput(t, f.target)})
-		testassert.NoError(t, err)
-		f.flip()
-		{
-			_, err := prepared.Execute(context.Background(), nil)
-			testassert.Require(t, err != nil && strings.Contains(err.Error(), "approved canonical write_dir changed"), "Execute error = %v, want write-dir canonical change refusal", err)
-		}
-		assertFileContent(t, f.target, "x")
-	})
-
-}
-
-func TestPreparePatchRejectsOutsideWriteDirAtPreparation(t *testing.T) {
-	root := t.TempDir()
-	inside := filepath.Join(root, "in")
-	testassert.NoError(t, os.Mkdir(inside, 0o755))
-	testassert.NoError(t, os.WriteFile(filepath.Join(inside, "a.txt"), []byte("x"), 0o644))
-	rootCanonical, err := bindWorkspaceRoot(root)
-	testassert.NoError(t, err)
-	writeDirCanonical, err := bindWriteDir(root, "apply_patch", inside)
-	testassert.NoError(t, err)
-	outside := filepath.Join(root, "out")
-	testassert.NoError(t, os.Mkdir(outside, 0o755))
-	testassert.NoError(t, os.WriteFile(filepath.Join(outside, "b.txt"), []byte("y"), 0o644))
-
-	// A patch destination outside write_dir is rejected at preparation,
-	// before authorization: no targets are declared and nothing runs.
-	input := applyPatchInput(t, "*** Add File: "+filepath.Join(outside, "new.txt")+"\n+data")
-	args, err := NormalizePatchArgs(map[string]any{"input": input})
-	testassert.NoError(t, err)
-	prepared, err := PreparePatchCall(root, rootCanonical, writeDirCanonical, CapabilityOptions{WriteDir: inside}, newTempCodeGroupStore(t), args)
-	testassert.Require(t, err != nil && strings.Contains(err.Error(), "outside write_dir"), "PreparePatchCall error = %v, want outside-write_dir rejection at preparation", err)
-	testassert.Require(t, prepared == nil, "prepared call = %+v, want nil after preparation rejection", prepared)
-	{
-		_, err := os.Stat(filepath.Join(outside, "new.txt"))
-		testassert.Require(t, os.IsNotExist(err), "outside new.txt stat err = %v, want absent", err)
-	}
-
-	// A source outside write_dir is likewise rejected at preparation.
-	input = applyPatchInput(t, "*** Update File: "+filepath.Join(outside, "b.txt")+"\n@@\n-y\n+z")
-	args, err = NormalizePatchArgs(map[string]any{"input": input})
-	testassert.NoError(t, err)
-	{
-		_, err := PreparePatchCall(root, rootCanonical, writeDirCanonical, CapabilityOptions{WriteDir: inside}, newTempCodeGroupStore(t), args)
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "outside write_dir"), "PreparePatchCall error = %v, want outside-write_dir source rejection at preparation", err)
-	}
-
-	// An inside patch prepares and applies normally.
-	input = applyPatchInput(t, "*** Update File: "+filepath.Join(inside, "a.txt")+"\n@@\n-x\n+fixed")
-	args, err = NormalizePatchArgs(map[string]any{"input": input})
-	testassert.NoError(t, err)
-	prepared, err = PreparePatchCall(root, rootCanonical, writeDirCanonical, CapabilityOptions{WriteDir: inside}, newTempCodeGroupStore(t), args)
-	testassert.NoError(t, err)
-	{
-		_, err := prepared.Execute(context.Background(), nil)
-		testassert.NoError(t, err)
-	}
-	assertFileContent(t, filepath.Join(inside, "a.txt"), "fixed")
 }

@@ -96,23 +96,31 @@ func TestAgentInputsModelIdentityAcrossSessionMutations(t *testing.T) {
 				ctx := context.Background()
 				store := emptyStore(t)
 				h := newTestHarness(t, store, nil)
-				inputs := AgentInputs{AssemblyMode: "full", Model: model.ModelRef{Provider: "old", Model: "model"}, Instructions: "keep"}
+				old := model.ModelRef{Provider: "old", Model: "model"}
+				keep := "keep"
+				inputs := SessionInputs{Model: &old, Instructions: &keep}
 				if operation == "create" {
-					inputs.Model = row.ref
+					inputs.Model = nil
+					if !row.ref.IsZero() {
+						inputs.Model = modelChoice(row.ref)
+					}
 				}
-				created, err := h.CreateSession(ctx, CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: AgentSelection{Inputs: &inputs}})
+				created, err := h.CreateSession(ctx, CreateSessionRequest{Workspace: "/tmp/works", Inputs: inputs})
 				testassert.NoError(t, err)
 				id := created.Identity.SessionID
 				leaseCoordinator(t, h, id)
 				result := created
 				if operation == "change" {
-					inputs.Model = row.ref
-					result, err = h.ChangeAgentType(ctx, id, AgentSelection{Inputs: &inputs})
+					inputs.Model = nil
+					if !row.ref.IsZero() {
+						inputs.Model = modelChoice(row.ref)
+					}
+					result, err = h.SetSessionInputs(ctx, id, inputs)
 				} else if operation == "model" {
 					result, err = h.SetSessionModel(ctx, id, row.ref)
 				}
 				testassert.NoError(t, err)
-				if got := result.State.AgentSelection.Inputs.Model; got != row.ref {
+				if got := modelChoiceValue(result.State.Inputs.Model); got != row.ref {
 					t.Errorf("immediate = %#v, want %#v", got, row.ref)
 				}
 				for name, reader := range map[string]*Harness{"warm": h, "cold": newTestHarness(t, store, nil)} {
@@ -121,7 +129,7 @@ func TestAgentInputsModelIdentityAcrossSessionMutations(t *testing.T) {
 						t.Errorf("%s read: %v", name, err)
 						continue
 					}
-					if got := view.AgentSelection.Inputs.Model; got != row.ref {
+					if got := modelChoiceValue(view.Inputs.Model); got != row.ref {
 						t.Errorf("%s = %#v, want %#v", name, got, row.ref)
 					}
 				}
@@ -151,7 +159,7 @@ func TestPreparationInputOwnsContent(t *testing.T) {
 		req.Content[0].Extra["nested"][5] = '2'
 		return validPrepared(), nil
 	})
-	prepared, _, _, cleanup, err := h.prepareExecution(context.Background(), PreparationSession{AgentSelection: testSelection("test")}, RequestKindMessage, content)
+	prepared, _, _, cleanup, err := h.prepareExecution(context.Background(), PreparationSession{Inputs: testInputs("test")}, RequestKindMessage, content)
 	testassert.NoError(t, err)
 	defer cleanup()
 	defer h.releasePrepared(&prepared)
@@ -320,31 +328,31 @@ func TestCreateSessionWorkspaceIdentity(t *testing.T) {
 	store := emptyStore(t)
 	h := newTestHarness(t, store, nil)
 
-	rec, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	rec, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
-	testassert.Require(t, rec.Identity.Workspace == "/tmp/works" && regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(rec.Identity.SessionID) && (rec.State.Lifecycle == LifecycleOpen && rec.State.AgentSelection.Definition.DefinitionID == "coder" && rec.Revision == 1) && (!rec.Identity.CreatedAt.IsZero() && rec.State.LastActivity.Equal(rec.Identity.CreatedAt)) && len(rec.State.Usage.ByModel) == 0, "got %v, want %v; session id %q is not 32 lowercase hex characters; created session state = %+v; creation did not sample one time for created_at and last_activity: %+v; created session carries usage: %+v", rec.Identity.Workspace, "/tmp/works", rec.Identity.SessionID, rec.State, rec, rec.State.Usage)
+	testassert.Require(t, rec.Identity.Workspace == "/tmp/works" && regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(rec.Identity.SessionID) && (rec.State.Lifecycle == LifecycleOpen && reflect.DeepEqual(rec.State.Inputs, testInputs("coder")) && rec.Revision == 1) && (!rec.Identity.CreatedAt.IsZero() && rec.State.LastActivity.Equal(rec.Identity.CreatedAt)) && len(rec.State.Usage.ByModel) == 0, "got %v, want %v; session id %q is not 32 lowercase hex characters; created session state = %+v; creation did not sample one time for created_at and last_activity: %+v; created session carries usage: %+v", rec.Identity.Workspace, "/tmp/works", rec.Identity.SessionID, rec.State, rec, rec.State.Usage)
 	read, err := h.ReadSessionHeader(context.Background(), rec.Identity.SessionID)
 	testassert.NoError(t, err)
 	testassert.Require(t, read.Identity.Workspace == "/tmp/works" && read.Revision.DurableRevision == 1, "read session = %+v", read)
 
 	for _, workspace := range []string{"relative/path", "/tmp/works/../works", ""} {
 		{
-			_, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: workspace, AgentSelection: testSelection("coder")})
+			_, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: workspace, Inputs: testInputs("coder")})
 			testassert.Require(t, errors.Is(err, ErrInvalid), "CreateSession(%q) = %v, want ErrInvalid", workspace, err)
 		}
-		_, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: workspace, AgentSelection: AgentSelection{Inputs: &AgentInputs{AssemblyMode: "full"}}})
+		_, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: workspace, Inputs: SessionInputs{}})
 		testassert.Require(t, errors.Is(err, ErrInvalid), "resolved CreateSession(%q) = %v, want ErrInvalid", workspace, err)
 	}
 	{
-		_, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works"})
-		testassert.Require(t, errors.Is(err, ErrInvalid), "empty agent type = %v, want ErrInvalid", err)
+		empty, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works"})
+		testassert.Require(t, err == nil && reflect.DeepEqual(empty.State.Inputs, SessionInputs{}), "empty inputs = %+v, %v", empty.State.Inputs, err)
 	}
 }
 
 func TestArchivedResolvedSessionRejectsModelChange(t *testing.T) {
 	h := newTestHarness(t, emptyStore(t), nil)
 	ctx := context.Background()
-	created, err := h.CreateSession(ctx, CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: AgentSelection{Inputs: &AgentInputs{AssemblyMode: "full", Model: testModelRef()}}})
+	created, err := h.CreateSession(ctx, CreateSessionRequest{Workspace: "/tmp/works", Inputs: SessionInputs{Model: modelChoice(testModelRef())}})
 	testassert.NoError(t, err)
 	archived, err := h.ArchiveSession(ctx, created.Identity.SessionID)
 	testassert.NoError(t, err)
@@ -352,7 +360,7 @@ func TestArchivedResolvedSessionRejectsModelChange(t *testing.T) {
 	testassert.Require(t, errors.Is(err, ErrInvalid), "archived model update = %v", err)
 	header, err := h.ReadSessionHeader(ctx, created.Identity.SessionID)
 	testassert.NoError(t, err)
-	testassert.Require(t, header.Revision.DurableRevision == archived.Revision && header.AgentSelection.Inputs.Model == testModelRef(), "archived selection changed: %+v", header)
+	testassert.Require(t, header.Revision.DurableRevision == archived.Revision && modelChoiceValue(header.Inputs.Model) == testModelRef(), "archived selection changed: %+v", header)
 }
 
 // TestReadsMaterializeValidatedState proves Session and Operation reads:
@@ -378,7 +386,7 @@ func TestReadsMaterializeValidatedState(t *testing.T) {
 		_, err := h.ReadOperation(context.Background(), testSessionID, testOpID)
 		testassert.Require(t, errors.Is(err, ErrNotFound), "absent operation = %v, want ErrNotFound", err)
 	}
-	created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	read, err := h.ReadSessionHeader(context.Background(), created.Identity.SessionID)
 	testassert.Require(t, err == nil && read.Revision.DurableRevision == 1 && read.Identity.SessionID == created.Identity.SessionID, "ReadSession = %+v, err %v", read, err)
@@ -416,7 +424,7 @@ func TestCorruptSessionIsUnavailable(t *testing.T) {
 		return err
 	}())
 
-	sibling, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	sibling, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	{
 		_, err := h.ReadSessionHeader(context.Background(), sibling.Identity.SessionID)
@@ -427,19 +435,19 @@ func TestCorruptSessionIsUnavailable(t *testing.T) {
 // TestChangeAgentType proves the retained Agent-type transition: open-only,
 // identity/usage/activity preserving, and never touching an admitted
 // Operation's admission section.
-func TestChangeAgentType(t *testing.T) {
+func TestSetSessionInputs(t *testing.T) {
 	store := freshSessionStore(t)
 	h := newTestHarness(t, store, nil)
 
 	before, err := h.ReadSessionHeader(context.Background(), testSessionID)
 	testassert.NoError(t, err)
 	beforeUsage := readSessionView(t, h, testSessionID).TotalUsage
-	after, err := h.ChangeAgentType(context.Background(), testSessionID, testSelection("reviewer"))
+	after, err := h.SetSessionInputs(context.Background(), testSessionID, testInputs("reviewer"))
 	testassert.NoError(t, err)
-	testassert.Require(t, after.State.AgentSelection.Definition.DefinitionID == "reviewer" && after.Revision == before.Revision.DurableRevision+1 && (after.Identity == before.Identity && after.State.LastActivity.Equal(before.LastActivity) && usageTotalsEqual(after.State.Usage, beforeUsage)), "changed session = %+v; agent-type change altered identity, activity or usage: %+v", after.State, after)
+	testassert.Require(t, reflect.DeepEqual(after.State.Inputs, testInputs("reviewer")) && after.Revision == before.Revision.DurableRevision+1 && (after.Identity == before.Identity && after.State.LastActivity.Equal(before.LastActivity) && usageTotalsEqual(after.State.Usage, beforeUsage)), "changed session = %+v; inputs change altered identity, activity or usage: %+v", after.State, after)
 	{
-		_, err := h.ChangeAgentType(context.Background(), testSessionID, AgentSelection{})
-		testassert.Require(t, errors.Is(err, ErrInvalid), "empty agent type = %v, want ErrInvalid", err)
+		_, err := h.SetSessionInputs(context.Background(), testSessionID, SessionInputs{Tools: []string{""}})
+		testassert.Require(t, errors.Is(err, ErrInvalid), "invalid inputs = %v, want ErrInvalid", err)
 	}
 
 	archived := &testGraph{session: validSessionRecord()}
@@ -448,7 +456,7 @@ func TestChangeAgentType(t *testing.T) {
 	archived.session.State.ArchivedAt = &stamped
 	archivedHarness := newTestHarness(t, archived.storage(t), nil)
 	{
-		_, err := archivedHarness.ChangeAgentType(context.Background(), testSessionID, testSelection("reviewer"))
+		_, err := archivedHarness.SetSessionInputs(context.Background(), testSessionID, testInputs("reviewer"))
 		testassert.Require(t, errors.Is(err, ErrInvalid), "agent type on an archived session = %v, want ErrInvalid", err)
 	}
 }
@@ -558,7 +566,7 @@ func TestAdmissionPublishesRunningOperation(t *testing.T) {
 
 	rec, disposition := mustAdmit(t, h, testSessionID, testOpID, admissionContent("hello"))
 	testassert.Equal(t, disposition, DispositionAdmitted)
-	testassert.Require(t, rec.State.Status == OperationRunning && rec.Admission.AgentSelection.Definition.DefinitionID == "coder" && rec.Admission.RequestKind == RequestKindMessage && rec.Admission.SessionID == testSessionID && rec.Admission.OperationID == testOpID && (rec.Admission.Execution.ConfigurationRevision == testCapture().ConfigurationRevision && rec.Admission.Execution.Model == testModelRef() && len(rec.Admission.Execution.Tools) == 1) && (rec.Admission.AdmittedEntry.SessionID == testSessionID && rec.Admission.AdmittedEntry.EntryID != "") && (!rec.State.StartedAt.IsZero() && rec.Admission.AdmittedAt.Equal(rec.State.StartedAt)) && (len(rec.State.PendingToolCalls) == 0 && len(rec.State.Usage.ByModel) == 0), "admitted operation = %+v; durable capture = %+v; admitted entry reference = %+v; operation timestamps = %+v; fresh operation state = %+v", rec, rec.Admission.Execution, rec.Admission.AdmittedEntry, rec.State, rec.State)
+	testassert.Require(t, rec.State.Status == OperationRunning && reflect.DeepEqual(rec.Admission.Inputs, testInputs("coder")) && rec.Admission.RequestKind == RequestKindMessage && rec.Admission.SessionID == testSessionID && rec.Admission.OperationID == testOpID && (rec.Admission.Execution.ConfigurationRevision == testCapture().ConfigurationRevision && rec.Admission.Execution.Model == testModelRef() && len(rec.Admission.Execution.Tools) == 1) && (rec.Admission.AdmittedEntry.SessionID == testSessionID && rec.Admission.AdmittedEntry.EntryID != "") && (!rec.State.StartedAt.IsZero() && rec.Admission.AdmittedAt.Equal(rec.State.StartedAt)) && (len(rec.State.PendingToolCalls) == 0 && len(rec.State.Usage.ByModel) == 0), "admitted operation = %+v; durable capture = %+v; admitted entry reference = %+v; operation timestamps = %+v; fresh operation state = %+v", rec, rec.Admission.Execution, rec.Admission.AdmittedEntry, rec.State, rec.State)
 
 	entries, regs := storedSessionState(store, testSessionID)
 	testassert.Require(t, len(entries) == 1 && entries[0].Kind == EntryInput && entries[0].OperationID == testOpID && entries[0].Sequence == 1, "published entries = %+v", entries)
@@ -594,61 +602,61 @@ func TestAdmissionPublishesRunningOperation(t *testing.T) {
 // owns the returned capture.
 func TestAdmissionPreparationContract(t *testing.T) {
 	t.Run("callback mutation cannot change admitted selections", func(t *testing.T) {
-		for _, form := range []string{"resolved", "definition"} {
+		for _, form := range []string{"tools", "instructions"} {
 			t.Run(form, func(t *testing.T) {
 				store := emptyStore(t)
 				h := newTestHarness(t, store, func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
-					if req.Session.AgentSelection.Inputs != nil {
-						i := req.Session.AgentSelection.Inputs
-						i.Tools[0], i.Capabilities[0], i.Strategy.Settings[2] = "changed", "changed", 'X'
+					if form == "tools" {
+						i := req.Session.Inputs
+						i.Tools[0], i.Strategy.Settings[2] = "changed", 'X'
 					} else {
-						req.Session.AgentSelection.Definition.DefinitionID = "changed"
+						*req.Session.Inputs.Instructions = "changed"
 					}
 					return validPrepared(), nil
 				})
-				selection := testSelection("coder")
-				if form == "resolved" {
-					selection = AgentSelection{Inputs: &AgentInputs{AssemblyMode: "full", Tools: []string{"read_file"}, Capabilities: []string{"cap"}, Strategy: StrategySelection{Settings: json.RawMessage(`{"selected":1}`)}}}
+				selection := testInputs("coder")
+				if form == "tools" {
+					selection = SessionInputs{Tools: []string{"read_file"}, Strategy: &StrategySelection{ID: "strategy", Settings: json.RawMessage(`{"selected":1}`)}}
 				}
-				want := ownAgentSelection(selection)
-				created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: selection})
+				want := selection.Owned()
+				created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: selection})
 				testassert.NoError(t, err)
 				id := created.Identity.SessionID
 				leaseCoordinator(t, h, id)
-				if selection.Inputs != nil {
-					selection.Inputs.Tools[0], selection.Inputs.Capabilities[0], selection.Inputs.Strategy.Settings[2] = "caller", "caller", 'Y'
-					created.State.AgentSelection.Inputs.Tools[0], created.State.AgentSelection.Inputs.Capabilities[0], created.State.AgentSelection.Inputs.Strategy.Settings[2] = "result", "result", 'R'
+				if form == "tools" {
+					selection.Tools[0], selection.Strategy.Settings[2] = "caller", 'Y'
+					created.State.Inputs.Tools[0], created.State.Inputs.Strategy.Settings[2] = "result", 'R'
 				} else {
-					selection.Definition.DefinitionID = "caller"
-					created.State.AgentSelection.Definition.DefinitionID = "result"
+					*selection.Instructions = "caller"
+					*created.State.Inputs.Instructions = "result"
 				}
-				if form == "resolved" {
-					change := ownAgentSelection(want)
-					changed, err := h.ChangeAgentType(context.Background(), id, change)
+				if form == "tools" {
+					change := want.Owned()
+					changed, err := h.SetSessionInputs(context.Background(), id, change)
 					testassert.NoError(t, err)
-					change.Inputs.Tools[0], change.Inputs.Capabilities[0], change.Inputs.Strategy.Settings[2] = "caller", "caller", 'Y'
-					changed.State.AgentSelection.Inputs.Tools[0], changed.State.AgentSelection.Inputs.Capabilities[0], changed.State.AgentSelection.Inputs.Strategy.Settings[2] = "result", "result", 'R'
+					change.Tools[0], change.Strategy.Settings[2] = "caller", 'Y'
+					changed.State.Inputs.Tools[0], changed.State.Inputs.Strategy.Settings[2] = "result", 'R'
 				}
 				mustAdmit(t, h, id, testOpID, admissionContent("hello"))
 				header, err := h.ReadSessionHeader(context.Background(), id)
 				testassert.NoError(t, err)
 				op, err := h.ReadOperation(context.Background(), id, testOpID)
 				testassert.NoError(t, err)
-				testassert.Require(t, reflect.DeepEqual(header.AgentSelection, want) && reflect.DeepEqual(op.Admission.AgentSelection, want), "callback changed session or operation selection")
-				if form == "resolved" {
+				testassert.Require(t, reflect.DeepEqual(header.Inputs, want) && reflect.DeepEqual(op.Admission.Inputs, want), "callback changed session or operation inputs")
+				if form == "tools" {
 					view, err := h.ReadSessionView(context.Background(), id)
 					testassert.NoError(t, err)
 					list, err := h.ListSessions(context.Background())
 					testassert.NoError(t, err)
-					for _, copy := range []*AgentInputs{header.AgentSelection.Inputs, op.Admission.AgentSelection.Inputs, view.Header.AgentSelection.Inputs, view.Operations[0].AgentSelection.Inputs, list[0].AgentSelection.Inputs} {
-						copy.Tools[0], copy.Capabilities[0], copy.Strategy.Settings[2] = "read", "read", 'Z'
+					for _, copy := range []SessionInputs{header.Inputs, op.Admission.Inputs, view.Header.Inputs, view.Operations[0].Inputs, list[0].Inputs} {
+						copy.Tools[0], copy.Strategy.Settings[2] = "read", 'Z'
 					}
 					again, err := h.ReadSessionView(context.Background(), id)
 					testassert.NoError(t, err)
-					testassert.Require(t, reflect.DeepEqual(again.Header.AgentSelection, want) && reflect.DeepEqual(again.Operations[0].AgentSelection, want), "read projections alias durable selections")
+					testassert.Require(t, reflect.DeepEqual(again.Header.Inputs, want) && reflect.DeepEqual(again.Operations[0].Inputs, want), "read projections alias durable inputs")
 					againOp, err := h.ReadOperation(context.Background(), id, testOpID)
 					testassert.NoError(t, err)
-					testassert.Require(t, reflect.DeepEqual(againOp.Admission.AgentSelection, want), "operation read aliases its source")
+					testassert.Require(t, reflect.DeepEqual(againOp.Admission.Inputs, want), "operation read aliases its source")
 				}
 			})
 		}
@@ -666,7 +674,7 @@ func TestAdmissionPreparationContract(t *testing.T) {
 			testassert.Equal(t, got, 1)
 		}
 		req := stub.lastCall().req
-		testassert.Require(t, req.RequestKind == RequestKindMessage && (req.Session.Identity.SessionID == testSessionID && req.Session.Identity.Workspace == "/tmp/works" && !req.Session.Identity.CreatedAt.IsZero() && req.Session.AgentSelection.Definition.DefinitionID == "coder"), "got %v, want %v; preparation session view = %+v", req.RequestKind, RequestKindMessage, req.Session)
+		testassert.Require(t, req.RequestKind == RequestKindMessage && (req.Session.Identity.SessionID == testSessionID && req.Session.Identity.Workspace == "/tmp/works" && !req.Session.Identity.CreatedAt.IsZero() && reflect.DeepEqual(req.Session.Inputs, testInputs("coder"))), "got %v, want %v; preparation session view = %+v", req.RequestKind, RequestKindMessage, req.Session)
 	})
 
 	t.Run("invalid prepared execution publishes nothing", func(t *testing.T) {
@@ -836,16 +844,16 @@ func TestAdmissionReservationAndRaces(t *testing.T) {
 		go func() {
 			res, err := h.Submit(context.Background(), SubmitRequest{SessionID: testSessionID, OperationID: testOpID, Origin: InputOriginUser, Mode: MessageModeRegular})
 			testassert.Check(t, err == nil, "admission: %v", err)
-			testassert.Check(t, res.Disposition == DispositionAdmitted && res.Operation != nil && res.Operation.Admission.AgentSelection.Definition.DefinitionID == "coder", "admitted operation = %+v disposition %q", res.Operation, res.Disposition)
+			testassert.Check(t, res.Disposition == DispositionAdmitted && res.Operation != nil && reflect.DeepEqual(res.Operation.Admission.Inputs, testInputs("coder")), "admitted operation = %+v disposition %q", res.Operation, res.Disposition)
 			admitted <- struct{}{}
 		}()
 		<-stub.arrived
 
 		changed := make(chan struct{}, 1)
 		go func() {
-			rec, err := h.ChangeAgentType(context.Background(), testSessionID, testSelection("reviewer"))
+			rec, err := h.SetSessionInputs(context.Background(), testSessionID, testInputs("reviewer"))
 			testassert.Check(t, err == nil, "ChangeAgentType: %v", err)
-			testassert.Check(t, rec.State.AgentSelection.Definition.DefinitionID == "reviewer", "changed session = %+v", rec.State)
+			testassert.Check(t, reflect.DeepEqual(rec.State.Inputs, testInputs("reviewer")), "changed session = %+v", rec.State)
 			changed <- struct{}{}
 		}()
 
@@ -854,9 +862,9 @@ func TestAdmissionReservationAndRaces(t *testing.T) {
 		<-changed
 		rec, err := h.ReadOperation(context.Background(), testSessionID, testOpID)
 		testassert.NoError(t, err)
-		testassert.Equal(t, rec.Admission.AgentSelection.Definition.DefinitionID, "coder")
+		testassert.Require(t, reflect.DeepEqual(rec.Admission.Inputs, testInputs("coder")), "admission inputs = %+v", rec.Admission.Inputs)
 		session, err := h.ReadSessionHeader(context.Background(), testSessionID)
-		testassert.Require(t, err == nil && session.AgentSelection.Definition.DefinitionID == "reviewer", "session agent type = %+v err %v", session, err)
+		testassert.Require(t, err == nil && reflect.DeepEqual(session.Inputs, testInputs("reviewer")), "session inputs = %+v err %v", session, err)
 	})
 }
 
@@ -879,7 +887,7 @@ func foreignAgentTypeChange(tx Transaction, sessionID, agentType string) error {
 	if err != nil {
 		return err
 	}
-	current.State.AgentSelection = testSelection(agentType)
+	current.State.Inputs = testInputs(agentType)
 	payload, err := encodeSessionRegister(SessionRecord{Identity: current.Identity, State: current.State})
 	if err != nil {
 		return err
@@ -1054,7 +1062,7 @@ func TestAdmissionIdempotency(t *testing.T) {
 			stub.gate = gate
 			store := freshSessionStore(t)
 			h := newTestHarness(t, store, stub.prepare)
-			created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+			created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 			testassert.NoError(t, err)
 			other := created.Identity.SessionID
 
@@ -1093,7 +1101,7 @@ func TestAdmissionIdempotency(t *testing.T) {
 		store := freshSessionStore(t)
 		h := newTestHarness(t, store, newPrepareStub(validPrepared()).prepare)
 		mustAdmit(t, h, testSessionID, "shared-op", admissionContent("x"))
-		created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, err)
 		_, err = h.Submit(context.Background(), SubmitRequest{SessionID: created.Identity.SessionID, OperationID: "shared-op", Origin: InputOriginUser, Content: admissionContent("y"), Mode: MessageModeRegular})
 		testassert.Require(t, errors.Is(err, ErrInvalid), "cross-session reuse = %v, want ErrInvalid", err)
@@ -1133,13 +1141,13 @@ func insertForeignAdmission(t *testing.T, tx Transaction, sessionID, operationID
 	}
 	record := OperationRecord{
 		Admission: OperationAdmission{
-			SessionID:      sessionID,
-			OperationID:    operationID,
-			RequestKind:    RequestKindMessage,
-			AdmittedEntry:  EntryRef{SessionID: sessionID, EntryID: input.EntryID},
-			AgentSelection: current.State.AgentSelection,
-			Execution:      testCapture(),
-			AdmittedAt:     inserted.CommittedAt,
+			SessionID:     sessionID,
+			OperationID:   operationID,
+			RequestKind:   RequestKindMessage,
+			AdmittedEntry: EntryRef{SessionID: sessionID, EntryID: input.EntryID},
+			Inputs:        current.State.Inputs,
+			Execution:     testCapture(),
+			AdmittedAt:    inserted.CommittedAt,
 		},
 		State: OperationCurrentState{
 			Status:           OperationRunning,
@@ -1314,7 +1322,7 @@ func TestForeignChangeRefreshesTheView(t *testing.T) {
 		}
 		session, err := h.ReadSessionHeader(context.Background(), testSessionID)
 		testassert.NoError(t, err)
-		testassert.Require(t, session.AgentSelection.Definition.DefinitionID == "foreign", "read session kept the stale view: %+v", session)
+		testassert.Require(t, reflect.DeepEqual(session.Inputs, testInputs("foreign")), "read session kept the stale view: %+v", session)
 	})
 
 	t.Run("failed agent-type change", func(t *testing.T) {
@@ -1333,18 +1341,20 @@ func TestForeignChangeRefreshesTheView(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		{
-			_, err := h.ChangeAgentType(context.Background(), testSessionID, testSelection("reviewer"))
+			_, err := h.SetSessionInputs(context.Background(), testSessionID, testInputs("reviewer"))
 			testassert.Require(t, errors.Is(err, ErrConflict), "raced change = %v, want ErrConflict", err)
 		}
 		session, err := h.ReadSessionHeader(context.Background(), testSessionID)
 		testassert.NoError(t, err)
-		testassert.Require(t, session.AgentSelection.Definition.DefinitionID == "foreign", "read session kept the stale view: %+v", session)
+		testassert.Require(t, reflect.DeepEqual(session.Inputs, testInputs("foreign")), "read session kept the stale view: %+v", session)
 	})
 
 	t.Run("resolved model update races a foreign named selection", func(t *testing.T) {
 		store := freshSessionStore(t)
 		h := newTestHarness(t, store, nil)
-		_, err := h.ChangeAgentType(context.Background(), testSessionID, AgentSelection{Inputs: &AgentInputs{AssemblyMode: "full", Model: model.ModelRef{Provider: "p", Model: "old"}, Instructions: "keep"}})
+		inputs := testInputs("keep")
+		inputs.Model = modelChoice(model.ModelRef{Provider: "p", Model: "old"})
+		_, err := h.SetSessionInputs(context.Background(), testSessionID, inputs)
 		testassert.NoError(t, err)
 		leaseCoordinator(t, h, testSessionID)
 		_, err = h.ReadSessionHeader(context.Background(), testSessionID)
@@ -1356,7 +1366,7 @@ func TestForeignChangeRefreshesTheView(t *testing.T) {
 		_, err = h.SetSessionModel(context.Background(), testSessionID, model.ModelRef{Provider: "p", Model: "new"})
 		testassert.Require(t, errors.Is(err, ErrConflict), "raced model update = %v, want conflict", err)
 		session, err := h.ReadSessionHeader(context.Background(), testSessionID)
-		testassert.Require(t, err == nil && session.AgentSelection.Definition != nil && session.AgentSelection.Definition.DefinitionID == "foreign", "raced model update changed foreign selection: %+v, %v", session, err)
+		testassert.Require(t, err == nil && reflect.DeepEqual(session.Inputs, testInputs("foreign")), "raced model update changed foreign inputs: %+v, %v", session, err)
 	})
 }
 
@@ -1525,7 +1535,7 @@ func foreignCorruptRevision(tx Transaction, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	current.State.AgentSelection = testSelection("foreign")
+	current.State.Inputs = testInputs("foreign")
 	payload, err := encodeSessionRegister(SessionRecord{Identity: current.Identity, State: current.State})
 	if err != nil {
 		return err
@@ -1574,7 +1584,7 @@ func TestRefreshReturnsDiscoveredCorruption(t *testing.T) {
 			err := store.Transact(context.Background(), func(tx Transaction) error { return foreignCorruptRevision(tx, testSessionID) })
 			testassert.NoError(t, err)
 		}
-		_, err := h.ChangeAgentType(context.Background(), testSessionID, testSelection("reviewer"))
+		_, err := h.SetSessionInputs(context.Background(), testSessionID, testInputs("reviewer"))
 		var corrupt *CorruptionError
 		testassert.Require(t, errors.As(err, &corrupt), "agent-type change over a corrupt foreign revision = %v, want the discovered CorruptionError", err)
 	})
@@ -1593,38 +1603,6 @@ func TestOwnCaptureDropsZeroLengthBacking(t *testing.T) {
 	rec, err := h.ReadOperation(context.Background(), testSessionID, testOpID)
 	testassert.NoError(t, err)
 	testassert.Require(t, rec.Admission.Execution.Tools == nil, "admitted capture retained the caller's zero-length backing: %+v", rec.Admission.Execution.Tools)
-}
-
-// TestOwnCaptureOwnsCapabilitySelection proves the admitted capture keeps the
-// prepared capability selection in its own storage: a zero-length selection
-// normalizes to nil and never keeps the caller's backing, and a caller
-// mutation after admission reaches neither the durable capture nor a later
-// read of the same prepared value.
-func TestOwnCaptureOwnsCapabilitySelection(t *testing.T) {
-	t.Run("zero-length backing", func(t *testing.T) {
-		prepared := validPrepared()
-		capabilities := make([]string, 0, 1) // zero length with spare capacity
-		prepared.Capture.Capabilities = capabilities
-		store := freshSessionStore(t)
-		h := newTestHarness(t, store, newPrepareStub(prepared).prepare)
-		mustAdmit(t, h, testSessionID, testOpID, admissionContent("x"))
-		_ = append(capabilities, "ghost") // the caller reuses its backing after admission
-		rec, err := h.ReadOperation(context.Background(), testSessionID, testOpID)
-		testassert.NoError(t, err)
-		testassert.Require(t, rec.Admission.Execution.Capabilities == nil, "admitted capture retained the caller's zero-length capability backing: %+v", rec.Admission.Execution.Capabilities)
-	})
-
-	t.Run("caller mutation after admission", func(t *testing.T) {
-		prepared := validPrepared()
-		capabilities := []string{"cap-a"}
-		prepared.Capture.Capabilities = capabilities
-		h := newTestHarness(t, freshSessionStore(t), newPrepareStub(prepared).prepare)
-		mustAdmit(t, h, testSessionID, testOpID, admissionContent("x"))
-		capabilities[0] = "tampered"
-		rec, err := h.ReadOperation(context.Background(), testSessionID, testOpID)
-		testassert.NoError(t, err)
-		testassert.Require(t, len(rec.Admission.Execution.Capabilities) == 1 && rec.Admission.Execution.Capabilities[0] == "cap-a", "admitted capture aliases the caller's capability selection: %+v", rec.Admission.Execution.Capabilities)
-	})
 }
 
 // TestAdmittedOperationCarriesRegisterRevision proves the admitted Operation
@@ -1740,7 +1718,7 @@ func TestConcurrentMaterializationSticksDiscoveredCorruption(t *testing.T) {
 		return err
 	}())
 
-	sibling, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	sibling, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	{
 		_, err := h.ReadSessionHeader(context.Background(), sibling.Identity.SessionID)

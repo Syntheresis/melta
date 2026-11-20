@@ -23,7 +23,7 @@ func TestAuthorHandshake(t *testing.T) {
 			guest, out := io.Pipe()
 			done := make(chan error, 1)
 			go func() {
-				done <- worker.ServeAuthor(context.Background(), extension.Extension{
+				done <- worker.Serve(context.Background(), extension.Extension{
 					Manifest: manifest,
 					Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 						called.Store(true)
@@ -80,11 +80,11 @@ func TestAuthorRegistrationDuringActivation(t *testing.T) {
 	guest, out := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- worker.ServeAuthor(context.Background(), extension.Extension{
+		done <- worker.Serve(context.Background(), extension.Extension{
 			Manifest: manifest,
 			Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 				_, err := api.RegisterCleanup(func(_ context.Context, call extension.AuthorContext, session harness.SessionIdentity) error {
-					called.Store(call.ExtensionID == "author" && session.SessionID == "s")
+					called.Store(call.ExtensionID == "author" && call.RequestID == "client-request" && session.SessionID == "s")
 					return nil
 				}, nil)
 				return nil, err
@@ -126,7 +126,7 @@ func TestAuthorRegistrationDuringActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(harness.SessionIdentity{SessionID: "s"})
-	send("call", worker.MethodCall, worker.AuthorCallParams{Handle: registered.Handle, Method: "cleanup", Context: worker.AuthorCallContext{Token: "callback", ExtensionID: "author", Settings: worker.JSONBytes(`{}`)}, Arguments: args})
+	send("call", worker.MethodCall, worker.AuthorCallParams{Handle: registered.Handle, Method: "cleanup", Context: worker.AuthorCallContext{Token: "callback", RequestID: "client-request", ExtensionID: "author", Settings: worker.JSONBytes(`{}`)}, Arguments: args})
 	reply, err = r.ReadFrame()
 	if err != nil || reply.ID != "call" || reply.Error != nil || string(reply.Result) != "null" || !called.Load() {
 		t.Fatalf("callback: %#v, %v, called %v", reply, err, called.Load())

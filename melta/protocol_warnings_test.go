@@ -147,10 +147,12 @@ func TestWarningsPromptReplaceClearAndFailedPreparationNoChange(t *testing.T) {
 		_, err = r.Reload(ctx, testCaller(r))
 		testassert.NoError(t, err)
 
-		// A failed hook (invalid consequence rejected before publication)
-		// changes nothing.
-		hook.set(nil, func(extension.PreparationInput) extension.PreparationConsequence {
-			return extension.PreparationConsequence{ToolNames: []string{"outside_catalog"}}
+		// A failed hook (unknown tool in the returned candidate is rejected
+		// before publication) changes nothing.
+		hook.setAdmission(nil, func(in extension.AdmissionInput) (extension.AdmissionResult, error) {
+			candidate := in.Candidate
+			candidate.Tools = append(append([]model.ToolDefinition(nil), candidate.Tools...), model.ToolDefinition{Name: "outside_catalog", Parameters: json.RawMessage(`{"type":"object"}`)})
+			return extension.AdmissionResult{Candidate: &candidate}, nil
 		})
 		hookSession, err := r.createSession(ctx, e.workspace("prompt-ws-4"), "worker")
 		testassert.NoError(t, err)
@@ -158,7 +160,7 @@ func TestWarningsPromptReplaceClearAndFailedPreparationNoChange(t *testing.T) {
 			err := submitExpectFailure(r, hookSession.Identity.SessionID, "op-hooked", "hello")
 			testassert.Require(t, err != nil, "the rejected-hook submit succeeded, want the failed preparation")
 		}
-		hook.set(nil, nil)
+		hook.setAdmission(nil, nil)
 
 		after, err := r.GetWarnings(ctx, testCaller(r))
 		testassert.NoError(t, err)
@@ -446,12 +448,12 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 		enableFixturePlugin(t, sh.configPath, "compacttools")
 		owner, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		comp := mustComposition(t, compactToolsPlugin(), fixtureAgentPlugin(compactToolsPlugin()))
-		svc := newConfigurationService(owner, comp, sh.loader,
+		svc := newConfigurationService(owner, newComposition(), sh.loader,
 			NewFileConfigurationSource(sh.configPath),
 			NewEnvironmentCredentialSource(filepath.Join(sh.home, ".melta", ".env")),
 			sh.locations(), harness.IncludedStrategyBinding(), r.obs)
-		svc.composition, svc.dataDir = comp, sh.dataDir
+		svc.dataDir = sh.dataDir
+		svc.authors = []nativeActivationSpec{{extension: compactToolsPlugin()}, {extension: fixtureAgentPlugin()}}
 		svc.attachWarnings(r.warnings)
 		{
 			_, err := svc.publish(context.Background())

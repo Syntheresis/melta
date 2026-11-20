@@ -135,13 +135,26 @@ func TestRuntimeSettingsReadSaveRoundTripPreservesOwnedPluginDocuments(t *testin
 	}
 }
 
-// assertNoEvent proves one subscription is silent without blocking.
+// assertNoEvent proves one subscription publishes no publication event
+// without blocking. Resource lifecycle events belong to earlier successful
+// publications (a retirement can follow its configuration event), so they are
+// drained rather than treated as a publication.
 func assertNoEvent(t *testing.T, sub *Subscription) {
 	t.Helper()
-	select {
-	case event, ok := <-sub.Events():
-		testassert.Require(t, !ok, "published event %+v, want silence", event)
-	default:
+	for {
+		select {
+		case event, ok := <-sub.Events():
+			if !ok {
+				return
+			}
+			if strings.HasPrefix(eventKind(t, event), "scope_") {
+				continue
+			}
+			testassert.Require(t, false, "published event %+v, want silence", event)
+			return
+		default:
+			return
+		}
 	}
 }
 
@@ -537,7 +550,7 @@ func TestConfigurationMutateWritesOwningFileOnly0600(t *testing.T) {
 		testassert.NoError(t, err)
 	}
 
-	candidate, err := svc.mutate(context.Background(), svc.editAgentModel("primary", "prov/m"))
+	candidate, err := svc.editAgentModel(context.Background(), "primary", "prov/m")
 	testassert.NoError(t, err)
 	testassert.Equal(t, candidate.snapshot.generation, 2)
 	info, err := os.Stat(h.configPath)
@@ -590,7 +603,7 @@ func TestConfigurationMutateAgentModelEditsLatestRoot(t *testing.T) {
 	agentsPath := h.configPath
 
 	// Set: the override lands on the existing entry and resolves.
-	candidate, err := svc.mutate(context.Background(), svc.editAgentModel("worker", "prov/m"))
+	candidate, err := svc.editAgentModel(context.Background(), "worker", "prov/m")
 	testassert.NoError(t, err)
 	{
 		found, model := hasDefinition(candidate.snapshot, "worker")
@@ -603,12 +616,12 @@ func TestConfigurationMutateAgentModelEditsLatestRoot(t *testing.T) {
 	}
 
 	// Identical value: still a real edit and publication.
-	candidate, err = svc.mutate(context.Background(), svc.editAgentModel("worker", "prov/m"))
+	candidate, err = svc.editAgentModel(context.Background(), "worker", "prov/m")
 	testassert.Require(t, err == nil && candidate.snapshot.generation == 3, "identical model edit = (%v, generation %d), want generation 3", err, candidate.snapshot.generation)
 	nextConfigurationEvent(t, sub, "3")
 
 	// Clear: the override is removed, the entry's other member kept.
-	candidate, err = svc.mutate(context.Background(), svc.editAgentModel("worker", ""))
+	candidate, err = svc.editAgentModel(context.Background(), "worker", "")
 	testassert.NoError(t, err)
 	{
 		found, model := hasDefinition(candidate.snapshot, "worker")
@@ -627,7 +640,7 @@ func TestConfigurationMutateAgentModelEditsLatestRoot(t *testing.T) {
 	// (deterministic remarshal of a no-op clear), so the write itself is
 	// proven by the sync-seam probe.
 	probe := installOwningSyncProbe(t, agentsPath)
-	candidate, err = svc.mutate(context.Background(), svc.editAgentModel("worker", ""))
+	candidate, err = svc.editAgentModel(context.Background(), "worker", "")
 	testassert.Require(t, err == nil && candidate.snapshot.generation == 5, "absent-override clear = (%v, generation %d), want a successful edit at generation 5", err, candidate.snapshot.generation)
 	nextConfigurationEvent(t, sub, "5")
 	testassert.Equal(t, probe.count(), 1)
@@ -639,7 +652,7 @@ func TestConfigurationMutateAgentModelEditsLatestRoot(t *testing.T) {
 
 	// A builtin without a user entry is addressable: the edit creates only
 	// its model member.
-	candidate, err = svc.mutate(context.Background(), svc.editAgentModel("primary", "prov/m"))
+	candidate, err = svc.editAgentModel(context.Background(), "primary", "prov/m")
 	testassert.NoError(t, err)
 	{
 		found, model := hasDefinition(candidate.snapshot, "primary")
@@ -666,7 +679,7 @@ func TestConfigurationMutateAgentModelPreservesConcurrentSettings(t *testing.T) 
 	}
 	t.Cleanup(func() { candidateBarrier = nil })
 	alpha := servicePlugin("alpha", &h.opens, acceptValidator)
-	svc := h.preparedService(context.Background(), alpha, fixtureAgentPlugin(alpha))
+	svc := h.preparedService(context.Background(), alpha, fixtureAgentPlugin())
 	initial, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	settings := projectSettings(initial.snapshot)
@@ -679,7 +692,7 @@ func TestConfigurationMutateAgentModelPreservesConcurrentSettings(t *testing.T) 
 	modelStarted, modelDone := make(chan struct{}), make(chan error, 1)
 	go func() {
 		close(modelStarted)
-		_, err := svc.mutate(context.Background(), svc.editAgentModel("worker", "prov/m"))
+		_, err := svc.editAgentModel(context.Background(), "worker", "prov/m")
 		modelDone <- err
 	}()
 	<-modelStarted
@@ -726,7 +739,7 @@ func TestConfigurationMutateAgentModelClearAlwaysWritesAndPublishes(t *testing.T
 	defer probe.restore()
 
 	for _, generation := range []string{"2", "3"} {
-		candidate, err := svc.mutate(context.Background(), svc.editAgentModel("primary", ""))
+		candidate, err := svc.editAgentModel(context.Background(), "primary", "")
 		testassert.NoError(t, err)
 		testassert.Equal(t, fmt.Sprint(candidate.snapshot.generation), generation)
 		nextConfigurationEvent(t, sub, generation)
@@ -741,8 +754,10 @@ func TestConfigurationMutateAgentModelClearAlwaysWritesAndPublishes(t *testing.T
 // TestConfigurationMutateUnknownAgentTypeFailsWithoutBareEntry proves the
 // nearest forbidden sibling of the retained create-on-missing loader path:
 // an unknown or dropped/invalid type fails harness.ErrInvalid before any
-// bare definition is created, and nothing is written, published, or
-// notified.
+// bare definition is created and nothing is written or published. Separately,
+// invalid enabled Agents definitions leave the extension inactive with its
+// reason while the candidate publishes, and a malformed baseline section
+// still refuses the complete publication.
 func TestConfigurationMutateUnknownAgentTypeFailsWithoutBareEntry(t *testing.T) {
 	h := newServiceHarness(t)
 	writeServiceFile(t, h.configPath, mutationConfigDocument())
@@ -761,18 +776,46 @@ func TestConfigurationMutateUnknownAgentTypeFailsWithoutBareEntry(t *testing.T) 
 	agentsBefore := mustRead(t, agentsPath)
 
 	for _, agentType := range []string{"ghost"} {
-		_, err := svc.mutate(context.Background(), svc.editAgentModel(agentType, "prov/m"))
+		_, err := svc.editAgentModel(context.Background(), agentType, "prov/m")
 		assertMetadataRefused(t, svc, sub, h.configPath, before, published, warnRev, err, harness.ErrInvalid)
 	}
 	testassert.Require(t, string(mustRead(t, agentsPath)) == string(agentsBefore), "a failed agent mutate changed the owning agents file")
-	for _, invalid := range []string{`{"broken":{"tools":["ghost_tool"]}}`, `{"badmodel":{"model":"noslash"}}`} {
+	for _, invalid := range []string{`{"broken":{"system_prompt":"bogus"}}`, `{"badmodel":{"model":"noslash"}}`} {
 		writeAgentDefinitions(t, h.configPath, invalid)
 		invalidBytes := mustRead(t, h.configPath)
-		_, err := svc.publish(context.Background())
-		testassert.Require(t, errors.Is(err, ErrConfiguration), "invalid active definitions = %v", err)
-		testassert.Require(t, svc.current() == published && string(mustRead(t, h.configPath)) == string(invalidBytes), "invalid reload changed publication or source")
-		assertNoEvent(t, sub)
+		candidate, err := svc.publish(context.Background())
+		testassert.NoError(t, err)
+		testassert.Require(t, candidate.snapshot.native.inactive[taskplugin.ExtensionID] == nil, "invalid definitions left Agents inactive: %v", candidate.snapshot.native.inactive[taskplugin.ExtensionID])
+		testassert.Require(t, string(mustRead(t, h.configPath)) == string(invalidBytes), "invalid reload changed its source")
+		var warned bool
+		_, warnings := svc.warnings.snapshot()
+		for _, warning := range warnings {
+			warned = warned || warning.Source == "plugin:"+taskplugin.ExtensionID && warning.Kind == "invalid_agent_type"
+		}
+		testassert.Require(t, warned, "invalid definitions published no invalid_agent_type warning: %v", warnings)
+		// Activation reports land ahead of the configuration event, so accept
+		// the warning event on either side of it.
+		for {
+			event, ok := nextEvent(t, sub)
+			testassert.Require(t, ok, "stream closed, want the generation %d configuration event", candidate.snapshot.generation)
+			if kind := eventKind(t, event); strings.HasPrefix(kind, "scope_") || kind == "warning_changed" {
+				continue
+			}
+			testassert.Require(t, eventKind(t, event) == "configuration_changed" && eventGeneration(t, event) == fmt.Sprint(candidate.snapshot.generation), "event = %s, want the generation %d configuration event", eventJSON(t, event), candidate.snapshot.generation)
+			break
+		}
 	}
+	// The nearest forbidden sibling: a malformed baseline section still
+	// refuses the complete publication.
+	lastPublished := svc.current()
+	writeServiceFile(t, h.configPath, strings.TrimSuffix(mutationConfigDocument(), "}")+`,"tools":[],"extensions":{"agents":{"enabled":true}}}`)
+	refusedBytes := mustRead(t, h.configPath)
+	{
+		_, err := svc.publish(context.Background())
+		testassert.Require(t, errors.Is(err, ErrConfiguration), "invalid baseline section = %v, want the configuration refusal", err)
+	}
+	testassert.Require(t, svc.current() == lastPublished && string(mustRead(t, h.configPath)) == string(refusedBytes), "invalid baseline refusal changed publication or source")
+	assertNoEvent(t, sub)
 }
 
 // TestConfigurationMutateMalformedModelRefFailsWithoutWrite proves a
@@ -790,7 +833,7 @@ func TestConfigurationMutateMalformedModelRefFailsWithoutWrite(t *testing.T) {
 	before, err := os.ReadFile(agentsPath)
 	testassert.NoError(t, err)
 	{
-		_, err := svc.mutate(context.Background(), svc.editAgentModel("worker", "noslash"))
+		_, err := svc.editAgentModel(context.Background(), "worker", "noslash")
 		testassert.Require(t, errors.Is(err, harness.ErrInvalid), "malformed ref mutate = %v, want harness.ErrInvalid", err)
 	}
 	after, err := os.ReadFile(agentsPath)
@@ -810,7 +853,7 @@ func TestConfigurationMutateAgentModelRejectsInactiveOwner(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			h := newServiceHarness(t)
 			writeServiceFile(t, h.configPath, row.config)
-			var plugins []extension.Native
+			var plugins []extension.Extension
 			if row.installed {
 				plugins = append(plugins, fixtureAgentPlugin())
 			}
@@ -818,8 +861,8 @@ func TestConfigurationMutateAgentModelRejectsInactiveOwner(t *testing.T) {
 			before, err := svc.publish(context.Background())
 			testassert.NoError(t, err)
 			bytesBefore := mustRead(t, h.configPath)
-			_, err = svc.mutate(context.Background(), svc.editAgentModel("primary", "p/new"))
-			testassert.Require(t, errors.Is(err, harness.ErrInvalid) && svc.current() == before.snapshot && bytes.Equal(bytesBefore, mustRead(t, h.configPath)), "inactive edit = %v, want no write or publication", err)
+			_, err = svc.editAgentModel(context.Background(), "primary", "p/new")
+			testassert.Require(t, errors.Is(err, extension.ErrClosed) && svc.current() == before.snapshot && bytes.Equal(bytesBefore, mustRead(t, h.configPath)), "inactive edit = %v, want no write or publication", err)
 		})
 	}
 }
@@ -834,13 +877,6 @@ func TestConfigurationMutateAgentModelRejectsInactiveOwner(t *testing.T) {
 // plugins member are removed by the whole-shape write instead — the
 // whole-plugins regression owns that axis.)
 func TestConfigurationMutateInvalidCandidateLeavesEverythingUnchanged(t *testing.T) {
-	// withSection returns the shared written settings plus one extra owned
-	// plugin section, so a row can target one specific plugin settings owner.
-	withSection := func(id, document string) protocol.Settings {
-		settings := mutationSettings()
-		settings.Extensions[id] = document
-		return settings
-	}
 	// withTools replaces the written top-level tools object.
 	withTools := func(document string) protocol.Settings {
 		settings := mutationSettings()
@@ -849,37 +885,24 @@ func TestConfigurationMutateInvalidCandidateLeavesEverythingUnchanged(t *testing
 	}
 	rows := []struct {
 		name       string
-		validate   func(json.RawMessage) error
-		schema     json.RawMessage
 		external   string // the document an external editor writes before the edit
 		settings   protocol.Settings
 		wantSource string
 	}{
 		{
 			name:       "the baseline settings owner rejects the written section",
-			validate:   acceptValidator,
 			external:   mutationConfigDocument(),
 			settings:   withTools(`{"max_output_bytes":0}`),
 			wantSource: "tools: max_output_bytes must be positive",
 		},
 		{
-			name:       "an unrelated plugin validator rejects its own written section",
-			validate:   acceptValidator,
-			schema:     json.RawMessage("false"),
-			external:   mutationConfigDocument(),
-			settings:   withSection("capowner", `{"enabled":true,"kept":2048}`),
-			wantSource: "jsonschema validation failed",
-		},
-		{
 			name:       "externally malformed document",
-			validate:   acceptValidator,
 			external:   `{not json`,
 			settings:   mutationSettings(),
 			wantSource: "decode",
 		},
 		{
 			name:       "externally trailing document",
-			validate:   acceptValidator,
 			external:   mutationConfigDocument() + `{}`,
 			settings:   mutationSettings(),
 			wantSource: "after top-level value",
@@ -889,11 +912,7 @@ func TestConfigurationMutateInvalidCandidateLeavesEverythingUnchanged(t *testing
 		t.Run(row.name, func(t *testing.T) {
 			h := newServiceHarness(t)
 			writeServiceFile(t, h.configPath, mutationConfigDocument())
-			capowner := servicePlugin("capowner", &h.opens, row.validate)
-			if row.schema != nil {
-				capowner.Declaration.ConfigSchema = row.schema
-			}
-			svc := h.service(context.Background(), capowner, servicePlugin("alpha", &h.opens, acceptValidator))
+			svc := h.service(context.Background(), servicePlugin("capowner", &h.opens, acceptValidator), servicePlugin("alpha", &h.opens, acceptValidator))
 			{
 				_, err := svc.publish(context.Background())
 				testassert.NoError(t, err)
@@ -940,21 +959,13 @@ func TestConfigurationMutateAgentEditInvalidCandidateLeavesEverythingUnchanged(t
 			config:     `{"providers":{},"sessions":"x"}`,
 			wantSource: "sessions",
 		},
-		{
-			name:       "invalid active extension",
-			config:     `{"providers":{},"extensions":{"alpha":{"enabled":true,"invalid":true}}}`,
-			wantSource: "jsonschema validation failed",
-		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			h := newServiceHarness(t)
 			writeServiceFile(t, h.configPath, mutationConfigDocument())
 			writeAgentDefinitions(t, h.configPath, workerAgentsDocument)
-			capowner := servicePlugin("capowner", &h.opens, acceptValidator)
-			alpha := servicePlugin("alpha", &h.opens, acceptValidator)
-			alpha.Declaration.ConfigSchema = json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"invalid":{"not":{"const":true}}},"required":["enabled"]}`)
-			svc := h.preparedService(context.Background(), capowner, alpha, fixtureAgentPlugin(capowner, alpha))
+			svc := h.preparedService(context.Background(), servicePlugin("capowner", &h.opens, acceptValidator), servicePlugin("alpha", &h.opens, acceptValidator), fixtureAgentPlugin())
 			{
 				_, err := svc.publish(context.Background())
 				testassert.NoError(t, err)
@@ -971,7 +982,7 @@ func TestConfigurationMutateAgentEditInvalidCandidateLeavesEverythingUnchanged(t
 			before, published, warnRev := metadataBaseline(t, svc, h.configPath)
 			agentsPath := h.configPath
 			agentsBefore := mustRead(t, agentsPath)
-			candidate, err := svc.mutate(context.Background(), svc.editAgentModel("worker", "prov/m"))
+			candidate, err := svc.editAgentModel(context.Background(), "worker", "prov/m")
 			testassert.Require(t, candidate.snapshot == nil, "agent edit = %+v, want a rejected candidate", candidate)
 			testassert.Require(t, strings.Contains(err.Error(), row.wantSource), "error %v does not preserve %q", err, row.wantSource)
 			assertMetadataRefused(t, svc, sub, h.configPath, before, published, warnRev, err, ErrConfiguration)
@@ -981,7 +992,7 @@ func TestConfigurationMutateAgentEditInvalidCandidateLeavesEverythingUnchanged(t
 			// succeeds, proving the file/generation/event oracles flip.
 			writeServiceFile(t, h.configPath, mutationConfigDocument())
 			writeAgentDefinitions(t, h.configPath, workerAgentsDocument)
-			candidate, err = svc.mutate(context.Background(), svc.editAgentModel("worker", "prov/m"))
+			candidate, err = svc.editAgentModel(context.Background(), "worker", "prov/m")
 			testassert.Require(t, err == nil && candidate.snapshot.generation == 2 && svc.current() == candidate.snapshot, "inverse edit = (%v, generation %d), want a successful publication at 2", err, candidate.snapshot.generation)
 			nextConfigurationEvent(t, sub, "2")
 		})
@@ -1304,7 +1315,7 @@ func TestRuntimeAgentModelMutationAffectsNextAdmissions(t *testing.T) {
 
 		mutation, err := r.setAgentTypeModel(ctx, "worker", "prov/wide")
 		testassert.NoError(t, err)
-		testassert.Require(t, mutation.ConfigurationRevision.Generation == "2", "mutation = %+v, want the new model at generation 2", mutation)
+		testassert.Require(t, string(mutation.Value) == "null" && r.config.current().generation == 2, "mutation = %+v, want the new model published at generation 2", mutation)
 
 		// Session B is idle: its next admission commits the new model at the
 		// new generation, and the active Operation has not re-captured. The
@@ -1587,70 +1598,60 @@ func TestConfigurationSettingsRejectNonIntegerTaskLexemes(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			h := newServiceHarness(t)
 			writeServiceFile(t, h.configPath, mutationConfigDocument())
-			svc := h.service(context.Background(), taskplugin.Native(taskplugin.Options{}))
-			// The isolated service harness normally skips resource opening; this
-			// row owns the real publication boundary, so attach the owner graph
-			// and data root the Melta wires in production.
-			graph, err := newNativeComposition([]extension.Native{taskplugin.Native(taskplugin.Options{})})
-			testassert.NoError(t, err)
-			svc.composition = graph
-			svc.dataDir = t.TempDir()
+			svc := h.preparedService(context.Background(), fixtureAgentPlugin())
 			initial, err := svc.publish(context.Background())
-			testassert.NoError(t, err)
-			before, err := os.ReadFile(h.configPath)
 			testassert.NoError(t, err)
 			generation := svc.current().generation
 			settings := projectSettings(initial.snapshot)
 			settings.Extensions["agents"] = `{"enabled":true,"task":` + row.task + `}`
 			_, err = svc.mutate(context.Background(), editSettings(settings))
+			testassert.NoError(t, err)
+			inactive := svc.current().native.inactive[taskplugin.ExtensionID]
 			if row.accepted {
-				testassert.NoError(t, err)
-				testassert.Require(t, svc.current().generation != generation, "accepted settings did not advance the generation")
+				testassert.Require(t, inactive == nil && svc.current().generation == generation+1, "accepted settings = inactive %v generation %d, want an active Agents at the next generation", inactive, svc.current().generation)
 				return
 			}
-			testassert.Require(t, errors.Is(err, ErrConfiguration), "settings write = %v, want the configuration refusal", err)
-			after, err := os.ReadFile(h.configPath)
-			testassert.NoError(t, err)
-			testassert.Require(t, string(after) == string(before), "rejected settings changed the owning bytes")
-			testassert.Equal(t, svc.current().generation, generation)
+			testassert.Require(t, inactive != nil && svc.current().generation == generation+1, "invalid settings = inactive %v generation %d, want Agents inactive at the next generation", inactive, svc.current().generation)
 		})
 	}
 }
 
-// TestConfigurationMutateExtensionEditRequiresPreparedProvider proves the
-// nearest sibling of an inactive owner: an externally enabled section whose
-// provider was not prepared in the published revision refuses the edit before
-// any write instead of opening a provider on demand.
-func TestConfigurationMutateExtensionEditRequiresPreparedProvider(t *testing.T) {
+// TestRegisteredSetModelRequiresPreparedActivation proves the nearest sibling
+// of an inactive owner: an externally enabled Agents section with no prepared
+// activation refuses the registered set_model operation before any write
+// instead of constructing or opening an activation on demand.
+func TestRegisteredSetModelRequiresPreparedActivation(t *testing.T) {
 	h := newServiceHarness(t)
 	writeServiceFile(t, h.configPath, `{"extensions":{"agents":{"enabled":false}}}`)
 	svc := h.preparedService(context.Background(), fixtureAgentPlugin())
 	before, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	testassert.Require(t, before.snapshot.resources.runtime.capabilities["agents.configuration"] == nil, "disabled Agents prepared a configuration provider")
+	var activated bool
+	for _, activation := range before.snapshot.native.activations {
+		activated = activated || (activation != nil && activation.id == taskplugin.ExtensionID)
+	}
+	testassert.Require(t, !activated, "disabled Agents published an activation")
 
 	// An external writer enables the section without a reload; the latest raw
 	// state says enabled but the published resource set has no provider.
 	writeServiceFile(t, h.configPath, `{"extensions":{"agents":{"enabled":true,"definitions":{"worker":{"system_prompt":"simple"}}}}}`)
 	bytesBefore := mustRead(t, h.configPath)
-	_, err = svc.mutate(context.Background(), svc.editAgentModel("worker", "prov/m"))
+	_, err = svc.editAgentModel(context.Background(), "worker", "prov/m")
 	testassert.Require(t, err != nil && svc.current() == before.snapshot && bytes.Equal(bytesBefore, mustRead(t, h.configPath)), "unprepared provider edit = %v, want no write or publication", err)
 }
 
-// TestConfigurationMutateExtensionEditRejectsMalformedArguments proves the
-// declared edit's argument document is caller input: a non-JSON or
+// TestRegisteredSetModelRejectsMalformedArguments proves the registered
+// set_model operation's argument document is caller input: a non-JSON or
 // wrong-shaped document fails invalid before any write.
-func TestConfigurationMutateExtensionEditRejectsMalformedArguments(t *testing.T) {
-	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, `{"extensions":{"agents":{"enabled":true,"definitions":{"worker":{"system_prompt":"simple"}}}}}`)
-	svc := h.preparedService(context.Background(), fixtureAgentPlugin())
-	before, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	bytesBefore := mustRead(t, h.configPath)
+func TestRegisteredSetModelRejectsMalformedArguments(t *testing.T) {
+	r, e := openProjectionRuntime(t, storage.NewMemory())
+	defer closeProjectionRuntime(r)
+	before := r.config.current()
+	bytesBefore := mustRead(t, e.configPath)
 	for _, arguments := range []string{`{`, `{"definition_id":"worker"}`, `[]`} {
-		_, err := svc.mutate(context.Background(), svc.editExtension(context.Background(), "agents", "set_model", json.RawMessage(arguments)))
+		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), taskplugin.ExtensionID, "set_model", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, json.RawMessage(arguments), "")
 		testassert.Require(t, errors.Is(err, harness.ErrInvalid), "arguments %s = %v, want harness.ErrInvalid", arguments, err)
-		testassert.Require(t, svc.current() == before.snapshot && bytes.Equal(bytesBefore, mustRead(t, h.configPath)), "arguments %s changed publication or source", arguments)
+		testassert.Require(t, r.config.current() == before && bytes.Equal(bytesBefore, mustRead(t, e.configPath)), "arguments %s changed publication or source", arguments)
 	}
 }
 

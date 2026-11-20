@@ -17,7 +17,7 @@ func main() {
 	} else {
 		entry = agents.Author()
 	}
-	if err := worker.ServeAuthor(context.Background(), entry, os.Stdin, os.Stdout); err != nil {
+	if err := worker.Serve(context.Background(), entry, os.Stdin, os.Stdout); err != nil {
 		os.Exit(1)
 	}
 }

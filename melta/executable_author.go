@@ -25,7 +25,7 @@ type executableAuthor struct {
 // executableAuthorExtension binds one process to one registrar activation.
 func executableAuthorExtension(manifest extension.Manifest, entryPoint string, environment func(context.Context, []string) ([]string, error)) extension.Extension {
 	return extension.Extension{Manifest: manifest, Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
-		a := newExecutableActivation(executableExtension{EntryPoint: entryPoint}, environment)
+		a := newExecutableActivation(entryPoint, environment)
 		a.author = &executableAuthor{manifest: manifest, api: api, registrations: make(map[string]extension.Registration)}
 		var excluded []string
 		if native, ok := api.(nativeAPI); ok {
@@ -196,7 +196,7 @@ func (a *executableActivation) authorRegistration(frame worker.Frame) error {
 			defer end()
 			outcome := a.request(ctx, worker.MethodCall, func(issued string) (any, error) {
 				return worker.AuthorCallParams{Handle: params.Handle, Method: "admission", Arguments: worker.JSONBytes(args), Context: worker.AuthorCallContext{
-					Token: issued, ExtensionID: call.ExtensionID, Settings: worker.JSONBytes(call.Settings), Session: call.Session, State: worker.JSONBytes(call.State),
+					Token: issued, RequestID: call.RequestID, ExtensionID: call.ExtensionID, Settings: worker.JSONBytes(call.Settings), Session: call.Session, State: worker.JSONBytes(call.State),
 				}}, nil
 			}, grant, typed(worker.DecodeAuthorAdmissionResult))
 			value, err := decodeOutcome(outcome)
@@ -435,7 +435,7 @@ func (a *executableActivation) authorRequest(ctx context.Context, handle, method
 	return a.request(ctx, worker.MethodCall, func(token string) (any, error) {
 		return worker.AuthorCallParams{
 			Handle: handle, Method: method, Arguments: worker.JSONBytes(args),
-			Context: worker.AuthorCallContext{Token: token, ExtensionID: call.ExtensionID, Settings: worker.JSONBytes(call.Settings), Session: call.Session, State: worker.JSONBytes(call.State)},
+			Context: worker.AuthorCallContext{Token: token, RequestID: call.RequestID, ExtensionID: call.ExtensionID, Settings: worker.JSONBytes(call.Settings), Session: call.Session, State: worker.JSONBytes(call.State)},
 		}, nil
 	}, grant, decode)
 }

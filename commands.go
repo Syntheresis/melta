@@ -656,19 +656,16 @@ func runDoctor(asJSON bool) error {
 	if binErr != nil {
 		binPath = fmt.Sprintf("unknown (%v)", binErr)
 	}
-	installed, capabilities := installedExtensions()
 	report, noProviders := doctor.Run(doctor.Params{
-		Home:                  home,
-		HomeErr:               homeErr,
-		ConfigPath:            cfgPath,
-		ConfigPathErr:         cfgPathErr,
-		WorkDir:               workDir,
-		BinaryPath:            binPath,
-		Version:               version.String(),
-		Platform:              runtime.GOOS + "/" + runtime.GOARCH,
-		LookupEnv:             os.LookupEnv,
-		InstalledExtensions:   installed,
-		InstalledCapabilities: capabilities,
+		Home:          home,
+		HomeErr:       homeErr,
+		ConfigPath:    cfgPath,
+		ConfigPathErr: cfgPathErr,
+		WorkDir:       workDir,
+		BinaryPath:    binPath,
+		Version:       version.String(),
+		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
+		LookupEnv:     os.LookupEnv,
 	})
 
 	if asJSON {

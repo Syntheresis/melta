@@ -114,7 +114,7 @@ func TestProofClearFailureBeforeMutationLeavesFileAndPreimageUntouched(t *testin
 	groupDir := filepath.Join(t.TempDir(), "group")
 	store := newCodeGroupStore(t, groupDir)
 	{
-		_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "first"})
+		_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "first"})
 		testassert.NoError(t, err)
 	}
 	testassert.Require(t, soleSnapshotMeta(t, store).LastWrite != nil && soleSnapshotMeta(t, store).LastWrite.Hash == snapshotIdentityHash("first"), "seed LastWrite = %+v, want the first write's proof", soleSnapshotMeta(t, store).LastWrite)
@@ -123,7 +123,7 @@ func TestProofClearFailureBeforeMutationLeavesFileAndPreimageUntouched(t *testin
 	counts := &mutationIOCount{}
 	withMutationFileCounting(t, counts)
 
-	_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "second"})
+	_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "second"})
 
 	testassert.Require(t, err != nil, "write whose pre-mutation proof clear fails succeeded, want refusal without mutation")
 	assertFileContent(t, path, "first")
@@ -139,11 +139,11 @@ func TestProvenPreMutationFailureRestoresPriorProof(t *testing.T) {
 	groupDir := filepath.Join(t.TempDir(), "group")
 	store := newCodeGroupStore(t, groupDir)
 	{
-		_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "first"})
+		_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "first"})
 		testassert.NoError(t, err)
 	}
 
-	_, err := execEdit(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "old_string": "missing", "new_string": "second"})
+	_, err := execEdit(t, root, "", store, map[string]any{"path": path, "old_string": "missing", "new_string": "second"})
 
 	testassert.Require(t, err != nil, "edit with no match succeeded, want a pre-mutation failure")
 	assertFileContent(t, path, "first")
@@ -160,7 +160,7 @@ func TestFailedPriorProofRestoreKeepsNilProofAndSkipsLaterRevert(t *testing.T) {
 	groupDir := filepath.Join(t.TempDir(), "group")
 	store := newCodeGroupStore(t, groupDir)
 	{
-		_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "first"})
+		_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "first"})
 		testassert.NoError(t, err)
 	}
 
@@ -168,7 +168,7 @@ func TestFailedPriorProofRestoreKeepsNilProofAndSkipsLaterRevert(t *testing.T) {
 	// proof clear that precedes it succeeds, the restore is the second meta
 	// publication of this call.
 	withSnapshotMetaPublishFailure(t, 2)
-	_, err := execEdit(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "old_string": "missing", "new_string": "second"})
+	_, err := execEdit(t, root, "", store, map[string]any{"path": path, "old_string": "missing", "new_string": "second"})
 
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "restore snapshot proof"), "edit error = %v, want the failed proof restoration reported", err)
 	assertFileContent(t, path, "first")
@@ -189,7 +189,7 @@ func TestFailedFinalIdentityRecordKeepsNilProofAndSkipsRevert(t *testing.T) {
 	// Publications under the seam: capture meta, pre-mutation proof clear,
 	// and the final identity record — only the final record fails.
 	withSnapshotMetaPublishFailure(t, 3)
-	_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "created"})
+	_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "created"})
 
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "record snapshot identity"), "write error = %v, want the failed final identity record", err)
 	assertFileContent(t, path, "created")
@@ -226,7 +226,7 @@ func TestPatchPartialSummaryUsesCompletedMutation(t *testing.T) {
 			if tc.step != "" {
 				withMutationFailure(t, path, tc.step)
 			}
-			_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, tc.patch)})
+			_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, tc.patch)})
 			var exitErr *ExitError
 			testassert.Require(t, errors.As(err, &exitErr), "error = %v, want partial summary", err)
 			for _, line := range tc.want {
@@ -269,7 +269,7 @@ func TestPatchPreconditionsUseCurrentExistence(t *testing.T) {
 			store := newTempCodeGroupStore(t)
 			args, err := NormalizePatchArgs(map[string]any{"input": applyPatchInput(t, tc.input)})
 			testassert.NoError(t, err)
-			call, err := PreparePatchCall(root, "", "", CapabilityOptions{}, store, args)
+			call, err := PreparePatchCall(root, "", store, args)
 			testassert.NoError(t, err)
 			if tc.exists {
 				testassert.NoError(t, os.Remove(path))
@@ -299,7 +299,7 @@ func TestPatchPreconditionsUseCurrentExistence(t *testing.T) {
 		store := newTempCodeGroupStore(t)
 		args, err := NormalizePatchArgs(map[string]any{"input": applyPatchInput(t, "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after")})
 		testassert.NoError(t, err)
-		call, err := PreparePatchCall(root, "", "", CapabilityOptions{}, store, args)
+		call, err := PreparePatchCall(root, "", store, args)
 		testassert.NoError(t, err)
 		testassert.NoError(t, os.Remove(destination))
 		_, err = call.Execute(context.Background(), nil)
@@ -318,7 +318,7 @@ func TestPatchUpdateDisappearsDuringCapture(t *testing.T) {
 	path := snapshotLifecycleFile(t, root, "file.txt", "before")
 	store := newRecordingCodeGroupStore(t)
 	store.onSnapshot = func(int) { testassert.NoError(t, os.Remove(path)) }
-	result, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{
+	result, err := execPatch(t, root, "", store, map[string]any{
 		"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-before\n+after"),
 	})
 	testassert.NoError(t, err)
@@ -338,19 +338,19 @@ func TestMutationPreflightBeforeCapture(t *testing.T) {
 		delete bool
 	}{
 		{"write", func(t *testing.T, root, path string, store SnapshotStore) error {
-			_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "after"})
+			_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "after"})
 			return err
 		}, false},
 		{"edit", func(t *testing.T, root, path string, store SnapshotStore) error {
-			_, err := execEdit(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "old_string": "before", "new_string": "after"})
+			_, err := execEdit(t, root, "", store, map[string]any{"path": path, "old_string": "before", "new_string": "after"})
 			return err
 		}, false},
 		{"patch_update", func(t *testing.T, root, _ string, store SnapshotStore) error {
-			_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-before\n+after")})
+			_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-before\n+after")})
 			return err
 		}, false},
 		{"patch_delete", func(t *testing.T, root, _ string, store SnapshotStore) error {
-			_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Delete File: file.txt")})
+			_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Delete File: file.txt")})
 			return err
 		}, true},
 	} {
@@ -394,12 +394,12 @@ func TestPreparedEditAndWriteWithAppearedTarget(t *testing.T) {
 			if edit {
 				args, err = NormalizeEditArgs(map[string]any{"path": path, "old_string": "before", "new_string": "after"})
 				testassert.NoError(t, err)
-				call, err = PrepareEditCall(root, "", "", CapabilityOptions{}, store, args)
+				call, err = PrepareEditCall(root, "", store, args)
 				testassert.NoError(t, err)
 			} else {
 				args, err = NormalizeWriteArgs(map[string]any{"path": path, "content": "after"})
 				testassert.NoError(t, err)
-				call, err = PrepareWriteCall(root, "", "", CapabilityOptions{}, store, args)
+				call, err = PrepareWriteCall(root, "", store, args)
 				testassert.NoError(t, err)
 			}
 			testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
@@ -428,13 +428,13 @@ func TestAppearedDestinationWithFailedAbandonReportsRefusalAndCleanupFailure(t *
 	groupDir := filepath.Join(t.TempDir(), "group")
 	store := newCodeGroupStore(t, groupDir)
 	{
-		_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+one")})
+		_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+one")})
 		testassert.NoError(t, err)
 	}
 	testassert.NoError(t, os.Remove(path))
 
 	wrapped := &recordingCodeGroupStore{testCodeGroupStore: store, plantBefore: path, failAbandon: true}
-	_, err := execPatch(t, root, "", "", CapabilityOptions{}, wrapped, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+two")})
+	_, err := execPatch(t, root, "", wrapped, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+two")})
 
 	testassert.Require(t, err != nil, "Add whose destination appeared with failing abandonment succeeded, want refusal")
 	msg := err.Error()
@@ -454,13 +454,13 @@ func TestAppearedDestinationWithCompletedAbandonKeepsEntryAndPriorProof(t *testi
 	groupDir := filepath.Join(t.TempDir(), "group")
 	store := newCodeGroupStore(t, groupDir)
 	{
-		_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+one")})
+		_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+one")})
 		testassert.NoError(t, err)
 	}
 	testassert.NoError(t, os.Remove(path))
 
 	wrapped := &recordingCodeGroupStore{testCodeGroupStore: store, plantBefore: path}
-	_, err := execPatch(t, root, "", "", CapabilityOptions{}, wrapped, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+two")})
+	_, err := execPatch(t, root, "", wrapped, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+two")})
 
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "appeared during apply"), "err = %v, want the destination-appeared refusal", err)
 	testassert.Require(t, !strings.Contains(err.Error(), "additionally failed"), "err = %v, want the completed abandonment reported without a cleanup failure", err)
@@ -551,7 +551,7 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 				root, link, real1, real2 := rebindingLifecycleFixture(t)
 				refusalFlip(store, 1, func() { rebindLink(t, link, real2) })
 				run := func() error {
-					_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": link, "content": "after"})
+					_, err := execWrite(t, root, "", store, map[string]any{"path": link, "content": "after"})
 					return err
 				}
 				assert := func(t *testing.T, _ error) {
@@ -570,11 +570,11 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 			name: "write_reused_target",
 			build: func(t *testing.T, store *recordingCodeGroupStore) (func() error, string, func(*testing.T, error)) {
 				root, link, real1, real2 := rebindingLifecycleFixture(t)
-				_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": link, "content": "first"})
+				_, err := execWrite(t, root, "", store, map[string]any{"path": link, "content": "first"})
 				testassert.NoError(t, err)
 				refusalFlip(store, 2, func() { rebindLink(t, link, real2) })
 				run := func() error {
-					_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": link, "content": "after"})
+					_, err := execWrite(t, root, "", store, map[string]any{"path": link, "content": "after"})
 					return err
 				}
 				assert := func(t *testing.T, _ error) {
@@ -592,7 +592,7 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 				root, link, real1, real2 := rebindingLifecycleFixture(t)
 				refusalFlip(store, 1, func() { rebindLink(t, link, real2) })
 				run := func() error {
-					_, err := execEdit(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": link, "old_string": "before", "new_string": "after"})
+					_, err := execEdit(t, root, "", store, map[string]any{"path": link, "old_string": "before", "new_string": "after"})
 					return err
 				}
 				assert := func(t *testing.T, _ error) {
@@ -609,7 +609,7 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 				root, link, real1, real2 := rebindingLifecycleFixture(t)
 				refusalFlip(store, 1, func() { rebindLink(t, link, real2) })
 				run := func() error {
-					_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Update File: link.txt\n@@\n-before\n+after")})
+					_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Update File: link.txt\n@@\n-before\n+after")})
 					return err
 				}
 				assert := func(t *testing.T, _ error) {
@@ -629,7 +629,7 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 				testassert.NoError(t, os.WriteFile(replacement, []byte("secret"), 0o644))
 				refusalFlip(store, 1, func() { testassert.NoError(t, os.Symlink(replacement, approved)) })
 				run := func() error {
-					_, err := execPatch(t, base, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Add File: link.txt\n+after")})
+					_, err := execPatch(t, base, "", store, map[string]any{"input": applyPatchInput(t, "*** Add File: link.txt\n+after")})
 					return err
 				}
 				assert := func(t *testing.T, _ error) {
@@ -646,7 +646,7 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 				root, link, real1, real2 := rebindingLifecycleFixture(t)
 				refusalFlip(store, 1, func() { rebindLink(t, link, real2) })
 				run := func() error {
-					_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Delete File: link.txt")})
+					_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Delete File: link.txt")})
 					return err
 				}
 				assert := func(t *testing.T, _ error) {
@@ -668,7 +668,7 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 				testassert.NoError(t, os.WriteFile(replacement, []byte("secret"), 0o644))
 				refusalFlip(store, 1, func() { testassert.NoError(t, os.Symlink(replacement, approved)) })
 				run := func() error {
-					_, err := execPatch(t, base, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Update File: src.txt\n*** Move to: new.txt\n@@\n-old content\n+NEW")})
+					_, err := execPatch(t, base, "", store, map[string]any{"input": applyPatchInput(t, "*** Update File: src.txt\n*** Move to: new.txt\n@@\n-old content\n+NEW")})
 					return err
 				}
 				assert := func(t *testing.T, _ error) {
@@ -687,7 +687,7 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 				dst := filepath.Join(root, "new.txt")
 				refusalFlip(store, 2, func() { rebindLink(t, link, real2) })
 				run := func() error {
-					_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Update File: link.txt\n*** Move to: new.txt\n@@\n-before\n+after")})
+					_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Update File: link.txt\n*** Move to: new.txt\n@@\n-before\n+after")})
 					return err
 				}
 				assert := func(t *testing.T, err error) {
@@ -713,11 +713,11 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 			build: func(t *testing.T, store *recordingCodeGroupStore) (func() error, string, func(*testing.T, error)) {
 				root, link, real1, real2 := rebindingLifecycleFixture(t)
 				dst := filepath.Join(root, "new.txt")
-				_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": link, "content": "first"})
+				_, err := execWrite(t, root, "", store, map[string]any{"path": link, "content": "first"})
 				testassert.NoError(t, err)
 				refusalFlip(store, 3, func() { rebindLink(t, link, real2) })
 				run := func() error {
-					_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Update File: link.txt\n*** Move to: new.txt\n@@\n-first\n+after")})
+					_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Update File: link.txt\n*** Move to: new.txt\n@@\n-first\n+after")})
 					return err
 				}
 				assert := func(t *testing.T, err error) {
@@ -824,7 +824,7 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 				testassert.NoError(t, os.Symlink(realA, rootLink))
 				refusalFlip(store, op.flipCall, func() { rebindLink(t, rootLink, realB) })
 				run := func() error {
-					_, err := execPatch(t, rootLink, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, op.input())})
+					_, err := execPatch(t, rootLink, "", store, map[string]any{"input": applyPatchInput(t, op.input())})
 					return err
 				}
 				assert := func(tt *testing.T, err error) { op.assert(tt, store, realA, realB, err) }
@@ -839,11 +839,11 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 		run  func(t *testing.T, store *recordingCodeGroupStore, rootLink string) error
 	}{
 		{name: "write", run: func(t *testing.T, store *recordingCodeGroupStore, rootLink string) error {
-			_, err := execWrite(t, rootLink, "", "", CapabilityOptions{}, store, map[string]any{"path": "file.txt", "content": "after"})
+			_, err := execWrite(t, rootLink, "", store, map[string]any{"path": "file.txt", "content": "after"})
 			return err
 		}},
 		{name: "edit", run: func(t *testing.T, store *recordingCodeGroupStore, rootLink string) error {
-			_, err := execEdit(t, rootLink, "", "", CapabilityOptions{}, store, map[string]any{"path": "file.txt", "old_string": "hi", "new_string": "after"})
+			_, err := execEdit(t, rootLink, "", store, map[string]any{"path": "file.txt", "old_string": "hi", "new_string": "after"})
 			return err
 		}},
 	} {
@@ -868,152 +868,6 @@ func TestMutationToolsRefuseRebindingDuringSnapshotCapture(t *testing.T) {
 					assertFreshCaptureAbandoned(t, store, filepath.Join(realA, "file.txt"))
 				}
 				return run, "approved canonical workspace root changed", assert
-			},
-		})
-	}
-
-	// Write-dir rebinding rows.
-	for _, op := range []struct {
-		name     string
-		seed     func(t *testing.T, realA, realB string)
-		input    func(realA string) string
-		flipCall int
-		assert   func(t *testing.T, store *recordingCodeGroupStore, realA, realB string, err error)
-	}{
-		{
-			name: "patch_update", seed: func(t *testing.T, realA, realB string) {
-				testassert.NoError(t, os.WriteFile(filepath.Join(realA, "file.txt"), []byte("hi"), 0o644))
-				testassert.NoError(t, os.WriteFile(filepath.Join(realB, "file.txt"), []byte("secret"), 0o644))
-			},
-			input: func(realA string) string {
-				return "*** Update File: " + filepath.Join(realA, "file.txt") + "\n@@\n-hi\n+after"
-			},
-			flipCall: 1,
-			assert: func(t *testing.T, store *recordingCodeGroupStore, realA, realB string, _ error) {
-				assertFileContent(t, filepath.Join(realA, "file.txt"), "hi")
-				assertFileContent(t, filepath.Join(realB, "file.txt"), "secret")
-				assertFreshCaptureAbandoned(t, store, filepath.Join(realA, "file.txt"))
-			},
-		},
-		{
-			name: "patch_add", seed: func(*testing.T, string, string) {},
-			input:    func(realA string) string { return "*** Add File: " + filepath.Join(realA, "new.txt") + "\n+after" },
-			flipCall: 1,
-			assert: func(t *testing.T, store *recordingCodeGroupStore, realA, realB string, _ error) {
-				assertPathMissing(t, filepath.Join(realA, "new.txt"))
-				assertPathMissing(t, filepath.Join(realB, "new.txt"))
-				assertFreshCaptureAbandoned(t, store, filepath.Join(realA, "new.txt"))
-			},
-		},
-		{
-			name: "patch_delete", seed: func(t *testing.T, realA, realB string) {
-				testassert.NoError(t, os.WriteFile(filepath.Join(realA, "gone.txt"), []byte("doomed"), 0o644))
-				testassert.NoError(t, os.WriteFile(filepath.Join(realB, "gone.txt"), []byte("secret"), 0o644))
-			},
-			input:    func(realA string) string { return "*** Delete File: " + filepath.Join(realA, "gone.txt") },
-			flipCall: 1,
-			assert: func(t *testing.T, store *recordingCodeGroupStore, realA, realB string, _ error) {
-				assertFileContent(t, filepath.Join(realA, "gone.txt"), "doomed")
-				assertFileContent(t, filepath.Join(realB, "gone.txt"), "secret")
-				assertFreshCaptureAbandoned(t, store, filepath.Join(realA, "gone.txt"))
-			},
-		},
-		{
-			name: "patch_move_dst", seed: func(t *testing.T, realA, _ string) {
-				testassert.NoError(t, os.WriteFile(filepath.Join(realA, "src.txt"), []byte("old content"), 0o644))
-			},
-			input: func(realA string) string {
-				return "*** Update File: " + filepath.Join(realA, "src.txt") + "\n*** Move to: " + filepath.Join(realA, "new.txt") + "\n@@\n-old content\n+NEW"
-			},
-			flipCall: 1,
-			assert: func(t *testing.T, store *recordingCodeGroupStore, realA, realB string, _ error) {
-				assertFileContent(t, filepath.Join(realA, "src.txt"), "old content")
-				assertPathMissing(t, filepath.Join(realA, "new.txt"))
-				assertPathMissing(t, filepath.Join(realB, "new.txt"))
-				assertFreshCaptureAbandoned(t, store, filepath.Join(realA, "new.txt"))
-			},
-		},
-		{
-			name: "patch_move_src", seed: func(t *testing.T, realA, realB string) {
-				testassert.NoError(t, os.WriteFile(filepath.Join(realA, "old.txt"), []byte("before"), 0o644))
-				testassert.NoError(t, os.WriteFile(filepath.Join(realB, "old.txt"), []byte("secret"), 0o644))
-			},
-			input: func(realA string) string {
-				return "*** Update File: " + filepath.Join(realA, "old.txt") + "\n*** Move to: " + filepath.Join(realA, "new.txt") + "\n@@\n-before\n+after"
-			},
-			flipCall: 2,
-			assert: func(t *testing.T, store *recordingCodeGroupStore, realA, realB string, err error) {
-				assertFileContent(t, filepath.Join(realA, "new.txt"), "after")
-				assertFileContent(t, filepath.Join(realA, "old.txt"), "before")
-				assertFileContent(t, filepath.Join(realB, "old.txt"), "secret")
-				assertPartialCommitted(t, err, "M "+filepath.Join(realA, "new.txt"))
-				testassert.Require(t, len(store.discards) == 1, "discards = %v, want exactly one discard: the refused source capture", store.discards)
-				assertEntryPresent(t, store, filepath.Join(realA, "new.txt"))
-				assertEntryDiscarded(t, store, filepath.Join(realA, "old.txt"))
-				testassert.Require(t, len(store.identityRecords) == 1, "identity records = %+v, want only the completed destination record", store.identityRecords)
-			},
-		},
-	} {
-		cases = append(cases, rebindingCase{
-			name: op.name + "_write_dir",
-			build: func(t *testing.T, store *recordingCodeGroupStore) (func() error, string, func(*testing.T, error)) {
-				base := t.TempDir()
-				realA := filepath.Join(base, "realA")
-				realB := filepath.Join(base, "realB")
-				for _, dir := range []string{realA, realB} {
-					testassert.NoError(t, os.Mkdir(dir, 0o755))
-				}
-				wd := filepath.Join(base, "wd")
-				testassert.NoError(t, os.Symlink(realA, wd))
-				op.seed(t, realA, realB)
-				wdCanonical, err := bindWriteDir(base, "apply_patch", wd)
-				testassert.NoError(t, err)
-				refusalFlip(store, op.flipCall, func() { rebindLink(t, wd, realB) })
-				run := func() error {
-					_, err := execPatch(t, base, "", wdCanonical, CapabilityOptions{WriteDir: wd}, store, map[string]any{"input": applyPatchInput(t, op.input(realA))})
-					return err
-				}
-				assert := func(tt *testing.T, err error) { op.assert(tt, store, realA, realB, err) }
-				return run, "approved canonical write_dir changed", assert
-			},
-		})
-	}
-
-	// Write/edit producers revalidated against a flipped write-dir witness.
-	for _, tool := range []struct {
-		name string
-		run  func(t *testing.T, store *recordingCodeGroupStore, base, realA, wd string) error
-	}{
-		{name: "write", run: func(t *testing.T, store *recordingCodeGroupStore, base, realA, wd string) error {
-			_, err := execWrite(t, base, "", "", CapabilityOptions{WriteDir: wd}, store, map[string]any{"path": filepath.Join(realA, "file.txt"), "content": "after"})
-			return err
-		}},
-		{name: "edit", run: func(t *testing.T, store *recordingCodeGroupStore, base, realA, wd string) error {
-			_, err := execEdit(t, base, "", "", CapabilityOptions{WriteDir: wd}, store, map[string]any{"path": filepath.Join(realA, "file.txt"), "old_string": "hi", "new_string": "after"})
-			return err
-		}},
-	} {
-		cases = append(cases, rebindingCase{
-			name: tool.name + "_write_dir",
-			build: func(t *testing.T, store *recordingCodeGroupStore) (func() error, string, func(*testing.T, error)) {
-				base := t.TempDir()
-				realA := filepath.Join(base, "realA")
-				realB := filepath.Join(base, "realB")
-				for _, dir := range []string{realA, realB} {
-					testassert.NoError(t, os.Mkdir(dir, 0o755))
-				}
-				wd := filepath.Join(base, "wd")
-				testassert.NoError(t, os.Symlink(realA, wd))
-				testassert.NoError(t, os.WriteFile(filepath.Join(realA, "file.txt"), []byte("hi"), 0o644))
-				testassert.NoError(t, os.WriteFile(filepath.Join(realB, "file.txt"), []byte("secret"), 0o644))
-				refusalFlip(store, 1, func() { rebindLink(t, wd, realB) })
-				run := func() error { return tool.run(t, store, base, realA, wd) }
-				assert := func(t *testing.T, _ error) {
-					assertFileContent(t, filepath.Join(realA, "file.txt"), "hi")
-					assertFileContent(t, filepath.Join(realB, "file.txt"), "secret")
-					assertFreshCaptureAbandoned(t, store, filepath.Join(realA, "file.txt"))
-				}
-				return run, "approved canonical write_dir changed", assert
 			},
 		})
 	}

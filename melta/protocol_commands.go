@@ -17,11 +17,11 @@ import (
 // coordinator's own publication. A failed fresh read propagates its typed
 // error; the committed creation is never rolled back and no synthetic
 // revision is invented.
-func (r *Melta) CreateSession(ctx context.Context, c Caller, workspace string, requested *protocol.AgentSelection) (protocol.Session, error) {
-	selection := r.defaultAgentSelection()
+func (r *Melta) CreateSession(ctx context.Context, c Caller, workspace string, requested *protocol.SessionInputs) (protocol.Session, error) {
+	var inputs harness.SessionInputs
 	if requested != nil {
 		var err error
-		selection, err = selectionFromProtocol(*requested)
+		inputs, err = sessionInputsFromProtocol(*requested)
 		if err != nil {
 			return protocol.Session{}, err
 		}
@@ -38,7 +38,7 @@ func (r *Melta) CreateSession(ctx context.Context, c Caller, workspace string, r
 		if err := r.authorize(c, ctx, h, CallerScope{Kind: CallerScopeWorkspace, Workspace: normalized}); err != nil {
 			return err
 		}
-		record, err := r.createSessionRecord(ctx, h, normalized, selection)
+		record, err := r.createSessionRecord(ctx, h, normalized, inputs, nil)
 		if err != nil {
 			return err
 		}
@@ -217,13 +217,13 @@ func forkBoundaryEntry(ctx context.Context, h *harness.Harness, sourceID string,
 	return "", sourceErr
 }
 
-// SetSessionAgentType is the protocol-shaped Agent-type change: the Harness
-// keeps its nonempty-only selection (an unknown type fails at the next
+// SetSessionInputs is the protocol-shaped Session inputs change: the Harness
+// stores the validated inputs (an unknown model fails at the next
 // preparation, not here), and the returned header is the narrow
 // post-transition metadata read.
-func (r *Melta) SetSessionAgentType(ctx context.Context, c Caller, sessionID string, req protocol.SetSessionAgentTypeRequest) (protocol.Session, error) {
+func (r *Melta) SetSessionInputs(ctx context.Context, c Caller, sessionID string, req protocol.SetSessionInputsRequest) (protocol.Session, error) {
 	var header protocol.Session
-	selection, err := selectionFromProtocol(req.AgentSelection)
+	inputs, err := sessionInputsFromProtocol(req.Inputs)
 	if err != nil {
 		return header, err
 	}
@@ -231,7 +231,7 @@ func (r *Melta) SetSessionAgentType(ctx context.Context, c Caller, sessionID str
 		if err := r.authorize(c, ctx, h, CallerScope{Kind: CallerScopeSession, SessionID: sessionID}); err != nil {
 			return err
 		}
-		if _, err := h.ChangeAgentType(ctx, sessionID, selection); err != nil {
+		if _, err := h.SetSessionInputs(ctx, sessionID, inputs); err != nil {
 			return err
 		}
 		var err error

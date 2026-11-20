@@ -54,11 +54,10 @@ func (publicNoopStopper) StopJob(string, string) {}
 func publicChildLaunch(root string) harness.LaunchChildRequest {
 	return harness.LaunchChildRequest{
 		ParentSessionID: root,
-		AgentSelection:  publicSelection("coder"),
+		Inputs:          publicInputs("coder"),
 		Content:         []model.ContentPart{{Kind: model.PartText, Text: "child"}},
 		OperationID:     "child-op-1",
 		ExtensionID:     "test.extension",
-		MaxConcurrent:   2,
 		OutputLimit:     1024,
 		Report:          true,
 	}
@@ -465,7 +464,7 @@ func TestObservePublicBothStores(t *testing.T) {
 			testassert.Require(t, len(got) == 0, "the restarted owner replayed %+v", got)
 		}
 		{
-			_, err := restarted.ChangeAgentType(context.Background(), session, publicSelection("planner"))
+			_, err := restarted.SetSessionInputs(context.Background(), session, publicInputs("planner"))
 			testassert.NoError(t, err)
 		}
 		{

@@ -5,7 +5,7 @@
   import { errorText } from '../lib/errors.js';
   import { settings } from '../lib/settings.js';
   import { ProvisionalActivity } from './activity';
-  import { AttemptLedger } from './attempts';
+  import { AttemptLedger, mintOperationID } from './attempts';
   import { invokeNative } from './results';
   import { classifyRestore, restoreLines } from './restore';
   import { composeForkBody, composeObjectPatch, parseExactJSON, presentNumber } from './exactjson';
@@ -63,6 +63,10 @@
   const modal = writable('');
   let modelLoading = false;
   let modelError = '';
+  let agentList = [];
+  let agentCurrent = '';
+  let agentCurrentSession = '';
+  let agentsAvailable = false;
   let models = [];
   // Closing the model dialog invalidates its outstanding read.
   let modelToken = 0;
@@ -135,8 +139,19 @@
   // Two derived render records over the actual subscribed owners: each pane
   // depends on its own reader/activity references plus the shared attempt
   // owner and the authoritative warnings it reads.
-  $: root = viewOf($rootReader, $rootActivity, rootID, $attempts, warnings);
+  $: root = (agentCurrent, agentCurrentSession, viewOf($rootReader, $rootActivity, rootID, $attempts, warnings));
   $: child = viewOf($childReader, $childActivity, childID, $attempts, warnings);
+
+  // latestOperationModel returns the model of the Operation with the greatest
+  // admitted_at; hydration.operations is sorted by operation_id, not admission.
+  function latestOperationModel(hydration) {
+    if (!hydration || !Array.isArray(hydration.operations)) return '';
+    let latest = null;
+    for (const candidate of hydration.operations) {
+      if (latest === null || Date.parse(candidate.admitted_at) > Date.parse(latest.admitted_at)) latest = candidate;
+    }
+    return latest ? latest.model : '';
+  }
 
   function viewOf(reader, activity, sessionID, ledger, globalWarnings) {
     const hydration = reader ? reader.getHydration() : null;
@@ -156,9 +171,9 @@
       ownWarnings: hydration ? hydration.warnings.filter((warning) => warning.session_id === sessionID) : [],
       globalWarnings: hydration ? hydration.warnings.filter((warning) => !warning.session_id) : (globalWarnings ? globalWarnings.payload : []),
       model: hydration && hydration.selected_model ? hydration.selected_model : '',
-      agentType: hydration ? hydration.session.agent_selection?.definition?.definition_id || '' : '',
-      agentDefinition: hydration ? hydration.session.agent_selection?.definition ?? null : null,
-      agentSelection: hydration ? hydration.session.agent_selection : null,
+      ranModel: operation ? operation.model : latestOperationModel(hydration),
+      agentType: agentCurrentSession === sessionID ? agentCurrent : '',
+      agentDefinition: agentCurrentSession === sessionID ? agentCurrent : '',
       activity: activity.getState(),
       attempts: ledger.outstanding(sessionID),
     };
@@ -295,6 +310,7 @@
     // Repair clears both snapshots once; its own fresh reads replace them.
     configuration = null;
     warnings = null;
+    agentsAvailable = false;
   }
 
   async function performRepair() {
@@ -363,7 +379,7 @@
       return;
     }
     if (kind === 'configuration') {
-      acceptGlobal('configuration', classified.data.configuration_revision, classified.data.agents, info);
+      acceptGlobal('configuration', classified.data.configuration_revision, null, info);
     } else {
       acceptGlobal('warnings', classified.data.warnings_revision, classified.data.warnings.filter((warning) => !warning.session_id), info);
     }
@@ -422,28 +438,40 @@
     return selectionTask;
   }
 
-  // Full-reference identity is the three-field tuple; display names are not
-  // unique and never address a roster entry.
-  const refKey = (ref) => JSON.stringify([ref?.extension_id ?? '', ref?.capability_id ?? '', ref?.definition_id ?? '']);
-
   // ONE Create task for a captured Workspace address; callers keep their own adoption.
-  async function createSessionIn(addressed) {
-    const roster = await invoke('configuration', 'GetConfiguration', '{}', JSON.parse);
-    if (roster.kind !== 'ok') return roster;
-    const agents = roster.data.agents;
+  function validExtensions(entries) {
+    if (!Array.isArray(entries)) return false;
     const seen = new Set();
-    if (!Array.isArray(agents) || !agents.every((agent) => {
-      const ref = agent?.definition;
-      if (!agent || typeof agent !== 'object' || Array.isArray(agent) || Object.keys(agent).length !== 9 || typeof agent.name !== 'string' || !agent.name || !ref || typeof ref !== 'object' || Array.isArray(ref) || Object.keys(ref).length !== 3 || typeof ref.extension_id !== 'string' || !ref.extension_id || typeof ref.capability_id !== 'string' || !ref.capability_id || typeof ref.definition_id !== 'string' || !ref.definition_id || seen.has(refKey(ref)) || typeof agent.description !== 'string' || typeof agent.subagent !== 'boolean' || typeof agent.model !== 'string' || typeof agent.readonly !== 'boolean' || typeof agent.write_dir !== 'string' || !Array.isArray(agent.tools) || !agent.tools.every((value) => typeof value === 'string') || !Array.isArray(agent.capabilities) || !agent.capabilities.every((value) => typeof value === 'string')) return false;
-      seen.add(refKey(ref));
-      return true;
-    })) return { kind: 'rejection', message: 'Invalid agent roster' };
-    // Root creation selects only the supplied application definition; a
-    // foreign-only roster or a roster without it creates a resolved Session.
-    const suppliedPrimary = agents.find((agent) => agent.definition.extension_id === 'agents' && agent.definition.capability_id === 'agents.definitions' && agent.definition.definition_id === 'primary');
-    const selection = suppliedPrimary ? { definition: suppliedPrimary.definition } : undefined;
+    return entries.every((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.extension_id !== 'string' || !entry.extension_id ||
+          typeof entry.version !== 'string' || (entry.configuration_schema !== undefined && typeof entry.configuration_schema !== 'string') || typeof entry.settings !== 'string' ||
+          (entry.inactive_reason !== undefined && typeof entry.inactive_reason !== 'string') ||
+          !Array.isArray(entry.tools) || !entry.tools.every((tool) => typeof tool === 'string') || !Array.isArray(entry.operations) ||
+          seen.has(entry.extension_id)) return false;
+      seen.add(entry.extension_id);
+      return entry.operations.every((item) => item && typeof item === 'object' &&
+        ['harness', 'workspace', 'session'].includes(item.target) && item.method && typeof item.method.name === 'string' &&
+        !!item.method.name && ['pure', 'service_io'].includes(item.method.mode) &&
+        typeof item.method.input === 'string' && typeof item.method.success === 'string');
+    });
+  }
+
+  async function createSessionIn(addressed) {
+    const discovery = await invoke('extensions', 'ListExtensions', '{}', JSON.parse);
+    if (discovery.kind !== 'ok') return discovery;
+    if (!validExtensions(discovery.data)) return { kind: 'rejection', message: 'Invalid extension catalog' };
+    const agents = discovery.data.find((entry) => entry.extension_id === 'agents' && !entry.inactive_reason);
+    if (agents?.operations?.some((entry) => entry.method?.name === 'create' && entry.target === 'workspace')) {
+      return invoke('session create', 'InvokeExtension', JSON.stringify({
+        body: { extension_id: 'agents', operation: 'create', target: { kind: 'workspace', workspace: addressed }, arguments: {}, request_id: mintOperationID() },
+      }), (raw) => {
+        const result = JSON.parse(raw)?.result;
+        if (!result || typeof result.session_id !== 'string' || !result.session_id) throw new Error('Invalid session creation receipt');
+        return result;
+      });
+    }
     return invoke('session create', 'CreateSession', JSON.stringify({
-      body: { workspace: addressed, ...(selection ? { agent_selection: selection } : {}) },
+      body: { workspace: addressed },
     }), JSON.parse);
   }
 
@@ -807,7 +835,7 @@
         outcomeNote = lists.error;
         return;
       }
-      const row = (session) => ({ id: session.session_id, agentType: session.agent_selection?.definition?.definition_id || '', lastActivity: session.last_activity });
+      const row = (session) => ({ id: session.session_id, agentType: '', lastActivity: session.last_activity });
       pickerOpen = sortSessions(lists.open).map(row);
       pickerArchived = sortSessions(lists.archived).map(row);
     } finally {
@@ -900,20 +928,52 @@
 
   // --- Agent type ------------------------------------------------------------
 
-  // SetSessionAgentType is reported against its captured Session; the stamped refresh is gated.
-  async function pickAgentType(definition) {
+  // Selection is reported against its captured Session; the stamped refresh is gated.
+  async function pickAgentType(agent) {
     closeModal('agent');
     const addressed = rootID;
-    if (!addressed || !definition) return;
+    if (!addressed || !agent) return;
     const cap = stampFor(addressed, 'root')();
-    const classified = await invoke('agent type', 'SetSessionAgentType', JSON.stringify({
-      session_id: addressed,
-      body: { agent_selection: { definition } },
-    }), JSON.parse);
+    const classified = await invokeAgent('select', { kind: 'session', session_id: addressed }, { agent });
     if (!reportAddressed(classified, 'Agent type change', `session ${addressed}`)) {
       return;
     }
-    if (sameStamp(cap, stampFor(addressed, 'root')()) && rootReader) rootReader.markDirty();
+    if (sameStamp(cap, stampFor(addressed, 'root')())) {
+      agentCurrent = agent;
+      agentCurrentSession = addressed;
+      if (rootReader) rootReader.markDirty();
+    }
+  }
+
+  async function invokeAgent(operation, target, args) {
+    return invoke('agents', 'InvokeExtension', JSON.stringify({
+      body: { extension_id: 'agents', operation, target, arguments: args, request_id: mintOperationID() },
+    }), (raw) => JSON.parse(raw)?.result ?? {});
+  }
+
+  async function openAgentPicker() {
+    const addressed = rootID;
+    const cap = stampFor(addressed, 'root')();
+    const listed = await invokeAgent('list', { kind: 'harness' }, {});
+    if (listed.kind !== 'ok') { outcomeNote = listed.message; return; }
+    const current = await invokeAgent('current', { kind: 'session', session_id: addressed }, {});
+    if (!sameStamp(cap, stampFor(addressed, 'root')())) return;
+    if (current.kind !== 'ok') { outcomeNote = current.message; return; }
+    agentList = Array.isArray(listed.data) ? listed.data : [];
+    agentCurrent = current.data?.agent || '';
+    agentCurrentSession = addressed;
+    openModal('agent');
+  }
+
+  async function openSettings() {
+    openModal('settings');
+    agentsAvailable = false;
+    const cap = stampFor(rootID, 'root')();
+    const discovery = await invoke('extensions', 'ListExtensions', '{}', JSON.parse);
+    if (get(modal) !== 'settings' || !sameStamp(cap, stampFor(rootID, 'root')())) return;
+    if (discovery.kind !== 'ok' || !validExtensions(discovery.data)) return;
+    const agents = discovery.data.find((entry) => entry.extension_id === 'agents' && !entry.inactive_reason);
+    agentsAvailable = ['list', 'current', 'select'].every((name) => agents?.operations?.some((entry) => entry.method.name === name));
   }
 
   async function openModelDialog() {
@@ -922,6 +982,29 @@
     modelLoading = true;
     modelError = '';
     const cap = stampFor(rootID, 'root')();
+    const addressed = rootID;
+    const discovery = await invoke('extensions', 'ListExtensions', '{}', JSON.parse);
+    if (token !== modelToken || !sameStamp(cap, stampFor(rootID, 'root')())) return;
+    if (discovery.kind !== 'ok' || !validExtensions(discovery.data)) {
+      modelError = discovery.message || 'Invalid extension catalog';
+      modelLoading = false;
+      return;
+    }
+    const agents = discovery.data.find((entry) => entry.extension_id === 'agents' && !entry.inactive_reason);
+    if (agents?.operations?.some((entry) => entry.method?.name === 'current' && entry.target === 'session')) {
+      const current = await invokeAgent('current', { kind: 'session', session_id: addressed }, {});
+      if (token !== modelToken || !sameStamp(cap, stampFor(rootID, 'root')())) return;
+      if (current.kind !== 'ok') {
+        modelError = current.message;
+        modelLoading = false;
+        return;
+      }
+      agentCurrent = current.data?.agent || '';
+      agentCurrentSession = addressed;
+    } else {
+      agentCurrent = '';
+      agentCurrentSession = addressed;
+    }
     const classified = await invoke('model list', 'ListModels', JSON.stringify({ query: { all: false } }), JSON.parse);
     try {
       if (token !== modelToken || !sameStamp(cap, stampFor(rootID, 'root')())) return;
@@ -961,19 +1044,20 @@
   // model field.
   async function pickModel(ref) {
     const addressedSession = rootID;
-    const selection = root.agentSelection;
-    const addressedType = selection?.definition?.definition_id;
-    if (!selection || (!selection.inputs && !addressedType)) return;
-    if (addressedType && (selection.definition.extension_id !== 'agents' || selection.definition.capability_id !== 'agents.definitions')) {
-      modelError = 'This definition does not offer a model edit.';
-      return;
-    }
     const cap = stampFor(addressedSession, 'root')();
-    const classified = await invoke('model selection', addressedType ? 'UpdateConfigurationSettings' : 'SetSessionModel', JSON.stringify(
-      addressedType
-        ? { body: { extension_edit: { extension_id: 'agents', edit_id: 'set_model', arguments: JSON.stringify({ definition_id: addressedType, model: ref }) } } }
-        : { session_id: addressedSession, body: { model: ref } },
-    ), JSON.parse);
+    const discovery = await invoke('extensions', 'ListExtensions', '{}', JSON.parse);
+    if (discovery.kind !== 'ok') { modelError = discovery.message; return; }
+    if (!validExtensions(discovery.data)) { modelError = 'Invalid extension catalog'; return; }
+    const agents = discovery.data.find((entry) => entry.extension_id === 'agents' && !entry.inactive_reason);
+    let addressedType = '';
+    if (agents?.operations?.some((entry) => entry.method?.name === 'current' && entry.target === 'session')) {
+      const current = await invokeAgent('current', { kind: 'session', session_id: addressedSession }, {});
+      if (current.kind !== 'ok') { modelError = current.message; return; }
+      addressedType = current.data?.agent || '';
+    }
+    const classified = addressedType
+      ? await invokeAgent('set_model', { kind: 'harness' }, { definition_id: addressedType, model: ref })
+      : await invoke('model selection', 'SetSessionModel', JSON.stringify({ session_id: addressedSession, body: { model: ref } }), JSON.parse);
     if (!reportAddressed(classified, 'Model selection', addressedType ? `agent type ${addressedType}` : `session ${addressedSession}`)) {
       modelError = classified.message;
       return;
@@ -1010,7 +1094,7 @@
       }
       byId.set(header.session_id, {
         id: header.session_id,
-        agentType: header.agent_selection?.definition?.definition_id || '',
+        agentType: '',
         lifecycle: header.lifecycle,
         lastActivity: header.last_activity,
         live: false,
@@ -1107,7 +1191,7 @@
     <button class="bg-btn" on:click={() => void openBackgroundPanel()} aria-label="Background sessions">Background</button>
     <button class="tokens" on:click={() => openModal('usage')} title="Exact token usage" aria-label="Show token usage">⚡ {root.usage.cache} ↑ {root.usage.input} ↓ {root.usage.output}</button>
     <span class="context" title="Context used">{root.usage.used} / {root.usage.window}</span>
-    <button class="settings-btn" on:click={() => openModal('settings')} title="Settings" aria-label="Settings">
+    <button class="settings-btn" on:click={() => void openSettings()} title="Settings" aria-label="Settings">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     </button>
   </div>
@@ -1181,15 +1265,15 @@
       on:close={() => closeModal('workspace')} />
   {/if}
   {#if $modal === 'agent'}
-    <AgentPicker agents={configuration ? configuration.payload : []} current={root.agentDefinition}
+    <AgentPicker agents={agentList} current={root.agentDefinition}
       on:select={(e) => void pickAgentType(e.detail)}
       on:close={() => closeModal('agent')} />
   {/if}
   {#if $modal === 'settings'}
-    <SettingsEditor getClient={clientNow} stamp={() => stampFor('', 'root')()} hasAgents={Array.isArray(configuration?.payload) && configuration.payload.length > 0}
+    <SettingsEditor getClient={clientNow} stamp={() => stampFor('', 'root')()} hasAgents={agentsAvailable}
       on:note={(e) => { outcomeNote = e.detail; }}
       on:changed={() => void refreshGlobal('configuration')}
-      on:agent={() => openModal('agent')}
+      on:agent={() => void openAgentPicker()}
       on:providers={() => openModal('providers')}
       on:snapshots={() => openModal('snapshots')}
       on:viewer={() => openModal('viewer')}
@@ -1223,7 +1307,7 @@
       on:close={() => closeModal('fork')} />
   {/if}
   {#if $modal === 'model'}
-    <ModelDialog agentType={root.agentType} selectedModel={root.model} {models} loading={modelLoading} error={modelError}
+    <ModelDialog agentType={root.agentType} selectedModel={root.model} ranModel={root.ranModel} {models} loading={modelLoading} error={modelError}
       on:select={(e) => void pickModel(e.detail)}
       on:close={() => closeModelDialog()} />
   {/if}

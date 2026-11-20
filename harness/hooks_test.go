@@ -61,7 +61,7 @@ func newHookHarness(t *testing.T, exec Execution) (*Harness, *graphStorage, *coo
 	h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
 		return prepared, nil
 	})
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	{
 		_, disposition := mustAdmitWithoutExecution(t, h, session.Identity.SessionID, testOpID, admissionContent("hello"))
@@ -1122,7 +1122,7 @@ func TestArgumentHookPureChainRepairRestoreAndRefusal(t *testing.T) {
 		h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
 			return admission, nil
 		})
-		session, serr := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		session, serr := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, serr)
 		c := leaseCoordinator(t, h, session.Identity.SessionID)
 		sessionID := session.Identity.SessionID

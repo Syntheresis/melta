@@ -15,6 +15,8 @@ import (
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/extensions/adaptation"
 	"github.com/Syntheresis/melta/extensions/agents"
+	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/melta"
 	"github.com/Syntheresis/melta/protocol"
 )
@@ -119,26 +121,23 @@ func awaitMountedSuccess(t *testing.T, ctx context.Context, client *protocol.Cli
 }
 
 // TestProtocolSuppliedRuntimeBaselineControls proves the HTTP host over the
-// supplied no-extension Runtime: the Agent roster stays empty when Agents and
-// Adaptation are absent and when they are installed but inactive, model
-// controls operate on the resolved inputs and reach the later admission, and
-// Session creation refuses a missing or malformed Workspace.
+// supplied no-extension Runtime: no extension registers when Agents and
+// Adaptation are absent or installed but inactive, model controls operate on
+// the resolved inputs and reach the later admission, and Session creation
+// refuses a missing or malformed Workspace.
 func TestProtocolSuppliedRuntimeBaselineControls(t *testing.T) {
 	rows := []struct {
 		name       string
 		disabled   bool
-		extensions []extension.Native
+		extensions []extension.Extension
 	}{
 		{name: "absent"},
 		{
 			name:     "installed but disabled",
 			disabled: true,
-			extensions: []extension.Native{
-				agents.Native(agents.Options{
-					CapabilityIDs: append([]string(nil), agents.StandardTools...),
-					ToolIDs:       append([]string(nil), agents.StandardTools...),
-				}),
-				adaptation.Native(),
+			extensions: []extension.Extension{
+				agents.Author(),
+				adaptation.Author(),
 			},
 		},
 	}
@@ -158,12 +157,12 @@ func TestProtocolSuppliedRuntimeBaselineControls(t *testing.T) {
 			client := mountedClient(t, server)
 			workspace := t.TempDir()
 
-			configuration, err := client.GetConfigurationWithResponse(ctx)
-			if err != nil || configuration.JSON200 == nil {
-				t.Fatalf("GetConfiguration = (%+v, %v)", configuration, err)
+			discovery, err := client.ListExtensionsWithResponse(ctx)
+			if err != nil || discovery.JSON200 == nil {
+				t.Fatalf("ListExtensions = (%+v, %v)", discovery, err)
 			}
-			if len(configuration.JSON200.Agents) != 0 {
-				t.Fatalf("Agent roster = %+v, want no named definitions", configuration.JSON200.Agents)
+			if len(*discovery.JSON200) != 0 {
+				t.Fatalf("extensions = %+v, want none", discovery.JSON200)
 			}
 
 			missing, err := client.CreateSessionWithResponse(ctx, protocol.CreateSessionRequest{Workspace: ""})
@@ -187,8 +186,8 @@ func TestProtocolSuppliedRuntimeBaselineControls(t *testing.T) {
 			if err != nil || selected.JSON200 == nil {
 				t.Fatalf("SetSessionModel = (%+v, %v)", selected, err)
 			}
-			if selected.JSON200.AgentSelection.Inputs == nil || selected.JSON200.AgentSelection.Inputs.Model != "prov/m" {
-				t.Fatalf("SetSessionModel response = %+v, want the resolved input model", selected.JSON200.AgentSelection)
+			if selected.JSON200.Inputs.Model == nil || *selected.JSON200.Inputs.Model != "prov/m" {
+				t.Fatalf("SetSessionModel response = %+v, want the stored model", selected.JSON200.Inputs)
 			}
 			models, err := client.ListModelsWithResponse(ctx, &protocol.ListModelsParams{All: false})
 			if err != nil || models.JSON200 == nil || len(models.JSON200.Models) != 1 || models.JSON200.Models[0].Ref != "prov/m" {
@@ -214,4 +213,46 @@ func TestProtocolSuppliedRuntimeBaselineControls(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProtocolMountedSessionOperationRead proves the generated Operation read
+// returns the captured inputs under Session authority and maps another
+// Session's Operation and an unknown ID to the same not-found read.
+func TestProtocolMountedSessionOperationRead(t *testing.T) {
+	modelEndpoint := newBaselineModel(t)
+	dataDir := t.TempDir()
+	options := melta.Options{
+		DataDir:       dataDir,
+		Configuration: melta.NewValueConfigurationSource(baselineConfigDocument(modelEndpoint.URL, false)),
+		Credentials:   melta.NewEnvironmentCredentialSource(filepath.Join(dataDir, ".env")),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, _, server := mountedOwner(t, ctx, options)
+	client := mountedClient(t, server)
+	workspace := t.TempDir()
+	created, err := client.CreateSessionWithResponse(ctx, protocol.CreateSessionRequest{Workspace: workspace})
+	testassert.Require(t, err == nil && created.JSON201 != nil, "CreateSession = (%+v, %v)", created, err)
+	sessionID := created.JSON201.SessionId
+	tools := []string{"read_file"}
+	ref := protocol.ModelRef("prov/m")
+	selected, err := client.SetSessionInputsWithResponse(ctx, sessionID, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Model: &ref, Tools: &tools}})
+	testassert.Require(t, err == nil && selected.JSON200 != nil, "SetSessionInputs = (%+v, %v)", selected, err)
+	submitted, err := client.SubmitSessionWithResponse(ctx, sessionID, protocol.SubmitRequest{
+		OperationId: "op-read", Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{baselineTextPart(t, "hello")},
+	})
+	testassert.Require(t, err == nil && submitted.JSON200 != nil, "SubmitSession = (%+v, %v)", submitted, err)
+	awaitMountedSuccess(t, ctx, client, sessionID, "op-read")
+
+	read, err := client.GetSessionOperationWithResponse(ctx, sessionID, "op-read")
+	testassert.Require(t, err == nil && read.JSON200 != nil, "GetSessionOperation = (%+v, %v)", read, err)
+	testassert.Require(t, string(read.JSON200.Inputs.Model) == "prov/m" && read.JSON200.Inputs.Prompt != "" && read.JSON200.Inputs.Strategy.Id == harness.IncludedStrategyID, "operation inputs = %+v, want the captured model/strategy", read.JSON200.Inputs)
+	testassert.Require(t, len(read.JSON200.Inputs.Tools) == 1 && read.JSON200.Inputs.Tools[0].Name == "read_file", "operation tools = %+v, want the admitted selection", read.JSON200.Inputs.Tools)
+
+	other, err := client.CreateSessionWithResponse(ctx, protocol.CreateSessionRequest{Workspace: workspace})
+	testassert.Require(t, err == nil && other.JSON201 != nil, "second CreateSession = (%+v, %v)", other, err)
+	wrongSession, err := client.GetSessionOperationWithResponse(ctx, other.JSON201.SessionId, "op-read")
+	testassert.Require(t, err == nil && wrongSession.StatusCode() == http.StatusNotFound && wrongSession.JSONDefault != nil && wrongSession.JSONDefault.Code == protocol.ErrorCodeNotFound, "other Session's Operation = (%+v, %v), want typed not found", wrongSession, err)
+	unknown, err := client.GetSessionOperationWithResponse(ctx, sessionID, "op-missing")
+	testassert.Require(t, err == nil && unknown.StatusCode() == http.StatusNotFound && unknown.JSONDefault != nil && unknown.JSONDefault.Code == protocol.ErrorCodeNotFound, "unknown Operation = (%+v, %v), want typed not found", unknown, err)
 }

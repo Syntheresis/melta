@@ -3,6 +3,7 @@ package melta
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/Syntheresis/melta/extension"
 	agents "github.com/Syntheresis/melta/extensions/agents"
@@ -10,87 +11,85 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
-// suppliedDefinition builds one supplied Agents named selection for tests.
-func suppliedDefinition(name string) harness.AgentSelection {
-	return harness.AgentSelection{Definition: &harness.DefinitionRef{ExtensionID: agents.ExtensionID, CapabilityID: agents.DefinitionsCapabilityID, DefinitionID: name}}
+// agentState supplies one Agents-owned Session state value.
+func agentState(name string) map[string]harness.SessionStateValue {
+	raw, _ := json.Marshal(struct {
+		Agent string `json:"agent"`
+	}{name})
+	return map[string]harness.SessionStateValue{agents.ExtensionID: raw}
 }
 
-// agentsTestNative builds the real supplied Agents extension over the
-// registered universe the caller's fixture composes: the standard tool
-// capabilities plus every registered fixture declaration. Tests that need a
-// deliberately invalid universe pass none of the fixture plugins.
-func agentsTestNative(registered ...extension.Native) extension.Native {
-	return agentsTestNativeWithDefaults(nil, registered...)
-}
-
-// agentsTestNativeWithDefaults is agentsTestNative with one explicit
-// constructor default capability selection.
-func agentsTestNativeWithDefaults(defaults []string, registered ...extension.Native) extension.Native {
-	capabilities := append([]string(nil), agents.StandardTools...)
-	tools := append([]string(nil), agents.StandardTools...)
-	capabilities = append(capabilities, agents.DefinitionsCapabilityID, agents.ConfigurationCapabilityID, "model_adaptation")
-	for _, native := range registered {
-		for _, capability := range native.Declaration.Capabilities {
-			capabilities = append(capabilities, capability.ID)
-			if capability.Kind == extension.KindTool {
-				tools = append(tools, capability.ID)
-			}
-		}
-	}
-	return agentsTestNativeIDs(capabilities, tools, defaults)
-}
-
-// agentsTestNativeIDs builds the real supplied Agents extension over explicit
-// constructor universes.
-func agentsTestNativeIDs(capabilities, tools, defaults []string) extension.Native {
-	return agents.Native(agents.Options{CapabilityIDs: capabilities, ToolIDs: tools, DefaultCapabilityIDs: defaults})
+// agentsTestNative is the real supplied Agents extension author entry.
+func agentsTestNative() extension.Extension {
+	return agents.Author()
 }
 
 // preparedService is the isolated service harness over the production
-// resource path: the composition and data root are attached so candidate
-// publication prepares the Harness scope and the roster projection.
-func (h *serviceHarness) preparedService(owner context.Context, plugins ...extension.Native) *configurationService {
+// resource path: the owner composition and data root are attached so
+// candidate publication prepares the runtime resource set and the author
+// specs activate.
+func (h *serviceHarness) preparedService(owner context.Context, authors ...extension.Extension) *configurationService {
 	h.t.Helper()
-	svc := h.service(owner, plugins...)
-	c, err := newNativeComposition(plugins)
-	if err != nil {
-		h.t.Fatalf("newComposition: %v", err)
-	}
-	svc.composition = c
+	svc := h.service(owner, authors...)
 	svc.dataDir = h.dataDir
 	return svc
 }
 
-// editAgentModel drives the supplied set_model configuration edit through the
-// one extension-edit path for tests that assert the retained model semantics.
-func (s *configurationService) editAgentModel(agentType, ref string) configurationEdit {
+// editAgentModel drives the supplied Agents registered set_model operation
+// through the production settings-update path against the published
+// candidate, for tests that assert the retained model semantics.
+func (s *configurationService) editAgentModel(ctx context.Context, agentType, ref string) (configurationCapture, error) {
+	s.nativeMu.Lock()
+	candidate := s.nativeCurrent
+	var activation *nativeActivation
+	if candidate != nil {
+		for _, a := range candidate.activations {
+			if a != nil && a.id == agents.ExtensionID {
+				activation = a
+				break
+			}
+		}
+	}
+	s.nativeMu.Unlock()
+	if candidate == nil || activation == nil {
+		return configurationCapture{}, fmt.Errorf("agents activation is not published: %w", extension.ErrClosed)
+	}
 	arguments, _ := json.Marshal(struct {
 		DefinitionID string `json:"definition_id"`
 		Model        string `json:"model"`
 	}{DefinitionID: agentType, Model: ref})
-	return s.editExtension(context.Background(), "agents", "set_model", arguments)
+	callCtx, cancel := context.WithCancel(ctx)
+	scope := &nativeCallScope{
+		nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel},
+		candidate:          candidate, activation: activation,
+		commandScope: harnessScope, receipt: &nativeReceipt{},
+	}
+	defer scope.end()
+	settingsArgs, _ := json.Marshal(struct {
+		Service   string          `json:"service"`
+		Method    string          `json:"method"`
+		Arguments json.RawMessage `json:"arguments"`
+	}{agents.ConfigurationCapabilityID, "set_model", arguments})
+	if _, err := scope.call(callCtx, extension.ContractSettings, "update", settingsArgs); err != nil {
+		return configurationCapture{}, err
+	}
+	return configurationCapture{snapshot: s.current()}, nil
 }
 
-// updateSettingsOnly drives the settings arm of the settings/extension-edit
-// request union.
+// updateSettingsOnly drives the settings arm of the settings request.
 func updateSettingsOnly(r *Melta, ctx context.Context, settings protocol.Settings) (protocol.SettingsMutation, error) {
-	return r.UpdateSettings(ctx, testCaller(r), protocol.UpdateSettingsRequest{Settings: &settings})
+	return r.UpdateSettings(ctx, testCaller(r), protocol.UpdateSettingsRequest{Settings: settings})
 }
 
-// setAgentTypeModel drives the supplied set_model extension edit through the
-// public UpdateSettings request for tests that assert the retained model
-// propagation.
-func (r *Melta) setAgentTypeModel(ctx context.Context, agentType, ref string) (protocol.SettingsMutation, error) {
+// setAgentTypeModel drives the supplied Agents registered set_model harness
+// operation for tests that assert the retained model propagation.
+func (r *Melta) setAgentTypeModel(ctx context.Context, agentType, ref string) (extension.Result, error) {
 	arguments, err := json.Marshal(struct {
 		DefinitionID string `json:"definition_id"`
 		Model        string `json:"model"`
 	}{DefinitionID: agentType, Model: ref})
 	if err != nil {
-		return protocol.SettingsMutation{}, err
+		return extension.Result{}, err
 	}
-	return r.UpdateSettings(ctx, testCaller(r), protocol.UpdateSettingsRequest{ExtensionEdit: &protocol.ExtensionEdit{
-		ExtensionId: "agents",
-		EditId:      "set_model",
-		Arguments:   string(arguments),
-	}})
+	return r.invokeRegisteredOperation(ctx, testCaller(r), agents.ExtensionID, "set_model", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, arguments, "")
 }

@@ -326,7 +326,7 @@ func TestPreparationReservationReleasesOnDiscards(t *testing.T) {
 		testassert.Equal(t, opens, 0)
 	})
 
-	t.Run("cap-rejected child launch discards with release", func(t *testing.T) {
+	t.Run("stopping parent rejects child launch with release", func(t *testing.T) {
 		counters := &reservationCounters{}
 		opens := 0
 		prepared := PreparedExecution{
@@ -340,14 +340,12 @@ func TestPreparationReservationReleasesOnDiscards(t *testing.T) {
 		h, cancel := releasingHarness(t, freshSessionStore(t), prepared)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		{
-			_, err := admitLocked(h, c, memberSession, "existing-child", 0)
-			testassert.NoError(t, err)
-		}
+		c.mu.Lock()
+		c.stop = &stopInterval{done: make(chan struct{})}
+		c.mu.Unlock()
 		req := launchRequest()
-		req.MaxConcurrent = 1
 		_, err := h.LaunchChildSession(context.Background(), req)
-		testassert.Require(t, err != nil, "capped launch = nil, want the cap rejection")
+		testassert.Require(t, err != nil, "stopping parent launch = nil, want rejection")
 		testassert.Equal(t, counters.releases.Load(), int64(1))
 		testassert.Equal(t, opens, 0)
 	})

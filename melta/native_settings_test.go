@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
+	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/protocol"
 )
@@ -77,12 +78,13 @@ func TestSettingsUpdateRegisteredTransformConcurrentWriter(t *testing.T) {
 		}
 		return nil, err
 	}}
+	svc.authors = append(svc.authors, nativeActivationSpec{extension: e, section: []byte(initial)})
 	candidate, err := svc.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(initial)}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer candidate.release()
-	if err := candidate.publish(); err != nil {
+	if err := candidate.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	r, env := openProjectionRuntime(t, storage.NewMemory())
@@ -94,7 +96,7 @@ func TestSettingsUpdateRegisteredTransformConcurrentWriter(t *testing.T) {
 	defer func() { r.config = original }()
 	target := protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}
 	invoke := func(args json.RawMessage) error {
-		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "setting", "update", target, args, nil)
+		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "setting", "update", target, args, "")
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -112,7 +114,7 @@ func TestSettingsUpdateRegisteredTransformConcurrentWriter(t *testing.T) {
 		name   string
 		target protocol.ExtensionInvocationTarget
 	}{{"update-workspace", workspaceTarget(workspace)}, {"update-session", sessionTarget(session)}} {
-		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "setting", row.name, row.target, []byte(`{"service":"own/opaque","method":"change/opaque","arguments":{}}`), nil)
+		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "setting", row.name, row.target, []byte(`{"service":"own/opaque","method":"change/opaque","arguments":{}}`), "")
 		if !errors.Is(err, ErrDenied) || calls.Load() != 0 || svc.current().generation != 1 {
 			t.Fatalf("forbidden registered operation %s: %v", row.name, err)
 		}
@@ -197,6 +199,9 @@ func TestSettingsUpdateRegisteredTransformConcurrentWriter(t *testing.T) {
 			t.Fatalf("invalid transform published: %s %v", arguments, err)
 		}
 	}
+	// An invalid ordinary field leaves the extension inactive while the rest
+	// of the candidate publishes, so its own transform is unavailable until a
+	// later valid write repairs the section.
 	_, err = svc.mutate(context.Background(), configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
 		sections, err := extensionSections(roots, "setting")
 		if err != nil {
@@ -216,8 +221,30 @@ func TestSettingsUpdateRegisteredTransformConcurrentWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := invoke([]byte(`{"service":"own/opaque","method":"change/opaque","arguments":{"value":9}}`)); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("transform over an inactive section = %v, want not-found", err)
+	}
+	_, err = svc.mutate(context.Background(), configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
+		sections, err := extensionSections(roots, "setting")
+		if err != nil {
+			return 0, err
+		}
+		section, err := decodeRoot(sections["setting"])
+		if err != nil {
+			return 0, err
+		}
+		section["value"] = json.RawMessage(`7`)
+		raw, err := marshalRawObject(section, true)
+		if err != nil {
+			return 0, err
+		}
+		return writeExtensionSection(roots, sections, "setting", raw)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := invoke([]byte(`{"service":"own/opaque","method":"change/opaque","arguments":{"value":9}}`)); err != nil {
-		t.Fatalf("repair ordinary invalid field: %v", err)
+		t.Fatalf("repaired ordinary field: %v", err)
 	}
 	parked, continueOld := make(chan struct{}), make(chan struct{})
 	beforeUpdate = func() { close(parked); <-continueOld }
@@ -231,7 +258,7 @@ func TestSettingsUpdateRegisteredTransformConcurrentWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sameAuthority.release()
-	if err := sameAuthority.publish(); err != nil {
+	if err := sameAuthority.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	close(continueOld)
@@ -245,7 +272,7 @@ func TestSettingsUpdateRegisteredTransformConcurrentWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer next.release()
-	if err := next.publish(); err != nil {
+	if err := next.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	_, err = scope.call(context.Background(), "melta.settings", "update", json.RawMessage(`{"service":"own/opaque","method":"change/opaque","arguments":{"grant":"other"}}`))
@@ -303,7 +330,7 @@ func TestSettingsUpdateRegisteredWorkerTransform(t *testing.T) {
 	if warningExists(svc.warnings, "plugin:settings-worker", "worker-entry") {
 		t.Fatal("worker warning escaped before publication")
 	}
-	if err := candidate.publish(); err != nil {
+	if err := candidate.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	if !warningExists(svc.warnings, "plugin:settings-worker", "worker-entry") {
@@ -321,7 +348,7 @@ func TestSettingsUpdateRegisteredWorkerTransform(t *testing.T) {
 	r.config = svc
 	defer func() { r.config = original }()
 	_, err = r.invokeRegisteredOperation(context.Background(), testCaller(r), "settings-worker", "update",
-		protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, []byte(`{"service":"worker/transform","method":"change/value","arguments":9007199254740993}`), nil)
+		protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, []byte(`{"service":"worker/transform","method":"change/value","arguments":9007199254740993}`), "")
 	if err != nil {
 		t.Fatal(err)
 	}

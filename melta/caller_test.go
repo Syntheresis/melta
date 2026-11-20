@@ -2,6 +2,7 @@ package melta
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -146,7 +147,10 @@ func TestProducerScopeAuthority(t *testing.T) {
 		}{
 			{"reload", func(c Caller) error { _, err := r.Reload(ctx, c); return err }},
 			{"get configuration", func(c Caller) error { _, err := r.GetConfiguration(ctx, c); return err }},
-			{"update settings", func(c Caller) error { _, err := r.UpdateSettings(ctx, c, protocol.UpdateSettingsRequest{}); return err }},
+			{"update settings", func(c Caller) error {
+				_, err := r.UpdateSettings(ctx, c, protocol.UpdateSettingsRequest{Settings: protocol.Settings{Tools: json.RawMessage(`[]`)}})
+				return err
+			}},
 			{"list models", func(c Caller) error { _, err := r.ListModels(ctx, c, protocol.ListModelsParams{}); return err }},
 			{"list providers", func(c Caller) error { _, err := r.ListProviders(ctx, c); return err }},
 			{"add provider", func(c Caller) error {
@@ -223,8 +227,8 @@ func TestProducerScopeAuthority(t *testing.T) {
 				_, err := r.ForkSession(ctx, c, sessionA, protocol.ForkRequest{OperationId: "scope-fork", BoundaryItemId: "missing", Content: []protocol.ContentPart{textContentPart(t, "fork", nil)}})
 				return err
 			}},
-			{"set session agent type", sessionA, func(c Caller) error {
-				_, err := r.SetSessionAgentType(ctx, c, sessionA, protocol.SetSessionAgentTypeRequest{})
+			{"set session inputs", sessionA, func(c Caller) error {
+				_, err := r.SetSessionInputs(ctx, c, sessionA, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{}})
 				return err
 			}},
 			{"build hydration", sessionA, func(c Caller) error { _, err := r.GetHydration(ctx, c, sessionA); return err }},

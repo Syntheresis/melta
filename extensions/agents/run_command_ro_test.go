@@ -1,4 +1,4 @@
-package tool
+package agents
 
 import (
 	"strings"
@@ -6,6 +6,11 @@ import (
 
 	"github.com/Syntheresis/melta/internal/testassert"
 )
+
+func isReadOnlyCommand(command string) bool {
+	_, err := ReadOnlyCommand(command)
+	return err == nil
+}
 
 func TestReadOnlyRunCommandAllowsWhitelistedCommands(t *testing.T) {
 	tests := []struct {

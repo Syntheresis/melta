@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 
 	"github.com/Syntheresis/melta/extension"
@@ -66,9 +68,18 @@ func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, ca
 	scope, author := t.authorScope(ctx, tc, workspace, true, true, nil)
 	plan := t.binding.entry.value.(nativeTool).tool.Prepare(scope.ctx, author, call).Owned()
 	scope.end()
+	var start *nativeSessionStart
+	if plan.Start != nil {
+		if plan.Start.Target == "" {
+			return immediateError(call.ID, fmt.Errorf("session start target must not be empty: %w", harness.ErrInvalid))
+		}
+		target := url.PathEscape(t.binding.entry.activation.id) + "/" + url.PathEscape(plan.Start.Target)
+		plan.Permissions = append(plan.Permissions, harness.PermissionRequest{Permission: harness.PermissionSessionOwn, Target: target})
+		start = &nativeSessionStart{extensionID: t.binding.entry.activation.id, plan: *plan.Owned().Start}
+	}
 	prepared := harness.PreparedTool{
 		Permissions: slices.Clone(plan.Permissions), CanonicalWorkspace: plan.CanonicalWorkspace,
-		CanonicalWriteDir: plan.CanonicalWriteDir, Immediate: plan.Immediate,
+		Immediate: plan.Immediate,
 	}
 	if plan.Immediate != nil {
 		return prepared
@@ -79,13 +90,14 @@ func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, ca
 			return harness.ToolOutcome{Result: bindingToolResult(call.ID, err, false), Evidence: harness.ExecutionNotStarted}
 		}
 		scope, author := t.authorScope(ctx, tc, workspace, false, false, permissions)
+		scope.start = start
 		defer scope.end()
 		return t.binding.entry.value.(nativeTool).tool.Execute(scope.ctx, author, plan)
 	}
 	return prepared
 }
 
-func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]harness.SessionStateValue) []harness.AuthorizationHook {
+func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]harness.SessionStateValue, settings json.RawMessage, host *composition, lease *artifactCallLease, secrets map[string]map[string]string) []harness.AuthorizationHook {
 	var hooks []harness.AuthorizationHook
 	for _, registration := range s.hooks["authorization"] {
 		entry := registration
@@ -100,406 +112,93 @@ func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]ha
 			scope := &nativeCallScope{
 				nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
 				candidate:          s.candidate, activation: activation, pure: true,
-				workspace: workspace, workspaceBind: true, session: tc.Session, states: states,
+				workspace: workspace, workspaceBind: true, session: tc.Session, states: states, host: host, lease: lease, operationSecrets: secrets,
 			}
 			defer scope.end()
 			call := extension.AuthorContext{ExtensionID: activation.id, Settings: bytes.Clone(activation.section), Session: tc.Session, State: bytes.Clone(states[activation.id]), Call: scope.call}
-			input := extension.AuthorizationInput{ToolName: action.ToolName, Arguments: bytes.Clone(action.Arguments), CanonicalWorkspace: action.CanonicalWorkspace, Permissions: slices.Clone(action.Permissions)}
+			input := extension.AuthorizationInput{ToolName: action.ToolName, Arguments: bytes.Clone(action.Arguments), CanonicalWorkspace: action.CanonicalWorkspace, ToolSettings: bytes.Clone(settings), Permissions: slices.Clone(action.Permissions)}
 			return entry.value.(nativeHook).handler.(extension.AuthorizationHook)(child, call, input)
 		}})
 	}
 	return hooks
 }
 
-// implementationProvenance resolves every actual implementing extension root:
-// the selected tools/hooks/strategy, the named-definition owner when used, and
-// their transitively declared dependency closure, excluding the host baseline.
-func implementationProvenance(c *composition, sel selection) []harness.ImplementationCapture {
-	roots := make(map[string]bool)
-	seen := make(map[string]bool)
-	var addCapability func(*extension.CompiledCapability)
-	addCapability = func(capability *extension.CompiledCapability) {
-		if capability == nil || seen[capability.ID] {
-			return
-		}
-		seen[capability.ID] = true
-		roots[capability.Declaration.Declaration.ID] = true
-		for _, binding := range capability.Component.Requires {
-			if binding.Host || binding.Target == nil {
-				continue
-			}
-			addCapability(binding.Target)
-		}
+func registeredHookScope(ctx context.Context, stage *nativeSnapshot, entry *nativeRegistration, sel selection, session harness.SessionIdentity, pure bool) (*nativeCallScope, extension.AuthorContext) {
+	child, cancel := context.WithCancel(ctx)
+	scope := &nativeCallScope{
+		nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
+		candidate:          stage.candidate, activation: entry.activation, pure: pure,
+		session: session, states: sel.states, host: sel.invocation.snapshot.composition,
+		lease: sel.lease, operationSecrets: sel.operationSecrets,
 	}
-	add := func(id string) {
-		if capability, ok := c.compiled.Capability(id); ok {
-			addCapability(capability)
-		}
+	call := extension.AuthorContext{
+		ExtensionID: entry.activation.id, Settings: bytes.Clone(entry.activation.section),
+		Session: session, State: bytes.Clone(sel.states[entry.activation.id]), Call: scope.call,
 	}
-	for _, id := range sel.selected {
-		add(id)
-	}
-	if sel.inputs.Strategy.ID != "" {
-		add(sel.inputs.Strategy.ID)
-	}
-	if sel.definition != nil {
-		add(sel.definition.CapabilityID)
-	}
-	var out []harness.ImplementationCapture
-	for _, declaration := range c.compiled.Declarations() {
-		id := declaration.Declaration.ID
-		if !roots[id] {
-			continue
-		}
-		out = append(out, harness.ImplementationCapture{ExtensionID: id, Version: declaration.Declaration.Version, Settings: sel.invocation.Config(id)})
-	}
-	return out
+	return scope, call
 }
 
-func selectedCapability(scopes []*scope, id string) (*capabilityValue, bool) {
-	for _, scope := range scopes {
-		if value, ok := scope.capabilities[id]; ok {
-			return value, true
-		}
-	}
-	return nil, false
-}
-
-// resolveStrategyBinding selects the execution's strategy and binds an
-// executable implementation to the admitted execution context.
-func resolveStrategyBinding(c *composition, scopes []*scope, selected harness.StrategySelection, ctx context.Context) (*harness.StrategyBinding, error) {
-	if selected.ID == "" {
-		return c.defaultStrategy, nil
-	}
-	capability, ok := c.compiled.Capability(selected.ID)
-	if !ok || capability.Kind != extension.KindStrategy {
-		return nil, fmt.Errorf("unknown strategy %q: %w", selected.ID, ErrComposition)
-	}
-	value, ok := selectedCapability(scopes, selected.ID)
-	if !ok {
-		return nil, fmt.Errorf("strategy %q is not open in this execution: %w", selected.ID, ErrClosed)
-	}
-	if value.implementation.Strategy == nil {
-		return nil, fmt.Errorf("strategy %q has no implementation: %w", selected.ID, ErrComposition)
-	}
-	strategy := value.implementation.Strategy
-	if executable, ok := strategy.(*executableStrategy); ok {
-		bound := *executable
-		bound.ctx = ctx
-		strategy = &bound
-	}
-	return &harness.StrategyBinding{ID: capability.ID, RequiresContextWindow: capability.Strategy.RequiresContextWindow, Strategy: strategy}, nil
-}
-
-// strategyLookup returns the per-procedure strategy lookup over the
-// execution's retained composition and scopes: no selection uses the host
-// default owned by the composition, while a selected capability is resolved
-// from those retained scopes at each procedure start. The Harness checks the
-// returned identity and window once at its boundary.
-func strategyLookup(c *composition, scopes []*scope, selected harness.StrategySelection) func(context.Context, string) (*harness.StrategyBinding, error) {
-	return func(ctx context.Context, _ string) (*harness.StrategyBinding, error) {
-		if selected.ID == "" {
-			return c.defaultStrategy, nil
-		}
-		return resolveStrategyBinding(c, scopes, selected, ctx)
-	}
-}
-
-func (c *composition) toolSpec(id string) (toolDeclaration, bool) {
-	export, ok := c.exports[id]
-	if !ok {
-		return toolDeclaration{}, false
-	}
-	if export.standard {
-		return toolDeclaration{id: id, standardDescribe: export.standardDescribe}, true
-	}
-	return toolDeclaration{id: id, capability: export.capability, native: export.native}, true
-}
-
-func (c *composition) toolDeclarations(names []string) ([]toolDeclaration, error) {
-	declarations := make([]toolDeclaration, 0, len(names))
-	seen := make(map[string]bool, len(names))
-	for _, name := range names {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		declaration, ok := c.toolSpec(name)
-		if !ok {
-			return nil, fmt.Errorf("tool %q has no composed declaration: %w", name, ErrComposition)
-		}
-		declarations = append(declarations, declaration)
-	}
-	return declarations, nil
-}
-
-type boundTool struct {
-	Tool
-	identity harness.ToolImplementation
-}
-
-func (c *composition) bindTool(sel selection, id string) (boundTool, error) {
-	export, ok := c.exports[id]
-	if !ok {
-		return boundTool{}, fmt.Errorf("tool %q has no composed declaration: %w", id, ErrComposition)
-	}
-	if export.standard {
-		value := c.standardValues[id]
-		if value == nil {
-			return boundTool{}, fmt.Errorf("standard tool %q has no value: %w", id, ErrComposition)
-		}
-		return boundTool{Tool: value, identity: harness.ToolImplementation{ID: id}}, nil
-	}
-	value, ok := selectedCapability(sel.scopes, id)
-	if !ok || value.capability == nil || value.capability.Kind != extension.KindTool || value.scope.unavailable() {
-		return boundTool{}, fmt.Errorf("tool %q is not open in this invocation: %w", id, ErrClosed)
-	}
-	if value.implementation.Tool == nil {
-		return boundTool{}, fmt.Errorf("tool %q has no implementation: %w", id, ErrComposition)
-	}
-	return boundTool{
-		Tool:     extensionTool{composition: c, value: value, lease: sel.lease, operationSecrets: sel.operationSecrets},
-		identity: harness.ToolImplementation{ID: value.capability.ID, ExtensionID: value.capability.Declaration.Declaration.ID},
-	}, nil
-}
-
-// extensionTool adapts one native Tool contribution to the host's baseline
-// tool interface and builds the same Harness PreparedTool gate.
-type extensionTool struct {
-	composition      *composition
-	value            *capabilityValue
-	lease            *artifactCallLease
-	operationSecrets map[string]map[string]string
-}
-
-func (t extensionTool) baseIdentity(tc ToolContext, callID string, grant nativeGrant) callIdentity {
-	return callIdentity{
-		session:          tc.Session,
-		operationID:      tc.OperationID,
-		invocationID:     tc.InvocationID,
-		purpose:          string(tc.Purpose),
-		toolCallID:       callID,
-		revision:         tc.Invocation.Revision(),
-		grant:            grant,
-		lease:            t.lease,
-		operationSecrets: t.operationSecrets,
-	}
-}
-
-func (t extensionTool) context(tc ToolContext, calls extension.CallContext) extension.ToolContext {
-	return extension.ToolContext{
-		Session:       tc.Session,
-		Model:         tc.Model,
-		Revision:      tc.Invocation.Revision(),
-		Workspace:     tc.Workspace,
-		AdmittedEntry: tc.AdmittedEntry,
-		Constraints:   tc.Constraints,
-		Config:        tc.Invocation.Config(t.value.capability.Declaration.Declaration.ID),
-		AgentTypes:    tc.Invocation.AgentTypes(),
-		Calls:         calls,
-	}
-}
-
-// contextualTool is one native tool that can receive the host callback
-// context for its pure normalization step. The public Tool contract has no
-// context parameter, so the worker binding implements this private extension.
-type contextualTool interface {
-	NormalizeContext(context.Context, extension.ToolContext, model.ToolCall) (json.RawMessage, error)
-}
-
-func (t extensionTool) Normalize(ctx context.Context, tc ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	carrier := harness.CallbackIdentityFromContext(ctx)
-	identity := t.baseIdentity(tc, call.ID, nativeGrant{pure: true})
-	identity.requestID = carrier.RequestID
-	identity.toolCallID = carrier.ToolCallID
-	if identity.toolCallID == "" {
-		identity.toolCallID = call.ID
-	}
-	identity.effectID = carrier.EffectID
-	view, calls := t.composition.newView(t.value, ctx, identity)
-	defer view.end()
-	if contextual, ok := t.value.implementation.Tool.(contextualTool); ok {
-		return contextual.NormalizeContext(ctx, t.context(tc, calls), call)
-	}
-	return t.value.implementation.Tool.Normalize(t.context(tc, calls), call)
-}
-
-func (t extensionTool) Prepare(ctx context.Context, tc ToolContext, call model.ToolCall) harness.PreparedTool {
-	carrier := harness.CallbackIdentityFromContext(ctx)
-	identity := t.baseIdentity(tc, call.ID, nativeGrant{pure: true})
-	identity.requestID = carrier.RequestID
-	identity.toolCallID = carrier.ToolCallID
-	if identity.toolCallID == "" {
-		identity.toolCallID = call.ID
-	}
-	view, calls := t.composition.newView(t.value, ctx, identity)
-	plan := t.value.implementation.Tool.Prepare(view.ctx, t.context(tc, calls), call)
-	view.end()
-	return t.prepared(tc, call, plan)
-}
-
-func (t extensionTool) prepared(tc ToolContext, call model.ToolCall, plan extension.ToolPlan) harness.PreparedTool {
-	owned := plan.Owned()
-	// Three independent owned arrays: the public prepared plan the Harness
-	// authorizes, the private frozen action grant, and the plan handed back to
-	// the native executor. Author mutation of any one cannot alter another.
-	actionPermissions := slices.Clone(owned.Permissions)
-	prepared := harness.PreparedTool{Permissions: slices.Clone(owned.Permissions), CanonicalWorkspace: owned.CanonicalWorkspace, CanonicalWriteDir: owned.CanonicalWriteDir, Immediate: owned.Immediate}
-	if owned.Immediate != nil {
-		return prepared
-	}
-	prepared.Execute = func(ctx context.Context) harness.ToolOutcome {
-		carrier := harness.CallbackIdentityFromContext(ctx)
-		identity := t.baseIdentity(tc, call.ID, nativeGrant{permissions: actionPermissions})
-		identity.requestID = carrier.RequestID
-		identity.toolCallID = carrier.ToolCallID
-		if identity.toolCallID == "" {
-			identity.toolCallID = call.ID
-		}
-		identity.effectID = carrier.EffectID
-		view, calls := t.composition.newView(t.value, ctx, identity)
-		defer view.end()
-		return t.value.implementation.Tool.Execute(view.ctx, t.context(tc, calls), owned)
-	}
-	return prepared
-}
-
-func hookBoundary(value *capabilityValue, boundary extension.HookBoundary) (extension.Hook, bool) {
-	if value == nil || value.capability == nil || value.capability.Kind != extension.KindHook {
-		return extension.Hook{}, false
-	}
-	for _, hook := range value.capability.Hooks {
-		if hook.Boundary == boundary {
-			return hook, true
-		}
-	}
-	return extension.Hook{}, false
-}
-
-// bindToolArgumentHooks binds every selected before_tool hook in selected
-// capability order.
-func bindToolArgumentHooks(sel selection, base callIdentity) []harness.ToolArgumentsHook {
-	composition := sel.invocation.snapshot.composition
-	base.revision = sel.invocation.Revision()
-	var hooks []harness.ToolArgumentsHook
-	for _, id := range sel.inputs.Capabilities {
-		value, ok := selectedCapability(sel.scopes, id)
-		if !ok {
-			continue
-		}
-		hook, ok := hookBoundary(value, extension.BoundaryBeforeTool)
-		if !ok {
-			continue
-		}
-		implementation := value.implementation.BeforeTool
-		if implementation == nil {
-			continue
-		}
-		mode := harness.HookModeEffectful
-		pure := false
-		if hook.Mode == extension.HookModePure {
-			mode = harness.HookModePure
-			pure = true
-		}
-		extensionID := value.capability.Declaration.Declaration.ID
-		hookID := id
-		hooks = append(hooks, harness.ToolArgumentsHook{
-			ID:          hookID,
-			ExtensionID: extensionID,
-			Mode:        mode,
-			Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-				carrier := harness.CallbackIdentityFromContext(ctx)
-				identity := base
-				identity.requestID = carrier.RequestID
-				identity.toolCallID = call.ID
-				identity.effectID = carrier.EffectID
-				identity.grant = nativeGrant{pure: pure}
-				view, calls := composition.newView(value, ctx, identity)
-				defer view.end()
-				return implementation(view.ctx, calls, call)
-			},
-		})
-	}
-	return hooks
-}
-
-// bindRequestHooks binds every selected request hook in selected capability order.
-func bindRequestHooks(sel selection, base callIdentity) []harness.RequestHook {
-	composition := sel.invocation.snapshot.composition
-	base.revision = sel.invocation.Revision()
+func registeredRequestHooks(stage *nativeSnapshot, sel selection, session harness.SessionIdentity) []harness.RequestHook {
 	var hooks []harness.RequestHook
-	for _, id := range sel.inputs.Capabilities {
-		value, ok := selectedCapability(sel.scopes, id)
-		if !ok {
-			continue
-		}
-		hook, ok := hookBoundary(value, extension.BoundaryRequest)
-		if !ok {
-			continue
-		}
-		implementation := value.implementation.Request
-		if implementation == nil {
-			continue
-		}
-		mode := harness.HookModeEffectful
-		pure := false
-		if hook.Mode == extension.HookModePure {
-			mode = harness.HookModePure
-			pure = true
-		}
-		extensionID := value.capability.Declaration.Declaration.ID
-		hookID := id
+	for _, entry := range stage.hooks["request"] {
+		hook := entry.value.(nativeHook)
 		hooks = append(hooks, harness.RequestHook{
-			ID:          hookID,
-			ExtensionID: extensionID,
-			Mode:        mode,
+			ID: entry.id, ExtensionID: entry.activation.id, Mode: harness.HookMode(hook.mode),
 			Run: func(ctx context.Context, input harness.RequestHookInput) (harness.RequestConsequence, error) {
-				carrier := harness.CallbackIdentityFromContext(ctx)
-				identity := base
-				identity.requestID = input.RequestID
-				identity.effectID = carrier.EffectID
-				identity.grant = nativeGrant{pure: pure}
-				view, calls := composition.newView(value, ctx, identity)
-				defer view.end()
-				return implementation(view.ctx, calls, input)
+				if err := entry.activation.unavailable(); err != nil {
+					return harness.RequestConsequence{}, err
+				}
+				scope, call := registeredHookScope(ctx, stage, entry, sel, session, hook.mode == extension.HookModePure)
+				defer scope.end()
+				return hook.handler.(extension.AuthorRequestHook)(scope.ctx, call, extension.AuthorRequestInput{RequestHookInput: input, PromptAssembled: sel.candidate.Prompt == nil})
 			},
 		})
 	}
 	return hooks
 }
 
-// bindToolOutputHooks binds every selected after_tool hook in selected order.
-func bindToolOutputHooks(sel selection, base callIdentity) []harness.ToolOutputHook {
-	composition := sel.invocation.snapshot.composition
-	base.revision = sel.invocation.Revision()
+func registeredArgumentHooks(stage *nativeSnapshot, sel selection, session harness.SessionIdentity) []harness.ToolArgumentsHook {
+	var hooks []harness.ToolArgumentsHook
+	for _, entry := range stage.hooks["arguments"] {
+		hook := entry.value.(nativeHook)
+		hooks = append(hooks, harness.ToolArgumentsHook{
+			ID: entry.id, ExtensionID: entry.activation.id, Mode: harness.HookMode(hook.mode),
+			Run: func(ctx context.Context, input model.ToolCall) (json.RawMessage, error) {
+				if err := entry.activation.unavailable(); err != nil {
+					return nil, err
+				}
+				scope, call := registeredHookScope(ctx, stage, entry, sel, session, hook.mode == extension.HookModePure)
+				defer scope.end()
+				result, err := hook.handler.(extension.ArgumentsHook)(scope.ctx, call, input)
+				if err != nil {
+					return nil, err
+				}
+				if result.Refusal != nil {
+					return nil, errors.New(*result.Refusal)
+				}
+				if result.Arguments == nil {
+					return input.Arguments, nil
+				}
+				return result.Arguments, nil
+			},
+		})
+	}
+	return hooks
+}
+
+func registeredResultHooks(stage *nativeSnapshot, sel selection, session harness.SessionIdentity) []harness.ToolOutputHook {
 	var hooks []harness.ToolOutputHook
-	for _, id := range sel.inputs.Capabilities {
-		value, ok := selectedCapability(sel.scopes, id)
-		if !ok {
-			continue
-		}
-		if _, ok := hookBoundary(value, extension.BoundaryAfterTool); !ok {
-			continue
-		}
-		implementation := value.implementation.AfterTool
-		if implementation == nil {
-			continue
-		}
-		extensionID := value.capability.Declaration.Declaration.ID
-		hookID := id
+	for _, entry := range stage.hooks["result"] {
+		hook := entry.value.(nativeHook)
 		hooks = append(hooks, harness.ToolOutputHook{
-			ID:          hookID,
-			ExtensionID: extensionID,
+			ID: entry.id, ExtensionID: entry.activation.id,
 			Run: func(ctx context.Context, input harness.ToolOutputInput) (string, error) {
-				carrier := harness.CallbackIdentityFromContext(ctx)
-				identity := base
-				identity.requestID = carrier.RequestID
-				identity.toolCallID = input.Outcome.Result.CallID
-				identity.effectID = carrier.EffectID
-				identity.grant = nativeGrant{pure: true}
-				view, calls := composition.newView(value, ctx, identity)
-				defer view.end()
-				return implementation(view.ctx, calls, input)
+				if err := entry.activation.unavailable(); err != nil {
+					return "", err
+				}
+				scope, call := registeredHookScope(ctx, stage, entry, sel, session, true)
+				defer scope.end()
+				return hook.handler.(extension.ResultHook)(scope.ctx, call, input)
 			},
 		})
 	}

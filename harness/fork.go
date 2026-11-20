@@ -95,7 +95,8 @@ func (h *Harness) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	}
 	prepared, capture, prepCtx, cleanup, err := h.prepareExecution(ctx, PreparationSession{
 		Identity:       SessionIdentity{SessionID: destID, Workspace: view.Identity.Workspace},
-		AgentSelection: view.State.AgentSelection,
+		Inputs:         view.State.Inputs,
+		ExtensionState: view.State.ExtensionState,
 	}, RequestKindMessage, content)
 	if err != nil {
 		return ForkResult{}, err
@@ -261,7 +262,8 @@ func (h *Harness) forkTransaction(tx Transaction, destID string, view SessionRec
 		},
 		State: SessionState{
 			Lifecycle:      LifecycleOpen,
-			AgentSelection: ownAgentSelection(source.State.AgentSelection),
+			Inputs:         source.State.Inputs.Owned(),
+			ExtensionState: ownSessionStateValues(source.State.ExtensionState),
 			Usage:          UsageTotals{},
 			LastActivity:   now,
 		},

@@ -325,45 +325,23 @@ func (c *CLI) compose(s stamp) {
 	c.mu.Unlock()
 	c.create(s)
 }
-func selectionName(selection protocol.AgentSelection) string {
-	if selection.Definition != nil {
-		return selection.Definition.DefinitionId
+func selectionName(inputs protocol.SessionInputs) string {
+	if inputs.Model != nil {
+		return string(*inputs.Model)
 	}
 	return ""
 }
 
 func (c *CLI) create(s stamp) {
-	rawRoster, err := call(s, "GetConfiguration", "", nil, nil, nil)
-	if err != nil {
-		c.navigationReport(s, terminal.RenderErrorMsg(err.Error()))
-		return
-	}
-	agents, err := clientops.AgentRoster(rawRoster)
-	if err != nil {
-		c.navigationReport(s, terminal.RenderErrorMsg(err.Error()))
-		return
-	}
-	var selection *protocol.AgentSelection
-	// Root creation selects only the supplied application definition; a
-	// foreign-only roster or a roster without it creates a resolved Session.
-	suppliedPrimary := protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "primary"}
-	for _, agent := range agents {
-		if agent.Definition == suppliedPrimary {
-			ref := agent.Definition
-			selection = &protocol.AgentSelection{Definition: &ref}
-			break
-		}
-	}
-	var session protocol.Session
-	raw, err := call(s, "CreateSession", "", protocol.CreateSessionRequest{AgentSelection: selection, Workspace: s.workspace}, nil, &session)
+	sessionID, err := clientops.CreateDefaultSession(s.ctx, s.conn, s.workspace)
 	if err == nil {
-		c.adoptRoot(s, session.Workspace, session.SessionId)
-		c.report(s, resultText(raw, err), true)
+		c.adoptRoot(s, s.workspace, sessionID)
+		c.report(s, sessionID, true)
 		return
 	}
 	// A current failure keeps the accepted source live and visible; a
 	// superseded one neither adopts nor publishes.
-	c.navigationReport(s, resultText(raw, err))
+	c.navigationReport(s, resultText(nil, err))
 }
 
 func (c *CLI) refreshList(s stamp, lifecycle string, show bool) {
@@ -391,7 +369,7 @@ func (c *CLI) refreshList(s stamp, lifecycle string, show bool) {
 	if show {
 		items := make([]terminal.MenuItem, 0, len(list)+1)
 		for _, session := range list {
-			items = append(items, terminal.MenuItem{Label: session.SessionId, Detail: selectionName(session.AgentSelection), Selectable: true, Current: session.SessionId == c.rootID, Extra: session})
+			items = append(items, terminal.MenuItem{Label: session.SessionId, Detail: selectionName(session.Inputs), Selectable: true, Current: session.SessionId == c.rootID, Extra: session})
 		}
 		outstanding := false
 		for _, a := range c.attempts {

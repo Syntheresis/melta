@@ -370,9 +370,9 @@ func TestPublicBaselineEndToEnd(t *testing.T) {
 	credentials := &memoryCredentials{values: map[string]melta.CredentialValue{
 		externalKeyEnv: {Value: externalKey, Defined: true, Managed: true},
 	}}
-	inputs := melta.DefaultAgentInputs()
-	inputs.Model = model.ModelRef{Provider: "prov", Model: "m"}
-	inputs.Instructions = "The external baseline module."
+	ref := model.ModelRef{Provider: "prov", Model: "m"}
+	instructions := "The external baseline module."
+	inputs := harness.SessionInputs{Model: &ref, Instructions: &instructions}
 	evaluator := &recordingEvaluator{}
 	options := melta.Options{
 		DataDir:       dataDir,
@@ -380,7 +380,7 @@ func TestPublicBaselineEndToEnd(t *testing.T) {
 		Credentials:   credentials,
 		Locations:     locations,
 		Identity:      "external baseline application",
-		Agent:         &inputs,
+		Defaults:      inputs,
 		Strategy: &harness.StrategyBinding{
 			ID:                    externalStrategy,
 			RequiresContextWindow: false,
@@ -401,8 +401,8 @@ func TestPublicBaselineEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if session.Workspace != workspace || session.AgentSelection.Inputs == nil || session.AgentSelection.Inputs.Model != "prov/m" {
-		t.Fatalf("created session = %+v, want the fixed Workspace and resolved input model", session)
+	if session.Workspace != workspace || session.Inputs.Model != nil {
+		t.Fatalf("created session = %+v, want the fixed Workspace and no stored model override", session)
 	}
 	sessionID := session.SessionId
 

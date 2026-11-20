@@ -11,14 +11,6 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// ToolDescription is one static tool description: the model-visible
-// definition and whether the tool is available under the hard constraints
-// (never a permission filter).
-type ToolDescription struct {
-	Definition model.ToolDefinition
-	Available  bool
-}
-
 // BackgroundServices is the baseline background-work surface one standard tool
 // call carries: job start and completion delivery over the Melta's public
 // Harness methods. Extension child launch is a declared native host service,
@@ -134,10 +126,9 @@ func (b *boundBackground) bindPlan(plan harness.PreparedTool) harness.PreparedTo
 
 // ToolContext carries what one tool call needs beyond the call itself: the
 // Workspace, the calling Operation's admitted-input identity, the captured
-// Invocation, the selected Agent's hard constraints, this call's bound
-// background authority, and the call-time subprocess environment producer. It
-// exposes neither the complete admission register nor file/command-specific
-// numeric fields.
+// Invocation, this call's bound background authority, and the call-time
+// subprocess environment producer. It exposes neither the complete admission
+// register nor file/command-specific numeric fields.
 type ToolContext struct {
 	Session       harness.SessionIdentity
 	Model         model.ModelRef
@@ -147,7 +138,6 @@ type ToolContext struct {
 	Purpose       harness.InvocationPurpose
 	AdmittedEntry harness.EntryRef
 	Invocation    Invocation
-	Constraints   harness.ToolConstraints
 	Background    BackgroundServices
 
 	// SubprocessEnv is invoked at each concrete process start — foreground

@@ -10,7 +10,7 @@ import (
 )
 
 // PermissionFileRead, PermissionFileWrite, PermissionCommandRun,
-// PermissionSleep, PermissionChildLaunch and PermissionProcessOwn are the
+// PermissionSleep, PermissionSessionOwn and PermissionProcessOwn are the
 // published semantic permission names of the fixed automatic policy. They are
 // exact strings; plugins may define new namespaced names but cannot contribute
 // rules to the built-in policy, and these built-in names are not a closed
@@ -19,12 +19,12 @@ import (
 // The access values stay private: access strings and policy parsing are the
 // Harness's own.
 const (
-	PermissionFileRead    = "file.read"
-	PermissionFileWrite   = "file.write"
-	PermissionCommandRun  = "command.run"
-	PermissionSleep       = "sleep"
-	PermissionChildLaunch = "child.launch"
-	PermissionProcessOwn  = "process.own"
+	PermissionFileRead   = "file.read"
+	PermissionFileWrite  = "file.write"
+	PermissionCommandRun = "command.run"
+	PermissionSleep      = "sleep"
+	PermissionSessionOwn = "session.own"
+	PermissionProcessOwn = "process.own"
 
 	permissionAccessAllow = "allow"
 	permissionAccessDeny  = "deny"
@@ -54,7 +54,6 @@ type PreparedAction struct {
 	ToolName           string
 	Arguments          json.RawMessage
 	CanonicalWorkspace string
-	CanonicalWriteDir  string
 	Permissions        []PermissionRequest
 }
 
@@ -205,7 +204,7 @@ func buildBuiltinRules() []builtinRule {
 	return append(rules,
 		builtinRule{permission: PermissionCommandRun, matches: anyTarget, allow: true},
 		builtinRule{permission: PermissionSleep, matches: equalsFixedTarget, allow: true},
-		builtinRule{permission: PermissionChildLaunch, matches: anyTarget, allow: true},
+		builtinRule{permission: PermissionSessionOwn, matches: anyTarget, allow: true},
 		builtinRule{permission: PermissionProcessOwn, matches: anyTarget, allow: true},
 	)
 }

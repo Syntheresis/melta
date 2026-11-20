@@ -18,10 +18,6 @@ import (
 
 const publicModule = "github.com/Syntheresis/melta"
 
-// fixturePkg is the one test-support package an executable fixture may
-// import; it holds the shared native definition both transports serve.
-const fixturePkg = publicModule + "/extension/worker/testdata/fixture/native"
-
 // sqliteDriverPkg is the one third-party dependency the foundation permits:
 // the SQLite driver is confined to internal/storage.
 const sqliteDriverPkg = "github.com/mattn/go-sqlite3"
@@ -195,11 +191,6 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 	// concrete implementation package.
 	if dir == "extension/worker" || strings.HasPrefix(dir, "extension/worker/") {
 		for _, imp := range imports {
-			// The executable fixture is the one test-support consumer of the
-			// shared native definition; no protocol file may reach it.
-			if imp == fixturePkg && dir == "extension/worker/testdata/fixture" {
-				continue
-			}
 			if imp != modelPkg && imp != harnessPkg && imp != promptPkg && imp != protocolPkg && imp != extensionPkg && imp != workerPkg && !std[imp] {
 				problems = append(problems, rel+": extension/worker imports "+imp+"; the shared worker protocol may import only the standard library and the public "+modelPkg+", "+harnessPkg+", "+promptPkg+", "+protocolPkg+" and "+extensionPkg+" contracts, never the Runtime/Melta owner or a concrete implementation package")
 			}
@@ -277,8 +268,8 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 				problems = append(problems, rel+": internal/config imports "+imp+"; configuration may import only the standard library, "+atomicfsPkg+", and "+modelPkg)
 			}
 		case "extensions/agents":
-			if imp != modelPkg && imp != promptPkg && imp != harnessPkg && imp != extensionPkg && imp != protocolPkg && imp != toolargsPkg && imp != publicModule+"/internal/tool" && !std[imp] {
-				problems = append(problems, rel+": extensions/agents imports "+imp+"; the supplied Agents extension may import only the standard library, public contracts, and the retained tool and tool-argument helpers, never the Runtime owner")
+			if imp != modelPkg && imp != promptPkg && imp != harnessPkg && imp != extensionPkg && imp != protocolPkg && imp != toolargsPkg && imp != shellparsePkg && imp != publicModule+"/internal/tool" && !std[imp] {
+				problems = append(problems, rel+": extensions/agents imports "+imp+"; the supplied Agents extension may import only the standard library, public contracts, and the retained tool, tool-argument and shell-parse helpers, never the Runtime owner")
 			}
 		case "internal/storage":
 			if imp != harnessPkg && imp != sqliteDriverPkg && !std[imp] {
@@ -366,7 +357,7 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 // TestDependencyRulesRejectNonStdlibDotlessImports proves the allowlists use authoritative standard-library membership, not a dot-in-path shape: the cgo pseudo-import "C" and a dotless path outside the stdlib set fail every package row, while ordinary stdlib imports, the model dependency on agent's side, and internal/storage's dependency on harness still pass. The foundation's own reverse and skipping edges — model or agent reaching harness, any target package reaching internal/storage, and the driver reaching a target package — are each rejected exactly once.
 func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 	std := standardLibraryImports(t)
-	for _, rel := range []string{"model/x.go", "agent/x.go", "harness/x.go", "internal/config/x.go", "internal/storage/x.go", "internal/toolargs/x.go", "internal/testassert/x.go", "protocol/x.go", "client/x.go", "internal/terminal/x.go", "internal/hostprocess/x.go", "internal/clienthost/x.go", "internal/clientview/x.go", "internal/clientops/x.go", "internal/protocolgen/x.go", "internal/acpclient/x.go", "internal/cliclient/x.go", "internal/desktopclient/x.go", "extension/worker/x.go", "extension/worker/testdata/fixture/main.go"} {
+	for _, rel := range []string{"model/x.go", "agent/x.go", "harness/x.go", "internal/config/x.go", "internal/storage/x.go", "internal/toolargs/x.go", "internal/testassert/x.go", "protocol/x.go", "client/x.go", "internal/terminal/x.go", "internal/hostprocess/x.go", "internal/clienthost/x.go", "internal/clientview/x.go", "internal/clientops/x.go", "internal/protocolgen/x.go", "internal/acpclient/x.go", "internal/cliclient/x.go", "internal/desktopclient/x.go", "extension/worker/x.go"} {
 		for _, imp := range []string{"C", "notreal/pkg"} {
 			{
 				problems := checkTrackedGoFile(rel, []string{imp}, std)
@@ -422,8 +413,8 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 	}
 	// The shared worker protocol encodes the public extension, model,
 	// harness, prompt and protocol values over the standard library; the
-	// Runtime/Melta owner, the generated implementation packages, the driver,
-	// and its testdata fixture's reverse edges stay rejected.
+	// Runtime/Melta owner, the generated implementation packages and the
+	// driver stay rejected.
 	{
 		problems := checkTrackedGoFile("extension/worker/x.go", []string{
 			"bufio", "bytes", "context", "encoding/base64", "encoding/json", "errors", "fmt", "io", "sort", "strconv", "sync", "sync/atomic",
@@ -436,24 +427,11 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 		publicModule + "/internal/agent", publicModule + "/internal/storage", sqliteDriverPkg,
 		publicModule + "/internal/plugins", publicModule + "/extensions/agents",
 		publicModule + "/extensions/adaptation", "github.com/santhosh-tekuri/jsonschema/v6",
-		fixturePkg,
 	} {
 		{
 			problems := checkTrackedGoFile("extension/worker/x.go", []string{imp}, std)
 			testassert.Check(t, len(problems) == 1, "extension/worker importing %q: %d problems, want 1: %v", imp, len(problems), problems)
 		}
-	}
-	{
-		problems := checkTrackedGoFile("extension/worker/testdata/fixture/main.go", []string{
-			"context", "encoding/json", "fmt", "os",
-			publicModule + "/extension", publicModule + "/extension/worker",
-			fixturePkg, publicModule + "/harness", publicModule + "/model",
-		}, std)
-		testassert.Check(t, len(problems) == 0, "allowed fixture imports flagged: %v", problems)
-	}
-	{
-		problems := checkTrackedGoFile("extension/worker/testdata/fixture/main.go", []string{publicModule + "/melta"}, std)
-		testassert.Check(t, len(problems) == 1, "fixture importing the Melta owner: %d problems, want 1: %v", len(problems), problems)
 	}
 	// The Adaptation extension declares one Harness-scoped PreparationHook
 	// over the public model and prompt contracts and the native extension
@@ -503,6 +481,7 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 			"encoding/json", "fmt",
 			publicModule + "/model", publicModule + "/harness", publicModule + "/prompt", publicModule + "/protocol",
 			publicModule + "/extension", publicModule + "/internal/toolargs", publicModule + "/internal/tool",
+			publicModule + "/internal/shellparse",
 		}, std)
 		testassert.Check(t, len(problems) == 0, "allowed extensions/agents imports flagged: %v", problems)
 	}
@@ -573,7 +552,7 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 		testassert.Check(t, len(problems) == 0, "allowed internal/catalog imports flagged: %v", problems)
 	}
 	{
-		problems := checkTrackedGoFile("extensions/agents/x.go", []string{"fmt", "encoding/json", publicModule + "/model", publicModule + "/prompt", publicModule + "/harness", publicModule + "/extension", publicModule + "/protocol", publicModule + "/internal/toolargs"}, std)
+		problems := checkTrackedGoFile("extensions/agents/x.go", []string{"fmt", "encoding/json", publicModule + "/model", publicModule + "/prompt", publicModule + "/harness", publicModule + "/extension", publicModule + "/protocol", publicModule + "/internal/toolargs", publicModule + "/internal/shellparse"}, std)
 		testassert.Check(t, len(problems) == 0, "allowed extensions/agents imports flagged: %v", problems)
 	}
 	for _, imp := range []string{publicModule + "/agent", publicModule + "/harness", publicModule + "/runtime", publicModule + "/internal/storage", sqliteDriverPkg, publicModule + "/internal/plugins"} {

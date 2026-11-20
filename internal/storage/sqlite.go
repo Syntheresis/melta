@@ -39,7 +39,7 @@ const (
 	// request purpose; 22 records positional request edits, advertised tool
 	// definitions, body parameters, and materialized summary inputs. The SQL
 	// tables are unchanged.
-	sqliteSchemaVersion = 22
+	sqliteSchemaVersion = 23
 
 	// sqlitePoolDSN configures every physical connection of the long-lived
 	// pool: write-ahead logging, full synchronous durability, immediate

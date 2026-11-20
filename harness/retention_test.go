@@ -398,9 +398,9 @@ func newCancelledCompletionFixture(t *testing.T, storage Storage, store *graphSt
 	parentLease, parentRelease := leaseCoordinatorNow(t, h, completionParentID)
 	t.Cleanup(parentRelease)
 	childLease, childRelease := leaseCoordinatorNow(t, h, completionChildID)
-	parentMember, err := admitLocked(h, parentLease, memberSession, completionChildID, 0)
+	parentMember, err := admitLocked(h, parentLease, memberSession, completionChildID)
 	testassert.NoError(t, err)
-	jobMember, err := admitLocked(h, childLease, memberJob, jobFixtureID, 0)
+	jobMember, err := admitLocked(h, childLease, memberJob, jobFixtureID)
 	testassert.NoError(t, err)
 	childLease.mu.Lock()
 	childLease.pendingCompletion = &launchInfo{completionID: parentMember.completionID, outputLimit: 1024, report: true}
@@ -835,7 +835,7 @@ func TestChildCompletionRendersThroughAGraphlessChild(t *testing.T) {
 	child.mu.Unlock()
 	testassert.Require(t, childGraph == nil, "the child's released graph stayed resident")
 
-	member, err := admitLocked(h, parent, memberSession, completionChildID, 0)
+	member, err := admitLocked(h, parent, memberSession, completionChildID)
 	testassert.NoError(t, err)
 	child.mu.Lock()
 	child.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}

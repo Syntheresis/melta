@@ -7,7 +7,7 @@
 openapi: "3.0.3"
 info:
   title: melta-protocol
-  version: "18"
+  version: "19"
 servers:
   - url: "http://127.0.0.1"
 # Every path requires the bearer credential; it is declared once here and
@@ -198,9 +198,9 @@ paths:
                 $ref: "#/components/schemas/ForkResult"
         default:
           $ref: "#/components/responses/Error"
-  /v1/sessions/{id}/agent-type:
+  /v1/sessions/{id}/inputs:
     put:
-      operationId: SetSessionAgentType
+      operationId: SetSessionInputs
       parameters:
         - $ref: "#/components/parameters/SessionID"
       requestBody:
@@ -208,10 +208,10 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SetSessionAgentTypeRequest"
+              $ref: "#/components/schemas/SetSessionInputsRequest"
       responses:
         "200":
-          description: The Session header; only subsequent admissions use the new Agent type.
+          description: The Session header; only subsequent admissions use the new inputs.
           content:
             application/json:
               schema:
@@ -269,6 +269,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HistoryPage"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/sessions/{id}/operations/{operation_id}:
+    get:
+      operationId: GetSessionOperation
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+        - $ref: "#/components/parameters/OperationID"
+      responses:
+        "200":
+          description: The Operation header and its effective execution inputs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionOperation"
         default:
           $ref: "#/components/responses/Error"
   /v1/sessions/{id}/code-snapshots:
@@ -434,21 +449,19 @@ paths:
           description: The selection was removed; package copies and configuration are retained.
         default:
           $ref: "#/components/responses/Error"
-  /v1/extensions/capabilities:
+  /v1/extensions:
     get:
-      operationId: ListExtensionCapabilities
+      operationId: ListExtensions
       responses:
         "200":
           description: >
-            Every enabled extension's configuration schema, captured non-secret
-            settings, declared capabilities and methods, and explicit
-            exposures. The order is registration order.
+            Registered extension tools and client operations in activation order.
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/ExtensionCapabilityCatalog"
+                  $ref: "#/components/schemas/RegisteredExtension"
         default:
           $ref: "#/components/responses/Error"
   /v1/extensions/invoke:
@@ -767,6 +780,13 @@ components:
       schema:
         type: string
         pattern: "^[0-9a-f]{32}$"
+    OperationID:
+      name: operation_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
     WorkspaceQuery:
       name: workspace
       in: query
@@ -905,16 +925,10 @@ components:
         source_dir:
           type: string
           minLength: 1
-    ExtensionCapabilityCatalog:
+    RegisteredExtension:
       type: object
       additionalProperties: false
-      required:
-        - extension_id
-        - version
-        - configuration_schema
-        - settings
-        - capabilities
-        - exposed
+      required: [extension_id, version, settings, tools, operations]
       properties:
         extension_id:
           type: string
@@ -926,50 +940,26 @@ components:
           $ref: "#/components/schemas/ExtensionConfigDocument"
         settings:
           $ref: "#/components/schemas/ExtensionConfigDocument"
-        capabilities:
+        tools:
           type: array
           items:
-            $ref: "#/components/schemas/ExtensionCapability"
-        exposed:
+            type: string
+        operations:
           type: array
           items:
-            $ref: "#/components/schemas/ExtensionExposure"
-    ExtensionCapability:
+            $ref: "#/components/schemas/RegisteredExtensionOperation"
+        inactive_reason:
+          type: string
+    RegisteredExtensionOperation:
       type: object
       additionalProperties: false
-      required:
-        - capability_id
-        - contract_id
-        - contract_version
-        - kind
-        - methods
+      required: [method, target]
       properties:
-        capability_id:
+        method:
+          $ref: "#/components/schemas/ExtensionMethod"
+        target:
           type: string
-          minLength: 1
-        contract_id:
-          type: string
-          minLength: 1
-        contract_version:
-          type: string
-          minLength: 1
-        kind:
-          type: string
-          enum:
-            - service
-            - tool
-            - hook
-            - strategy
-        methods:
-          type: array
-          items:
-            $ref: "#/components/schemas/ExtensionMethod"
-        hooks:
-          type: array
-          items:
-            $ref: "#/components/schemas/ExtensionHook"
-        strategy:
-          $ref: "#/components/schemas/ExtensionStrategy"
+          enum: [harness, workspace, session]
     ExtensionMethod:
       type: object
       additionalProperties: false
@@ -995,69 +985,12 @@ components:
           $ref: "#/components/schemas/ExtensionConfigDocument"
         partial:
           $ref: "#/components/schemas/ExtensionConfigDocument"
-    ExtensionHook:
-      type: object
-      additionalProperties: false
-      required:
-        - boundary
-        - mode
-      properties:
-        boundary:
-          type: string
-          enum:
-            - prepare
-            - request
-            - before_tool
-            - after_tool
-        mode:
-          type: string
-          enum:
-            - pure
-            - effectful
-    ExtensionStrategy:
-      type: object
-      additionalProperties: false
-      required:
-        - requires_context_window
-      properties:
-        requires_context_window:
-          type: boolean
-    ExtensionExposure:
-      type: object
-      additionalProperties: false
-      required:
-        - capability_id
-        - method
-        - kind
-        - target
-      properties:
-        capability_id:
-          type: string
-          minLength: 1
-        method:
-          type: string
-          minLength: 1
-        kind:
-          type: string
-          enum:
-            - query
-            - management
-            - session_work
-        target:
-          type: string
-          enum:
-            - harness
-            - workspace
-            - session
     ExtensionInvocationRequest:
       type: object
       additionalProperties: false
       required:
         - extension_id
-        - capability_id
-        - contract_id
-        - contract_version
-        - method
+        - operation
         - target
         - arguments
         - request_id
@@ -1065,16 +998,7 @@ components:
         extension_id:
           type: string
           minLength: 1
-        capability_id:
-          type: string
-          minLength: 1
-        contract_id:
-          type: string
-          minLength: 1
-        contract_version:
-          type: string
-          minLength: 1
-        method:
+        operation:
           type: string
           minLength: 1
         target:
@@ -1266,7 +1190,7 @@ components:
         protocol_version:
           type: string
           enum:
-            - "18"
+            - "19"
     Scope:
       description: >
         One SSE event's applicable scope, discriminated by kind. Every
@@ -1568,7 +1492,7 @@ components:
         - session_id
         - workspace
         - lifecycle
-        - agent_selection
+        - inputs
         - created_at
         - last_activity
         - session_revision
@@ -1586,8 +1510,8 @@ components:
           pattern: "^[0-9a-f]{32}$"
         lifecycle:
           $ref: "#/components/schemas/SessionLifecycle"
-        agent_selection:
-          $ref: "#/components/schemas/AgentSelection"
+        inputs:
+          $ref: "#/components/schemas/SessionInputs"
         current_operation_id:
           type: string
         created_at:
@@ -1609,8 +1533,8 @@ components:
       properties:
         workspace:
           type: string
-        agent_selection:
-          $ref: "#/components/schemas/AgentSelection"
+        inputs:
+          $ref: "#/components/schemas/SessionInputs"
     Operation:
       type: object
       additionalProperties: false
@@ -1619,7 +1543,6 @@ components:
         - request_kind
         - status
         - admitted_at
-        - agent_selection
         - model
         - usage
       properties:
@@ -1643,14 +1566,56 @@ components:
         settled_at:
           type: string
           format: date-time
-        agent_selection:
-          $ref: "#/components/schemas/AgentSelection"
         model:
           $ref: "#/components/schemas/ModelRef"
         detail:
           type: string
         usage:
           $ref: "#/components/schemas/UsageTotals"
+    SessionOperation:
+      type: object
+      additionalProperties: false
+      required:
+        - operation
+        - inputs
+      properties:
+        operation:
+          $ref: "#/components/schemas/Operation"
+        inputs:
+          $ref: "#/components/schemas/OperationInputs"
+    OperationInputs:
+      type: object
+      additionalProperties: false
+      required:
+        - model
+        - prompt
+        - tools
+        - strategy
+      properties:
+        model:
+          $ref: "#/components/schemas/ModelRef"
+        prompt:
+          type: string
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationTool"
+        strategy:
+          $ref: "#/components/schemas/StrategySelection"
+    OperationTool:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - description
+        - parameters
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parameters:
+          $ref: "#/components/schemas/JSONObject"
     PendingInput:
       type: object
       additionalProperties: false
@@ -2148,14 +2113,14 @@ components:
           $ref: "#/components/schemas/Session"
         operation:
           $ref: "#/components/schemas/Operation"
-    SetSessionAgentTypeRequest:
+    SetSessionInputsRequest:
       type: object
       additionalProperties: false
       required:
-        - agent_selection
+        - inputs
       properties:
-        agent_selection:
-          $ref: "#/components/schemas/AgentSelection"
+        inputs:
+          $ref: "#/components/schemas/SessionInputs"
     SetSessionModelRequest:
       type: object
       additionalProperties: false
@@ -2164,59 +2129,22 @@ components:
       properties:
         model:
           $ref: "#/components/schemas/ModelRef"
-    AgentSelection:
+    SessionInputs:
       type: object
       additionalProperties: false
-      properties:
-        inputs:
-          $ref: "#/components/schemas/AgentInputs"
-        definition:
-          $ref: "#/components/schemas/DefinitionRef"
-    DefinitionRef:
-      type: object
-      additionalProperties: false
-      required: [extension_id, capability_id, definition_id]
-      properties:
-        extension_id:
-          type: string
-        capability_id:
-          type: string
-        definition_id:
-          type: string
-    AgentInputs:
-      type: object
-      additionalProperties: false
-      required: [model, instructions, assembly_mode, tools, capabilities, constraints, strategy]
       properties:
         model:
           $ref: "#/components/schemas/ModelRef"
         instructions:
           type: string
-        assembly_mode:
+        prompt:
           type: string
-          enum: [full, simple, none]
-          x-enum-varnames: [AgentAssemblyFull, AgentAssemblySimple, AgentAssemblyNone]
         tools:
           type: array
           items:
             type: string
-        capabilities:
-          type: array
-          items:
-            type: string
-        constraints:
-          $ref: "#/components/schemas/ToolConstraints"
         strategy:
           $ref: "#/components/schemas/StrategySelection"
-    ToolConstraints:
-      type: object
-      additionalProperties: false
-      required: [readonly, write_dir]
-      properties:
-        readonly:
-          type: boolean
-        write_dir:
-          type: string
     StrategySelection:
       type: object
       additionalProperties: false
@@ -2402,59 +2330,18 @@ components:
           $ref: "#/components/schemas/CompactionSettings"
         extensions:
           $ref: "#/components/schemas/ExtensionsSettings"
-    Agent:
-      type: object
-      additionalProperties: false
-      required:
-        - name
-        - definition
-        - description
-        - subagent
-        - model
-        - readonly
-        - write_dir
-        - tools
-        - capabilities
-      properties:
-        name:
-          type: string
-        definition:
-          $ref: "#/components/schemas/DefinitionRef"
-        description:
-          type: string
-        subagent:
-          type: boolean
-        model:
-          $ref: "#/components/schemas/ModelRef"
-        readonly:
-          type: boolean
-        write_dir:
-          type: string
-        tools:
-          type: array
-          items:
-            type: string
-        capabilities:
-          type: array
-          items:
-            type: string
     ConfigurationView:
       type: object
       additionalProperties: false
       required:
         - configuration_revision
         - settings
-        - agents
         - providers
       properties:
         configuration_revision:
           $ref: "#/components/schemas/ConfigurationRevision"
         settings:
           $ref: "#/components/schemas/Settings"
-        agents:
-          type: array
-          items:
-            $ref: "#/components/schemas/Agent"
         providers:
           type: array
           items:
@@ -2469,33 +2356,13 @@ components:
           $ref: "#/components/schemas/ConfigurationRevision"
     UpdateSettingsRequest:
       type: object
-      description: >-
-        Exactly one of the complete settings shape or one declared extension
-        configuration edit; the accepting owner rejects zero or both.
+      description: The complete settings shape to publish.
       additionalProperties: false
+      required:
+        - settings
       properties:
         settings:
           $ref: "#/components/schemas/Settings"
-        extension_edit:
-          $ref: "#/components/schemas/ExtensionEdit"
-    ExtensionEdit:
-      type: object
-      additionalProperties: false
-      required:
-        - extension_id
-        - edit_id
-        - arguments
-      properties:
-        extension_id:
-          type: string
-          minLength: 1
-        edit_id:
-          type: string
-          minLength: 1
-        arguments:
-          type: string
-          description: >-
-            The edit call's JSON document, carried as exact text.
     SettingsMutation:
       type: object
       additionalProperties: false

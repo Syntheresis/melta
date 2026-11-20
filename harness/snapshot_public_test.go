@@ -1044,11 +1044,10 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 
 		res, err := h.LaunchChildSession(ctx, harness.LaunchChildRequest{
 			ParentSessionID: root,
-			AgentSelection:  publicSelection("coder"),
+			Inputs:          publicInputs("coder"),
 			Content:         []model.ContentPart{{Kind: model.PartText, Text: "child work"}},
 			OperationID:     "child-op-1",
 			ExtensionID:     "test.extension",
-			MaxConcurrent:   1,
 			OutputLimit:     1024,
 			Report:          true,
 		})
@@ -1332,7 +1331,6 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 		f := newPublicFixtureWithJobs(t, store, snapshotJobStopper{}, script, nil, nil)
 		f.prepareHook = func(call int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
 			capture := publicCapture()
-			capture.Capabilities = []string{"cap.a", "cap.b"}
 			conversationInput, conversationOutput := 1.0, 2.0
 			compactInput := 0.5
 			capture.Pricing = &harness.ModelPricing{Input: &conversationInput, Output: &conversationOutput}
@@ -1543,7 +1541,7 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 			testassert.Require(t, op.SettledAt != nil, "operation fixture lost its settlement pointer: %+v", op)
 			record, err := h.ReadOperation(ctx, session, op.OperationID)
 			testassert.Require(t, err == nil, "ReadOperation(%s): %v", op.OperationID, err)
-			testassert.Require(t, record.State.SettledAt != nil && record.State.Terminal != nil && (len(record.Admission.Execution.Tools) != 0 && len(record.Admission.Execution.Tools[0].Parameters) != 0 && len(record.Admission.Execution.Capabilities) != 0), "operation fixture lost its terminal pointers: %+v; operation fixture lost its execution references: %+v", record.State, record.Admission.Execution)
+			testassert.Require(t, record.State.SettledAt != nil && record.State.Terminal != nil && (len(record.Admission.Execution.Tools) != 0 && len(record.Admission.Execution.Tools[0].Parameters) != 0), "operation fixture lost its terminal pointers: %+v; operation fixture lost its execution references: %+v", record.State, record.Admission.Execution)
 			if recordExpected == nil {
 				recordExpected, err = json.Marshal(record)
 				testassert.NoError(t, err)
@@ -1560,7 +1558,7 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 		mutated.TotalUsage.ByModel[0].Model.Provider = "mutated"
 		mutated.TotalUsage.ByModel[0].Usage.InputTokens = 999
 		mutated.TotalUsage.ByModel = append(mutated.TotalUsage.ByModel, harness.ModelUsage{})
-		mutated.Header.AgentSelection.Definition.DefinitionID = "mutated"
+		*mutated.Header.Inputs.Instructions = "mutated"
 		for i := range mutated.Operations {
 			op := &mutated.Operations[i]
 			op.Model.Provider = "mutated"
@@ -1576,8 +1574,6 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 		mutatedRecord.Admission.Execution.Model.Provider = "mutated"
 		mutatedRecord.Admission.Execution.Tools[0].Parameters[9] = 'p'
 		mutatedRecord.Admission.Execution.Tools = append(mutatedRecord.Admission.Execution.Tools, model.ToolDefinition{})
-		mutatedRecord.Admission.Execution.Capabilities[0] = "mutated"
-		mutatedRecord.Admission.Execution.Capabilities = append(mutatedRecord.Admission.Execution.Capabilities, "forged")
 		mutatedRecord.Admission.Execution.Compact.SystemPrompt = "mutated"
 		*mutatedRecord.Admission.Execution.Pricing.Input = 999
 		*mutatedRecord.Admission.Execution.Pricing.Output = 999
@@ -1739,7 +1735,7 @@ func TestPublicListSessionsRowOwnership(t *testing.T) {
 		*mutated[0].ArchivedAt = mutated[0].ArchivedAt.Add(time.Hour)
 		mutated[0].Identity.Workspace = "mutated"
 		mutated[0].Lifecycle = "mutated"
-		mutated[0].AgentSelection.Definition.DefinitionID = "mutated"
+		*mutated[0].Inputs.Instructions = "mutated"
 		mutated = append(mutated, harness.SessionHeader{})
 
 		fresh, err := f.h.ListSessions(ctx)

@@ -48,10 +48,10 @@ func factFixtureGraph() *testGraph {
 
 	op2 := OperationRecord{
 		Admission: OperationAdmission{
-			SessionID:      testSessionID,
-			OperationID:    "op-compact",
-			RequestKind:    RequestKindCompact,
-			AgentSelection: testSelection("coder"),
+			SessionID:   testSessionID,
+			OperationID: "op-compact",
+			RequestKind: RequestKindCompact,
+			Inputs:      testInputs("coder"),
 			Execution: func() ExecutionCapture {
 				capture := testCapture()
 				capture.Pricing = conversationPricing()
@@ -764,7 +764,7 @@ func TestSessionReadViewMemberPublications(t *testing.T) {
 	before := read()
 	testassert.Require(t, len(before.Background) == 0 && before.History.Revision.LocalRevision == 0, "baseline = %+v", before)
 
-	member, err := admitLocked(h, c, memberJob, "job-1", 0)
+	member, err := admitLocked(h, c, memberJob, "job-1")
 	testassert.NoError(t, err)
 	afterAdmit := read()
 	testassert.Require(t, len(afterAdmit.Background) == 1 && afterAdmit.Background[0] == (BackgroundMemberView{Kind: "job", ID: "job-1"}) && afterAdmit.History.Revision.LocalRevision == before.History.Revision.LocalRevision+1, "background after admission = %+v; got %v, want %v", afterAdmit.Background, afterAdmit.History.Revision.LocalRevision, before.History.Revision.LocalRevision+1)

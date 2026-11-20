@@ -69,10 +69,10 @@ func validSessionRecord() SessionRecord {
 		Revision: 1,
 		Identity: SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime},
 		State: SessionState{
-			Lifecycle:      LifecycleOpen,
-			AgentSelection: testSelection("coder"),
-			Usage:          UsageTotals{},
-			LastActivity:   testTime,
+			Lifecycle:    LifecycleOpen,
+			Inputs:       testInputs("coder"),
+			Usage:        UsageTotals{},
+			LastActivity: testTime,
 		},
 	}
 }
@@ -81,13 +81,13 @@ func validOperationRecord() OperationRecord {
 	return OperationRecord{
 		Revision: 1,
 		Admission: OperationAdmission{
-			SessionID:      testSessionID,
-			OperationID:    testOpID,
-			RequestKind:    RequestKindMessage,
-			AdmittedEntry:  EntryRef{SessionID: testSessionID, EntryID: hexID(1)},
-			AgentSelection: testSelection("coder"),
-			Execution:      testCapture(),
-			AdmittedAt:     testTime,
+			SessionID:     testSessionID,
+			OperationID:   testOpID,
+			RequestKind:   RequestKindMessage,
+			AdmittedEntry: EntryRef{SessionID: testSessionID, EntryID: hexID(1)},
+			Inputs:        testInputs("coder"),
+			Execution:     testCapture(),
+			AdmittedAt:    testTime,
 		},
 		State: OperationCurrentState{
 			Status:           OperationRunning,
@@ -854,7 +854,7 @@ func TestRegisterPayloadRoundTrip(t *testing.T) {
 	sessionReg := Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterSession}, Revision: 7, Payload: sessionRaw}
 	decoded, err := decodeSessionRegister(sessionReg)
 	testassert.NoError(t, err)
-	testassert.Require(t, decoded.Revision == 7 && decoded.Identity == session.Identity && (decoded.State.Lifecycle == session.State.Lifecycle && reflect.DeepEqual(decoded.State.AgentSelection, session.State.AgentSelection) && decoded.State.CurrentOperationID == session.State.CurrentOperationID && decoded.State.ArchivedAt == nil && decoded.State.LastActivity.Equal(session.State.LastActivity) && usageTotalsEqual(decoded.State.Usage, session.State.Usage)), "decoded session register %+v does not round-trip; decoded session state %+v does not round-trip", decoded, decoded.State)
+	testassert.Require(t, decoded.Revision == 7 && decoded.Identity == session.Identity && (decoded.State.Lifecycle == session.State.Lifecycle && reflect.DeepEqual(decoded.State.Inputs, session.State.Inputs) && decoded.State.CurrentOperationID == session.State.CurrentOperationID && decoded.State.ArchivedAt == nil && decoded.State.LastActivity.Equal(session.State.LastActivity) && usageTotalsEqual(decoded.State.Usage, session.State.Usage)), "decoded session register %+v does not round-trip; decoded session state %+v does not round-trip", decoded, decoded.State)
 	testassert.Require(t, !strings.Contains(string(sessionRaw), `"revision"`), "revision leaked into the session payload: %s", sessionRaw)
 
 	operation := validOperationRecord()
@@ -863,7 +863,7 @@ func TestRegisterPayloadRoundTrip(t *testing.T) {
 	opReg := Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterOperation, OperationID: testOpID}, Revision: 3, Payload: opRaw}
 	decodedOp, err := decodeOperationRegister(opReg)
 	testassert.NoError(t, err)
-	testassert.Require(t, decodedOp.Revision == 3 && decodedOp.Admission.SessionID == operation.Admission.SessionID && decodedOp.Admission.OperationID == operation.Admission.OperationID && reflect.DeepEqual(decodedOp.Admission.AgentSelection, operation.Admission.AgentSelection) && decodedOp.Admission.AdmittedAt.Equal(operation.Admission.AdmittedAt) && decodedOp.State.Status == operation.State.Status && len(decodedOp.State.PendingToolCalls) == len(operation.State.PendingToolCalls), "decoded operation register does not round-trip: %+v", decodedOp)
+	testassert.Require(t, decodedOp.Revision == 3 && decodedOp.Admission.SessionID == operation.Admission.SessionID && decodedOp.Admission.OperationID == operation.Admission.OperationID && reflect.DeepEqual(decodedOp.Admission.Inputs, operation.Admission.Inputs) && decodedOp.Admission.AdmittedAt.Equal(operation.Admission.AdmittedAt) && decodedOp.State.Status == operation.State.Status && len(decodedOp.State.PendingToolCalls) == len(operation.State.PendingToolCalls), "decoded operation register does not round-trip: %+v", decodedOp)
 	testassert.Require(t, !strings.Contains(string(opRaw), `"revision"`), "revision leaked into the operation payload: %s", opRaw)
 }
 
@@ -877,13 +877,16 @@ func TestAgentInputsCanonicalModelInRegisters(t *testing.T) {
 		{"absent", model.ModelRef{}, ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			selection := AgentSelection{Inputs: &AgentInputs{Model: row.ref, AssemblyMode: "full"}}
+			selection := SessionInputs{}
+			if !row.ref.IsZero() {
+				selection.Model = modelChoice(row.ref)
+			}
 			session := validSessionRecord()
-			session.State.AgentSelection = selection
+			session.State.Inputs = selection
 			sessionRaw, err := encodeSessionRegister(session)
 			testassert.NoError(t, err)
 			operation := validOperationRecord()
-			operation.Admission.AgentSelection = selection
+			operation.Admission.Inputs = selection
 			opRaw, err := encodeOperationRegister(operation)
 			testassert.NoError(t, err)
 			for name, raw := range map[string]json.RawMessage{"session": sessionRaw, "operation": opRaw} {
@@ -894,9 +897,7 @@ func TestAgentInputsCanonicalModelInRegisters(t *testing.T) {
 				}
 				parent, err := objectMember(obj, owner, true)
 				testassert.NoError(t, err)
-				selected, err := objectMember(parent, "agent_selection", true)
-				testassert.NoError(t, err)
-				inputs, err := objectMember(selected, "inputs", true)
+				inputs, err := objectMember(parent, "inputs", true)
 				testassert.NoError(t, err)
 				modelRaw, exists := inputs["model"]
 				if row.modelJSON == "" && exists {
@@ -908,13 +909,13 @@ func TestAgentInputsCanonicalModelInRegisters(t *testing.T) {
 			}
 			decoded, err := decodeSessionRegister(Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterSession}, Revision: 1, Payload: sessionRaw})
 			testassert.NoError(t, err)
-			if decoded.State.AgentSelection.Inputs.Model != row.ref {
-				t.Errorf("session model = %#v", decoded.State.AgentSelection.Inputs.Model)
+			if modelChoiceValue(decoded.State.Inputs.Model) != row.ref {
+				t.Errorf("session model = %#v", decoded.State.Inputs.Model)
 			}
 			decodedOp, err := decodeOperationRegister(Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterOperation, OperationID: testOpID}, Revision: 1, Payload: opRaw})
 			testassert.NoError(t, err)
-			if decodedOp.Admission.AgentSelection.Inputs.Model != row.ref {
-				t.Errorf("operation model = %#v", decodedOp.Admission.AgentSelection.Inputs.Model)
+			if modelChoiceValue(decodedOp.Admission.Inputs.Model) != row.ref {
+				t.Errorf("operation model = %#v", decodedOp.Admission.Inputs.Model)
 			}
 		})
 	}
@@ -928,17 +929,18 @@ func TestAgentInputsCanonicalModelRejectsMalformed(t *testing.T) {
 		"miscased": `{"Provider":"a","model":"b"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			selection := json.RawMessage(`{"inputs":{"model":` + raw + `,"instructions":"","assembly_mode":"full","tools":[],"capabilities":[],"constraints":{"readonly":false,"write_dir":""},"strategy":{"id":""}}}`)
-			if _, err := decodeAgentSelection(selection); err == nil {
+			selection := json.RawMessage(`{"model":` + raw + `}`)
+			var invalid SessionInputs
+			if err := json.Unmarshal(selection, &invalid); err == nil {
 				t.Fatalf("accepted model %s", raw)
 			}
-			validSelection := AgentSelection{Inputs: &AgentInputs{AssemblyMode: "full"}}
+			validSelection := SessionInputs{Tools: []string{}}
 			session := validSessionRecord()
-			session.State.AgentSelection = validSelection
+			session.State.Inputs = validSelection
 			sessionRaw, err := encodeSessionRegister(session)
 			testassert.NoError(t, err)
 			operation := validOperationRecord()
-			operation.Admission.AgentSelection = validSelection
+			operation.Admission.Inputs = validSelection
 			opRaw, err := encodeOperationRegister(operation)
 			testassert.NoError(t, err)
 			validRaw, err := json.Marshal(validSelection)
@@ -1041,7 +1043,7 @@ func TestRegisterPayloadRejectsInvalidWire(t *testing.T) {
 		{"miscased key", renameKey(opRaw, "admission", "Admission")},
 		{"null admission", setKey(opRaw, "admission", json.RawMessage(`null`))},
 		{"wrong state container", setKey(opRaw, "state", json.RawMessage(`[]`))},
-		{"operation mismatch", setKey(opRaw, "admission", json.RawMessage(`{"session_id":"`+testSessionID+`","operation_id":"ghost","request_kind":"message","admitted_entry":{"session_id":"`+testSessionID+`","entry_id":"`+hexID(1)+`"},"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},"execution":{"configuration_revision":"rev-1","model":{"provider":"prov","model":"gpt-x"},"context_window":4096,"output_reserve":2048,"system_prompt":"system","tools":[],"initial_tool_names":[],"readonly":false,"write_dir":"","compact":{"model":{"provider":"cprov","model":"compact-x"},"system_prompt":"summarize"}},"admitted_at":"2026-01-02T03:04:05.123456789Z"}`))},
+		{"operation mismatch", setKey(opRaw, "admission", json.RawMessage(`{"session_id":"`+testSessionID+`","operation_id":"ghost","request_kind":"message","admitted_entry":{"session_id":"`+testSessionID+`","entry_id":"`+hexID(1)+`"},"inputs":{"instructions":"coder"},"execution":{"configuration_revision":"rev-1","model":{"provider":"prov","model":"gpt-x"},"context_window":4096,"output_reserve":2048,"system_prompt":"system","tools":[],"initial_tool_names":[],"compact":{"model":{"provider":"cprov","model":"compact-x"},"system_prompt":"summarize"}},"admitted_at":"2026-01-02T03:04:05.123456789Z"}`))},
 	}
 	for _, m := range opMutations {
 		t.Run("operation/"+m.name, func(t *testing.T) {
@@ -1550,9 +1552,9 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			_, err := encodeSessionRegister(v)
 			return err
 		}},
-		{"session empty agent type", func() error {
+		{"session invalid tool name", func() error {
 			v := validSessionRecord()
-			v.State.AgentSelection = AgentSelection{}
+			v.State.Inputs = SessionInputs{Tools: []string{""}}
 			_, err := encodeSessionRegister(v)
 			return err
 		}},
@@ -1618,18 +1620,6 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 		{"capture empty revision", func() error {
 			v := testCapture()
 			v.ConfigurationRevision = ""
-			_, err := encodeExecutionCapture(v)
-			return err
-		}},
-		{"capture duplicate capability name", func() error {
-			v := testCapture()
-			v.Capabilities = []string{"cap-a", "cap-b", "cap-a"}
-			_, err := encodeExecutionCapture(v)
-			return err
-		}},
-		{"capture empty capability name", func() error {
-			v := testCapture()
-			v.Capabilities = []string{""}
 			_, err := encodeExecutionCapture(v)
 			return err
 		}},
@@ -1926,131 +1916,6 @@ func TestIDShapes(t *testing.T) {
 	}
 }
 
-// TestExecutionCaptureCapabilities pins the durable capability selection: an
-// empty selection encodes by omission; omission and the empty array both
-// decode to none while null is invalid; present names must be nonempty and
-// unique and keep the selected order; and a historical capture carrying
-// plugin-defined names decodes without any plugin definition.
-func TestExecutionCaptureCapabilities(t *testing.T) {
-	encode := func(t *testing.T, capabilities []string) json.RawMessage {
-		t.Helper()
-		v := testCapture()
-		v.Capabilities = capabilities
-		raw, err := encodeExecutionCapture(v)
-		testassert.NoError(t, err)
-		return raw
-	}
-
-	for _, empty := range [][]string{nil, {}} {
-		obj, err := decodePayloadObject(encode(t, empty))
-		testassert.NoError(t, err)
-		{
-			_, present := obj["capabilities"]
-			testassert.Require(t, !present, "empty capability selection %#v leaked the capabilities member", empty)
-		}
-	}
-
-	ordered := []string{"retired-plugin.capability", "cap-mid", "cap-last"}
-	obj, err := decodePayloadObject(encode(t, ordered))
-	testassert.NoError(t, err)
-	{
-		got := string(obj["capabilities"])
-		testassert.Equal(t, got, `["retired-plugin.capability","cap-mid","cap-last"]`)
-	}
-	decoded, err := decodeExecutionCapture(obj)
-	testassert.NoError(t, err)
-	testassert.Require(t, len(decoded.Capabilities) == 3 && decoded.Capabilities[0] == "retired-plugin.capability" && decoded.Capabilities[1] == "cap-mid" && decoded.Capabilities[2] == "cap-last", "decoded capabilities = %q, want the selected order", decoded.Capabilities)
-	decoded.Capabilities[0] = "tampered"
-	again, err := decodeExecutionCapture(obj)
-	testassert.Require(t, err == nil && again.Capabilities[0] == "retired-plugin.capability", "decoded capabilities alias the payload bytes: %q, %v", again.Capabilities, err)
-
-	captureWith := func(capabilities string) map[string]json.RawMessage {
-		members, err := decodePayloadObject(encode(t, nil))
-		testassert.NoError(t, err)
-		if capabilities != "" {
-			members["capabilities"] = json.RawMessage(capabilities)
-		}
-		return members
-	}
-	{
-		got, err := decodeExecutionCapture(captureWith(""))
-		testassert.Require(t, err == nil && got.Capabilities == nil, "omitted capabilities = %q, %v, want none", got.Capabilities, err)
-	}
-	{
-		got, err := decodeExecutionCapture(captureWith("[]"))
-		testassert.Require(t, err == nil && got.Capabilities == nil, "empty-array capabilities = %q, %v, want none", got.Capabilities, err)
-	}
-	for _, bad := range []string{"null", `["cap-a","cap-a"]`, `[""]`, `[5]`, `"cap-a"`, `["cap-a",null]`} {
-		{
-			got, err := decodeExecutionCapture(captureWith(bad))
-			testassert.Require(t, err != nil, "capabilities %s decoded to %q, want rejection", bad, got.Capabilities)
-		}
-	}
-}
-
-// TestExecutionCapturePermissionMembers pins the durable permission capability
-// members: readonly and write_dir are required members encoded always,
-// including their false and empty values, they round-trip unchanged, and a
-// capture missing either member, carrying null, or with a wrong-typed member
-// is invalid.
-func TestExecutionCapturePermissionMembers(t *testing.T) {
-	encode := func(t *testing.T, v ExecutionCapture) map[string]json.RawMessage {
-		t.Helper()
-		raw, err := encodeExecutionCapture(v)
-		testassert.NoError(t, err)
-		members, err := decodePayloadObject(raw)
-		testassert.NoError(t, err)
-		return members
-	}
-
-	explicit := encode(t, testCapture())
-	{
-		got := string(explicit["readonly"])
-		testassert.Equal(t, got, "false")
-	}
-	{
-		got := string(explicit["write_dir"])
-		testassert.Equal(t, got, `""`)
-	}
-
-	v := testCapture()
-	v.Readonly = true
-	v.WriteDir = "/w/sub"
-	decoded, err := decodeExecutionCapture(encode(t, v))
-	testassert.NoError(t, err)
-	testassert.Require(t, decoded.Readonly == true && decoded.WriteDir == "/w/sub", "round-tripped members = %v %q, want true and %q", decoded.Readonly, decoded.WriteDir, "/w/sub")
-
-	for _, mutation := range []struct {
-		name    string
-		members func(map[string]json.RawMessage)
-	}{
-		{"missing readonly", func(m map[string]json.RawMessage) { delete(m, "readonly") }},
-		{"missing write_dir", func(m map[string]json.RawMessage) { delete(m, "write_dir") }},
-		{"null readonly", func(m map[string]json.RawMessage) { m["readonly"] = json.RawMessage("null") }},
-		{"null write_dir", func(m map[string]json.RawMessage) { m["write_dir"] = json.RawMessage("null") }},
-		{"string readonly", func(m map[string]json.RawMessage) { m["readonly"] = json.RawMessage(`"true"`) }},
-		{"number write_dir", func(m map[string]json.RawMessage) { m["write_dir"] = json.RawMessage(`5`) }},
-	} {
-		t.Run(mutation.name, func(t *testing.T) {
-			members := encode(t, v)
-			mutation.members(members)
-			{
-				got, err := decodeExecutionCapture(members)
-				testassert.Require(t, err != nil, "capture decoded to %+v, want rejection", got)
-			}
-		})
-	}
-}
-
-// TestExecutionCaptureCompactionMembers pins the durable compaction
-// configuration members: context_window, output_reserve and compact are
-// required conversation members encoded always, the nested compact object
-// carries exactly the model and system_prompt keys with the model in the
-// durable two-field form, everything round-trips unchanged, a capture missing
-// a member, carrying a non-positive conversation window or reserve, an
-// incomplete compact model identity, an empty compact prompt, or a compact
-// object carrying a retired budget member is invalid on both the encode and
-// decode paths.
 func TestExecutionCaptureCompactionMembers(t *testing.T) {
 	encode := func(t *testing.T, v ExecutionCapture) map[string]json.RawMessage {
 		t.Helper()

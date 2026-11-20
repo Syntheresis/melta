@@ -19,12 +19,12 @@ import (
 	"time"
 
 	"github.com/Syntheresis/melta/extension"
+	agents "github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
-	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
 
@@ -52,21 +52,17 @@ func newServiceHarness(t *testing.T) *serviceHarness {
 	return h
 }
 
-func (h *serviceHarness) service(owner context.Context, plugins ...extension.Native) *configurationService {
+func (h *serviceHarness) service(owner context.Context, plugins ...extension.Extension) *configurationService {
 	h.t.Helper()
-	return h.serviceWithDefaults(owner, nil, plugins...)
-}
-
-func (h *serviceHarness) serviceWithDefaults(owner context.Context, defaults []string, plugins ...extension.Native) *configurationService {
-	h.t.Helper()
-	c, err := newNativeComposition(plugins)
-	if err != nil {
-		h.t.Fatalf("newComposition: %v", err)
-	}
-	return newConfigurationService(owner, c, h.loader,
+	svc := newConfigurationService(owner, newComposition(), h.loader,
 		NewFileConfigurationSource(h.configPath),
 		NewEnvironmentCredentialSource(filepath.Join(h.home, ".melta", ".env")),
 		h.locations(), harness.IncludedStrategyBinding(), newObservation())
+	svc.dataDir = h.dataDir
+	for _, plugin := range plugins {
+		svc.authors = append(svc.authors, nativeActivationSpec{extension: plugin})
+	}
+	return svc
 }
 
 func (h *serviceHarness) locations() Locations {
@@ -159,8 +155,8 @@ func writeAgentDefinitions(t *testing.T, configPath, content string) {
 	writeServiceFile(t, configPath, string(data))
 }
 
-func fixtureAgentPlugin(registered ...extension.Native) extension.Native {
-	return agentsTestNative(registered...)
+func fixtureAgentPlugin() extension.Extension {
+	return agentsTestNative()
 }
 
 func enableFixturePlugin(t *testing.T, configPath, id string) {
@@ -192,37 +188,54 @@ func ownerResourceConfig(endpoint, alpha, extra string) string {
 	return strings.TrimSuffix(ownerConfigDocument(endpoint), "}") + `,"extensions":{"agents":{"enabled":true,"definitions":` + ownerAgentsDocument + `},"alpha":{"enabled":true,` + strings.TrimPrefix(alpha, "{") + extra + `}}`
 }
 
-func servicePlugin(id string, opens *atomic.Int64, _ func(json.RawMessage) error) extension.Native {
+func servicePlugin(id string, opens *atomic.Int64, _ func(json.RawMessage) error) extension.Extension {
 	capabilityID := "capability." + id
-	return testNative(id, extension.LifetimeHarness, []extension.Capability{testServiceCapability(capabilityID)}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+	return testNative(id, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		opens.Add(1)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{capabilityID: testServiceImplementation()}}, nil
+		_, err := api.RegisterService(testServiceCapability(capabilityID), nil)
+		return nil, err
 	})
 }
 
 func TestRuntimeConfigurationResourceReplacement(t *testing.T) {
-	t.Run("inactive dependency declaration is not composed", func(t *testing.T) {
+	t.Run("inactive invalid extension is not activated", func(t *testing.T) {
 		e := newOwnerEnv(t)
 		e.fixtureStore(storage.NewMemory())
 		var opens atomic.Int64
-		p := servicePlugin("alpha", &opens, acceptValidator)
-		p.Declaration.Components[0].Requires = []extension.Binding{{Name: "missing", Provider: "missing/component", CapabilityID: "missing"}}
+		manifest := registrarManifest("alpha")
+		manifest.APIVersion = "invalid"
+		p := extension.Extension{Manifest: manifest, Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+			opens.Add(1)
+			return nil, nil
+		}}
 		writeServiceFile(t, e.configPath, `{"extensions":{"alpha":{"enabled":false}}}`)
 		r, err := e.open(context.Background(), p)
 		testassert.NoError(t, err)
 		defer r.Close(context.Background())
 		testassert.Equal(t, opens.Load(), int64(0))
 		writeServiceFile(t, e.configPath, `{"extensions":{"alpha":{"enabled":true}}}`)
-		before := r.config.current()
 		_, err = r.Reload(context.Background(), testCaller(r))
-		testassert.Require(t, errors.Is(err, ErrConfiguration) && r.config.current() == before && opens.Load() == 0, "invalid active graph = %v", err)
+		testassert.NoError(t, err)
+		catalog, err := r.ListExtensions(context.Background(), testCaller(r))
+		testassert.NoError(t, err)
+		var inactive bool
+		for _, item := range catalog {
+			inactive = inactive || item.ExtensionId == "alpha" && item.InactiveReason != nil
+		}
+		testassert.Require(t, inactive && opens.Load() == 0, "invalid active extension = %+v, opens %d", catalog, opens.Load())
 	})
 	t.Run("inactive extension remains unconstructed across reload", func(t *testing.T) {
 		e := newOwnerEnv(t)
 		e.fixtureStore(storage.NewMemory())
 		var opens, activeOpens atomic.Int64
-		p := servicePlugin("alpha", &opens, func(json.RawMessage) error { return errors.New("inactive validator called") })
-		active := servicePlugin("beta", &activeOpens, acceptValidator)
+		p := extension.Extension{Manifest: registrarManifest("alpha"), Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+			opens.Add(1)
+			return nil, errors.New("inactive activation called")
+		}}
+		active := extension.Extension{Manifest: registrarManifest("beta"), Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+			activeOpens.Add(1)
+			return nil, nil
+		}}
 		writeServiceFile(t, e.configPath, `{"extensions":{"alpha":{"enabled":false,"value":"invalid"},"beta":{"enabled":true},"uninstalled":{"enabled":true}}}`)
 		r, err := e.open(context.Background(), p, active)
 		testassert.NoError(t, err)
@@ -240,22 +253,20 @@ func TestRuntimeConfigurationResourceReplacement(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
 	var opens, closes atomic.Int64
-	p := servicePlugin("alpha", &opens, acceptValidator)
-	p.Open = func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		id := opens.Add(1)
-		_ = id
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.alpha": testServiceImplementation()}, Close: func(context.Context, extension.CallContext) error { closes.Add(1); return nil }}, nil
-	}
+	p := extension.Extension{Manifest: registrarManifest("alpha"), Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+		opens.Add(1)
+		return func(context.Context) error { closes.Add(1); return nil }, nil
+	}}
 	extensionConfig := func(raw string) string {
 		return `{"providers":{"prov":` + nominalProvMember("https://prov.test/v1", "", `{"m":{"name":"One","context_window":100}}`) + `},"extensions":{"alpha":` + raw + `}}`
 	}
 	writeServiceFile(t, e.configPath, extensionConfig(`{ "enabled":true,"value" : 1 }`))
-	plugins := []extension.Native{p}
+	plugins := []extension.Extension{p}
 	r, err := e.open(context.Background(), plugins...)
 	testassert.NoError(t, err)
 	defer r.Close(context.Background())
-	plugins[0].Open = func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{}, errFactory
+	plugins[0].Activate = func(context.Context, extension.API) (func(context.Context) error, error) {
+		return nil, errFactory
 	}
 	testassert.Equal(t, opens.Load(), int64(1))
 	_, err = r.Reload(context.Background(), testCaller(r))
@@ -289,19 +300,10 @@ func TestRuntimeConfigurationResourceReplacement(t *testing.T) {
 func TestResourceFactoryWithoutWarningSink(t *testing.T) {
 	h := newServiceHarness(t)
 	writeServiceFile(t, h.configPath, `{"extensions":{"alpha":{"enabled":true}}}`)
-	p := servicePlugin("alpha", &h.opens, nil)
-	p.Open = func(_ context.Context, info extension.InstanceContext) (extension.Instance, error) {
-		if info.ReportWarning != nil {
-			return extension.Instance{}, errors.New("unexpected warning callback")
-		}
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.alpha": testServiceImplementation()}}, nil
-	}
-	c := mustComposition(t, p)
-	s := h.service(context.Background(), p)
-	s.composition, s.dataDir = c, h.dataDir
-	_, err := s.publish(context.Background())
+	svc := h.preparedService(context.Background(), servicePlugin("alpha", &h.opens, nil))
+	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	testassert.NoError(t, s.current().resources.release())
+	testassert.NoError(t, svc.current().resources.release())
 }
 
 func TestRuntimeConfigurationCandidateResources(t *testing.T) {
@@ -309,69 +311,78 @@ func TestRuntimeConfigurationCandidateResources(t *testing.T) {
 	e.fixtureStore(storage.NewMemory())
 	var opens, closes atomic.Int64
 	var fail atomic.Bool
-	first := servicePlugin("alpha", &opens, acceptValidator)
-	first.Open = func(_ context.Context, info extension.InstanceContext) (extension.Instance, error) {
+	firstManifest := registrarManifest("alpha")
+	firstManifest.Services = []string{"melta.warnings"}
+	first := extension.Extension{Manifest: firstManifest, Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 		id := opens.Add(1)
-		info.ReportWarning("factory", fmt.Sprintf("instance-%d", id))
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.alpha": testServiceImplementation()}, Close: func(context.Context, extension.CallContext) error {
+		warning, _ := json.Marshal(map[string]string{"kind": "factory", "message": fmt.Sprintf("instance-%d", id)})
+		if _, err := api.Call(ctx, "melta.warnings", "report", warning); err != nil {
+			return nil, err
+		}
+		return func(context.Context) error {
 			closes.Add(1)
 			if id == 1 {
 				return errCloser
 			}
 			return nil
-		}}, nil
-	}
-	second := servicePlugin("beta", &atomic.Int64{}, acceptValidator)
-	second.Open = func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+		}, nil
+	}}
+	secondManifest := registrarManifest("beta")
+	secondManifest.Services = []string{"melta.warnings"}
+	second := extension.Extension{Manifest: secondManifest, Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 		if fail.Load() {
-			return extension.Instance{}, errFactory
+			if _, err := api.Call(ctx, "melta.warnings", "report", []byte(`{"kind":"factory","message":"failed beta"}`)); err != nil {
+				return nil, err
+			}
+			return nil, errFactory
 		}
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.beta": testServiceImplementation()}}, nil
-	}
+		return nil, nil
+	}}
 	writeServiceFile(t, e.configPath, resourceServiceConfig(`{"value":1}`))
 	r, err := e.open(context.Background(), first, second)
 	testassert.NoError(t, err)
 	defer r.Close(context.Background())
-	before := mustRead(t, e.configPath)
-	previous := r.config.current()
-	warnRevision, _ := r.warnings.snapshot()
-	sub, err := r.Subscribe(32)
-	testassert.NoError(t, err)
-	defer sub.Close()
-	settings := projectSettings(previous)
+	settings := projectSettings(r.config.current())
 	settings.Extensions["alpha"] = `{"enabled":true,"value":2}`
+	settings.Extensions["beta"] = `{"enabled":true,"value":2}`
 	fail.Store(true)
-	_, err = updateSettingsOnly(r, context.Background(), settings)
-	testassert.Require(t, errors.Is(err, errFactory), "failed candidate = %v", err)
-	testassert.Require(t, r.config.current() == previous && string(mustRead(t, e.configPath)) == string(before), "failed candidate changed publication or owning bytes")
-	testassert.Equal(t, opens.Load(), int64(2))
-	testassert.Equal(t, closes.Load(), int64(1))
-	gotRevision, _ := r.warnings.snapshot()
-	testassert.Equal(t, gotRevision, warnRevision)
-	assertNoEvent(t, sub)
-	fail.Store(false)
 	result, err := updateSettingsOnly(r, context.Background(), settings)
 	testassert.NoError(t, err)
 	testassert.Equal(t, result.ConfigurationRevision.Generation, "2")
-	testassert.Equal(t, opens.Load(), int64(3))
-	testassert.Equal(t, closes.Load(), int64(2))
+	testassert.Equal(t, opens.Load(), int64(2))
+	testassert.Equal(t, closes.Load(), int64(1))
+	catalog, err := r.ListExtensions(context.Background(), testCaller(r))
+	testassert.NoError(t, err)
+	var betaInactive bool
+	for _, item := range catalog {
+		betaInactive = betaInactive || item.ExtensionId == "beta" && item.InactiveReason != nil
+	}
+	testassert.Require(t, betaInactive, "failed beta not reported inactive: %+v", catalog)
 	_, warnings := r.warnings.snapshot()
+	for _, w := range warnings {
+		testassert.Require(t, w.Message != "failed beta", "failed activation warning published")
+	}
+	fail.Store(false)
+	settings.Extensions["beta"] = `{"enabled":true,"value":3}`
+	result, err = updateSettingsOnly(r, context.Background(), settings)
+	testassert.NoError(t, err)
+	testassert.Equal(t, result.ConfigurationRevision.Generation, "3")
+	testassert.Equal(t, opens.Load(), int64(2))
+	testassert.Equal(t, closes.Load(), int64(1))
+	_, warnings = r.warnings.snapshot()
 	var seen bool
 	for _, w := range warnings {
-		if w.Source == "plugin:alpha" && w.Message == "instance-3" {
+		if w.Source == "plugin:alpha" && w.Message == "instance-2" {
 			seen = true
-		}
-		if w.Message == "instance-2" {
-			t.Fatal("failed candidate warning published")
 		}
 	}
 	testassert.Require(t, seen, "successful candidate warning was not published: %v", warnings)
 	_, err = updateSettingsOnly(r, context.Background(), result.Result)
 	testassert.NoError(t, err)
-	testassert.Equal(t, opens.Load(), int64(3))
+	testassert.Equal(t, opens.Load(), int64(2))
 	err = r.Close(context.Background())
 	testassert.Require(t, errors.Is(err, errCloser), "retirement cleanup failure did not reach Close: %v", err)
-	testassert.Equal(t, closes.Load(), int64(3))
+	testassert.Equal(t, closes.Load(), int64(2))
 }
 
 func TestRuntimeCanceledCandidateDisposesOnlyItsPrefix(t *testing.T) {
@@ -380,21 +391,18 @@ func TestRuntimeCanceledCandidateDisposesOnlyItsPrefix(t *testing.T) {
 	var opens, closes atomic.Int64
 	var park atomic.Bool
 	entered := make(chan struct{})
-	first := servicePlugin("alpha", &opens, acceptValidator)
-	first.Open = func(_ context.Context, info extension.InstanceContext) (extension.Instance, error) {
-		id := opens.Add(1)
-		info.ReportWarning("factory", fmt.Sprintf("instance-%d", id))
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.alpha": testServiceImplementation()}, Close: func(context.Context, extension.CallContext) error { closes.Add(1); return nil }}, nil
-	}
-	second := servicePlugin("beta", &atomic.Int64{}, acceptValidator)
-	second.Open = func(ctx context.Context, _ extension.InstanceContext) (extension.Instance, error) {
+	first := extension.Extension{Manifest: registrarManifest("alpha"), Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+		opens.Add(1)
+		return func(context.Context) error { closes.Add(1); return nil }, nil
+	}}
+	second := extension.Extension{Manifest: registrarManifest("beta"), Activate: func(ctx context.Context, _ extension.API) (func(context.Context) error, error) {
 		if park.Load() {
 			close(entered)
 			<-ctx.Done()
-			return extension.Instance{}, ctx.Err()
+			return nil, ctx.Err()
 		}
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.beta": testServiceImplementation()}}, nil
-	}
+		return nil, nil
+	}}
 	writeServiceFile(t, e.configPath, resourceServiceConfig(`{"v":1}`))
 	r, err := e.open(context.Background(), first, second)
 	testassert.NoError(t, err)
@@ -404,7 +412,7 @@ func TestRuntimeCanceledCandidateDisposesOnlyItsPrefix(t *testing.T) {
 	sub, err := r.Subscribe(16)
 	testassert.NoError(t, err)
 	defer sub.Close()
-	writeServiceFile(t, e.configPath, resourceServiceConfig(`{"v":2}`))
+	writeServiceFile(t, e.configPath, strings.Replace(resourceServiceConfig(`{"v":2}`), `"beta":{"enabled":true}`, `"beta":{"enabled":true,"v":2}`, 1))
 	park.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -428,17 +436,16 @@ func TestRuntimeRetirementDoesNotHoldPublicationLocks(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(release) })
-	p := servicePlugin("alpha", &opens, acceptValidator)
-	p.Open = func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+	p := extension.Extension{Manifest: registrarManifest("alpha"), Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
 		id := opens.Add(1)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.alpha": testServiceImplementation()}, Close: func(context.Context, extension.CallContext) error {
+		return func(context.Context) error {
 			if id == 1 {
 				close(entered)
 				<-release
 			}
 			return nil
-		}}, nil
-	}
+		}, nil
+	}}
 	writeServiceFile(t, e.configPath, resourceServiceConfig(`{"v":1}`))
 	r, err := e.open(context.Background(), p)
 	testassert.NoError(t, err)
@@ -475,17 +482,16 @@ func TestRuntimeRetiredResourcesReleaseBeforeArtifactInterval(t *testing.T) {
 		return textTurnEvents("done")
 	})
 	var opens atomic.Int64
-	p := servicePlugin("alpha", &opens, acceptValidator)
-	p.Open = func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+	p := extension.Extension{Manifest: registrarManifest("alpha"), Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
 		id := opens.Add(1)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.alpha": testServiceImplementation()}, Close: func(context.Context, extension.CallContext) error {
+		return func(context.Context) error {
 			if id == 1 {
 				close(closeStarted)
 				<-closeRelease
 			}
 			return nil
-		}}, nil
-	}
+		}, nil
+	}}
 	writeServiceFile(t, e.configPath, ownerResourceConfig(e.server.URL, `{"v":1}`, ""))
 	r, err := e.open(context.Background(), p)
 	testassert.NoError(t, err)
@@ -518,22 +524,31 @@ func TestRuntimePreparedReservationSurvivesUntilOpening(t *testing.T) {
 	store := newGatedStore(storage.NewMemory())
 	e.fixtureStore(store)
 	var opens, closes atomic.Int64
-	alpha := servicePlugin("alpha", &opens, acceptValidator)
-	alpha.Open = func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+	alpha := extension.Extension{Manifest: registrarManifest("alpha"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		opens.Add(1)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.alpha": testServiceImplementation()}, Close: func(context.Context, extension.CallContext) error { closes.Add(1); return nil }}, nil
-	}
-	bound := make(chan string, 1)
-	dependency := extension.Binding{Name: "dep", Provider: "alpha/alpha#component", CapabilityID: "capability.alpha", Definition: testServiceCapability("capability.alpha").Definition()}
-	operationCapability := testServiceCapability("operation.value")
-	operation := testNative("operation", extension.LifetimeOperation, []extension.Capability{operationCapability}, []extension.Binding{dependency}, func(ctx context.Context, info extension.InstanceContext) (extension.Instance, error) {
-		result, err := info.Call(ctx, "dep", "call", json.RawMessage(`{}`))
+		_, err := api.RegisterService(extension.Service{Name: "capability.alpha", Methods: []extension.RegisteredMethod{{
+			Method: extension.PureMethod("call", `{}`, `{}`),
+			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+				return extension.Result{Value: json.RawMessage(`{}`)}, nil
+			},
+		}}}, nil)
 		if err != nil {
-			return extension.Instance{}, err
+			return nil, err
 		}
-		bound <- string(result.Value)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"operation.value": testServiceImplementation()}}, nil
-	})
+		return func(context.Context) error { closes.Add(1); return nil }, nil
+	}}
+	bound := make(chan string, 1)
+	operation := extension.Extension{Manifest: registrarManifest("operation"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.AttachRequest(extension.HookModePure, func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			result, err := call.Call(ctx, "capability.alpha", "call", json.RawMessage(`{}`))
+			if err != nil {
+				return harness.RequestConsequence{}, err
+			}
+			bound <- string(result.Value)
+			return harness.RequestConsequence{}, nil
+		}, nil)
+		return nil, err
+	}}
 	modelStarted, modelRelease := make(chan struct{}), make(chan struct{})
 	var modelOnce sync.Once
 	e.server.setScript(func(context.Context, string) []string {
@@ -595,11 +610,10 @@ func TestRuntimeDiscardedPreparationReleasesRetiredResources(t *testing.T) {
 	store := &rejectingAdmissionStore{Storage: storage.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
 	e.fixtureStore(store)
 	var opens, closes atomic.Int64
-	p := servicePlugin("alpha", &opens, acceptValidator)
-	p.Open = func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+	p := extension.Extension{Manifest: registrarManifest("alpha"), Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
 		opens.Add(1)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"capability.alpha": testServiceImplementation()}, Close: func(context.Context, extension.CallContext) error { closes.Add(1); return nil }}, nil
-	}
+		return func(context.Context) error { closes.Add(1); return nil }, nil
+	}}
 	writeServiceFile(t, e.configPath, ownerResourceConfig(e.server.URL, `{"value":1}`, ""))
 	r, err := e.open(context.Background(), p)
 	testassert.NoError(t, err)
@@ -633,12 +647,19 @@ func snapshotModelName(cfg *configuration, providerID, modelID string) string {
 }
 
 func hasDefinition(cfg *configuration, name string) (bool, string) {
-	for _, def := range cfg.definitions {
-		if def.name == name {
-			return true, modelRefString(def.inputs.Model)
-		}
+	var section struct {
+		Definitions map[string]struct {
+			Model string `json:"model"`
+		} `json:"definitions"`
 	}
-	return false, ""
+	if err := json.Unmarshal(cfg.extensions[agents.ExtensionID], &section); err != nil {
+		return false, ""
+	}
+	def, found := section.Definitions[name]
+	if !found {
+		return false, ""
+	}
+	return true, def.Model
 }
 
 // TestConfigurationServicePublishesImmutableGenerations proves the
@@ -706,7 +727,7 @@ func TestConfigurationServiceCapturesInputOnce(t *testing.T) {
 	}
 	t.Cleanup(func() { candidateBarrier = nil })
 	alpha := servicePlugin("alpha", &h.opens, acceptValidator)
-	svc := h.preparedService(context.Background(), alpha, fixtureAgentPlugin(alpha))
+	svc := h.preparedService(context.Background(), alpha, fixtureAgentPlugin())
 
 	first, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
@@ -733,44 +754,38 @@ func TestConfigurationServiceCapturesInputOnce(t *testing.T) {
 	}
 }
 
-// TestConfigurationServicePluginValidationRejectsPublication proves the
-// plugin section contract against the compiled declarations: unknown IDs and
-// non-object values reject the candidate, each validator's source error is
-// preserved, nothing publishes, and no factory runs. The positive siblings
-// (absent section passes nil, a no-settings plugin accepts {}, and a missing
-// model selection stays startable) must publish.
-func TestConfigurationServicePluginValidationRejectsPublication(t *testing.T) {
+// TestConfigurationServiceInvalidSectionsLeaveExtensionInactive proves the
+// plugin section contract: an enabled section that fails its manifest settings
+// schema leaves the extension inactive with its reason while the candidate
+// publishes and the entry point never runs. Absent, disabled, and malformed
+// non-enabled sections produce nothing.
+func TestConfigurationServiceInvalidSectionsLeaveExtensionInactive(t *testing.T) {
 	for _, row := range []struct {
 		name       string
 		config     string
-		validate   func(json.RawMessage) error
 		schema     json.RawMessage
 		wantSource string
-		wantIs     error
 	}{
-		{name: "validator failure", config: `{"extensions":{"alpha":{"enabled":true,"x":1}}}`, validate: acceptValidator, schema: json.RawMessage("false"), wantSource: "jsonschema validation failed"},
+		{name: "schema violation", config: `{"extensions":{"alpha":{"enabled":true,"x":1}}}`, schema: json.RawMessage("false"), wantSource: "jsonschema validation failed"},
 		{name: "no-settings violation", config: `{"extensions":{"alpha":{"enabled":true,"x":true}}}`, schema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"],"additionalProperties":false}`), wantSource: "jsonschema validation failed"},
 	} {
 		h := newServiceHarness(t)
 		writeServiceFile(t, h.configPath, row.config)
-		plugin := servicePlugin("alpha", &h.opens, row.validate)
+		plugin := servicePlugin("alpha", &h.opens, nil)
 		if row.schema != nil {
-			plugin.Declaration.ConfigSchema = row.schema
+			plugin.Manifest.SettingsSchema = row.schema
 		}
 		svc := h.service(context.Background(), plugin)
 		candidate, err := svc.publish(context.Background())
-		testassert.Require(t, candidate.snapshot == nil && errors.Is(err, ErrConfiguration), "%s: publish = (%v, %v), want a rejected candidate", row.name, candidate, err)
-		testassert.Require(t, (row.wantIs == nil || errors.Is(err, row.wantIs)) && (row.wantSource == "" || strings.Contains(err.Error(), row.wantSource)), "%s: error %v does not preserve the validator source error; %s: error %v does not preserve %q", row.name, err, row.name, err, row.wantSource)
-		testassert.Require(t, svc.current() == nil, "%s: a rejected candidate published a snapshot", row.name)
-		if h.opens.Load() != 0 {
-			t.Fatalf("%s: rejection ran %d factories", row.name, h.opens.Load())
-		}
+		testassert.NoError(t, err)
+		inactive := candidate.snapshot.native.inactive["alpha"]
+		testassert.Require(t, inactive != nil && strings.Contains(inactive.Error(), row.wantSource), "%s: inactive = %v, want the reason preserving %q", row.name, inactive, row.wantSource)
+		testassert.Equal(t, h.opens.Load(), int64(0))
 	}
 
 	for _, row := range []struct {
-		name     string
-		config   string
-		validate func(json.RawMessage) error
+		name   string
+		config string
 	}{
 		{name: "absent section", config: `{}`},
 		{name: "disabled section", config: `{"extensions":{"alpha":{"enabled":false,"x":[1]},"ghost":{"enabled":true}}}`},
@@ -783,24 +798,16 @@ func TestConfigurationServicePluginValidationRejectsPublication(t *testing.T) {
 	} {
 		h := newServiceHarness(t)
 		writeServiceFile(t, h.configPath, row.config)
-		var seen atomic.Pointer[json.RawMessage]
-		validate := row.validate
-		if validate == nil && row.name != "no-settings accepts participation flag" {
-			validate = func(raw json.RawMessage) error {
-				clone := append(json.RawMessage(nil), raw...)
-				seen.Store(&clone)
-				return nil
-			}
-		}
-		svc := h.service(context.Background(), servicePlugin("alpha", &h.opens, validate))
+		svc := h.service(context.Background(), servicePlugin("alpha", &h.opens, nil))
 		{
 			_, err := svc.publish(context.Background())
 			testassert.Require(t, err == nil, "%s: publish: %v", row.name, err)
 		}
-		if row.name != "no-settings accepts participation flag" && seen.Load() != nil {
-			t.Fatalf("%s: inactive validator ran", row.name)
+		if row.name == "no-settings accepts participation flag" {
+			testassert.Require(t, h.opens.Load() == 1 && svc.current().native.inactive["alpha"] == nil, "%s: active extension = opens %d inactive %v, want one activation", row.name, h.opens.Load(), svc.current().native.inactive["alpha"])
+		} else {
+			testassert.Require(t, h.opens.Load() == 0 && svc.current().native.inactive["alpha"] == nil, "%s: inactive section ran %d activations", row.name, h.opens.Load())
 		}
-		testassert.Require(t, h.opens.Load() == 0, "%s: configuration publication ran a factory", row.name)
 	}
 }
 
@@ -809,30 +816,31 @@ func pluginsConfigFile(alpha string) string {
 	return `{"providers":{"prov":` + nominalProvMember("https://prov.test/v1", "", `{"m":{"name":"One","context_window":100}}`) + `},"extensions":{"alpha":` + alpha + `}}`
 }
 
-// TestConfigurationServiceValidatorScratchCannotChangePublication proves the
-// owned-validator-input rows: a synchronous validator that uses its received
-// bytes as an in-place scratch buffer cannot change the retained candidate,
-// the published snapshot, or a later Invocation.Config handout; absent
-// settings still deliver nil to the validator; and a tampering rejected
-// candidate notifies nothing while leaving the prior pointer, generation,
-// and retained bytes intact.
-func TestConfigurationServiceValidatorScratchCannotChangePublication(t *testing.T) {
+// TestConfigurationServiceActivationCannotChangePublication proves the
+// captured-section contract: the published snapshot and a later Invocation
+// handout keep the candidate's exact bytes no matter what the extension's own
+// entry point does with its settings view; a missing section activates
+// nothing; and a section that violates the manifest schema leaves only that
+// extension inactive while the revision publishes with its event, the prior
+// capture intact.
+func TestConfigurationServiceActivationCannotChangePublication(t *testing.T) {
 	const admitted = `{"enabled":true,"value":"original"}`
-	t.Run("in-place scratch never reaches the publication", func(t *testing.T) {
+	t.Run("activation cannot change the published section", func(t *testing.T) {
 		h := newServiceHarness(t)
 		writeServiceFile(t, h.configPath, pluginsConfigFile(admitted))
-		plugin := servicePlugin("alpha", &h.opens, acceptValidator)
-		plugin.Declaration.ConfigSchema = json.RawMessage(`{"type":"object","required":["enabled","value"],"properties":{"enabled":{"type":"boolean"},"value":{"const":"original"}}}`)
+		plugin := testNative("alpha", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			section := api.Settings()
+			for i := range section {
+				section[i] = 'x'
+			}
+			return nil, nil
+		})
 		svc := h.service(context.Background(), plugin)
 		pub, err := svc.publish(context.Background())
 		testassert.NoError(t, err)
 		testassert.Require(t, string(pub.snapshot.extensions["alpha"]) == admitted, "published snapshot bytes = %s, want the retained candidate", pub.snapshot.extensions["alpha"])
-		{
-			got := (Invocation{snapshot: pub.snapshot}).Config("alpha")
-			testassert.Require(t, string(got) == admitted, "Invocation.Config = %s, want the retained candidate", got)
-		}
 	})
-	t.Run("absent settings skip validator", func(t *testing.T) {
+	t.Run("absent settings skip activation", func(t *testing.T) {
 		h := newServiceHarness(t)
 		writeServiceFile(t, h.configPath, providerConfigFile("One"))
 		svc := h.service(context.Background(), servicePlugin("alpha", &h.opens, acceptValidator))
@@ -840,12 +848,13 @@ func TestConfigurationServiceValidatorScratchCannotChangePublication(t *testing.
 			_, err := svc.publish(context.Background())
 			testassert.NoError(t, err)
 		}
+		testassert.Equal(t, h.opens.Load(), int64(0))
 	})
-	t.Run("rejected tampering leaves the prior publication intact", func(t *testing.T) {
+	t.Run("tampering leaves the extension inactive and publishes the revision", func(t *testing.T) {
 		h := newServiceHarness(t)
 		writeServiceFile(t, h.configPath, pluginsConfigFile(admitted))
 		plugin := servicePlugin("alpha", &h.opens, acceptValidator)
-		plugin.Declaration.ConfigSchema = json.RawMessage(`{"type":"object","required":["enabled","value"],"properties":{"enabled":{"type":"boolean"},"value":{"const":"original"}}}`)
+		plugin.Manifest.SettingsSchema = json.RawMessage(`{"type":"object","required":["enabled","value"],"properties":{"enabled":{"type":"boolean"},"value":{"const":"original"}}}`)
 		svc := h.service(context.Background(), plugin)
 		sub, err := svc.obs.subscribe(4)
 		testassert.NoError(t, err)
@@ -854,17 +863,10 @@ func TestConfigurationServiceValidatorScratchCannotChangePublication(t *testing.
 		testassert.NoError(t, err)
 		nextConfigurationEvent(t, sub, "1")
 		writeServiceFile(t, h.configPath, pluginsConfigFile(`{"enabled":true,"value":"tampered"}`))
-		{
-			_, err := svc.publish(context.Background())
-			testassert.Require(t, errors.Is(err, ErrConfiguration), "reload = %v, want a rejected candidate", err)
-		}
-		select {
-		case event, ok := <-sub.Events():
-			testassert.Require(t, !ok, "rejected build published event %+v, want silence", event)
-			t.Fatal("the subscription closed around the rejected build, want silence with the subscription open")
-		default:
-		}
-		testassert.Require(t, svc.current() == first.snapshot, "a rejected candidate replaced the prior publication")
+		second, err := svc.publish(context.Background())
+		testassert.NoError(t, err)
+		nextConfigurationEvent(t, sub, "2")
+		testassert.Require(t, second.snapshot.native.inactive["alpha"] != nil, "tampered extension = %v, want it inactive with a reason", second.snapshot.native.inactive)
 		testassert.Require(t, first.snapshot.generation == 1 && string(first.snapshot.extensions["alpha"]) == admitted, "prior snapshot = generation %d bytes %s, want generation 1 with the retained bytes", first.snapshot.generation, first.snapshot.extensions["alpha"])
 	})
 }
@@ -1095,7 +1097,7 @@ func TestConfigurationServiceSerializesBuildsAndRejectsCanceledWaiters(t *testin
 	close(gate)
 
 	first := <-buildA
-	testassert.Require(t, first.err == nil && first.cfg.snapshot.generation == 1, "active build: %v; got %v, want %v", first.err, first.cfg.snapshot.generation, 1)
+	testassert.Require(t, first.err == nil && first.cfg.snapshot != nil && first.cfg.snapshot.generation == 1, "active build: %v; got %v, want %v", first.err, first.cfg.snapshot, 1)
 	{
 		waiter := <-waiting
 		testassert.Require(t, waiter.cfg.snapshot == nil && errors.Is(waiter.err, context.Canceled), "canceled waiter = (%v, %v), want its own context error without starting another build", waiter.cfg, waiter.err)
@@ -1335,81 +1337,6 @@ func TestConfigurationServiceUnreadableMainDocumentFailsPublication(t *testing.T
 	candidate, err := svc.publish(context.Background())
 	testassert.Require(t, candidate.snapshot == nil && errors.Is(err, ErrConfiguration), "publish = (%v, %v), want the unreadable document to fail publication", candidate, err)
 	testassert.Require(t, strings.Contains(err.Error(), "read main configuration"), "error = %v, want the retained source path", err)
-}
-
-// TestConfigurationServiceToolDeclarationsStayDeclarative proves the
-// description/factory boundary: a Tool provider's compiled declaration feeds
-// the agent parser's tool universe and its description function and factory
-// both stay untouched by configuration publication.
-func TestConfigurationServiceToolDeclarationsStayDeclarative(t *testing.T) {
-	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, providerConfigFile("One"))
-	writeAgentDefinitions(t, h.configPath, `{"worker":{"tools":["tool.x"]}}`)
-	describeCalled := false
-	toolPlugin := testNative("tooldecl", extension.LifetimeHarness, []extension.Capability{extension.ToolCapability("tool.x")}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		h.opens.Add(1)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"tool.x": {Tool: noopNativeTool{}}}}, nil
-	})
-	toolPlugin.Describe["tool.x"] = func(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-		describeCalled = true
-		return extension.ToolDescription{Definition: model.ToolDefinition{Name: "tool.x", Parameters: json.RawMessage(`{}`)}, Available: true}, nil
-	}
-	svc := h.preparedService(context.Background(), toolPlugin, fixtureAgentPlugin(toolPlugin))
-	snapshot, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	// The declared tool ID validated the configured reference and produced no
-	// warning.
-	found, _ := hasDefinition(snapshot.snapshot, "worker")
-	testassert.Require(t, found, "worker retained = %v, want the declared tool to validate cleanly", found)
-	// An invalid active definition rejects the complete candidate.
-	previous := snapshot.snapshot
-	writeAgentDefinitions(t, h.configPath, `{"worker":{"tools":["ghost_tool"]}}`)
-	_, err = svc.publish(context.Background())
-	testassert.Require(t, errors.Is(err, ErrConfiguration) && strings.Contains(err.Error(), "ghost_tool") && svc.current() == previous, "invalid definition = %v, want rejection without publication", err)
-	testassert.Require(t, !describeCalled, "configuration publication ran the description function")
-	if h.opens.Load() != 0 {
-		t.Fatalf("%d factories ran during configuration publication", h.opens.Load())
-	}
-}
-
-// TestConfigurationServiceProjectsHostSelectedDefaultCapabilities proves the
-// application-supplied default capability IDs install on the built-in
-// definitions before overlays and ordinary inheritance: custom and inherited
-// definitions carry the default, explicit selections override or clear it,
-// and a host supplying no defaults selects none even when a
-// PreparationHook-typed export is registered.
-func TestConfigurationServiceProjectsHostSelectedDefaultCapabilities(t *testing.T) {
-	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, providerConfigFile("One"))
-	writeAgentDefinitions(t, h.configPath, `{
-	  "custom": {},
-	  "clear": {"capabilities": []},
-	  "explicit": {"capabilities": ["capability.alpha"]}
-	}`)
-	alpha := servicePlugin("alpha", &atomic.Int64{}, nil)
-	svc := h.preparedService(context.Background(), alpha, agentsTestNativeWithDefaults([]string{"capability.alpha"}, alpha))
-	snapshot, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	want := []string{"capability.alpha"}
-	for _, def := range snapshot.snapshot.definitions {
-		switch def.name {
-		case "clear":
-			testassert.Require(t, def.inputs.Capabilities == nil, "%s capabilities = %q, want the explicit empty clear", def.name, def.inputs.Capabilities)
-		default:
-			testassert.Require(t, reflect.DeepEqual(def.inputs.Capabilities, want), "%s capabilities = %q, want the projected default %q", def.name, def.inputs.Capabilities, want)
-		}
-	}
-
-	plain := newServiceHarness(t)
-	writeServiceFile(t, plain.configPath, strings.TrimSuffix(providerConfigFile("One"), "}")+`,"extensions":{"hooks":{"enabled":true,"tag":"T"}}}`)
-	writeAgentDefinitions(t, plain.configPath, `{}`)
-	hook := hookPlugin(&recordHook{name: "hook.first", events: &traceLog{}})
-	noDefaults := plain.preparedService(context.Background(), hook, fixtureAgentPlugin(hook))
-	snapshot, err = noDefaults.publish(context.Background())
-	testassert.NoError(t, err)
-	for _, def := range snapshot.snapshot.definitions {
-		testassert.Require(t, def.inputs.Capabilities == nil, "%s capabilities = %q, want none without host defaults", def.name, def.inputs.Capabilities)
-	}
 }
 
 // countingConfigurationSource counts document reads around a real source.

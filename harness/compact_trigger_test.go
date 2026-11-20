@@ -993,7 +993,7 @@ func TestModelEffectCompactBoundaryExcludesPostFreezeAppends(t *testing.T) {
 	// The controlled stimulus: the admitted fixture member's canonical
 	// background_completion signal is injected through the closed-delivery
 	// producer while the summary is parked, then the member finishes.
-	member, err := admitLocked(h, c, memberSession, completionChildID, 0)
+	member, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
 	{
 		err := h.deliverClosedCompletion(c, completionMember(member), "Task completed.", nil)
@@ -1082,7 +1082,7 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 		queue = queue[1:]
 		return next, nil
 	})
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	sessionID := session.Identity.SessionID
 	c := leaseCoordinator(t, h, sessionID)

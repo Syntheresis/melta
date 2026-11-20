@@ -7,9 +7,7 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/tool"
 	"github.com/Syntheresis/melta/model"
-	"github.com/Syntheresis/melta/prompt"
 )
 
 func (s authorInstance) describeTask(_ context.Context, call extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
@@ -51,7 +49,7 @@ func (s authorInstance) admit(_ context.Context, call extension.AuthorContext, i
 				}
 				candidate.Prompt = &text
 			default:
-				candidate.Instructions = definition.Prompt
+				candidate.Instructions = formatInstructions(definition.Prompt)
 				candidate.Prompt = nil
 			}
 		}
@@ -73,7 +71,7 @@ func (s authorInstance) admit(_ context.Context, call extension.AuthorContext, i
 			candidate.Tools = slices.Clone(candidate.Tools)
 			for i := range candidate.Tools {
 				if candidate.Tools[i].Name == "run_command" {
-					candidate.Tools[i].Description = tool.ReadOnlyRunCommandDescription
+					candidate.Tools[i].Description = ReadOnlyRunCommandDescription
 				}
 			}
 		}
@@ -120,11 +118,47 @@ func simplePrompt(access extension.PromptAccess, instructions string) (string, e
 			parts = append(parts, strings.TrimSpace(section.Text))
 		}
 	}
-	if text := prompt.FormatInstructions(instructions); text != "" {
+	if text := formatInstructions(instructions); text != "" {
 		parts = append(parts, text)
 	}
 	if text := strings.TrimSpace(rules); text != "" {
 		parts = append(parts, text)
 	}
 	return strings.TrimSpace(strings.Join(parts, "\n\n")), nil
+}
+
+const agentPromptHeading = "## Your Role and Instructions"
+
+// formatInstructions renders this extension's instruction heading and body,
+// keeping a body that already opens with the role heading unchanged.
+func formatInstructions(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	if !startsWithAgentPromptHeading(body) {
+		body = agentPromptHeading + "\n\n" + body
+	}
+	return body
+}
+
+func startsWithAgentPromptHeading(body string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "#") {
+			return false
+		}
+		headingText := strings.TrimLeft(line, "#")
+		headingText = strings.TrimSpace(headingText)
+		headingText = strings.TrimSpace(strings.TrimRight(headingText, "#"))
+		headingText = strings.ToLower(headingText)
+		headingText = strings.ReplaceAll(headingText, "-", " ")
+		headingText = strings.ReplaceAll(headingText, "_", " ")
+		headingText = strings.Join(strings.Fields(headingText), " ")
+		return headingText == "your role and instructions"
+	}
+	return false
 }

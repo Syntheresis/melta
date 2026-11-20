@@ -15,14 +15,6 @@ import (
 //go:embed runtime_identity.md
 var runtimeIdentity string
 
-func installedExtensions() ([]string, []string) {
-	var ids []string
-	for _, plugin := range builtin.Plugins() {
-		ids = append(ids, plugin.Declaration.ID)
-	}
-	return ids, builtin.DefaultCapabilityIDs()
-}
-
 // runRuntime runs the shared managed Melta owner and its thin protocol host in
 // the foreground for the lifetime of the signal context. It supplies the
 // current application paths and the first-run configuration document, opens
@@ -53,7 +45,11 @@ func runRuntime(ctx context.Context, dataDir, configPath string) (err error) {
 	if os.Getenv("MELTA_DEBUG_WIRE") == "1" {
 		locations.WireDebugDir = filepath.Join(dataRoot, "debug", "wire")
 	}
-	if err := runtime.InitializeFirstRunConfiguration(absConfigPath); err != nil {
+	var extensionIDs []string
+	for _, plugin := range builtin.Plugins() {
+		extensionIDs = append(extensionIDs, plugin.Manifest.ID)
+	}
+	if err := runtime.InitializeFirstRunConfiguration(absConfigPath, extensionIDs); err != nil {
 		return err
 	}
 	host := runtime.NewProtocolHost()

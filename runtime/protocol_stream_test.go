@@ -108,7 +108,8 @@ func TestProtocolServerStreamIsolation(t *testing.T) {
 	options := testOwnerOptions(t)
 	options.Configuration = melta.NewValueConfigurationSource([]byte(fmt.Sprintf(
 		`{"providers":{"prov":{"transport":{"base_url":%q,"api_key_env":""},"discovery":false,"models":{"m":{"name":"M","context_window":262144}}}}}`, large.URL+"/v1")))
-	options.Agent = &harness.AgentInputs{Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "full"}
+	ref := model.ModelRef{Provider: "prov", Model: "m"}
+	options.Defaults = harness.SessionInputs{Model: &ref}
 	owner, _, server := mountedOwner(t, ctx, options)
 
 	// The healthy sibling stream, drained continuously through the flood.

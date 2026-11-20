@@ -27,6 +27,7 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/extensions/adaptation"
+	"github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
@@ -38,7 +39,7 @@ import (
 // constructed baseline write and patch tools.
 func chainAgentsDocument(body string) string {
 	return `{
-  "chained": {"model": "prov/gpt-5.5", "system_prompt": "simple", "prompt": "` + body + `", "tools": ["write_file", "apply_patch"], "capabilities": ["hook.first", "arg.rewrite"]}
+  "chained": {"model": "prov/gpt-5.5", "system_prompt": "simple", "prompt": "` + body + `", "tools": ["write_file", "apply_patch"]}
 }`
 }
 
@@ -47,7 +48,7 @@ func chainAgentsDocument(body string) string {
 // hookPlugin requires, and no sessions section.
 func chainPlainConfigDocument(endpoint string) string {
 	return `{"providers":{"prov":` + nominalProvMember(endpoint, "PRODUCTION_TEST_KEY",
-		`{"gpt-5.5":{"name":"G","context_window":262144}}`) + `},"extensions":{"hooks":{"enabled":true,"tag":"T1"},"arghooks":{"enabled":true},"adaptation":{"enabled":true}}}`
+		`{"gpt-5.5":{"name":"G","context_window":262144}}`) + `},"extensions":{"hooks":{"enabled":true,"tag":"T1"},"arghooks":{"enabled":true}}}`
 }
 
 // chainCommandConfigDocument is the readonly-git row's provider document: no
@@ -72,7 +73,7 @@ func chainModelsConfigDocument(endpoint string) string {
 		`{"gpt-5.5":{"name":"G","context_window":262144},"vanilla":{"name":"V","context_window":262144}}`) + `}}`
 }
 
-// rewriteWriteHook is the combined scenario's ToolArgumentsHook: it replaces
+// rewriteWriteHook is the combined scenario's registered arguments hook: it replaces
 // every write_file call's arguments with its fixed rewrite, passes every
 // other call through unchanged, and records every received call's identity
 // and raw argument bytes.
@@ -82,14 +83,14 @@ type rewriteWriteHook struct {
 	replace string
 }
 
-func (h *rewriteWriteHook) BeforeTool(_ context.Context, _ extension.CallContext, call model.ToolCall) (json.RawMessage, error) {
+func (h *rewriteWriteHook) BeforeTool(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
 	h.mu.Lock()
 	h.seen = append(h.seen, call.Name+" "+string(call.Arguments))
 	h.mu.Unlock()
 	if call.Name == "write_file" {
-		return json.RawMessage(h.replace), nil
+		return extension.ArgumentsResult{Arguments: json.RawMessage(h.replace)}, nil
 	}
-	return call.Arguments, nil
+	return extension.ArgumentsResult{}, nil
 }
 
 func (h *rewriteWriteHook) received() []string {
@@ -98,18 +99,18 @@ func (h *rewriteWriteHook) received() []string {
 	return append([]string(nil), h.seen...)
 }
 
-// noopArgumentHook is the no-op ToolArgumentsHook: it records every received
+// noopArgumentHook is the no-op registered arguments hook: it records every received
 // call's identity and raw argument bytes and returns them unchanged.
 type noopArgumentHook struct {
 	mu   sync.Mutex
 	seen []string
 }
 
-func (h *noopArgumentHook) BeforeTool(_ context.Context, _ extension.CallContext, call model.ToolCall) (json.RawMessage, error) {
+func (h *noopArgumentHook) BeforeTool(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
 	h.mu.Lock()
 	h.seen = append(h.seen, call.Name+" "+string(call.Arguments))
 	h.mu.Unlock()
-	return call.Arguments, nil
+	return extension.ArgumentsResult{}, nil
 }
 
 func (h *noopArgumentHook) received() []string {
@@ -118,11 +119,11 @@ func (h *noopArgumentHook) received() []string {
 	return append([]string(nil), h.seen...)
 }
 
-// argumentHookPlugin declares one before-tool hook capability under id.
-func argumentHookPlugin(id string, hook extension.BeforeToolHook) extension.Native {
-	capability := extension.HookCapability(id, extension.SingleHook(extension.BoundaryBeforeTool, extension.HookModeEffectful))
-	return testNative("arghooks", extension.LifetimeHarness, []extension.Capability{capability}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{id: {BeforeTool: hook}}}, nil
+// argumentHookPlugin attaches one effectful arguments hook.
+func argumentHookPlugin(hook extension.ArgumentsHook) extension.Extension {
+	return testNative("arghooks", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.AttachArguments(extension.HookModeEffectful, hook, nil)
+		return nil, err
 	})
 }
 
@@ -335,18 +336,31 @@ func TestProductionCrossBoundaryComposition(t *testing.T) {
 		testassert.NoError(t, os.MkdirAll(workspace, 0o700))
 		testassert.NoError(t, os.WriteFile(filepath.Join(workspace, "notes.txt"), []byte(originalNotesTxt), 0o600))
 
-		hook := &recordHook{name: "hook.first", events: &traceLog{}, mutate: func(in extension.PreparationInput) extension.PreparationConsequence {
-			prompt := in.Prompt + "|hooked"
-			return extension.PreparationConsequence{Prompt: &prompt}
+		hook := &recordHook{name: "hook.first", events: &traceLog{}, admissionMutate: func(in extension.AdmissionInput) (extension.AdmissionResult, error) {
+			var prompt string
+			var err error
+			if in.Candidate.Prompt != nil {
+				prompt = *in.Candidate.Prompt
+			} else {
+				prompt, err = in.Prompt.Default()
+				if err != nil {
+					return extension.AdmissionResult{}, err
+				}
+			}
+			prompt += "|hooked"
+			candidate := in.Candidate
+			candidate.Prompt = &prompt
+			return extension.AdmissionResult{Candidate: &candidate}, nil
 		}}
 		argHook := &rewriteWriteHook{replace: hookRewriteArgs}
 		useFixtureStore(t, e.store)
 		openChained := func(ctx context.Context, hook *recordHook, argHook *rewriteWriteHook) (*Melta, error) {
-			plugins := []extension.Native{
+			plugins := []extension.Extension{
+				fixtureAgentPlugin(),
 				hookPlugin(hook),
-				argumentHookPlugin("arg.rewrite", argHook.BeforeTool), adaptation.Native(),
+				argumentHookPlugin(argHook.BeforeTool),
 			}
-			return Open(ctx, testOptions(dataDir, configPath, home, append(plugins, fixtureAgentPlugin(plugins...))...))
+			return Open(ctx, testOptions(dataDir, configPath, home, plugins...))
 		}
 		owner, ownerCancel := context.WithCancel(ctx)
 		defer ownerCancel()
@@ -583,10 +597,14 @@ func TestProductionReadonlyGitHookSeesOriginalArguments(t *testing.T) {
 		)
 		writeServiceFile(t, e.configPath, chainCommandConfigDocument(server.URL))
 		writeAgentDefinitions(t, e.configPath,
-			`{"rogit": {"model": "prov/m", "system_prompt": "simple", "tools": ["run_command"], "readonly": true, "capabilities": ["arg.noop"]}}`)
+			`{"rogit": {"model": "prov/m", "system_prompt": "simple", "tools": ["run_command", "write_file"], "readonly": true}}`)
 
 		hook := &noopArgumentHook{}
-		r, err := e.openPlugins(ctx, argumentHookPlugin("arg.noop", hook.BeforeTool))
+		// The fixture registers its argument hook before the Agents extension,
+		// so the hook observes the call's original arguments before the
+		// readonly rewrite injects the safety flags; the command still
+		// executes under the rewritten form.
+		r, err := e.openPlugins(ctx, argumentHookPlugin(hook.BeforeTool), agents.Author())
 		testassert.NoError(t, err)
 		defer r.Close(ctx)
 
@@ -594,7 +612,8 @@ func TestProductionReadonlyGitHookSeesOriginalArguments(t *testing.T) {
 		testassert.NoError(t, err)
 		submitThroughRuntime(t, r, session.Identity.SessionID, "op-1", "status")
 		rec := awaitOperation(t, r, session.Identity.SessionID, "op-1", harness.OperationSuccess)
-		testassert.Require(t, rec.Admission.Execution.Readonly, "capture readonly = %v, want the agent's constraint", rec.Admission.Execution.Readonly)
+		testassert.Require(t, slices.Equal(rec.Admission.Execution.InitialToolNames, []string{"run_command"}), "captured selection = %v, want the readonly definition without the selected write tool", rec.Admission.Execution.InitialToolNames)
+		testassert.Require(t, slices.Equal(wireToolNames(decodeWireChatBody(t, server.bodyAt(0))), []string{"run_command"}), "dispatched advertisement = %v, want the captured selection", wireToolNames(decodeWireChatBody(t, server.bodyAt(0))))
 
 		// The hook saw the call exactly once, with the original arguments.
 		{
@@ -615,14 +634,13 @@ func TestProductionReadonlyGitHookSeesOriginalArguments(t *testing.T) {
 	})
 }
 
-// TestProductionCapabilityIDsModelIndependent proves the model-switch row:
-// two agents with identical configured capabilities but differently-adapted
-// models keep IDENTICAL capability ID lists in their captures while the
-// model-dependent adaptation changes their advertisements and prompts — the
-// adaptation never leaks into the capability list. The GPT-adapted Agent then
-// attempts the two tools its adaptation excludes: each call settles the
+// TestProductionAdaptationModelIndependent proves the model-switch row: two
+// agents with identical tool selections but differently-adapted models keep
+// IDENTICAL admitted tool lists while the model-dependent adaptation changes
+// only their request-local advertisements and prompts. The GPT-adapted Agent
+// then attempts the two tools its adaptation excludes: each call settles the
 // ordinary exact unavailable error and leaves no file effect.
-func TestProductionCapabilityIDsModelIndependent(t *testing.T) {
+func TestProductionAdaptationModelIndependent(t *testing.T) {
 	eachProductionStore(t, func(t *testing.T, e *productionEnv) {
 		ctx := context.Background()
 		server := newChainServer(t,
@@ -637,11 +655,11 @@ func TestProductionCapabilityIDsModelIndependent(t *testing.T) {
 		)
 		writeServiceFile(t, e.configPath, chainModelsConfigDocument(server.URL))
 		writeAgentDefinitions(t, e.configPath, `{
-  "gptagent": {"model": "prov/gpt-5.5", "system_prompt": "full", "tools": ["read_file", "write_file", "edit_file", "apply_patch"], "capabilities": ["model_adaptation"]},
-  "vanillaagent": {"model": "prov/vanilla", "system_prompt": "full", "tools": ["read_file", "write_file", "edit_file", "apply_patch"], "capabilities": ["model_adaptation"]}
+  "gptagent": {"model": "prov/gpt-5.5", "system_prompt": "full", "tools": ["read_file", "write_file", "edit_file", "apply_patch"]},
+  "vanillaagent": {"model": "prov/vanilla", "system_prompt": "full", "tools": ["read_file", "write_file", "edit_file", "apply_patch"]}
 }`)
 
-		r, err := e.openPlugins(ctx, adaptation.Native())
+		r, err := e.openPlugins(ctx, adaptation.Author())
 		testassert.NoError(t, err)
 		defer r.Close(ctx)
 
@@ -658,17 +676,16 @@ func TestProductionCapabilityIDsModelIndependent(t *testing.T) {
 		submitThroughRuntime(t, r, van.Identity.SessionID, "op-van", "hello")
 		vanRec := awaitOperation(t, r, van.Identity.SessionID, "op-van", harness.OperationSuccess)
 
-		// Identical capability ID lists, from identical configured
-		// capabilities.
-		testassert.Require(t, slices.Equal(gptRec.Admission.Execution.Capabilities, vanRec.Admission.Execution.Capabilities) && slices.Equal(gptRec.Admission.Execution.Capabilities, []string{"model_adaptation"}), "capability IDs = %q vs %q, want identical lists across the model switch; capability IDs = %q, want exactly the agents' configured selection", gptRec.Admission.Execution.Capabilities, vanRec.Admission.Execution.Capabilities, gptRec.Admission.Execution.Capabilities)
-
-		// The advertisements differ exactly as the bundled adaptations
-		// resolve: the GPT-family match excludes write/edit and keeps the
-		// patch tool, the unmatched model selects all four tools.
+		// The admitted selections are identical and model-independent; the
+		// model-dependent adaptation changes only the request-local
+		// advertisement and prompt.
 		gptTools := gptRec.Admission.Execution.InitialToolNames
 		vanTools := vanRec.Admission.Execution.InitialToolNames
-		testassert.Require(t, slices.Equal(gptTools, []string{"read_file", "apply_patch"}), "adapted advertisement = %v, want write/edit excluded and apply_patch included", gptTools)
-		testassert.Require(t, slices.Equal(vanTools, []string{"read_file", "write_file", "edit_file", "apply_patch"}), "baseline advertisement = %v, want every selected tool", vanTools)
+		testassert.Require(t, slices.Equal(gptTools, []string{"read_file", "write_file", "edit_file", "apply_patch"}) && slices.Equal(vanTools, gptTools), "admitted selections = %v vs %v, want the same configured tools", gptTools, vanTools)
+		gptWire := decodeWireChatBody(t, server.bodyAt(0))
+		vanWire := decodeWireChatBody(t, server.bodyAt(3))
+		testassert.Require(t, slices.Equal(wireToolNames(gptWire), []string{"read_file", "apply_patch"}), "adapted advertisement = %v, want write/edit excluded and apply_patch included", wireToolNames(gptWire))
+		testassert.Require(t, slices.Equal(wireToolNames(vanWire), []string{"read_file", "write_file", "edit_file", "apply_patch"}), "baseline advertisement = %v, want every selected tool", wireToolNames(vanWire))
 
 		// The excluded tools are refused by the ordinary unavailable path:
 		// each attempted call settles its exact error and no file effect
@@ -692,9 +709,10 @@ func TestProductionCapabilityIDsModelIndependent(t *testing.T) {
 		}
 
 		// The prompts differ too: the adapted model's bundled guidance
-		// append renders in the full prompt.
-		testassert.Require(t, strings.Contains(gptRec.Admission.Execution.SystemPrompt, "Use more tool calls when they can improve the response"), "adapted prompt = %.200s, want the adaptation's append paragraph", gptRec.Admission.Execution.SystemPrompt)
-		testassert.Require(t, !strings.Contains(vanRec.Admission.Execution.SystemPrompt, "Use more tool calls when they can improve the response"), "baseline prompt = %.200s, want no automatic bundled guidance", vanRec.Admission.Execution.SystemPrompt)
+		// append renders in its request, never in the admitted capture.
+		testassert.Require(t, strings.Contains(string(gptWire.Messages[0].Content), "Use more tool calls when they can improve the response"), "adapted request prompt = %.400s, want the adaptation's append paragraph", gptWire.Messages[0].Content)
+		testassert.Require(t, !strings.Contains(string(vanWire.Messages[0].Content), "Use more tool calls when they can improve the response"), "baseline request prompt = %.400s, want no automatic bundled guidance", vanWire.Messages[0].Content)
+		testassert.Require(t, !strings.Contains(gptRec.Admission.Execution.SystemPrompt, "Use more tool calls when they can improve the response"), "adapted capture prompt = %.400s, want the request-local adaptation out of the admitted capture", gptRec.Admission.Execution.SystemPrompt)
 	})
 }
 

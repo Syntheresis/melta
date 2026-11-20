@@ -3,7 +3,6 @@ package melta
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,27 +23,15 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
-// credentialHostNative declares the fixed credentials host binding.
-func credentialHostNative(t *testing.T, id string, secrets []extension.SecretRef, lifetime extension.Lifetime, capability extension.Capability, open func(context.Context, extension.InstanceContext) (extension.Instance, error)) extension.Native {
+// credentialAuthor builds one author extension with the credential fixture
+// manifest: the credentials service requested and the given secret refs.
+func credentialAuthor(t *testing.T, id string, secrets []extension.SecretRef, activate func(context.Context, extension.API) (func(context.Context) error, error)) extension.Extension {
 	t.Helper()
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	return extension.Native{
-		Declaration: extension.Declaration{
-			ID:           id,
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"},"operation":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      secrets,
-			Components: []extension.Component{{
-				ID:       id + "-c",
-				Lifetime: lifetime,
-				Provides: []string{capability.ID},
-				Requires: []extension.Binding{{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}},
-			}},
-			Capabilities: []extension.Capability{capability},
-		},
-		Open: open,
-	}
+	manifest := registrarManifest(id)
+	manifest.SettingsSchema = json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"]}`)
+	manifest.Services = []string{extension.ContractCredentials}
+	manifest.Secrets = secrets
+	return extension.Extension{Manifest: manifest, Activate: activate}
 }
 
 func credentialValue(t *testing.T, result extension.Result, err error) string {
@@ -57,110 +44,54 @@ func credentialValue(t *testing.T, result extension.Result, err error) string {
 	return value.Value
 }
 
-func TestNativeCredentialsResolveActivationAndOperationCaptures(t *testing.T) {
+// TestCredentialsActivationReadsResolveAndRefuseUniformly proves the
+// credential host contract at activation: a declared activation field
+// resolves from the candidate's captured binding and stays available to the
+// activation's later calls; an operation field and a declared field with no
+// captured binding refuse with the uniform unavailable message; an undeclared
+// field refuses with the declaration message.
+func TestCredentialsActivationReadsResolveAndRefuseUniformly(t *testing.T) {
 	const (
 		activationName = "MELTA_CRED_ACTIVATION"
 		operationName  = "MELTA_CRED_OPERATION"
 	)
 	t.Setenv(activationName, "activation-value")
 	t.Setenv(operationName, "operation-value")
-	capability := extension.ServiceCapability("cred.probe", "test.cred.probe", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""))
 
 	var openActivation, openOperationErr, openMissingErr, openUndeclaredErr string
-	native := credentialHostNative(t, "cred", []extension.SecretRef{
+	author := credentialAuthor(t, "cred", []extension.SecretRef{
 		{Field: "/activation", Lifetime: extension.SecretActivation},
 		{Field: "/operation", Lifetime: extension.SecretOperation},
 		{Field: "/missing", Lifetime: extension.SecretOperation},
-	}, extension.LifetimeHarness, capability, func(ctx context.Context, info extension.InstanceContext) (extension.Instance, error) {
-		result, err := info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
+	}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+		result, err := api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 		openActivation = credentialValue(t, result, err)
-		_, err = info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-		testassert.Require(t, err != nil, "an operation credential resolved during a Harness Open")
+		_, err = api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
+		testassert.Require(t, err != nil, "an operation credential resolved during activation")
 		openOperationErr = err.Error()
-		_, err = info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/missing"}`))
+		_, err = api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/missing"}`))
 		testassert.Require(t, err != nil, "an unresolved operation field resolved")
 		openMissingErr = err.Error()
-		_, err = info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/undeclared"}`))
+		_, err = api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/undeclared"}`))
 		testassert.Require(t, err != nil, "an undeclared credential field resolved")
 		openUndeclaredErr = err.Error()
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"cred.probe": {Service: map[string]extension.Handler{"call": func(ctx context.Context, call extension.CallContext, _ json.RawMessage) (extension.Result, error) {
-			return call.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-		}}}}}, nil
+		// The activation capture stays available to every later call of the
+		// activation that opened it.
+		result, err = api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
+		testassert.Equal(t, credentialValue(t, result, err), "activation-value")
+		return nil, nil
 	})
-
-	c := mustComposition(t, native)
-	sections := map[string]json.RawMessage{
-		"cred": json.RawMessage(`{"enabled":true,"activation":"` + activationName + `","operation":"` + operationName + `"}`),
-	}
-	declaredBindings := map[declaredField]declaredBinding{
-		{extensionID: "cred", field: "/activation"}: {name: activationName, value: "activation-value"},
-		{extensionID: "cred", field: "/operation"}:  {name: operationName, value: "operation-value"},
-	}
-	rt := mustOpenScope(t, c, context.Background(), ScopeInfo{Kind: ScopeRuntime, DataDir: "/d", sections: sections, declaredBindings: declaredBindings}, nil)
-	defer func() { testassert.NoError(t, rt.close()) }()
-	op := mustOpenScope(t, c, context.Background(), ScopeInfo{Kind: ScopeOperation, DataDir: "/d", Workspace: "/w", SessionID: testSessionID, OperationID: "op", sections: sections, declaredBindings: declaredBindings}, []*scope{rt})
-	defer func() { testassert.NoError(t, op.close()) }()
+	h := newServiceHarness(t)
+	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"cred":{"enabled":true,"activation":"`+activationName+`","operation":"`+operationName+`"}}`))
+	svc := h.preparedService(context.Background(), author)
+	_, err := svc.publish(context.Background())
+	testassert.NoError(t, err)
+	defer svc.current().resources.release()
 
 	testassert.Equal(t, openActivation, "activation-value")
-	testassert.Require(t, strings.Contains(openOperationErr, `credential "/operation" is unavailable`) && !strings.Contains(openOperationErr, "outside an Operation"), "operation read during a Harness Open = %v, want the uniform unavailable refusal", openOperationErr)
+	testassert.Require(t, strings.Contains(openOperationErr, `credential "/operation" is unavailable`) && !strings.Contains(openOperationErr, "outside an Operation"), "operation read during activation = %v, want the uniform unavailable refusal", openOperationErr)
 	testassert.Require(t, strings.Contains(openMissingErr, `credential "/missing" is unavailable`) && !strings.Contains(openMissingErr, "outside an Operation"), "missing operation field read = %v, want the uniform unavailable refusal", openMissingErr)
 	testassert.Require(t, strings.Contains(openUndeclaredErr, "is not declared"), "undeclared field read = %v, want the declaration refusal", openUndeclaredErr)
-
-	value := rt.capabilities["cred.probe"]
-	testassert.Require(t, value != nil && value.activationSecrets["/activation"] == "activation-value", "capability = %+v, want the captured activation value", value)
-	operationSecrets := map[string]map[string]string{"cred": {"/operation": "operation-value"}}
-	view, call := c.newView(value, context.Background(), callIdentity{session: harness.SessionIdentity{SessionID: testSessionID}, operationID: "op", operationSecrets: operationSecrets})
-	defer view.end()
-	// The activation capture stays available to every later callback of the
-	// component that opened it.
-	result, err := call.Call(context.Background(), "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
-	testassert.Equal(t, credentialValue(t, result, err), "activation-value")
-	// The operation reference resolves from the live Operation's capture, not
-	// from a process-global current value.
-	result, err = call.Call(context.Background(), "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-	testassert.Equal(t, credentialValue(t, result, err), "operation-value")
-	// Another extension's capture entry is never visible through this
-	// caller's own declared field.
-	crossView, crossCall := c.newView(value, context.Background(), callIdentity{session: harness.SessionIdentity{SessionID: testSessionID}, operationID: "op", operationSecrets: map[string]map[string]string{"credother": {"/operation": "other-value"}}})
-	defer crossView.end()
-	_, err = crossCall.Call(context.Background(), "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-	testassert.Require(t, err != nil && strings.Contains(err.Error(), "is unavailable"), "unrelated extension operation value = %v, want the unavailable refusal", err)
-	// A guest Operation identity without a host-carried capture is not
-	// authority for an Operation credential.
-	nilView, nilCall := c.newView(value, context.Background(), callIdentity{session: harness.SessionIdentity{SessionID: testSessionID}, operationID: "op", operationSecrets: nil})
-	defer nilView.end()
-	_, err = nilCall.Call(context.Background(), "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-	testassert.Require(t, err != nil && strings.Contains(err.Error(), `credential "/operation" is unavailable`) && !strings.Contains(err.Error(), "outside an Operation"), "OperationID with no private capture = %v, want the uniform unavailable refusal", err)
-}
-
-// TestNativeCredentialsActivationAvailableInClose proves a component's Close
-// callback keeps the same retained activation capture as Open and ordinary
-// callbacks, and that its call view still expires when Close returns.
-func TestNativeCredentialsActivationAvailableInClose(t *testing.T) {
-	const activationName = "MELTA_CLOSE_ACTIVATION"
-	t.Setenv(activationName, "close-activation")
-	capability := extension.ServiceCapability("cred.close", "test.cred.close", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""))
-	var closeValue string
-	var closeErr error
-	var retained extension.CallContext
-	native := credentialHostNative(t, "credclose", []extension.SecretRef{{Field: "/activation", Lifetime: extension.SecretActivation}}, extension.LifetimeHarness, capability, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"cred.close": {Service: map[string]extension.Handler{"call": testServiceHandler()}}}, Close: func(ctx context.Context, call extension.CallContext) error {
-			result, err := call.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
-			closeValue, closeErr = credentialString(result), err
-			retained = call
-			return nil
-		}}, nil
-	})
-	c := mustComposition(t, native)
-	sections := map[string]json.RawMessage{"credclose": json.RawMessage(`{"enabled":true,"activation":"` + activationName + `"}`)}
-	declaredBindings := map[declaredField]declaredBinding{
-		{extensionID: "credclose", field: "/activation"}: {name: activationName, value: "close-activation"},
-	}
-	rt := mustOpenScope(t, c, context.Background(), ScopeInfo{Kind: ScopeRuntime, DataDir: "/d", sections: sections, declaredBindings: declaredBindings}, nil)
-	testassert.NoError(t, rt.close())
-	testassert.Require(t, closeErr == nil && closeValue == "close-activation", "Close activation get = (%q, %v), want the retained capture", closeValue, closeErr)
-	_, err := retained.Call(context.Background(), "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
-	testassert.Require(t, errors.Is(err, extension.ErrClosed), "retained Close view call = %v, want extension.ErrClosed", err)
 }
 
 // TestOperationCredentialsUsePreparedOpeningCapture proves the operation
@@ -173,7 +104,7 @@ func TestOperationCredentialsUsePreparedOpeningCapture(t *testing.T) {
 	h := newServiceHarness(t)
 	probe := &credentialGateProbe{}
 	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credprobe":{"enabled":true,"activation":"`+name+`","operation":"`+name+`"}}`))
-	svc := h.preparedService(context.Background(), probe.native(t))
+	svc := h.preparedService(context.Background(), probe.author(t))
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
@@ -184,9 +115,7 @@ func TestOperationCredentialsUsePreparedOpeningCapture(t *testing.T) {
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity: harness.SessionIdentity{SessionID: sessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{
-				Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none", Tools: []string{"cred_probe"},
-			}},
+			Inputs:   harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}, Prompt: new(string), Tools: []string{"cred_probe"}},
 		},
 		RequestKind: harness.RequestKindMessage,
 	})
@@ -237,7 +166,7 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	first := &credentialGateProbe{}
 	second := &credentialGateProbe{}
 	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"creda":{"enabled":true,"activation":"`+name+`","operation":"`+name+`"},"credb":{"enabled":true,"activation":"`+name+`","operation":"`+name+`"}}`))
-	svc := h.preparedService(context.Background(), first.nativeFor(t, "creda", "cred_probe_a"), second.nativeFor(t, "credb", "cred_probe_b"))
+	svc := h.preparedService(context.Background(), first.authorFor(t, "creda", "cred_probe_a"), second.authorFor(t, "credb", "cred_probe_b"))
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
@@ -247,9 +176,7 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity: harness.SessionIdentity{SessionID: sessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{
-				Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none", Tools: []string{"cred_probe_a", "cred_probe_b"},
-			}},
+			Inputs:   harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}, Prompt: new(string), Tools: []string{"cred_probe_a", "cred_probe_b"}},
 		},
 		RequestKind: harness.RequestKindMessage,
 	})
@@ -275,21 +202,21 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 
 // TestDeclaredCredentialRotationReplacesResources proves a candidate whose
 // active sections are unchanged but whose declared binding value rotated
-// prepares a replacement resource set, while an identical candidate reuses
-// the current one.
+// re-activates with the new captured value and prepares a replacement
+// resource set, while an identical candidate reuses the current activation
+// and resource set.
 func TestDeclaredCredentialRotationReplacesResources(t *testing.T) {
 	const name = "MELTA_RES_ROTATE"
 	t.Setenv(name, "one")
 	h := newServiceHarness(t)
 	var opens []string
-	capability := extension.ServiceCapability("cred.res", "test.cred.res", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""))
-	native := credentialHostNative(t, "credres", []extension.SecretRef{{Field: "/activation", Lifetime: extension.SecretActivation}}, extension.LifetimeHarness, capability, func(ctx context.Context, info extension.InstanceContext) (extension.Instance, error) {
-		result, err := info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
+	author := credentialAuthor(t, "credres", []extension.SecretRef{{Field: "/activation", Lifetime: extension.SecretActivation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+		result, err := api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 		opens = append(opens, credentialValue(t, result, err))
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"cred.res": {Service: map[string]extension.Handler{"call": testServiceHandler()}}}}, nil
+		return nil, nil
 	})
 	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credres":{"enabled":true,"activation":"`+name+`"}}`))
-	svc := h.preparedService(context.Background(), native)
+	svc := h.preparedService(context.Background(), author)
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	first := svc.current().resources
@@ -310,40 +237,6 @@ func TestDeclaredCredentialRotationReplacesResources(t *testing.T) {
 	defer svc.current().resources.release()
 }
 
-// TestDeclaredCredentialLazyWorkspaceUsesCandidateCapture proves a Workspace
-// component that opens after the candidate build uses the captured binding
-// rather than sampling a later environment value.
-func TestDeclaredCredentialLazyWorkspaceUsesCandidateCapture(t *testing.T) {
-	const name = "MELTA_LAZY_WORKSPACE"
-	t.Setenv(name, "candidate-value")
-	h := newServiceHarness(t)
-	var opened string
-	capability := extension.ServiceCapability("cred.lazy", "test.cred.lazy", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""))
-	native := credentialHostNative(t, "credado", []extension.SecretRef{{Field: "/activation", Lifetime: extension.SecretActivation}}, extension.LifetimeWorkspace, capability, func(ctx context.Context, info extension.InstanceContext) (extension.Instance, error) {
-		result, err := info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
-		opened = credentialValue(t, result, err)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"cred.lazy": {Service: map[string]extension.Handler{"call": testServiceHandler()}}}}, nil
-	})
-	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credado":{"enabled":true,"activation":"`+name+`"}}`))
-	svc := h.preparedService(context.Background(), native)
-	_, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	defer svc.current().resources.release()
-	t.Setenv(name, "later-value")
-
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
-	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
-		Session: harness.PreparationSession{
-			Identity:       harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none"}},
-		},
-		RequestKind: harness.RequestKindMessage,
-	})
-	testassert.NoError(t, err)
-	defer prepared.Release()
-	testassert.Equal(t, opened, "candidate-value")
-}
-
 // TestExternalSharedCredentialRotationKeepsProviderObservation proves an
 // external rotation of a provider/extension shared name after startup, with
 // no reload, keeps the provider's ordinary fresh observation and the
@@ -353,14 +246,12 @@ func TestExternalSharedCredentialRotationKeepsProviderObservation(t *testing.T) 
 	const name = "MELTA_SHARED_PROVIDER"
 	t.Setenv(name, "shared-candidate")
 	h := newServiceHarness(t)
-	native := credentialHostNative(t, "credshared", []extension.SecretRef{
+	author := credentialAuthor(t, "credshared", []extension.SecretRef{
 		{Field: "/activation", Lifetime: extension.SecretActivation},
 		{Field: "/operation", Lifetime: extension.SecretOperation},
-	}, extension.LifetimeHarness, extension.ServiceCapability("cred.shared", "test.cred.shared", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", "")), func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"cred.shared": testServiceImplementation()}}, nil
-	})
+	}, func(context.Context, extension.API) (func(context.Context) error, error) { return nil, nil })
 	writeServiceFile(t, h.configPath, `{"providers":{"prov":`+nominalProvMember("http://prov.test/v1", name, `{"m":{"name":"M","context_window":4096}}`)+`},"extensions":{"credshared":{"enabled":true,"activation":"`+name+`","operation":"`+name+`"}}}`)
-	svc := h.preparedService(context.Background(), native)
+	svc := h.preparedService(context.Background(), author)
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
@@ -392,14 +283,12 @@ func TestManagedKeyEditRefreshesSharedDeclaredBinding(t *testing.T) {
 	t.Cleanup(func() { _ = os.Unsetenv(name) })
 	managed := config.NewManagedEnv(filepath.Join(h.home, ".melta", ".env"))
 	testassert.NoError(t, managed.TrySet(name, "old-value"))
-	native := credentialHostNative(t, "credmanaged", []extension.SecretRef{
+	author := credentialAuthor(t, "credmanaged", []extension.SecretRef{
 		{Field: "/activation", Lifetime: extension.SecretActivation},
 		{Field: "/operation", Lifetime: extension.SecretOperation},
-	}, extension.LifetimeHarness, extension.ServiceCapability("cred.managed", "test.cred.managed", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", "")), func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"cred.managed": testServiceImplementation()}}, nil
-	})
+	}, func(context.Context, extension.API) (func(context.Context) error, error) { return nil, nil })
 	writeServiceFile(t, h.configPath, `{"providers":{"prov":`+nominalProvMember("http://prov.test/v1", name, `{"m":{"name":"M","context_window":4096}}`)+`},"extensions":{"credmanaged":{"enabled":true,"activation":"`+name+`","operation":"`+name+`"}}}`)
-	svc := h.preparedService(context.Background(), native)
+	svc := h.preparedService(context.Background(), author)
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	first := svc.current().resources
@@ -421,357 +310,30 @@ func TestManagedKeyEditRefreshesSharedDeclaredBinding(t *testing.T) {
 	defer svc.current().resources.release()
 }
 
-// TestCredentialLifecycleCaptureCoversOperationAndInvocation proves Operation
-// and Invocation Open/Close callbacks observe the retained Operation capture,
-// not a fresh environment sample.
-func TestCredentialLifecycleCaptureCoversOperationAndInvocation(t *testing.T) {
-	const name = "MELTA_LIFECYCLE_BIND"
-	t.Setenv(name, "lifecycle-value")
-	h := newServiceHarness(t)
-	openValues := make(map[string]string)
-	closeValues := make(map[string]string)
-	native := lifecycleCredentialNative(t, "credlife", name, openValues, closeValues, "")
-	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credlife":{"enabled":true,"operation":"`+name+`"}}`))
-	svc := h.preparedService(context.Background(), native)
-	_, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	defer svc.current().resources.release()
-	t.Setenv(name, "later-value")
-	{
-		_, err := svc.publish(context.Background())
-		testassert.NoError(t, err)
-	}
-
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
-	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
-		Session: harness.PreparationSession{
-			Identity:       harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none"}},
-		},
-		RequestKind: harness.RequestKindMessage,
-	})
-	testassert.NoError(t, err)
-	defer prepared.Release()
-	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-lifecycle", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
-	testassert.NoError(t, err)
-	testassert.Equal(t, openValues["op"], "later-value")
-	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-lifecycle", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
-	testassert.NoError(t, err)
-	testassert.Equal(t, openValues["inv"], "later-value")
-	testassert.NoError(t, inv.Close())
-	testassert.NoError(t, execution.Close())
-	testassert.Equal(t, closeValues["inv"], "later-value")
-	testassert.Equal(t, closeValues["op"], "later-value")
-}
-
-// TestCredentialLifecycleFailedPrefixCleanupKeepsCapture proves an Operation
-// component that opened before a sibling failure closes with the same
-// retained Operation capture.
-func TestCredentialLifecycleFailedPrefixCleanupKeepsCapture(t *testing.T) {
-	const name = "MELTA_LIFECYCLE_CLEANUP"
-	t.Setenv(name, "cleanup-value")
-	h := newServiceHarness(t)
-	openValues := make(map[string]string)
-	closeValues := make(map[string]string)
-	native := lifecycleCredentialNative(t, "credcleanup", name, openValues, closeValues, "op-fail")
-	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credcleanup":{"enabled":true,"operation":"`+name+`"}}`))
-	svc := h.preparedService(context.Background(), native)
-	_, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	defer svc.current().resources.release()
-	t.Setenv(name, "later-value")
-	{
-		_, err := svc.publish(context.Background())
-		testassert.NoError(t, err)
-	}
-
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
-	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
-		Session: harness.PreparationSession{
-			Identity:       harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none"}},
-		},
-		RequestKind: harness.RequestKindMessage,
-	})
-	testassert.NoError(t, err)
-	defer prepared.Release()
-	_, err = prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-cleanup", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
-	testassert.Require(t, err != nil, "the failing Operation component did not fail the open")
-	testassert.Equal(t, closeValues["op"], "later-value")
-}
-
-func lifecycleCredentialNative(t *testing.T, id, credentialName string, openValues, closeValues map[string]string, failComponent string) extension.Native {
-	t.Helper()
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	binding := extension.Binding{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}
-	components := []extension.Component{
-		{ID: "op", Lifetime: extension.LifetimeOperation, Requires: []extension.Binding{binding}},
-		{ID: "inv", Lifetime: extension.LifetimeInvocation, Requires: []extension.Binding{binding}},
-	}
-	if failComponent != "" {
-		components = append(components, extension.Component{ID: "op-fail", Lifetime: extension.LifetimeOperation, Requires: []extension.Binding{binding}})
-	}
-	return extension.Native{
-		Declaration: extension.Declaration{
-			ID:           id,
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"operation":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      []extension.SecretRef{{Field: "/operation", Lifetime: extension.SecretOperation}},
-			Components:   components,
-		},
-		Open: func(ctx context.Context, info extension.InstanceContext) (extension.Instance, error) {
-			if info.ComponentID == failComponent {
-				return extension.Instance{}, errors.New("component open failure")
-			}
-			result, err := info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-			if err != nil {
-				return extension.Instance{}, err
-			}
-			key := "op"
-			if info.ComponentID == "inv" {
-				key = "inv"
-			}
-			openValues[key] = credentialString(result)
-			return extension.Instance{Close: func(ctx context.Context, call extension.CallContext) error {
-				result, err := call.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-				if err != nil {
-					return err
-				}
-				closeValues[key] = credentialString(result)
-				return nil
-			}}, nil
-		},
-	}
-}
-
-// TestCredentialEffectfulHookUsesOperationCapture proves an effectful
-// before_tool hook receives the retained Operation capture through the same
-// callback handoff as tools.
-func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
-	const name = "MELTA_EFFECTFUL_HOOK"
-	t.Setenv(name, "hook-value")
-	h := newServiceHarness(t)
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	var hookValue string
-	native := extension.Native{
-		Declaration: extension.Declaration{
-			ID:           "credhook",
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"operation":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      []extension.SecretRef{{Field: "/operation", Lifetime: extension.SecretOperation}},
-			Components: []extension.Component{{
-				ID: "credhook-c", Lifetime: extension.LifetimeHarness, Provides: []string{"cred_tool", "cred_effect_hook"},
-				Requires: []extension.Binding{{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}},
-			}},
-			Capabilities: []extension.Capability{
-				extension.ToolCapability("cred_tool"),
-				extension.HookCapability("cred_effect_hook", extension.SingleHook(extension.BoundaryBeforeTool, extension.HookModeEffectful)),
-			},
-		},
-		Describe: map[string]extension.ToolDescribe{"cred_tool": func(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-			return extension.ToolDescription{Definition: model.ToolDefinition{Name: "cred_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, Available: true}, nil
-		}},
-		Open: func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{Capabilities: map[string]extension.Implementation{
-				"cred_tool": {Tool: noopNativeTool{}},
-				"cred_effect_hook": {BeforeTool: func(ctx context.Context, call extension.CallContext, toolCall model.ToolCall) (json.RawMessage, error) {
-					result, err := call.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-					if err != nil {
-						return nil, err
-					}
-					hookValue = credentialString(result)
-					return toolCall.Arguments, nil
-				}},
-			}}, nil
-		},
-	}
-	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credhook":{"enabled":true,"operation":"`+name+`"}}`))
-	svc := h.preparedService(context.Background(), native)
-	_, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	defer svc.current().resources.release()
-	t.Setenv(name, "later-value")
-	{
-		_, err := svc.publish(context.Background())
-		testassert.NoError(t, err)
-	}
-
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
-	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
-		Session: harness.PreparationSession{
-			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{
-				Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none", Tools: []string{"cred_tool"}, Capabilities: []string{"cred_effect_hook"},
-			}},
-		},
-		RequestKind: harness.RequestKindMessage,
-	})
-	testassert.NoError(t, err)
-	defer prepared.Release()
-	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-hook", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
-	testassert.NoError(t, err)
-	defer func() { testassert.NoError(t, execution.Close()) }()
-	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-hook", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
-	testassert.NoError(t, err)
-	defer func() { testassert.NoError(t, inv.Close()) }()
-	testassert.Require(t, len(inv.ToolHooks) == 1, "tool hooks = %d, want one effectful hook", len(inv.ToolHooks))
-	_, err = inv.ToolHooks[0].Run(context.Background(), model.ToolCall{ID: "call-hook", Name: "cred_tool", Arguments: json.RawMessage(`{}`)})
-	testassert.NoError(t, err)
-	testassert.Equal(t, hookValue, "later-value")
-}
-
-// credentialValueStrategy records the Operation value it obtained at its
-// legitimate Open.
-type credentialValueStrategy struct{ value string }
-
-func (s *credentialValueStrategy) Plan(harness.PlanInput) (harness.PlanOutput, error) {
-	return harness.PlanOutput{Kind: harness.PlanNone}, nil
-}
-
-func (s *credentialValueStrategy) Consume(harness.ConsumeInput) (harness.PlanOutput, error) {
-	return harness.PlanOutput{Kind: harness.PlanNone}, nil
-}
-
-func TestCredentialStrategyCapturesAtItsOperationOpen(t *testing.T) {
-	const name = "MELTA_STRATEGY_BIND"
-	t.Setenv(name, "strategy-value")
-	h := newServiceHarness(t)
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	var strategy *credentialValueStrategy
-	native := extension.Native{
-		Declaration: extension.Declaration{
-			ID:           "credstrat",
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"operation":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      []extension.SecretRef{{Field: "/operation", Lifetime: extension.SecretOperation}},
-			Components: []extension.Component{{
-				ID: "credstrat-c", Lifetime: extension.LifetimeOperation, Provides: []string{"cred_strategy"},
-				Requires: []extension.Binding{{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}},
-			}},
-			Capabilities: []extension.Capability{extension.StrategyCapability("cred_strategy", false)},
-		},
-		Open: func(ctx context.Context, info extension.InstanceContext) (extension.Instance, error) {
-			result, err := info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
-			if err != nil {
-				return extension.Instance{}, err
-			}
-			strategy = &credentialValueStrategy{value: credentialString(result)}
-			return extension.Instance{Capabilities: map[string]extension.Implementation{"cred_strategy": {Strategy: strategy}}}, nil
-		},
-	}
-	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credstrat":{"enabled":true,"operation":"`+name+`"}}`))
-	svc := h.preparedService(context.Background(), native)
-	_, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	defer svc.current().resources.release()
-	t.Setenv(name, "later-value")
-	{
-		_, err := svc.publish(context.Background())
-		testassert.NoError(t, err)
-	}
-
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
-	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
-		Session: harness.PreparationSession{
-			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{
-				Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none", Strategy: harness.StrategySelection{ID: "cred_strategy"},
-			}},
-		},
-		RequestKind: harness.RequestKindMessage,
-	})
-	testassert.NoError(t, err)
-	defer prepared.Release()
-	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-strategy", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
-	testassert.NoError(t, err)
-	defer func() { testassert.NoError(t, execution.Close()) }()
-	testassert.Require(t, execution.ResolveStrategy != nil && prepared.Capture.Strategy.ID == "cred_strategy" && strategy != nil, "strategy resolver/capture = %+v, want the opened strategy", prepared.Capture.Strategy)
-	binding, err := execution.ResolveStrategy(context.Background(), prepared.Capture.Strategy.ID)
-	testassert.Require(t, err == nil && binding != nil && binding.ID == "cred_strategy", "resolved strategy = %+v err %v, want the captured strategy", binding, err)
-	if _, err := binding.Strategy.Plan(harness.PlanInput{}); err != nil {
-		t.Fatalf("strategy Plan: %v", err)
-	}
-	testassert.Equal(t, strategy.value, "later-value")
-}
-
-// credentialNestedTool is one caller tool whose nested provider call reads
-// the provider's own declared credential field.
-type credentialNestedTool struct{}
-
-func (credentialNestedTool) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (credentialNestedTool) Prepare(context.Context, extension.ToolContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (credentialNestedTool) Execute(ctx context.Context, tc extension.ToolContext, _ extension.ToolPlan) harness.ToolOutcome {
-	own, err := tc.Calls.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/caller"}`))
-	if err != nil {
-		return credentialOutcome("call", "caller error: "+err.Error())
-	}
-	nested, err := tc.Calls.Call(ctx, "provider", "call", json.RawMessage(`{}`))
-	if err != nil {
-		return credentialOutcome("call", "provider error: "+err.Error())
-	}
-	return credentialOutcome("call", "caller="+credentialString(own)+"|provider="+credentialString(nested))
-}
-
+// TestCredentialNestedProviderUsesItsOwnDeclaredField proves a nested
+// registered service call runs as the serving extension: it resolves its own
+// declared credential field, never the caller's.
 func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	const callerName = "MELTA_NESTED_CALLER"
 	const providerName = "MELTA_NESTED_PROVIDER"
 	t.Setenv(callerName, "caller-value")
 	t.Setenv(providerName, "provider-value")
 	h := newServiceHarness(t)
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	providerCapability := extension.ServiceCapability("cred_provider", "test.cred.provider", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""))
-	providerNative := extension.Native{
-		Declaration: extension.Declaration{
-			ID:           "credprovider",
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      []extension.SecretRef{{Field: "/provider", Lifetime: extension.SecretActivation}},
-			Components: []extension.Component{{
-				ID: "credprovider-c", Lifetime: extension.LifetimeHarness, Provides: []string{"cred_provider"},
-				Requires: []extension.Binding{{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}},
-			}},
-			Capabilities: []extension.Capability{providerCapability},
-		},
-		Open: func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{Capabilities: map[string]extension.Implementation{"cred_provider": {Service: map[string]extension.Handler{"call": func(ctx context.Context, call extension.CallContext, _ json.RawMessage) (extension.Result, error) {
-				return call.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/provider"}`))
-			}}}}}, nil
-		},
-	}
-	binding := extension.Binding{Name: "provider", Provider: "credprovider/credprovider-c", CapabilityID: "cred_provider", Definition: providerCapability.Definition()}
-	callerCapability := extension.ToolCapability("cred_caller")
-	callerNative := extension.Native{
-		Declaration: extension.Declaration{
-			ID:           "credcaller",
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      []extension.SecretRef{{Field: "/caller", Lifetime: extension.SecretActivation}},
-			Components: []extension.Component{{
-				ID: "credcaller-c", Lifetime: extension.LifetimeHarness, Provides: []string{"cred_caller"},
-				Requires: []extension.Binding{
-					{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host},
-					binding,
-				},
-			}},
-			Capabilities: []extension.Capability{callerCapability},
-		},
-		Describe: map[string]extension.ToolDescribe{"cred_caller": func(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-			return extension.ToolDescription{Definition: model.ToolDefinition{Name: "cred_caller", Parameters: json.RawMessage(`{"type":"object"}`)}, Available: true}, nil
-		}},
-		Open: func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{Capabilities: map[string]extension.Implementation{"cred_caller": {Tool: credentialNestedTool{}}}}, nil
-		},
-	}
+	providerAuthor := credentialAuthor(t, "credprovider", []extension.SecretRef{{Field: "/provider", Lifetime: extension.SecretActivation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterService(extension.Service{Name: "cred_provider", Methods: []extension.RegisteredMethod{{
+			Method: extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""),
+			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
+				return call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/provider"}`))
+			},
+		}}}, nil)
+		return nil, err
+	})
+	callerAuthor := credentialAuthor(t, "credcaller", []extension.SecretRef{{Field: "/caller", Lifetime: extension.SecretActivation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "cred_caller", Description: "reads its own credential and nests a provider call", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, credentialNestedTool{}, nil)
+		return nil, err
+	})
 	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credprovider":{"enabled":true,"provider":"`+providerName+`"},"credcaller":{"enabled":true,"caller":"`+callerName+`"}}`))
-	svc := h.preparedService(context.Background(), providerNative, callerNative)
+	svc := h.preparedService(context.Background(), providerAuthor, callerAuthor)
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
@@ -780,9 +342,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{
-				Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none", Tools: []string{"cred_caller"},
-			}},
+			Inputs:   harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}, Prompt: new(string), Tools: []string{"cred_caller"}},
 		},
 		RequestKind: harness.RequestKindMessage,
 	})
@@ -797,6 +357,88 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-nested", Name: "cred_caller", Arguments: json.RawMessage(`{}`)}).Execute(context.Background())
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "nested outcome = %+v, want success", outcome.Result)
 	testassert.Equal(t, outcome.Result.Content, "caller=caller-value|provider=provider-value")
+}
+
+// credentialNestedTool is one caller tool whose nested provider call reads
+// the provider's own declared credential field.
+type credentialNestedTool struct{}
+
+func (credentialNestedTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
+	return call.Arguments, nil
+}
+func (credentialNestedTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
+	return extension.ToolPlan{}
+}
+func (credentialNestedTool) Execute(ctx context.Context, tc extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+	own, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/caller"}`))
+	if err != nil {
+		return credentialOutcome("call", "caller error: "+err.Error())
+	}
+	nested, err := tc.Call(ctx, "cred_provider", "call", json.RawMessage(`{}`))
+	if err != nil {
+		return credentialOutcome("call", "provider error: "+err.Error())
+	}
+	return credentialOutcome("call", "caller="+credentialString(own)+"|provider="+credentialString(nested))
+}
+
+// TestCredentialEffectfulHookUsesOperationCapture proves an effectful
+// arguments hook receives the retained Operation capture through the same
+// callback handoff as tools.
+func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
+	const name = "MELTA_EFFECTFUL_HOOK"
+	t.Setenv(name, "hook-value")
+	h := newServiceHarness(t)
+	var hookValue string
+	author := credentialAuthor(t, "credhook", []extension.SecretRef{{Field: "/operation", Lifetime: extension.SecretOperation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+		if _, err := api.RegisterTool(testDescribeTool("cred_tool"), testRegisteredTool{}, nil); err != nil {
+			return nil, err
+		}
+		_, err := api.AttachArguments(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
+			result, err := call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
+			if err != nil {
+				return extension.ArgumentsResult{}, err
+			}
+			hookValue = credentialString(result)
+			return extension.ArgumentsResult{Arguments: toolCall.Arguments}, nil
+		}, nil)
+		return nil, err
+	})
+	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credhook":{"enabled":true,"operation":"`+name+`"}}`))
+	svc := h.preparedService(context.Background(), author)
+	_, err := svc.publish(context.Background())
+	testassert.NoError(t, err)
+	defer svc.current().resources.release()
+	t.Setenv(name, "later-value")
+	{
+		_, err := svc.publish(context.Background())
+		testassert.NoError(t, err)
+	}
+
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
+	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
+		Session: harness.PreparationSession{
+			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
+			Inputs:   harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}, Prompt: new(string), Tools: []string{"cred_tool"}},
+		},
+		RequestKind: harness.RequestKindMessage,
+	})
+	testassert.NoError(t, err)
+	defer prepared.Release()
+	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-hook", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
+	testassert.NoError(t, err)
+	defer func() { testassert.NoError(t, execution.Close()) }()
+	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-hook", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
+	testassert.NoError(t, err)
+	defer func() { testassert.NoError(t, inv.Close()) }()
+	stage := inv.ArgumentStage()
+	if stage.Release != nil {
+		defer stage.Release()
+	}
+	testassert.NoError(t, stage.Error)
+	testassert.Require(t, len(stage.Hooks) == 1 && stage.Hooks[0].Mode == harness.HookModeEffectful, "tool hooks = %d, want one effectful hook", len(stage.Hooks))
+	_, err = stage.Hooks[0].Run(context.Background(), model.ToolCall{ID: "call-hook", Name: "cred_tool", Arguments: json.RawMessage(`{}`)})
+	testassert.NoError(t, err)
+	testassert.Equal(t, hookValue, "later-value")
 }
 
 // TestCustomProviderCreateRefreshesSharedDeclaredBinding proves a custom
@@ -820,16 +462,15 @@ func TestCustomProviderCreateRefreshesSharedDeclaredBinding(t *testing.T) {
 				testassert.NoError(t, managed.TrySet(testCase.envName, "old-managed"))
 			}
 			var opens atomic.Int64
-			capability := extension.ServiceCapability("cred.create", "test.cred.create", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""))
-			native := credentialHostNative(t, "credcreate", []extension.SecretRef{
+			author := credentialAuthor(t, "credcreate", []extension.SecretRef{
 				{Field: "/activation", Lifetime: extension.SecretActivation},
 				{Field: "/operation", Lifetime: extension.SecretOperation},
-			}, extension.LifetimeHarness, capability, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
+			}, func(context.Context, extension.API) (func(context.Context) error, error) {
 				opens.Add(1)
-				return extension.Instance{Capabilities: map[string]extension.Implementation{"cred.create": {Service: map[string]extension.Handler{"call": testServiceHandler()}}}}, nil
+				return nil, nil
 			})
 			writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credcreate":{"enabled":true,"activation":"`+testCase.envName+`","operation":"`+testCase.envName+`"}}`))
-			svc := h.preparedService(context.Background(), native)
+			svc := h.preparedService(context.Background(), author)
 			_, err := svc.publish(context.Background())
 			testassert.NoError(t, err)
 			firstResources := svc.current().resources
@@ -868,18 +509,12 @@ func TestDefinedEmptyExternalSharedKeyRefusesSuppliedConnect(t *testing.T) {
 	e := newProductionEnv(t, storage.NewMemory())
 	t.Setenv(name, "")
 	writeServiceFile(t, e.configPath, `{"providers":{"prov":`+nominalProvMember(e.server.URL, name, `{"m":{"name":"M","context_window":4096}}`)+`},"extensions":{"credexternal":{"enabled":true,"value":"`+name+`"}}}`)
-	native := extension.Native{
-		Declaration: extension.Declaration{
-			ID:           "credexternal",
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"value":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      []extension.SecretRef{{Field: "/value", Lifetime: extension.SecretActivation}},
-			Components:   []extension.Component{{ID: "credexternal-c", Lifetime: extension.LifetimeHarness}},
-		},
-		Open: func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{}, nil
-		},
-	}
+	manifest := registrarManifest("credexternal")
+	manifest.SettingsSchema = json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"value":{"type":"string"}},"required":["enabled"]}`)
+	manifest.Secrets = []extension.SecretRef{{Field: "/value", Lifetime: extension.SecretActivation}}
+	native := extension.Extension{Manifest: manifest, Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+		return nil, nil
+	}}
 	r, err := e.openPlugins(context.Background(), native)
 	testassert.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(context.Background()) })
@@ -915,7 +550,7 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 	server := newProductionModelServer(t, "", "")
 	probe := &credentialGateProbe{}
 	writeServiceFile(t, h.configPath, `{"providers":{"prov":`+nominalProvMember(server.URL, name, `{"m":{"name":"M","context_window":4096}}`)+`},"extensions":{"credprobe":{"enabled":true,"activation":"`+name+`","operation":"`+name+`"}}}`)
-	svc := h.preparedService(context.Background(), probe.native(t))
+	svc := h.preparedService(context.Background(), probe.author(t))
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
@@ -925,9 +560,7 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 		return harness.PreparationRequest{
 			Session: harness.PreparationSession{
 				Identity: harness.SessionIdentity{SessionID: session, Workspace: h.dataDir},
-				AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{
-					Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none", Tools: []string{"cred_probe"},
-				}},
+				Inputs:   harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}, Prompt: new(string), Tools: []string{"cred_probe"}},
 			},
 			RequestKind: harness.RequestKindMessage,
 		}
@@ -987,77 +620,81 @@ type credentialProbe struct {
 	toolValues []string
 }
 
-func (p *credentialProbe) native(t *testing.T) extension.Native {
+func (p *credentialProbe) author(t *testing.T) extension.Extension {
 	t.Helper()
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	toolCapability := extension.ToolCapability("cred_probe")
-	hookCapability := extension.HookCapability("cred_hook", extension.SingleHook(extension.BoundaryPrepare, extension.HookModePure))
-	return extension.Native{
-		Declaration: extension.Declaration{
-			ID:           "credprobe",
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"},"operation":{"type":"string"}},"required":["enabled"]}`),
+	return extension.Extension{
+		Manifest: extension.Manifest{
+			ID:             "credprobe",
+			Version:        "1",
+			APIVersion:     extension.APIVersion,
+			SettingsSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"},"operation":{"type":"string"}},"required":["enabled"]}`),
+			Services:       []string{extension.ContractCredentials},
 			Secrets: []extension.SecretRef{
 				{Field: "/activation", Lifetime: extension.SecretActivation},
 				{Field: "/operation", Lifetime: extension.SecretOperation},
 			},
-			Components: []extension.Component{{
-				ID:       "credprobe-c",
-				Lifetime: extension.LifetimeHarness,
-				Provides: []string{"cred_probe", "cred_hook"},
-				Requires: []extension.Binding{{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}},
-			}},
-			Capabilities: []extension.Capability{toolCapability, hookCapability},
 		},
-		Describe: map[string]extension.ToolDescribe{"cred_probe": func(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-			return extension.ToolDescription{Definition: model.ToolDefinition{Name: "cred_probe", Description: "reads declared credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, Available: true}, nil
-		}},
-		Open: func(ctx context.Context, info extension.InstanceContext) (extension.Instance, error) {
+		Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			result, err := info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
+			result, err := api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 			p.openActivation = credentialValue(t, result, err)
-			_, err = info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
+			_, err = api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
 			if err != nil {
 				p.openOperationErr = err.Error()
 			}
-			_, err = info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/missing"}`))
+			_, err = api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/missing"}`))
 			if err != nil {
 				p.openUndeclared = err.Error()
 			}
-			return extension.Instance{Capabilities: map[string]extension.Implementation{
-				"cred_probe": {Tool: &credentialTool{probe: p}},
-				"cred_hook":  {Preparation: p.prepare},
-			}}, nil
+			_, err = api.RegisterTool(model.ToolDefinition{Name: "cred_probe", Description: "reads declared credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, &credentialTool{probe: p}, nil)
+			if err != nil {
+				return nil, err
+			}
+			_, err = api.AttachAdmission(p.prepare, nil)
+			return nil, err
 		},
 	}
 }
 
-func (p *credentialProbe) prepare(_ context.Context, _ extension.CallContext, input extension.PreparationInput) (extension.PreparationConsequence, error) {
+func openCredentialProbe(t *testing.T, e *productionEnv, author extension.Extension) (*Melta, error) {
+	t.Helper()
+	useFixtureStore(t, e.store)
+	return Open(context.Background(), Options{
+		DataDir: e.dataDir, Configuration: NewFileConfigurationSource(e.configPath),
+		Credentials: NewEnvironmentCredentialSource(filepath.Join(e.home, ".melta", ".env")),
+		Locations:   e.locations(), Identity: e.identity, Extensions: []extension.Extension{author},
+	})
+}
+
+func (p *credentialProbe) prepare(_ context.Context, _ extension.AuthorContext, input extension.AdmissionInput) (extension.AdmissionResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.hookShell = input.Assembly.Shell
+	for _, line := range strings.Split(input.Prompt.Environment(), "\n") {
+		if value, ok := strings.CutPrefix(line, "Shell: "); ok {
+			p.hookShell = value
+		}
+	}
 	p.hookCalls++
-	return extension.PreparationConsequence{}, nil
+	return extension.AdmissionResult{}, nil
 }
 
 type credentialTool struct{ probe *credentialProbe }
 
-func (t *credentialTool) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (t *credentialTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
 	return call.Arguments, nil
 }
 
-func (t *credentialTool) Prepare(_ context.Context, _ extension.ToolContext, call model.ToolCall) extension.ToolPlan {
+func (t *credentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "cred_probe"}}, Data: []byte(call.ID)}
 }
 
-func (t *credentialTool) Execute(ctx context.Context, tc extension.ToolContext, plan extension.ToolPlan) harness.ToolOutcome {
-	activation, err := tc.Calls.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
+func (t *credentialTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+	activation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 	if err != nil {
 		return credentialOutcome(string(plan.Data), "activation error: "+err.Error())
 	}
-	operation, err := tc.Calls.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
+	operation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
 	if err != nil {
 		return credentialOutcome(string(plan.Data), "operation error: "+err.Error())
 	}
@@ -1120,28 +757,31 @@ func TestProjectedShellUsesTheOwnerEnvironmentProjection(t *testing.T) {
 }
 
 func TestResolveDeclaredSecretsOnlyReadsActiveSections(t *testing.T) {
-	native := extension.Native{Declaration: extension.Declaration{
-		ID:      "ext",
-		Version: "1",
+	author := extension.Extension{Manifest: extension.Manifest{
+		ID:             "ext",
+		Version:        "1",
+		APIVersion:     extension.APIVersion,
+		SettingsSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"]}`),
 		Secrets: []extension.SecretRef{
 			{Field: "/activation", Lifetime: extension.SecretActivation},
 			{Field: "/operation", Lifetime: extension.SecretOperation},
 			{Field: "/absent", Lifetime: extension.SecretOperation},
 		},
-	}}
-	resolved := resolveDeclaredSecrets([]extension.Native{native}, map[string]json.RawMessage{
+	}, Activate: func(context.Context, extension.API) (func(context.Context) error, error) { return nil, nil }}
+	specs := []nativeActivationSpec{{extension: author}}
+	resolved := resolveAuthorSecrets(specs, map[string]json.RawMessage{
 		"ext": json.RawMessage(`{"enabled":true,"activation":"ACTIVATION_NAME","operation":"OPERATION_NAME"}`),
 	})
 	testassert.Require(t, len(resolved) == 2, "resolved secrets = %+v, want the two present fields", resolved)
 	testassert.Equal(t, resolved[0].name, "ACTIVATION_NAME")
 	testassert.Equal(t, resolved[1].name, "OPERATION_NAME")
 	testassert.Require(t, len((&configuration{secrets: resolved}).declaredSecretNames()) == 2, "declared names did not dedupe the resolved references")
-	if got := resolveDeclaredSecrets([]extension.Native{native}, map[string]json.RawMessage{
+	if got := resolveAuthorSecrets(specs, map[string]json.RawMessage{
 		"ext": json.RawMessage(`{"enabled":false,"activation":"ACTIVATION_NAME","operation":"OPERATION_NAME"}`),
 	}); len(got) != 0 {
 		t.Fatalf("inactive section resolved %+v, want nothing", got)
 	}
-	if got := resolveDeclaredSecrets([]extension.Native{native}, nil); len(got) != 0 {
+	if got := resolveAuthorSecrets(specs, nil); len(got) != 0 {
 		t.Fatalf("absent section resolved %+v, want nothing", got)
 	}
 }
@@ -1200,7 +840,7 @@ func TestDeclaredCredentialsPromptAndChildEnvironment(t *testing.T) {
 				}
 			})
 
-			r, err := e.openPlugins(context.Background(), probe.native(t))
+			r, err := openCredentialProbe(t, e, probe.author(t))
 			testassert.NoError(t, err)
 			t.Cleanup(func() { _ = r.Close(context.Background()) })
 			workspace := e.workspace("credentials-workspace")
@@ -1208,12 +848,9 @@ func TestDeclaredCredentialsPromptAndChildEnvironment(t *testing.T) {
 			var session harness.SessionRecord
 			err = r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
 				var createErr error
-				session, createErr = r.createSessionRecord(ctx, h, workspace, harness.AgentSelection{Inputs: &harness.AgentInputs{
-					Model:        model.ModelRef{Provider: "prov", Model: "m"},
-					AssemblyMode: "full",
-					Tools:        []string{"cred_probe", "run_command"},
-					Capabilities: []string{"cred_hook"},
-				}})
+				session, createErr = r.createSessionRecord(ctx, h, workspace, harness.SessionInputs{
+					Model: &model.ModelRef{Provider: "prov", Model: "m"}, Tools: []string{"cred_probe", "run_command"},
+				}, nil)
 				return createErr
 			})
 			testassert.NoError(t, err)
@@ -1270,7 +907,7 @@ func TestDeclaredCredentialCapturesStayPerOperation(t *testing.T) {
 			return textTurnEvents("done")
 		}
 	})
-	r, err := e.openPlugins(context.Background(), probe.native(t))
+	r, err := openCredentialProbe(t, e, probe.author(t))
 	testassert.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(context.Background()) })
 	workspace := e.workspace("capture-workspace")
@@ -1281,10 +918,9 @@ func TestDeclaredCredentialCapturesStayPerOperation(t *testing.T) {
 		var session harness.SessionRecord
 		err := r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
 			var createErr error
-			session, createErr = r.createSessionRecord(ctx, h, workspace, harness.AgentSelection{Inputs: &harness.AgentInputs{
-				Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none",
-				Tools: []string{"cred_probe", "run_command"}, Capabilities: []string{},
-			}})
+			session, createErr = r.createSessionRecord(ctx, h, workspace, harness.SessionInputs{
+				Model: &model.ModelRef{Provider: "prov", Model: "m"}, Prompt: new(string), Tools: []string{"cred_probe", "run_command"},
+			}, nil)
 			return createErr
 		})
 		testassert.NoError(t, err)
@@ -1350,48 +986,36 @@ type credentialGateProbe struct {
 	values map[string]string
 }
 
-func (p *credentialGateProbe) native(t *testing.T) extension.Native {
-	return p.nativeFor(t, "credprobe", "cred_probe")
+func (p *credentialGateProbe) author(t *testing.T) extension.Extension {
+	return p.authorFor(t, "credprobe", "cred_probe")
 }
 
-func (p *credentialGateProbe) nativeFor(t *testing.T, id, toolID string) extension.Native {
+func (p *credentialGateProbe) authorFor(t *testing.T, id, toolID string) extension.Extension {
 	t.Helper()
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	toolCapability := extension.ToolCapability(toolID)
-	return extension.Native{
-		Declaration: extension.Declaration{
-			ID:           id,
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"},"operation":{"type":"string"}},"required":["enabled"]}`),
+	return extension.Extension{
+		Manifest: extension.Manifest{
+			ID: id, Version: "1", APIVersion: extension.APIVersion,
+			SettingsSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"},"operation":{"type":"string"}},"required":["enabled"]}`),
+			Services:       []string{extension.ContractCredentials},
 			Secrets: []extension.SecretRef{
 				{Field: "/activation", Lifetime: extension.SecretActivation},
 				{Field: "/operation", Lifetime: extension.SecretOperation},
 			},
-			Components: []extension.Component{{
-				ID:       id + "-c",
-				Lifetime: extension.LifetimeHarness,
-				Provides: []string{toolID},
-				Requires: []extension.Binding{{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}},
-			}},
-			Capabilities: []extension.Capability{toolCapability},
 		},
-		Describe: map[string]extension.ToolDescribe{toolID: func(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-			return extension.ToolDescription{Definition: model.ToolDefinition{Name: toolID, Description: "reads the captured credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, Available: true}, nil
-		}},
-		Open: func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{Capabilities: map[string]extension.Implementation{toolID: {Tool: &credentialGateTool{probe: p}}}}, nil
+		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			_, err := api.RegisterTool(model.ToolDefinition{Name: toolID, Description: "reads the captured credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, &credentialGateTool{probe: p}, nil)
+			return nil, err
 		},
 	}
 }
 
 type credentialGateTool struct{ probe *credentialGateProbe }
 
-func (t *credentialGateTool) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (t *credentialGateTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
 	return call.Arguments, nil
 }
 
-func (t *credentialGateTool) Prepare(_ context.Context, _ extension.ToolContext, call model.ToolCall) extension.ToolPlan {
+func (t *credentialGateTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	data, _ := json.Marshal(struct {
 		CallID    string          `json:"call_id"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -1399,7 +1023,7 @@ func (t *credentialGateTool) Prepare(_ context.Context, _ extension.ToolContext,
 	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "cred_probe"}}, Data: data}
 }
 
-func (t *credentialGateTool) Execute(ctx context.Context, tc extension.ToolContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t *credentialGateTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
 	var prepared struct {
 		CallID    string          `json:"call_id"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -1416,11 +1040,11 @@ func (t *credentialGateTool) Execute(ctx context.Context, tc extension.ToolConte
 		t.probe.mu.Unlock()
 		<-t.probe.release
 	}
-	activation, err := tc.Calls.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
+	activation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 	if err != nil {
 		return credentialOutcome(prepared.CallID, "activation error: "+err.Error())
 	}
-	operation, err := tc.Calls.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/operation"}`))
+	operation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
 	if err != nil {
 		return credentialOutcome(prepared.CallID, "operation error: "+err.Error())
 	}

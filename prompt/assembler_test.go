@@ -1,7 +1,6 @@
 package prompt_test
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,11 +18,9 @@ func writeRules(t *testing.T, dir, content string) {
 	testassert.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(content), 0o600))
 }
 
-func readRules(t *testing.T, globalDir, workspace string, mode prompt.Mode) prompt.Rules {
+func readRules(t *testing.T, globalDir, workspace string) prompt.Rules {
 	t.Helper()
-	rules, err := prompt.ReadRules(globalDir, workspace, mode)
-	testassert.NoError(t, err)
-	return rules
+	return prompt.ReadRules(globalDir, workspace)
 }
 
 func TestReadRulesReadsOnlyAgentsInGlobalThenWorkspaceOrder(t *testing.T) {
@@ -36,28 +33,18 @@ func TestReadRulesReadsOnlyAgentsInGlobalThenWorkspaceOrder(t *testing.T) {
 	writeRules(t, workspace, "WORKSPACE_RULES")
 	testassert.NoError(t, os.WriteFile(filepath.Join(workspace, "CLAUDE.md"), []byte("ALTERNATIVE_NAME_MARKER"), 0o600))
 
-	rules := readRules(t, globalDir, workspace, prompt.ModeFull)
+	rules := readRules(t, globalDir, workspace)
 	testassert.Require(t, rules.GlobalText == "GLOBAL_RULES" && rules.WorkspaceText == "WORKSPACE_RULES", "rules = %+v, want both layers", rules)
 	testassert.Require(t, len(rules.Warnings) == 0, "warnings = %+v, want none", rules.Warnings)
 
-	assembled, err := prompt.Assemble(prompt.AssemblyInput{Mode: prompt.ModeFull, Rules: rules, Workspace: workspace, SessionStart: testStart})
-	testassert.NoError(t, err)
+	assembled := prompt.Assemble(prompt.AssemblyInput{Rules: rules, Workspace: workspace, SessionStart: testStart})
 	testassert.Require(t, strings.Index(assembled, "GLOBAL_RULES") < strings.Index(assembled, "WORKSPACE_RULES"), "global rules did not render before workspace rules")
 	testassert.Require(t, !strings.Contains(assembled, "PARENT_AGENTS_MARKER") && !strings.Contains(assembled, "ALTERNATIVE_NAME_MARKER"), "assembly searched a parent or alternative rules file")
 }
 
-func TestReadRulesNoneReadsNothingAndYieldsNoWarnings(t *testing.T) {
-	globalDir := t.TempDir()
-	workspace := t.TempDir()
-	testassert.NoError(t, os.Mkdir(filepath.Join(globalDir, "AGENTS.md"), 0o700))
-	testassert.NoError(t, os.Mkdir(filepath.Join(workspace, "AGENTS.md"), 0o700))
-	rules := readRules(t, globalDir, workspace, prompt.ModeNone)
-	testassert.Require(t, rules.GlobalText == "" && rules.WorkspaceText == "" && len(rules.Warnings) == 0, "none rules = %+v, want no text and no diagnostics", rules)
-}
-
 func TestReadRulesEmptyGlobalDirectoryPerformsNoGlobalLookup(t *testing.T) {
 	workspace := t.TempDir()
-	rules := readRules(t, "", workspace, prompt.ModeFull)
+	rules := readRules(t, "", workspace)
 	testassert.Require(t, rules.GlobalText == "" && len(rules.Warnings) == 1 && rules.Warnings[0].Kind == prompt.WarnRulesNotFound, "rules = %+v, want no global layer and only the not-found warning", rules)
 }
 
@@ -113,7 +100,7 @@ func TestReadRulesWarningsKindsMessagesAndOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			globalDir := setup(t, tc.global)
 			workspace := setup(t, tc.workspace)
-			rules := readRules(t, globalDir, workspace, prompt.ModeFull)
+			rules := readRules(t, globalDir, workspace)
 			testassert.Require(t, rules.GlobalText == tc.wantGlobal && rules.WorkspaceText == tc.wantWorkspace, "rules = %+v, want global %q and workspace %q", rules, tc.wantGlobal, tc.wantWorkspace)
 			testassert.Require(t, len(rules.Warnings) == len(tc.wantWarnings), "warnings = %+v, want %d entries", rules.Warnings, len(tc.wantWarnings))
 			for i, want := range tc.wantWarnings {
@@ -129,23 +116,10 @@ func TestReadRulesCompleteOversizedTextAndWarningThreshold(t *testing.T) {
 	workspace := t.TempDir()
 	oversized := strings.Repeat("x", 20001)
 	writeRules(t, workspace, oversized)
-	rules := readRules(t, globalDir, workspace, prompt.ModeFull)
+	rules := readRules(t, globalDir, workspace)
 	testassert.Require(t, rules.WorkspaceText == oversized, "oversized rules text was truncated")
 	testassert.Require(t, len(rules.Warnings) == 1 && rules.Warnings[0].Kind == prompt.WarnRulesTooLarge, "warnings = %+v, want exactly one rules_too_large warning and no rules_not_found", rules.Warnings)
 
-	assembled, err := prompt.Assemble(prompt.AssemblyInput{Mode: prompt.ModeFull, Rules: rules, Workspace: workspace, SessionStart: testStart})
-	testassert.NoError(t, err)
+	assembled := prompt.Assemble(prompt.AssemblyInput{Rules: rules, Workspace: workspace, SessionStart: testStart})
 	testassert.Require(t, strings.Contains(assembled, oversized), "assembled prompt dropped the complete oversized rules text")
-}
-
-func TestReadRulesInvalidModeFailsBeforeReading(t *testing.T) {
-	for _, mode := range []prompt.Mode{"", "bogus"} {
-		globalDir := t.TempDir()
-		if err := os.Mkdir(filepath.Join(globalDir, "AGENTS.md"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		rules, err := prompt.ReadRules(globalDir, t.TempDir(), mode)
-		testassert.Require(t, errors.Is(err, prompt.ErrInvalidInput), "ReadRules(%q) error = %v, want ErrInvalidInput", mode, err)
-		testassert.Require(t, rules.GlobalText == "" && rules.WorkspaceText == "" && len(rules.Warnings) == 0, "ReadRules(%q) = %+v, want no read result", mode, rules)
-	}
 }

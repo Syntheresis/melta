@@ -21,21 +21,16 @@ func TestProtocolMountedPackageOperations(t *testing.T) {
 	_, _, server := mountedOwner(t, ctx, testOwnerOptions(t))
 	client := mountedClient(t, server)
 
-	declaration := extension.Declaration{
-		ID:           "wire",
-		Version:      "1.0.0",
-		ConfigSchema: json.RawMessage(`{"type":"object"}`),
-		Components: []extension.Component{{
-			ID:       "wire.component",
-			Lifetime: extension.LifetimeHarness,
-			Provides: []string{"wire.tool"},
-		}},
-		Capabilities: []extension.Capability{extension.ToolCapability("wire.tool")},
+	manifest := extension.Manifest{
+		ID:             "wire",
+		Version:        "1.0.0",
+		APIVersion:     extension.APIVersion,
+		SettingsSchema: json.RawMessage(`{"type":"object"}`),
 	}
-	manifest, err := worker.EncodeManifest(declaration, "worker")
+	manifestBytes, err := worker.EncodeManifest(manifest, "worker")
 	testassert.NoError(t, err)
 	source := t.TempDir()
-	testassert.NoError(t, os.WriteFile(filepath.Join(source, "manifest.json"), manifest, 0o600))
+	testassert.NoError(t, os.WriteFile(filepath.Join(source, "manifest.json"), manifestBytes, 0o600))
 	testassert.NoError(t, os.WriteFile(filepath.Join(source, "worker"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
 
 	installed, err := client.InstallExtensionPackageWithResponse(ctx, protocol.InstallExtensionPackageJSONRequestBody{SourceDir: source})

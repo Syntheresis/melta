@@ -62,7 +62,8 @@ type Dependencies struct {
 // receives.
 type PreparationSession struct {
 	Identity       SessionIdentity
-	AgentSelection AgentSelection
+	Inputs         SessionInputs
+	ExtensionState map[string]SessionStateValue
 }
 
 // PreparationRequest is the input of one preparation call.
@@ -206,6 +207,26 @@ type RequestStage struct {
 	Catalog          []model.ToolDefinition
 	InitialToolNames []string
 	Hooks            []RequestHook
+	Error            error
+	Release          func()
+}
+
+type ArgumentStage struct {
+	Hooks   []ToolArgumentsHook
+	Error   error
+	Release func()
+}
+
+type AuthorizationStage struct {
+	Hooks   []AuthorizationHook
+	Error   error
+	Release func()
+}
+
+type ResultStage struct {
+	Hooks   []ToolOutputHook
+	Error   error
+	Release func()
 }
 
 // RequestHook is one selected request-boundary hook: it runs after steering
@@ -291,9 +312,11 @@ type InvocationExecution struct {
 	// runs after the advertisement gate and before concrete preparation; the
 	// first receives the original raw call arguments, every later one the
 	// preceding committed value.
-	ToolHooks []ToolArgumentsHook
+	ToolHooks     []ToolArgumentsHook
+	ArgumentStage func() ArgumentStage
 	// AuthorizationHooks run in order after policy allows the prepared action.
 	AuthorizationHooks []AuthorizationHook
+	AuthorizationStage func() AuthorizationStage
 	// BindLocation binds a location relative to the actual Session Workspace.
 	BindLocation func(string) (canonical string, recheck func() error, err error)
 	// ToolOutputHooks are the selected output-shaping hooks in configured
@@ -302,6 +325,7 @@ type InvocationExecution struct {
 	// later one the preceding hook's return. They are pure and can never
 	// change the settled status, evidence, usage or metadata.
 	ToolOutputHooks []ToolOutputHook
+	ResultStage     func() ResultStage
 	Close           func() error
 }
 
@@ -327,6 +351,7 @@ type ToolBinding struct {
 	Identity  ToolImplementation
 	Normalize func(context.Context, model.ToolCall) (json.RawMessage, error)
 	Prepare   func(context.Context, model.ToolCall) PreparedTool
+	Release   func()
 }
 
 // Execution is one opened execution: the required invocation opener the
@@ -388,7 +413,6 @@ type ToolOutcome struct {
 type PreparedTool struct {
 	Permissions        []PermissionRequest
 	CanonicalWorkspace string
-	CanonicalWriteDir  string
 	Immediate          *ToolOutcome
 	Execute            func(context.Context) ToolOutcome
 }
@@ -396,7 +420,8 @@ type PreparedTool struct {
 // CreateSessionRequest is the input of one root Session creation.
 type CreateSessionRequest struct {
 	Workspace      string
-	AgentSelection AgentSelection
+	Inputs         SessionInputs
+	ExtensionState map[string]SessionStateValue
 }
 
 // SubmitRequest is the input of one public Session message submission.
@@ -546,8 +571,8 @@ func (h *Harness) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := validateWorkspace(req.Workspace); err != nil {
 		return SessionRecord{}, invalidInput("workspace: %v", err)
 	}
-	if err := validateAgentSelection(req.AgentSelection); err != nil {
-		return SessionRecord{}, invalidInput("agent selection: %v", err)
+	if _, err := req.Inputs.normalized(); err != nil {
+		return SessionRecord{}, invalidInput("inputs: %v", err)
 	}
 	sessionID, err := newHexID()
 	if err != nil {
@@ -558,7 +583,8 @@ func (h *Harness) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Identity: SessionIdentity{SessionID: sessionID, Workspace: req.Workspace, CreatedAt: now},
 		State: SessionState{
 			Lifecycle:      LifecycleOpen,
-			AgentSelection: ownAgentSelection(req.AgentSelection),
+			Inputs:         req.Inputs.Owned(),
+			ExtensionState: ownSessionStateValues(req.ExtensionState),
 			Usage:          UsageTotals{},
 			LastActivity:   now,
 		},
@@ -614,16 +640,25 @@ func (h *Harness) ReadOperation(ctx context.Context, sessionID, operationID stri
 	return record, nil
 }
 
-// ChangeAgentType changes the current Agent type of an open Session. It
-// preserves identity, usage, history, and last activity, and never alters an
-// active Operation's admission capture.
-func (h *Harness) ChangeAgentType(ctx context.Context, sessionID string, selection AgentSelection) (SessionRecord, error) {
-	if err := validateAgentSelection(selection); err != nil {
-		return SessionRecord{}, invalidInput("agent selection: %v", err)
+// SessionExtensionStates returns owned state values for scoped extension calls.
+func (h *Harness) SessionExtensionStates(ctx context.Context, sessionID string) (map[string]SessionStateValue, error) {
+	var states map[string]SessionStateValue
+	err := h.withSessionRead(ctx, sessionID, func(c *coordinator) error {
+		states = ownSessionStateValues(c.graph.Session.State.ExtensionState)
+		return nil
+	})
+	return states, err
+}
+
+// SetSessionInputs replaces the choices for subsequent admissions.
+func (h *Harness) SetSessionInputs(ctx context.Context, sessionID string, inputs SessionInputs) (SessionRecord, error) {
+	inputs, err := inputs.normalized()
+	if err != nil {
+		return SessionRecord{}, invalidInput("inputs: %v", err)
 	}
-	selection = ownAgentSelection(selection)
-	return h.changeSelection(ctx, sessionID, func(AgentSelection) (AgentSelection, error) {
-		return selection, nil
+	return h.updateOpenSession(ctx, sessionID, "inputs", func(state *SessionState) (bool, error) {
+		state.Inputs = inputs.Owned()
+		return true, nil
 	})
 }
 
@@ -632,13 +667,47 @@ func (h *Harness) SetSessionModel(ctx context.Context, sessionID string, ref mod
 	if (ref.Provider == "") != (ref.Model == "") {
 		return SessionRecord{}, invalidInput("model must be wholly empty or complete")
 	}
-	return h.changeSelection(ctx, sessionID, func(current AgentSelection) (AgentSelection, error) {
-		if current.Inputs == nil {
-			return AgentSelection{}, fmt.Errorf("selection is not resolved: %w", ErrConflict)
+	return h.updateOpenSession(ctx, sessionID, "model", func(state *SessionState) (bool, error) {
+		state.Inputs = state.Inputs.Owned()
+		state.Inputs.Model = nil
+		if ref.Provider != "" {
+			state.Inputs.Model = &ref
 		}
-		current = ownAgentSelection(current)
-		current.Inputs.Model = ref
-		return current, nil
+		return true, nil
+	})
+}
+
+// SetSessionExtensionState replaces one extension's state on an open Session.
+func (h *Harness) SetSessionExtensionState(ctx context.Context, sessionID, extensionID string, value SessionStateValue) (SessionRecord, error) {
+	if extensionID == "" {
+		return SessionRecord{}, invalidInput("extension ID must not be empty")
+	}
+	if _, err := value.MarshalJSON(); err != nil {
+		return SessionRecord{}, invalidInput("extension state: %v", err)
+	}
+	value = slices.Clone(value)
+	return h.updateOpenSession(ctx, sessionID, "extension state", func(state *SessionState) (bool, error) {
+		state.ExtensionState = ownSessionStateValues(state.ExtensionState)
+		if state.ExtensionState == nil {
+			state.ExtensionState = make(map[string]SessionStateValue)
+		}
+		state.ExtensionState[extensionID] = slices.Clone(value)
+		return true, nil
+	})
+}
+
+// ClearSessionExtensionState removes one extension's state from an open Session.
+func (h *Harness) ClearSessionExtensionState(ctx context.Context, sessionID, extensionID string) (SessionRecord, error) {
+	if extensionID == "" {
+		return SessionRecord{}, invalidInput("extension ID must not be empty")
+	}
+	return h.updateOpenSession(ctx, sessionID, "extension state", func(state *SessionState) (bool, error) {
+		if _, ok := state.ExtensionState[extensionID]; !ok {
+			return false, nil
+		}
+		state.ExtensionState = ownSessionStateValues(state.ExtensionState)
+		delete(state.ExtensionState, extensionID)
+		return true, nil
 	})
 }
 
@@ -659,17 +728,6 @@ func (h *Harness) ClaimExternalData(ctx context.Context, sessionID, extensionID 
 		return true, nil
 	})
 	return err
-}
-
-func (h *Harness) changeSelection(ctx context.Context, sessionID string, update func(AgentSelection) (AgentSelection, error)) (SessionRecord, error) {
-	return h.updateOpenSession(ctx, sessionID, "the Agent type", func(state *SessionState) (bool, error) {
-		selection, err := update(state.AgentSelection)
-		if err != nil {
-			return false, err
-		}
-		state.AgentSelection = selection
-		return true, nil
-	})
 }
 
 func (h *Harness) updateOpenSession(ctx context.Context, sessionID, operation string, update func(*SessionState) (bool, error)) (SessionRecord, error) {
@@ -1714,7 +1772,8 @@ func (h *Harness) admitReserved(ctx context.Context, c *coordinator, req admissi
 
 	prepared, capture, prepCtx, cleanup, err := h.prepareExecution(ctx, PreparationSession{
 		Identity:       view.Identity,
-		AgentSelection: view.State.AgentSelection,
+		Inputs:         view.State.Inputs,
+		ExtensionState: view.State.ExtensionState,
 	}, req.Kind, req.Content)
 	if err != nil {
 		if isPreparationRefusal(err) { // known non-admission before publication, typed or not: nothing was written
@@ -1766,7 +1825,8 @@ func (h *Harness) prepareExecution(ctx context.Context, session PreparationSessi
 		cleanup()
 		return PreparedExecution{}, ExecutionCapture{}, nil, nil, h.ctx.Err()
 	}
-	session.AgentSelection = ownAgentSelection(session.AgentSelection)
+	session.Inputs = session.Inputs.Owned()
+	session.ExtensionState = ownSessionStateValues(session.ExtensionState)
 	prepared, prepErr := h.deps.Prepare(prepCtx, PreparationRequest{
 		Session:     session,
 		RequestKind: kind,
@@ -1943,12 +2003,12 @@ func produceAdmission(tx Transaction, session SessionRecord, capture ExecutionCa
 		now := time.Now().UTC()
 		record := OperationRecord{
 			Admission: OperationAdmission{
-				SessionID:      req.SessionID,
-				OperationID:    req.OperationID,
-				RequestKind:    req.Kind,
-				AgentSelection: ownAgentSelection(session.State.AgentSelection),
-				Execution:      capture,
-				AdmittedAt:     now,
+				SessionID:   req.SessionID,
+				OperationID: req.OperationID,
+				RequestKind: req.Kind,
+				Inputs:      session.State.Inputs.Owned(),
+				Execution:   capture,
+				AdmittedAt:  now,
 			},
 			State: OperationCurrentState{
 				Status:           OperationRunning,
@@ -2012,13 +2072,13 @@ func produceAdmission(tx Transaction, session SessionRecord, capture ExecutionCa
 	}
 	record := OperationRecord{
 		Admission: OperationAdmission{
-			SessionID:      req.SessionID,
-			OperationID:    req.OperationID,
-			RequestKind:    req.Kind,
-			AdmittedEntry:  EntryRef{SessionID: req.SessionID, EntryID: entryID},
-			AgentSelection: ownAgentSelection(session.State.AgentSelection),
-			Execution:      capture,
-			AdmittedAt:     inserted.CommittedAt,
+			SessionID:     req.SessionID,
+			OperationID:   req.OperationID,
+			RequestKind:   req.Kind,
+			AdmittedEntry: EntryRef{SessionID: req.SessionID, EntryID: entryID},
+			Inputs:        session.State.Inputs.Owned(),
+			Execution:     capture,
+			AdmittedAt:    inserted.CommittedAt,
 		},
 		State: OperationCurrentState{
 			Status:           OperationRunning,
@@ -2338,12 +2398,8 @@ func ownCapture(c ExecutionCapture) ExecutionCapture {
 		for i, implementation := range c.Implementations {
 			out.Implementations[i] = implementation
 			out.Implementations[i].Settings = model.CloneRaw(implementation.Settings)
+			out.Implementations[i].State = slices.Clone(implementation.State)
 		}
-	}
-	if len(c.Capabilities) == 0 {
-		out.Capabilities = nil
-	} else {
-		out.Capabilities = append([]string(nil), c.Capabilities...)
 	}
 	out.Pricing = c.Pricing.Clone()
 	out.Compact.Pricing = c.Compact.Pricing.Clone()
@@ -2364,7 +2420,8 @@ func ownUsageTotals(t UsageTotals) UsageTotals {
 // ownSessionRecord returns an independent owned copy of one Session record.
 func ownSessionRecord(rec SessionRecord) SessionRecord {
 	out := rec
-	out.State.AgentSelection = ownAgentSelection(rec.State.AgentSelection)
+	out.State.Inputs = rec.State.Inputs.Owned()
+	out.State.ExtensionState = ownSessionStateValues(rec.State.ExtensionState)
 	if rec.State.ArchivedAt != nil {
 		stamped := *rec.State.ArchivedAt
 		out.State.ArchivedAt = &stamped
@@ -2374,10 +2431,21 @@ func ownSessionRecord(rec SessionRecord) SessionRecord {
 	return out
 }
 
+func ownSessionStateValues(values map[string]SessionStateValue) map[string]SessionStateValue {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]SessionStateValue, len(values))
+	for id, value := range values {
+		out[id] = slices.Clone(value)
+	}
+	return out
+}
+
 // ownOperationRecord returns an independent owned copy of one Operation record.
 func ownOperationRecord(rec OperationRecord) OperationRecord {
 	out := rec
-	out.Admission.AgentSelection = ownAgentSelection(rec.Admission.AgentSelection)
+	out.Admission.Inputs = rec.Admission.Inputs.Owned()
 	out.Admission.Execution = ownCapture(rec.Admission.Execution)
 	out.State.Usage = ownUsageTotals(rec.State.Usage)
 	out.State.PendingToolCalls = make([]PendingToolCall, len(rec.State.PendingToolCalls))

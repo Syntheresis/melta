@@ -21,8 +21,8 @@ import (
 // credential value is returned.
 
 // GetConfiguration projects the complete published configuration view: the
-// file-backed settings, the Agent roster, and provider views with their source
-// and key-source labels.
+// file-backed settings and provider views with their source and key-source
+// labels.
 func (r *Melta) GetConfiguration(ctx context.Context, c Caller) (protocol.ConfigurationView, error) {
 	release, err := r.enter(ctx)
 	if err != nil {
@@ -39,7 +39,6 @@ func (r *Melta) GetConfiguration(ctx context.Context, c Caller) (protocol.Config
 	return protocol.ConfigurationView{
 		ConfigurationRevision: configurationRevision(captured.snapshot, r.instance),
 		Settings:              projectSettings(captured.snapshot),
-		Agents:                projectAgents(captured.snapshot),
 		Providers:             projectProviders(captured),
 	}, nil
 }
@@ -171,13 +170,11 @@ func (r *Melta) GetWarnings(ctx context.Context, c Caller) (protocol.WarningsSna
 	}, nil
 }
 
-// UpdateSettings is the one configuration settings/extension-edit writer: the
-// request carries exactly one of the complete settings shape or one declared
-// extension configuration edit. A settings write replaces the whole sessions
-// member and the whole extensions member as the generated target shape — each
-// extension document string becomes that extension's owned raw section, an
-// omitted section removing any newer one — while a declared edit transforms
-// only its own extension's latest raw section. Every successful edit
+// UpdateSettings is the one configuration settings writer: the request
+// carries the complete settings shape. A settings write replaces the whole
+// sessions member and the whole extensions member as the generated target
+// shape — each extension document string becomes that extension's owned raw
+// section, an omitted section removing any newer one. Every successful edit
 // atomically rewrites the owning main configuration and publishes the next
 // generation, identical bytes and absent-member resets included. Unowned
 // top-level root members are untouched. The result projects the returned
@@ -191,30 +188,19 @@ func (r *Melta) UpdateSettings(ctx context.Context, c Caller, request protocol.U
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return protocol.SettingsMutation{}, err
 	}
-	switch {
-	case (request.Settings == nil) == (request.ExtensionEdit == nil):
-		return protocol.SettingsMutation{}, fmt.Errorf("settings request requires exactly one of settings or extension_edit: %w", harness.ErrInvalid)
-	}
-	if request.Settings != nil {
-		for _, section := range []struct {
-			name string
-			raw  json.RawMessage
-		}{
-			{"tools", request.Settings.Tools},
-			{"jobs", request.Settings.Jobs},
-			{"compaction", request.Settings.Compaction},
-		} {
-			if err := requireSettingsObject(section.name, section.raw); err != nil {
-				return protocol.SettingsMutation{}, fmt.Errorf("%v: %w", err, harness.ErrInvalid)
-			}
+	for _, section := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"tools", request.Settings.Tools},
+		{"jobs", request.Settings.Jobs},
+		{"compaction", request.Settings.Compaction},
+	} {
+		if err := requireSettingsObject(section.name, section.raw); err != nil {
+			return protocol.SettingsMutation{}, fmt.Errorf("%v: %w", err, harness.ErrInvalid)
 		}
 	}
-	var edit configurationEdit
-	if request.ExtensionEdit != nil {
-		edit = r.config.editExtension(ctx, request.ExtensionEdit.ExtensionId, request.ExtensionEdit.EditId, json.RawMessage(request.ExtensionEdit.Arguments))
-	} else {
-		edit = editSettings(*request.Settings)
-	}
+	edit := editSettings(request.Settings)
 	captured, err := r.config.mutate(ctx, edit)
 	if err != nil {
 		return protocol.SettingsMutation{}, err
@@ -572,49 +558,6 @@ func projectModelListEntry(prov *catalog.Provider, entry *catalog.Model) protoco
 		Incomplete:      incomplete,
 		Source:          protocol.ModelSource(entry.Source),
 	}
-}
-
-// projectAgents maps the captured resolver roster onto the roster view. Each
-// entry carries its complete source-qualified reference, stamped by the owner
-// from the supplying declaration; two providers may use the same displayed
-// name. Required array members are owned non-nil lists even when the
-// definition carries none, and no private definition field (prompt body) is
-// exposed.
-func projectAgents(captured *configuration) []protocol.Agent {
-	out := make([]protocol.Agent, 0, len(captured.definitions))
-	for _, at := range captured.definitions {
-		inputs := at.inputs.Owned()
-		deref := inputs.Model
-		out = append(out, protocol.Agent{
-			Name:         at.name,
-			Definition:   protocol.DefinitionRef{ExtensionId: at.ref.ExtensionID, CapabilityId: at.ref.CapabilityID, DefinitionId: at.ref.DefinitionID},
-			Description:  at.description,
-			Subagent:     at.subagent,
-			Model:        modelRefString(deref),
-			Readonly:     inputs.Constraints.Readonly,
-			WriteDir:     inputs.Constraints.WriteDir,
-			Tools:        ownStrings(inputs.Tools),
-			Capabilities: ownStrings(inputs.Capabilities),
-		})
-	}
-	return out
-}
-
-// ownStrings copies one string list into an owned, non-nil array: a present
-// collection serializes as [], never null.
-func ownStrings(values []string) []string {
-	out := make([]string, len(values))
-	copy(out, values)
-	return out
-}
-
-// modelRefString renders one resolved model ref in the provider/model wire
-// spelling; a modelless definition stays empty.
-func modelRefString(ref model.ModelRef) string {
-	if ref.IsZero() {
-		return ""
-	}
-	return ref.String()
 }
 
 // projectCost copies one catalog cost into its generated pointer shape with

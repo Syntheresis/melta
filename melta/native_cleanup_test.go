@@ -40,7 +40,7 @@ func TestCleanupBatchRetainsOriginalRegisteredHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer candidate.release()
-	if err := candidate.publish(); err != nil {
+	if err := candidate.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	failures := r.cleanupDeletedSessions(context.Background(), []deletedSession{
@@ -83,11 +83,11 @@ func TestScopedServiceDataClaimRequiresRegisteredCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer candidate.release()
-	if err := candidate.publish(); err != nil {
+	if err := candidate.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	invoke := func() error {
-		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "cleaner", "claim", sessionTarget(session), []byte(`{}`), nil)
+		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "cleaner", "claim", sessionTarget(session), []byte(`{}`), "")
 		return err
 	}
 	if err := invoke(); err == nil {
@@ -141,7 +141,7 @@ func TestCleanupBatchRunsAllAttachments(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer candidate.release()
-			if err := candidate.publish(); err != nil {
+			if err := candidate.publishForTest(); err != nil {
 				t.Fatal(err)
 			}
 			failures := r.cleanupDeletedSessions(context.Background(), []deletedSession{{sessionID: "deleted", owners: []string{"cleaner"}}})

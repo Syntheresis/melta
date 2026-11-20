@@ -7,14 +7,11 @@
 package doctor
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 
-	agentcfg "github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
 )
@@ -45,17 +42,15 @@ type Report struct {
 // Params carries the environmental inputs so Run stays free of
 // process-global reads that tests cannot control.
 type Params struct {
-	Home                  string // user home dir; ignored when HomeErr is set
-	HomeErr               error
-	ConfigPath            string // resolved config path; ignored when ConfigPathErr is set
-	ConfigPathErr         error
-	WorkDir               string // project lookup key (the process cwd)
-	BinaryPath            string
-	Version               string
-	Platform              string
-	LookupEnv             func(string) (string, bool) // process env; os.LookupEnv in production
-	InstalledExtensions   []string
-	InstalledCapabilities []string
+	Home          string // user home dir; ignored when HomeErr is set
+	HomeErr       error
+	ConfigPath    string // resolved config path; ignored when ConfigPathErr is set
+	ConfigPathErr error
+	WorkDir       string // project lookup key (the process cwd)
+	BinaryPath    string
+	Version       string
+	Platform      string
+	LookupEnv     func(string) (string, bool) // process env; os.LookupEnv in production
 }
 
 // Run executes every check group. The second result reports that no
@@ -161,29 +156,6 @@ func dataChecks(p Params, dataDir string, checks *[]Check, add func(group, name,
 		} else {
 			cfg = parsed
 			add("data", "config", StatusOK, p.ConfigPath)
-		}
-
-		if cfg != nil && slices.Contains(p.InstalledExtensions, "agents") && config.SectionEnabled(cfg.Extensions["agents"]) {
-			var section struct {
-				Definitions json.RawMessage `json:"definitions"`
-			}
-			if err := json.Unmarshal(cfg.Extensions["agents"], &section); err != nil {
-				add("data", "agents", StatusFail, err.Error())
-			} else {
-				data := section.Definitions
-				if len(data) == 0 {
-					data = json.RawMessage("{}")
-				}
-				capabilities := append(append([]string(nil), agentcfg.StandardTools...), p.InstalledCapabilities...)
-				parsed, err := agentcfg.ParseWithCapabilities(data, capabilities, agentcfg.StandardTools, p.InstalledCapabilities)
-				if err != nil {
-					add("data", "agents", StatusFail, err.Error())
-				} else if warnings := parsed.Warnings(); len(warnings) != 0 {
-					add("data", "agents", StatusFail, warnings[0].Error())
-				} else {
-					add("data", "agents", StatusOK, "extensions.agents")
-				}
-			}
 		}
 	}
 

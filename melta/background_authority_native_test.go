@@ -1,9 +1,8 @@
 package melta
 
-// Retained native child-authority coverage over the actual Native tool ->
-// declared host child_launch service -> Harness admission path. The removed
-// legacy BackgroundServices fixture is intentionally not restored; these tests
-// drive the current native Tool/ExtensionContext/CallContext contract and
+// Retained child-authority coverage over the actual registered tool ->
+// frozen ToolPlan start -> host session.start -> Harness admission bridge.
+// These tests drive the current RegisteredTool/AuthorContext contract and
 // assert the committed child and settlement identities.
 
 import (
@@ -22,21 +21,6 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-func bridgeChildLaunchArguments(operationID string) json.RawMessage {
-	value, _ := json.Marshal(map[string]any{
-		"definition": map[string]string{
-			"extension_id":  "agents",
-			"capability_id": "agents.definitions",
-			"definition_id": "secondary",
-		},
-		"prompt":         "child work",
-		"operation_id":   operationID,
-		"max_concurrent": 4,
-		"output_limit":   15360,
-	})
-	return value
-}
-
 type bridgeChildProbe struct {
 	mode         string
 	childStarted chan struct{}
@@ -46,53 +30,78 @@ type bridgeChildProbe struct {
 
 	childID      string
 	launchErr    error
-	retained     extension.CallContext
+	retained     extension.AuthorContext
 	executes     atomic.Int64
 	launchedOnce sync.Once
 	startedOnce  sync.Once
 	doneOnce     sync.Once
 }
 
-func (p *bridgeChildProbe) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (p *bridgeChildProbe) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
 	return call.Arguments, nil
 }
-func (p *bridgeChildProbe) Prepare(context.Context, extension.ToolContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionChildLaunch, Target: (harness.DefinitionRef{ExtensionID: "agents", CapabilityID: "agents.definitions", DefinitionID: "secondary"}).PermissionTarget()}}}
+
+func (p *bridgeChildProbe) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+	modelRef := model.ModelRef{Provider: "prov", Model: "m"}
+	return extension.ToolPlan{
+		Data: []byte(call.ID),
+		Start: &extension.SessionStart{
+			Target:       "secondary",
+			Inputs:       harness.SessionInputs{Model: &modelRef},
+			InitialState: harness.SessionStateValue(`{"agent":"secondary"}`),
+			Input:        []model.ContentPart{{Kind: model.PartText, Text: "child work"}},
+			Report:       true,
+			OutputLimit:  15360,
+		},
+	}
 }
-func (p *bridgeChildProbe) Execute(ctx context.Context, tc extension.ToolContext, _ extension.ToolPlan) harness.ToolOutcome {
-	arguments := bridgeChildLaunchArguments("probe-child-op")
+
+func (p *bridgeChildProbe) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+	callID := string(plan.Data)
+	arguments := json.RawMessage(`{}`)
 	p.executes.Add(1)
 	if p.mode == "canceled_origin" {
 		p.startedOnce.Do(func() { close(p.started) })
 		<-ctx.Done()
-		_, p.launchErr = tc.Calls.Call(context.Background(), "child_launch", "launch", arguments)
+		_, p.launchErr = tc.Call(context.Background(), "melta.session", "start", arguments)
 		p.doneOnce.Do(func() { close(p.done) })
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: tc.Calls.ToolCallID, Status: model.ResultInterrupted, Content: "canceled"}}
+		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultInterrupted, Content: "canceled"}}
 	}
-	result, err := tc.Calls.Call(ctx, "child_launch", "launch", arguments)
+	result, err := tc.Call(ctx, "melta.session", "start", arguments)
 	if err != nil {
 		p.launchErr = err
 		p.launchedOnce.Do(func() { close(p.launched) })
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: tc.Calls.ToolCallID, Status: model.ResultError, Content: err.Error()}}
+		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
 	}
 	var launched struct {
-		ChildSessionID string `json:"child_session_id"`
+		SessionID string `json:"session_id"`
 	}
 	if err := json.Unmarshal(result.Value, &launched); err != nil {
 		p.launchErr = err
 		p.launchedOnce.Do(func() { close(p.launched) })
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: tc.Calls.ToolCallID, Status: model.ResultError, Content: err.Error()}}
+		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
 	}
-	p.childID = launched.ChildSessionID
+	p.childID = launched.SessionID
 	<-p.childStarted // the committed child is blocked in its own model request
 	if p.mode == "interrupted_committed" {
 		p.launchedOnce.Do(func() { close(p.launched) })
 		<-ctx.Done()
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: tc.Calls.ToolCallID, Status: model.ResultInterrupted, Content: "interrupted"}}
+		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultInterrupted, Content: "interrupted"}}
 	}
-	p.retained = tc.Calls
+	p.retained = tc
 	p.launchedOnce.Do(func() { close(p.launched) })
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: tc.Calls.ToolCallID, Status: model.ResultSuccess, Content: launched.ChildSessionID}}
+	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: launched.SessionID}}
+}
+
+// shChildGrantNative registers the probe tool under the grant extension,
+// which requests the host session service its start consumes.
+func shChildGrantNative(tool extension.RegisteredTool) extension.Extension {
+	manifest := registrarManifest("grant")
+	manifest.Services = []string{"melta.session"}
+	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterTool(testDescribeTool("grant_tool"), tool, nil)
+		return nil, err
+	}}
 }
 
 func bridgeChildCount(t *testing.T, r *Melta, store harness.Storage) int {
@@ -130,11 +139,12 @@ func bridgeParentHasChildResult(t *testing.T, e *ownerEnv, childID string) bool 
 }
 
 // TestNativeChildBridgeRetainsCommittedChildren proves through the actual
-// native Tool -> host child_launch -> Harness admission bridge: a canceled
-// Execute origin cannot launch even with Background; a retained Call view is
-// closed after return; and an already-committed child blocked in its own model
-// request survives both parent interruption and executor return, then settles
-// successfully with the exact parent/child identity.
+// registered tool -> frozen start -> session.start -> Harness admission
+// bridge: a canceled Execute origin cannot consume the start even with a
+// fresh context; a retained Call view is closed after return; and an
+// already-committed child blocked in its own model request survives both
+// parent interruption and executor return, then settles successfully with
+// the exact parent/child identity.
 func TestNativeChildBridgeRetainsCommittedChildren(t *testing.T) {
 	for _, row := range []struct {
 		name       string
@@ -167,11 +177,14 @@ func TestNativeChildBridgeRetainsCommittedChildren(t *testing.T) {
 					if lastMessageRole(body) == "tool" {
 						return textTurnEvents("done")
 					}
-					return toolCallTurnEvents("call-probe", "grant_tool", `{}`)
+					if lastUserText(body) == "run" {
+						return toolCallTurnEvents("call-probe", "grant_tool", `{}`)
+					}
+					return textTurnEvents("done")
 				})
 				probe := &bridgeChildProbe{mode: row.mode, childStarted: childStarted, started: make(chan struct{}), launched: make(chan struct{}), done: make(chan struct{})}
 				ctx := context.Background()
-				r, err := e.open(ctx, childGrantNative(probe))
+				r, err := e.open(ctx, shChildGrantNative(probe))
 				testassert.NoError(t, err)
 				t.Cleanup(func() {
 					release()
@@ -197,7 +210,7 @@ func TestNativeChildBridgeRetainsCommittedChildren(t *testing.T) {
 					case <-time.After(10 * time.Second):
 						t.Fatal("the canceled-origin probe never resumed")
 					}
-					testassert.Require(t, probe.launchErr != nil, "post-cancellation Background launch = %v, want a refusal", probe.launchErr)
+					testassert.Require(t, probe.launchErr != nil, "post-cancellation session start = %v, want a refusal", probe.launchErr)
 					testassert.Equal(t, bridgeChildCount(t, r, store), 0)
 					return
 				}
@@ -212,13 +225,14 @@ func TestNativeChildBridgeRetainsCommittedChildren(t *testing.T) {
 				childHeader, err := r.harness.ReadSessionHeader(context.Background(), probe.childID)
 				testassert.NoError(t, err)
 				testassert.Equal(t, childHeader.Identity.OwnerSessionID, session.Identity.SessionID)
-				childOp, err := r.harness.ReadOperation(context.Background(), probe.childID, "probe-child-op")
+				childOpID := childHeader.CurrentOperationID
+				childOp, err := r.harness.ReadOperation(context.Background(), probe.childID, childOpID)
 				testassert.NoError(t, err)
 				testassert.Equal(t, childOp.State.Status, harness.OperationRunning)
 
 				if row.mode == "retained" {
 					awaitOperation(t, r, session.Identity.SessionID, "probe-parent-op", row.wantParent)
-					if _, err := probe.retained.Call(context.Background(), "child_launch", "launch", bridgeChildLaunchArguments("probe-child-op-2")); !errors.Is(err, extension.ErrClosed) {
+					if _, err := probe.retained.Call(context.Background(), "melta.session", "start", json.RawMessage(`{}`)); !errors.Is(err, extension.ErrClosed) {
 						t.Fatalf("the retained Call view error = %v, want the closed view refusal", err)
 					}
 					testassert.Equal(t, bridgeChildCount(t, r, store), 1)
@@ -234,7 +248,7 @@ func TestNativeChildBridgeRetainsCommittedChildren(t *testing.T) {
 				}
 
 				release()
-				awaitOperation(t, r, probe.childID, "probe-child-op", harness.OperationSuccess)
+				awaitOperation(t, r, probe.childID, childOpID, harness.OperationSuccess)
 				testassert.Equal(t, bridgeChildCount(t, r, store), 1)
 				childHeader, err = r.harness.ReadSessionHeader(context.Background(), probe.childID)
 				testassert.NoError(t, err)

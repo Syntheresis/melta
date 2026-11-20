@@ -25,10 +25,10 @@ import (
 // the Harness's own public methods; none constructs model behavior.
 
 // lifecycleAgentsDocument adds the child agent type beside the solo root;
-// both select the suite's preparation hook and declared tools.
+// both select the suite's preparation hook and the fixture tools.
 const lifecycleAgentsDocument = `{
-	"solo":   {"model": "prov/m", "system_prompt": "simple", "tools": ["read", "grep"], "capabilities": ["hook.first"]},
-	"worker": {"model": "prov/m", "system_prompt": "simple", "tools": ["read", "grep"], "capabilities": ["hook.first"]}
+	"solo":   {"model": "prov/m", "system_prompt": "simple", "tools": ["bg_read", "bg_grep"]},
+	"worker": {"model": "prov/m", "system_prompt": "simple", "tools": ["bg_read", "bg_grep"]}
 }`
 
 // backgroundLifecycleConfigDocument points the configured provider at the
@@ -324,7 +324,7 @@ func seedLifecycleRoot(t *testing.T, store harness.Storage, sessionID string) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	payload := fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q},`+
-			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"solo"}},"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
+			`"state":{"lifecycle":"open","inputs":{},"extension_state":{},"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		sessionID, now, now)
 	lifecycleInsertRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterSession}, payload)
 }
@@ -338,7 +338,7 @@ func seedLifecycleChild(t *testing.T, store harness.Storage, parentID, childID, 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	sessionPayload := fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q,"owner_session_id":%q},`+
-			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"worker"}},"current_operation_id":%q,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
+			`"state":{"lifecycle":"open","inputs":{},"extension_state":{},"current_operation_id":%q,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		childID, now, parentID, operationID, now)
 	entryID := newLifecycleID(t)
 	lifecycleInsertRegister(t, store, harness.RegisterKey{SessionID: childID, Kind: harness.RegisterSession}, sessionPayload)
@@ -360,7 +360,7 @@ func seedLifecycleChild(t *testing.T, store harness.Storage, parentID, childID, 
 
 // --- the native background fixture ---
 
-// lifecycleTools is the background suite's declared tool pair: pure object
+// lifecycleTools is the background suite's registered tool pair: pure object
 // normalization and one per-test-configured Prepare dispatcher, so the real
 // model's tool calls exercise real prepared outcomes.
 type lifecycleTools struct {
@@ -369,11 +369,11 @@ type lifecycleTools struct {
 	execute func(ctx context.Context, plan extension.ToolPlan) harness.ToolOutcome
 }
 
-func (t *lifecycleTools) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (t *lifecycleTools) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
 	return runtimeNormalize(call)
 }
 
-func (t *lifecycleTools) Prepare(ctx context.Context, _ extension.ToolContext, call model.ToolCall) extension.ToolPlan {
+func (t *lifecycleTools) Prepare(ctx context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	t.mu.Lock()
 	prepare := t.prepare
 	t.mu.Unlock()
@@ -383,7 +383,7 @@ func (t *lifecycleTools) Prepare(ctx context.Context, _ extension.ToolContext, c
 	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
 }
 
-func (t *lifecycleTools) Execute(ctx context.Context, _ extension.ToolContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t *lifecycleTools) Execute(ctx context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
 	t.mu.Lock()
 	execute := t.execute
 	t.mu.Unlock()
@@ -405,20 +405,15 @@ func (t *lifecycleTools) setPrepare(prepare func(ctx context.Context, call model
 	t.prepare = prepare
 }
 
-func lifecycleToolsPlugin(tools *lifecycleTools) extension.Native {
-	native := testNative("bgtools", extension.LifetimeHarness,
-		[]extension.Capability{extension.ToolCapability("read"), extension.ToolCapability("grep")}, nil,
-		func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{Capabilities: map[string]extension.Implementation{
-				"read": {Tool: tools},
-				"grep": {Tool: tools},
-			}}, nil
-		})
-	native.Describe = map[string]extension.ToolDescribe{
-		"read": extensionToolDescribe("read", availableToolDescription("read")),
-		"grep": extensionToolDescribe("grep", availableToolDescription("grep")),
-	}
-	return native
+func lifecycleToolsPlugin(tools *lifecycleTools) extension.Extension {
+	return testNative("bgtools", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		for _, name := range []string{"bg_read", "bg_grep"} {
+			if _, err := api.RegisterTool(testDescribeTool(name), tools, nil); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	})
 }
 
 // bgRuntime is the background suite's native owner: the solo and worker agent
@@ -470,11 +465,10 @@ func (b *bgRuntime) launchChild(parent, prompt, operationID string, maxConcurren
 	err := b.r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
 		res, err := h.LaunchChildSession(ctx, harness.LaunchChildRequest{
 			ParentSessionID: parent,
-			AgentSelection:  suppliedDefinition("worker"),
+			ExtensionState:  agentState("worker"),
 			Content:         []model.ContentPart{{Kind: model.PartText, Text: prompt}},
 			OperationID:     operationID,
 			ExtensionID:     "test.extension",
-			MaxConcurrent:   maxConcurrent,
 			OutputLimit:     4096,
 			Report:          true,
 		})

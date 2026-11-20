@@ -86,6 +86,55 @@ func newScriptFixture(t *testing.T) (*client.Client, *scriptDoer) {
 	return &client.Client{ClientWithResponses: generated}, doer
 }
 
+func TestCreateDefaultSessionDiscoveryAndNoRetry(t *testing.T) {
+	for _, row := range []struct {
+		name       string
+		discovery  string
+		invokeFail bool
+		wantPath   string
+		wantID     string
+	}{
+		{"absent", `[]`, false, "/v1/sessions", "ordinary"},
+		{"present", `[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","mode":"service_io","input":"{}","success":"{}"},"target":"workspace"}]}]`, false, "/v1/extensions/invoke", "selected"},
+		{"uncertain", `[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","mode":"service_io","input":"{}","success":"{}"},"target":"workspace"}]}]`, true, "/v1/extensions/invoke", ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			c, transport := newScriptFixture(t)
+			transport.respond = func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Path {
+				case "/v1/extensions":
+					return scriptedResponse(http.StatusOK, row.discovery), nil
+				case "/v1/extensions/invoke":
+					if row.invokeFail {
+						return nil, errors.New("connection lost")
+					}
+					return scriptedResponse(http.StatusOK, `{"kind":"success","result":{"session_id":"selected"}}`), nil
+				case "/v1/sessions":
+					return scriptedResponse(http.StatusCreated, `{"session_id":"ordinary"}`), nil
+				default:
+					return nil, fmt.Errorf("unexpected request %s", req.URL.Path)
+				}
+			}
+			id, err := clientops.CreateDefaultSession(context.Background(), c, "/workspace")
+			if row.invokeFail {
+				testassert.Require(t, err != nil && id == "", "uncertain create = %q, %v", id, err)
+			} else {
+				testassert.Require(t, err == nil && id == row.wantID, "create = %q, %v", id, err)
+			}
+			testassert.Require(t, len(transport.calls) == 2 && transport.calls[1].path == row.wantPath, "calls = %+v", transport.calls)
+		})
+	}
+}
+
+func TestInvokeExtensionPreservesNullSuccess(t *testing.T) {
+	c, transport := newScriptFixture(t)
+	transport.respond = func(*http.Request) (*http.Response, error) {
+		return scriptedResponse(http.StatusOK, `{"kind":"success","result":null}`), nil
+	}
+	value, err := clientops.InvokeExtension(context.Background(), c, "agents", "select", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, json.RawMessage(`{}`))
+	testassert.Require(t, err == nil && string(value) == "null", "null result = %s, %v", value, err)
+}
+
 // dispatchCase is one supported operation as its caller addresses it.
 type dispatchCase struct {
 	name      string
@@ -164,11 +213,11 @@ var dispatchCases = []dispatchCase{
 		body: `{"boundary_item_id":"itm","content":[],"operation_id":"op-fork"}`,
 	},
 	{
-		name: "SetSessionAgentType", operation: "SetSessionAgentType",
-		params: `{"session_id":"s1","body":{"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"integrated"}}}}`,
+		name: "SetSessionInputs", operation: "SetSessionInputs",
+		params: `{"session_id":"s1","body":{"inputs":{"tools":[]}}}`,
 		status: 200, response: `{"session_id":"s1"}`,
-		method: "PUT", path: "/v1/sessions/s1/agent-type",
-		body: `{"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"integrated"}}}`,
+		method: "PUT", path: "/v1/sessions/s1/inputs",
+		body: `{"inputs":{"tools":[]}}`,
 	},
 	{
 		name: "SetSessionModel", operation: "SetSessionModel",
@@ -229,6 +278,12 @@ var dispatchCases = []dispatchCase{
 		params: `{"session_id":"s1","query":{"cursor":"abc"}}`,
 		status: 200, response: `{"items":[],"older_cursor":null}`,
 		method: "GET", path: "/v1/sessions/s1/history", rawQuery: "cursor=abc",
+	},
+	{
+		name: "GetSessionOperation", operation: "GetSessionOperation",
+		params: `{"session_id":"s1","operation_id":"op-1"}`,
+		status: 200, response: `{"operation":{"operation_id":"op-1","request_kind":"message","status":"running","admitted_at":"2026-01-02T03:04:05Z","model":"prov/m","usage":{"by_model":[]}},"inputs":{"model":"prov/m","prompt":"p","tools":[],"strategy":{"id":"included","settings":"{}"}}}`,
+		method: "GET", path: "/v1/sessions/s1/operations/op-1",
 	},
 	{
 		name: "GetSessionCodeSnapshots", operation: "GetSessionCodeSnapshots",
@@ -392,44 +447,17 @@ var dispatchCases = []dispatchCase{
 		method: "GET", path: "/v1/warnings",
 	},
 	{
-		name: "ListExtensionCapabilities", operation: "ListExtensionCapabilities",
+		name: "ListExtensions", operation: "ListExtensions",
 		status: 200, response: `[]`,
-		method: "GET", path: "/v1/extensions/capabilities",
+		method: "GET", path: "/v1/extensions",
 	},
 	{
 		name: "InvokeExtension", operation: "InvokeExtension",
-		params: `{"body":{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"1","method":"raw","target":{"kind":"harness"},"arguments":{"big":9007199254740993},"request_id":"req-1"}}`,
+		params: `{"body":{"extension_id":"fixture","operation":"raw","target":{"kind":"harness"},"arguments":{"big":9007199254740993},"request_id":"req-1"}}`,
 		status: 200, response: `{"kind":"success","result":{"big":9007199254740993}}`,
 		method: "POST", path: "/v1/extensions/invoke",
-		body: `{"extension_id":"fixture","capability_id":"fixture.service","contract_id":"fixture.service/v1","contract_version":"1","method":"raw","target":{"kind":"harness"},"arguments":{"big":9007199254740993},"request_id":"req-1"}`,
+		body: `{"extension_id":"fixture","operation":"raw","target":{"kind":"harness"},"arguments":{"big":9007199254740993},"request_id":"req-1"}`,
 	},
-}
-
-func TestAgentRosterValidation(t *testing.T) {
-	valid := `{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"description":"","subagent":false,"model":"","readonly":false,"write_dir":"","tools":[],"capabilities":[]}`
-	duplicateName := `{"name":"primary","definition":{"extension_id":"guest","capability_id":"guest.definitions","definition_id":"primary"},"description":"","subagent":false,"model":"","readonly":false,"write_dir":"","tools":[],"capabilities":[]}`
-	for _, row := range []struct {
-		name  string
-		raw   string
-		want  int
-		valid bool
-	}{
-		{"empty", `{"agents":[]}`, 0, true},
-		{"supplied", `{"agents":[` + valid + `]}`, 1, true},
-		{"duplicate display names", `{"agents":[` + valid + `,` + duplicateName + `]}`, 2, true},
-		{"foreign-only primary", `{"agents":[` + duplicateName + `]}`, 1, true},
-		{"absent", `{}`, 0, false},
-		{"null", `{"agents":null}`, 0, false},
-		{"incomplete", `{"agents":[{"name":"primary"}]}`, 0, false},
-		{"null tool", `{"agents":[{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"description":"","subagent":false,"model":"","readonly":false,"write_dir":"","tools":[null],"capabilities":[]}]}`, 0, false},
-		{"duplicate", `{"agents":[` + valid + `,` + valid + `]}`, 0, false},
-		{"unknown", `{"agents":[{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"description":"","subagent":false,"model":"","readonly":false,"write_dir":"","tools":[],"capabilities":[],"unknown":true}]}`, 0, false},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			got, err := clientops.AgentRoster(json.RawMessage(row.raw))
-			testassert.Require(t, (err == nil) == row.valid && (!row.valid || len(got) == row.want), "roster = %+v, %v", got, err)
-		})
-	}
 }
 
 // TestCallDispatchesEveryOperation drives every supported invocation name
@@ -464,26 +492,6 @@ func TestCallDispatchesEveryOperation(t *testing.T) {
 	for _, name := range names {
 		testassert.Check(t, seen[name], "supported operation %q has no dispatch case", name)
 	}
-}
-
-// TestCallDispatchesSettingsExtensionEdit drives the second arm of the
-// settings/extension-edit request union through the same generated operation:
-// the edit's document string is carried as exact text and only the declared
-// request is sent.
-func TestCallDispatchesSettingsExtensionEdit(t *testing.T) {
-	c, doer := newScriptFixture(t)
-	response := `{"configuration_revision":{"instance_id":"0123456789abcdef0123456789abcdef","generation":"3"},"result":{"sessions":{"auto_archive":false,"archive_after_days":1,"delete_after_archive_days":0},"tools":{},"jobs":{},"compaction":{},"extensions":{}}}`
-	doer.respond = func(*http.Request) (*http.Response, error) {
-		return scriptedResponse(200, response), nil
-	}
-	params := json.RawMessage(`{"body":{"extension_edit":{"extension_id":"agents","edit_id":"set_model","arguments":"{\"definition_id\":\"primary\",\"model\":\"prov/m\"}"}}}`)
-	result, err := clientops.Call(context.Background(), c, "UpdateConfigurationSettings", params)
-	testassert.Require(t, err == nil, "Call(UpdateConfigurationSettings extension edit) = %v", err)
-	call := doer.one(t)
-	testassert.Equal(t, call.method, "PUT")
-	testassert.Equal(t, call.path, "/v1/configuration/settings")
-	testassert.Equal(t, call.body, `{"extension_edit":{"extension_id":"agents","edit_id":"set_model","arguments":"{\"definition_id\":\"primary\",\"model\":\"prov/m\"}"}}`)
-	testassert.Equal(t, string(result), response)
 }
 
 // TestCallAcceptsEmptyEnvelopePositives pins the operations whose declared

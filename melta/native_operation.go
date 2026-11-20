@@ -15,7 +15,7 @@ import (
 
 // invokeRegisteredOperation is the registered-handler counterpart of the
 // existing client invocation owner. The public envelope switches separately.
-func (r *Melta) invokeRegisteredOperation(ctx context.Context, caller Caller, extensionID, methodName string, targetInput protocol.ExtensionInvocationTarget, arguments json.RawMessage, states map[string]harness.SessionStateValue) (extension.Result, error) {
+func (r *Melta) invokeRegisteredOperation(ctx context.Context, caller Caller, extensionID, methodName string, targetInput protocol.ExtensionInvocationTarget, arguments json.RawMessage, requestID string) (extension.Result, error) {
 	arguments = bytes.Clone(arguments)
 	var result extension.Result
 	err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
@@ -47,6 +47,13 @@ func (r *Melta) invokeRegisteredOperation(ctx context.Context, caller Caller, ex
 		if err != nil {
 			return err
 		}
+		var states map[string]harness.SessionStateValue
+		if session.SessionID != "" {
+			states, err = h.SessionExtensionStates(ctx, session.SessionID)
+			if err != nil {
+				return err
+			}
+		}
 		args, err := acceptNativeMethod(operation.method.contract, arguments, false)
 		if err != nil {
 			return err
@@ -63,11 +70,11 @@ func (r *Melta) invokeRegisteredOperation(ctx context.Context, caller Caller, ex
 			candidate:          candidate, activation: entry.activation,
 			pure:    operation.method.contract.Mode == extension.ModePure,
 			session: session, states: states, host: r.config.composition,
-			commandScope: target, receipt: receipt, lease: lease,
+			commandScope: target, receipt: receipt, lease: lease, requestID: requestID,
 		}
 		author := extension.AuthorContext{
 			ExtensionID: entry.activation.id, Settings: bytes.Clone(entry.activation.section),
-			Session: session, State: bytes.Clone(states[entry.activation.id]), Call: scope.call,
+			Session: session, State: bytes.Clone(states[entry.activation.id]), Call: scope.call, RequestID: requestID,
 		}
 		result, err = executeNativeProvider(callCtx, author, operation.method.contract, operation.method.handler, "operation", methodName, args)
 		scope.end()

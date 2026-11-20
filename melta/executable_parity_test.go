@@ -1,9 +1,11 @@
 package melta
 
-// Native/worker boundary convergence: the shared fixture from
-// extension/worker/testdata/fixture runs natively and through a real worker
-// process, and every case compares the semantic observation both transports
-// produce.
+// Native/worker transport-boundary parity: the shipped author worker fixture
+// (extension/worker/testdata/author) runs as a real stdio process, and its
+// in-process native counterpart runs the same manifest, registrations, and
+// handler semantics. Every case compares the semantic values both transports
+// produce at the owner boundary; the filesystem, lifecycle, and client cases
+// belong to their owners and are not reproduced in both forms.
 
 import (
 	"context"
@@ -13,35 +15,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
-	"slices"
-	"strconv"
-	"strings"
-	"sync"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
-	workerfixture "github.com/Syntheresis/melta/extension/worker/testdata/fixture/native"
-	"github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
 
-// parityHost is one side of the native/process comparison.
-type parityHost struct {
-	name   string
-	worker bool
-	binary string
-	events string
-}
-
 // parityObservation collects the transport-independent semantic values one
 // parity run produced. Keys are stable descriptions, values are digests,
-// statuses, normalized paths or counts, never transport mechanics.
+// statuses, or counts, never transport mechanics.
 type parityObservation struct {
 	values map[string]string
 }
@@ -54,22 +39,27 @@ func (o parityObservation) set(key, value string) {
 	o.values[key] = value
 }
 
-// eachParityHost builds the worker executable once and runs one case through
-// the in-process native host and the real worker process. The same code
-// implements both transports.
-func eachParityHost(t *testing.T, run func(t *testing.T, host parityHost) parityObservation) {
+func hashHex(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// eachAuthorTransport runs one case through the in-process native fixture and
+// the real worker process over the same candidate fixture, then compares the
+// two semantic observations.
+func eachAuthorTransport(t *testing.T, run func(t *testing.T, workerHost bool, binary string) parityObservation) {
 	t.Helper()
-	binary := buildExecutableFixture(t)
-	hosts := []parityHost{{name: "native"}, {name: "worker", worker: true, binary: binary}}
-	observed := make([]parityObservation, len(hosts))
+	binary := buildAuthorWorker(t)
+	observed := make([]parityObservation, 2)
 	complete := true
-	for index, host := range hosts {
-		host := host
-		index := index
-		if !t.Run(host.name, func(t *testing.T) {
-			host.events = filepath.Join(t.TempDir(), "fixture-events.log")
-			t.Setenv(workerfixture.EventLogEnv, host.events)
-			observed[index] = run(t, host)
+	for index, workerHost := range []bool{false, true} {
+		name := "native"
+		if workerHost {
+			name = "worker"
+		}
+		index, workerHost := index, workerHost
+		if !t.Run(name, func(t *testing.T) {
+			observed[index] = run(t, workerHost, binary)
 		}) {
 			complete = false
 		}
@@ -77,899 +67,337 @@ func eachParityHost(t *testing.T, run func(t *testing.T, host parityHost) parity
 	if !complete {
 		return
 	}
-	for index := 1; index < len(observed); index++ {
-		if !reflect.DeepEqual(observed[0].values, observed[index].values) {
-			t.Fatalf("%s semantic observation differs across transports:\nnative: %v\nworker: %v", hosts[index].name, observed[0].values, observed[index].values)
+	if !reflect.DeepEqual(observed[0].values, observed[1].values) {
+		t.Fatalf("worker semantic observation differs across transports:\nnative: %v\nworker: %v", observed[0].values, observed[1].values)
+	}
+}
+
+// parityFixtureTool is the native counterpart of the worker fixture's
+// registration-replacing fixture tool, kept semantically identical to
+// extension/worker/testdata/author's fixtureTool.
+type parityFixtureTool struct {
+	api    extension.API
+	handle *extension.Registration
+	fresh  bool
+	remove bool
+}
+
+func (t *parityFixtureTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
+	return call.Arguments, nil
+}
+
+func (t *parityFixtureTool) Prepare(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
+	if !t.fresh {
+		if _, err := call.Call(ctx, "gate", "park", json.RawMessage(`{}`)); err != nil {
+			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
 		}
-	}
-}
-
-// openParity opens the fixture as a supplied native extension or as the
-// executable worker serving the same declaration. The supplied Agents
-// resolver composes the same registered capability universe either way.
-func (e *productionEnv) openParity(ctx context.Context, host parityHost) (*Melta, error) {
-	native := workerfixture.Native()
-	if host.worker {
-		return e.openExecutables(ctx, []executableExtension{{Declaration: native.Declaration, EntryPoint: host.binary}}, native.Declaration)
-	}
-	return e.openPlugins(ctx, native)
-}
-
-// configureFixture writes the fixture extension section and the Agents
-// definitions the case needs into the environment's main document.
-func configureFixture(t *testing.T, e *productionEnv, section, definitions string) {
-	t.Helper()
-	configureExtension(t, e, "fixture", section, definitions)
-}
-
-// configureExtension writes one extension section and the Agents definitions
-// into the environment's main document.
-func configureExtension(t *testing.T, e *productionEnv, id, section, definitions string) {
-	t.Helper()
-	data, err := os.ReadFile(e.configPath)
-	testassert.NoError(t, err)
-	var root map[string]json.RawMessage
-	testassert.NoError(t, json.Unmarshal(data, &root))
-	var extensions map[string]json.RawMessage
-	if len(root["extensions"]) != 0 {
-		testassert.NoError(t, json.Unmarshal(root["extensions"], &extensions))
-	}
-	if extensions == nil {
-		extensions = map[string]json.RawMessage{}
-	}
-	extensions[id] = json.RawMessage(section)
-	root["extensions"], err = json.Marshal(extensions)
-	testassert.NoError(t, err)
-	data, err = json.Marshal(root)
-	testassert.NoError(t, err)
-	writeServiceFile(t, e.configPath, string(data))
-	writeAgentDefinitions(t, e.configPath, definitions)
-}
-
-// paritySteps scripts one model turn sequence: one tool call per listed step,
-// then a final text turn.
-type parityStep struct {
-	name      string
-	arguments string
-}
-
-func parityScript(steps []parityStep) func(context.Context, string) []string {
-	return func(_ context.Context, body string) []string {
-		index := toolResultCount(body)
-		if index < len(steps) {
-			return toolCallTurnEvents(fmt.Sprintf("parity-call-%d", index), steps[index].name, steps[index].arguments)
+		if t.remove {
+			if err := t.api.Remove(*t.handle); err != nil {
+				return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+			}
+			return extension.ToolPlan{Data: []byte("old-plan"), Start: &extension.SessionStart{Target: "raw/name", InitialState: []byte(`{"large":9007199254740993}`), Report: true}}
 		}
-		return textTurnEvents("done")
-	}
-}
-
-func toolResultCount(body string) int {
-	var doc struct {
-		Messages []struct {
-			Role string `json:"role"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal([]byte(body), &doc); err != nil {
-		return 0
-	}
-	count := 0
-	for _, message := range doc.Messages {
-		if message.Role == "tool" {
-			count++
+		if _, err := t.api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, &parityFixtureTool{fresh: true}, *t.handle); err == nil {
+			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "reserved replacement accepted"}}}
 		}
-	}
-	return count
-}
-
-func hashHex(raw []byte) string {
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
-}
-
-func readFixtureEvents(t *testing.T, path string) []string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	testassert.NoError(t, err)
-	var events []string
-	for _, line := range strings.Split(string(data), "\n") {
-		if line != "" {
-			events = append(events, line)
-		}
-	}
-	return events
-}
-
-func countEvent(events []string, prefix string) int {
-	count := 0
-	for _, event := range events {
-		if strings.HasPrefix(event, prefix) {
-			count++
-		}
-	}
-	return count
-}
-
-// fixtureEventsWithPrefix returns the event lines carrying one prefix.
-func fixtureEventsWithPrefix(events []string, prefix string) []string {
-	out := make([]string, 0, len(events))
-	for _, event := range events {
-		if strings.HasPrefix(event, prefix) {
-			out = append(out, event)
-		}
-	}
-	return out
-}
-
-func parityPlanInput() harness.PlanInput {
-	return harness.PlanInput{
-		Trigger:         "manual",
-		Messages:        []model.Message{{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "plan input"}}}},
-		BoundaryEntryID: "boundary",
-		Instructions:    "instructions",
-		Tools:           []model.ToolDefinition{{Name: "fixture.tool", Parameters: json.RawMessage(`{}`)}},
-		ContextWindow:   4096,
-		OutputReserve:   1024,
-	}
-}
-
-// TestExecutableParityCorpusAndCallbacks proves the same multiline, array,
-// large-number and escaped raw bytes cross tool arguments, prepared plan data
-// and named-service values on both transports, and that all four hook
-// boundaries plus the strategy methods run in the same order with the same
-// semantic values.
-func TestExecutableParityCorpusAndCallbacks(t *testing.T) {
-	corpus := []struct {
-		payload string
-	}{
-		{"{\n  \"a\": 1,\n  \"nested\": {\"b\": [true, null]}\n}"},
-		{"[1, 2, 3, \"four\", {\"five\": 5}]"},
-		{"{\"big\":9007199254740993,\"precise\":1.0000000000000002}"},
-		{"{\"text\":\"line\\nbreak\\ttab <>& \\u2028 \\u00e9 \\\"quoted\\\"\"}"},
-	}
-	steps := make([]parityStep, len(corpus))
-	wantResults := make([]string, len(corpus))
-	wantBefore := make([]string, len(corpus))
-	wantAfter := make([]string, len(corpus))
-	for index, entry := range corpus {
-		arguments := `{"mode":"corpus","payload":` + entry.payload + `}`
-		wrapped := `{"hooked":` + strconv.Quote(arguments) + `}`
-		rawContent := hashHex([]byte(wrapped)) + ":" + hashHex([]byte(arguments))
-		steps[index] = parityStep{name: "fixture.tool", arguments: arguments}
-		wantResults[index] = "fixture-shaped:" + hashHex([]byte(rawContent)) + ":" + rawContent
-		wantBefore[index] = "hook:before_tool:in=" + strconv.Quote(arguments) + "->out=" + strconv.Quote(wrapped)
-		wantAfter[index] = "hook:after_tool:in=" + strconv.Quote(rawContent) + "->out=" + strconv.Quote(wantResults[index])
-	}
-
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool","fixture.tool.operation"],"capabilities":["fixture.hooks"]}}`)
-		e.server.setScript(parityScript(steps))
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
+		replacement, err := t.api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, &parityFixtureTool{fresh: true}, *t.handle)
 		if err != nil {
-			t.Fatalf("open: %v", err)
+			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
 		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
+		*t.handle = replacement
+	}
+	return extension.ToolPlan{Data: []byte("old-plan"), Start: &extension.SessionStart{Target: "raw/name", InitialState: []byte(`{"large":9007199254740993}`), Report: true}}
+}
 
-		session, err := r.createSession(ctx, e.workspace("parity-ws"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("session: %v", err)
-		}
-		submitThroughRuntime(t, r, session.Identity.SessionID, "op-corpus", "run")
-		awaitOperation(t, r, session.Identity.SessionID, "op-corpus", harness.OperationSuccess)
+func (t *parityFixtureTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+	if t.fresh || string(plan.Data) != "old-plan" || plan.Start == nil || plan.Start.Target != "raw/name" || string(plan.Start.InitialState) != `{"large":9007199254740993}` || !plan.Start.Report {
+		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "incorrect handler or plan"}}
+	}
+	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "old handler"}, Evidence: harness.ExecutionObserved}
+}
 
-		observation := newParityObservation()
-		if got, want := e.server.requests(), len(steps)+1; got != want {
-			t.Fatalf("model requests = %d, want %d", got, want)
-		}
-		preparePayload := "prov/m:fixture.tool,fixture.tool.operation"
-		wantPrompt := "fixture-preparation:" + hashHex([]byte(preparePayload))
-		first := decodeWireChatBody(t, e.server.bodyAt(0))
-		var systemPrompt string
-		{
-			err := json.Unmarshal(first.Messages[0].Content, &systemPrompt)
-			testassert.NoError(t, err)
-		}
-		testassert.Require(t, systemPrompt == wantPrompt, "prepared prompt = %q, want %q", systemPrompt, wantPrompt)
-		for index := 0; index < e.server.requests(); index++ {
-			doc := decodeWireChatBody(t, e.server.bodyAt(index))
-			testassert.Require(t, slices.Equal(wireToolNames(doc), []string{"fixture.tool"}), "request %d tools = %v, want the request-hook visibility subset", index, wireToolNames(doc))
-		}
-		for index, want := range wantResults {
-			body := e.server.bodyAt(index + 1)
-			testassert.Require(t, strings.Contains(body, want), "tool result %d = %q, want the shaped consequence %s", index, body, want)
-			observation.set(fmt.Sprintf("result-%d", index), want)
-		}
-
-		snapshot := r.config.current()
-		service := snapshot.resources.runtime.capabilities["fixture.service"]
-		if service == nil {
-			t.Fatal("fixture service is not open")
-		}
-		for index, entry := range corpus {
-			arguments := `{"data":` + entry.payload + `}`
-			result, err := snapshot.composition.invokeProvider(ctx, service, service.capability.Methods, "echo", json.RawMessage(arguments), nil, callIdentity{revision: snapshot.resources.revisionString()}, false)
+// nativeAuthorFixture is the in-process counterpart of the worker fixture's
+// default entry: same manifest, same registrations, same handler semantics.
+// Its "crash" method is the worker fixture's process exit; the parity script
+// never dispatches it, only proves both transports refuse it in a pure scope.
+func nativeAuthorFixture() extension.Extension {
+	return extension.Extension{
+		Manifest: authorFixtureManifest(),
+		Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+			if string(api.Settings()) == `{"fail":true}` {
+				return nil, errors.New("activation refused")
+			}
+			result, err := api.Call(ctx, "host-service", "echo", json.RawMessage(`{"entry":true}`))
 			if err != nil {
-				t.Fatalf("service echo %d: %v", index, err)
+				return nil, err
 			}
-			testassert.Require(t, string(result.Value) == arguments, "service value %d = %q, want the exact arguments %q", index, result.Value, arguments)
-			observation.set(fmt.Sprintf("service-%d", index), hashHex(result.Value))
-		}
-
-		binding, err := resolveStrategyBinding(snapshot.composition, []*scope{snapshot.resources.runtime}, harness.StrategySelection{ID: "fixture.strategy"}, context.Background())
-		if err != nil {
-			t.Fatalf("strategy binding: %v", err)
-		}
-		planInput := parityPlanInput()
-		plan, err := binding.Strategy.Plan(planInput)
-		if err != nil || plan.Kind != harness.PlanModel || plan.Model == nil || len(plan.Model.State) == 0 || len(plan.Model.Request.Messages) != 1 {
-			t.Fatalf("strategy plan = %+v, %v, want an input-derived model plan", plan, err)
-		}
-		planText := messageText(plan.Model.Request.Messages[0])
-		testassert.Require(t, strings.HasPrefix(planText, "fixture-plan:"), "plan message = %q, want the input-derived plan", planText)
-		consumeInput := harness.ConsumeInput{
-			Input:  planInput,
-			State:  plan.Model.State,
-			Output: model.Output{Status: model.OutputErrored, Source: model.ModelRef{Provider: "prov", Model: "m"}, Detail: "error detail"},
-		}
-		consume, err := binding.Strategy.Consume(consumeInput)
-		if err != nil || consume.Kind != harness.PlanNone {
-			t.Fatalf("strategy consume = %+v, %v", consume, err)
-		}
-		observation.set("strategy-plan-kind", string(plan.Kind))
-		observation.set("strategy-message", planText)
-		observation.set("strategy-state", string(plan.Model.State))
-		observation.set("strategy-consume-kind", string(consume.Kind))
-
-		events := readFixtureEvents(t, host.events)
-		wantEvents := []string{"hook:prepare:" + preparePayload + "->" + wantPrompt}
-		requestLine := "hook:request:in=fixture.tool,fixture.tool.operation->out=fixture.tool"
-		for index := range steps {
-			wantEvents = append(wantEvents, requestLine, wantBefore[index], wantAfter[index])
-		}
-		wantEvents = append(wantEvents, requestLine)
-		hookEvents := fixtureEventsWithPrefix(events, "hook:")
-		testassert.Require(t, slices.Equal(hookEvents, wantEvents), "hook events = %v, want %v", hookEvents, wantEvents)
-		observation.set("hooks", strings.Join(hookEvents, "\n"))
-		planEvents := fixtureEventsWithPrefix(events, "strategy:plan:")
-		consumeEvents := fixtureEventsWithPrefix(events, "strategy:consume:")
-		testassert.Require(t, len(planEvents) == 1 && len(consumeEvents) == 1, "strategy events = %v / %v", planEvents, consumeEvents)
-		testassert.Require(t, strings.Contains(consumeEvents[0], "state="+string(plan.Model.State)+";output=errored;detail=error detail"), "consume event = %q, want the plan's state bytes", consumeEvents[0])
-		observation.set("strategy-plan-event", planEvents[0])
-		observation.set("strategy-consume-event", consumeEvents[0])
-		return observation
-	})
-}
-
-// TestExecutableParityPreparedExecution compares the one prepared-execution
-// gate on both transports: an exact plan-data round trip, an invalid plan, an
-// evaluator denial and a returned result the shared validator rejects.
-func TestExecutableParityPreparedExecution(t *testing.T) {
-	steps := []parityStep{
-		{name: "fixture.tool", arguments: `{"mode":"default"}`},
-		{name: "fixture.tool", arguments: `{"mode":"invalid_plan"}`},
-		{name: "fixture.tool", arguments: `{"mode":"invalid_result"}`},
-	}
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool"]}}`)
-		addDenyRule(t, e.configPath, harness.PermissionFileRead, filepath.Join(e.workspace("parity-ws"), "fixture.txt"))
-		e.server.setScript(parityScript(steps))
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
-		session, err := r.createSession(ctx, e.workspace("parity-ws"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("session: %v", err)
-		}
-		submitThroughRuntime(t, r, session.Identity.SessionID, "op-execution", "run")
-		awaitOperation(t, r, session.Identity.SessionID, "op-execution", harness.OperationSuccess)
-
-		observation := newParityObservation()
-		// The first call is denied by the configured rule; the invalid plan
-		// declares no permission pair and is refused by the same gate; the
-		// invalid result reached execution but the shared validator replaced it
-		// with the contract-fixed unknown outcome.
-		for index, want := range []string{harness.PermissionDeniedContent, harness.PermissionDeniedContent, "Tool call failed internal validation."} {
-			body := e.server.bodyAt(index + 1)
-			testassert.Require(t, strings.Contains(body, want), "tool result %d = %q, want %q", index, body, want)
-			if index == 2 {
-				testassert.Require(t, strings.Contains(body, "Execution outcome unknown"), "invalid result kept a verified outcome: %q", body)
+			if string(result.Value) != `{"entry":true}` {
+				return nil, errors.New("entry service returned unexpected value")
 			}
-			observation.set(fmt.Sprintf("result-%d", index), want)
-		}
-		events := readFixtureEvents(t, host.events)
-		testassert.Equal(t, countEvent(events, "tool:execute:fixture.tool:"), 1)
-		observation.set("executions", fmt.Sprint(countEvent(events, "tool:execute:fixture.tool:")))
-		return observation
-	})
-}
-
-// TestExecutableParityDescribeBeforeOpen proves pure description is available
-// before any execution scope opens on both transports, and admitted work then
-// opens exactly one instance at every declared lifetime and closes it again.
-func TestExecutableParityDescribeBeforeOpen(t *testing.T) {
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool","fixture.tool.workspace","fixture.tool.operation","fixture.tool.invocation"]}}`)
-		steps := []parityStep{
-			{name: "fixture.tool", arguments: `{}`},
-			{name: "fixture.tool.workspace", arguments: `{}`},
-			{name: "fixture.tool.operation", arguments: `{}`},
-			{name: "fixture.tool.invocation", arguments: `{}`},
-		}
-		e.server.setScript(parityScript(steps))
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		closed := false
-		defer func() {
-			if !closed {
-				_ = r.Close(ctx)
-			}
-		}()
-
-		observation := newParityObservation()
-		snapshot := r.config.current()
-		for _, id := range []string{"fixture.tool", "fixture.tool.workspace", "fixture.tool.operation", "fixture.tool.invocation"} {
-			spec, ok := snapshot.composition.toolSpec(id)
-			if !ok {
-				t.Fatalf("tool %q is not composed", id)
-			}
-			description, err := spec.describe(ctx, Invocation{snapshot: snapshot}, model.ModelRef{Provider: "prov", Model: "m"}, harness.ToolConstraints{}, harness.SessionIdentity{SessionID: "describe", Workspace: "/workspace"}, harness.AgentInputs{Model: model.ModelRef{Provider: "prov", Model: "m"}})
+			_, err = api.RegisterService(extension.Service{Name: "worker-service", Methods: []extension.RegisteredMethod{
+				{
+					Method: extension.Method{Name: "relay", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+						return call.Call(ctx, "host-service", "echo", args)
+					},
+				},
+				{
+					Method: extension.Method{Name: "crash", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+						return extension.Result{}, errors.New("native crash stand-in")
+					},
+				},
+			}}, nil)
 			if err != nil {
-				t.Fatalf("describe %q before open: %v", id, err)
+				return nil, err
 			}
-			observation.set("describe:"+id, hashHex(description.Definition.Parameters))
-		}
-		before := readFixtureEvents(t, host.events)
-		testassert.Equal(t, countEvent(before, "open:harness:fixture.component"), 1)
-		for _, lifetime := range []string{"workspace", "operation", "invocation"} {
-			testassert.Equal(t, countEvent(before, "open:"+lifetime+":"), 0)
-		}
-
-		session, err := r.createSession(ctx, e.workspace("parity-ws"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("session: %v", err)
-		}
-		submitThroughRuntime(t, r, session.Identity.SessionID, "op-lifetimes", "run")
-		awaitOperation(t, r, session.Identity.SessionID, "op-lifetimes", harness.OperationSuccess)
-
-		testassert.NoError(t, r.Close(ctx))
-		closed = true
-		events := readFixtureEvents(t, host.events)
-		for _, component := range []struct{ lifetime, id string }{
-			{"harness", "fixture.component"},
-			{"workspace", "fixture.workspace"},
-			{"operation", "fixture.operation"},
-			{"invocation", "fixture.invocation"},
-		} {
-			opens := countEvent(events, "open:"+component.lifetime+":"+component.id)
-			closes := countEvent(events, "close:"+component.lifetime+":"+component.id)
-			testassert.Equal(t, opens, 1)
-			testassert.Equal(t, closes, opens)
-			observation.set("opens:"+component.lifetime, fmt.Sprint(opens))
-			observation.set("closes:"+component.lifetime, fmt.Sprint(closes))
-		}
-		return observation
-	})
-}
-
-// TestExecutableParityMetadataOneMiB proves one 1 MiB metadata outcome keeps
-// its exact bytes over the worker frame and matches the native description.
-func TestExecutableParityMetadataOneMiB(t *testing.T) {
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		t.Setenv(workerfixture.MetadataPaddingEnv, "1048576")
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool"]}}`)
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
-		snapshot := r.config.current()
-		spec, ok := snapshot.composition.toolSpec("fixture.tool")
-		if !ok {
-			t.Fatal("fixture.tool is not composed")
-		}
-		description, err := spec.describe(ctx, Invocation{snapshot: snapshot}, model.ModelRef{Provider: "prov", Model: "m"}, harness.ToolConstraints{}, harness.SessionIdentity{SessionID: "describe", Workspace: "/workspace"}, harness.AgentInputs{Model: model.ModelRef{Provider: "prov", Model: "m"}})
-		if err != nil {
-			t.Fatalf("describe: %v", err)
-		}
-		testassert.Require(t, len(description.Definition.Parameters) >= 1<<20, "metadata = %d bytes, want at least 1 MiB", len(description.Definition.Parameters))
-		observation := newParityObservation()
-		observation.set("metadata", hashHex(description.Definition.Parameters))
-		observation.set("size", fmt.Sprint(len(description.Definition.Parameters)))
-		return observation
-	})
-}
-
-// TestExecutableParitySessionDataAndCleanup proves the session and cache
-// namespace calls, the durable external-data claim and the post-deletion
-// cleanup callback produce the same owned layout and cleanup evidence on both
-// transports.
-func TestExecutableParitySessionDataAndCleanup(t *testing.T) {
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool"]}}`)
-		steps := []parityStep{{name: "fixture.tool", arguments: `{"mode":"data"}`}}
-		e.server.setScript(parityScript(steps))
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
-		session, err := r.createSession(ctx, e.workspace("parity-ws"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("session: %v", err)
-		}
-		submitThroughRuntime(t, r, session.Identity.SessionID, "op-data", "run")
-		awaitOperation(t, r, session.Identity.SessionID, "op-data", harness.OperationSuccess)
-		body := e.server.bodyAt(1)
-		hash := hashHex([]byte("fixture"))
-		sessionDir := filepath.Join(e.dataDir, "code", session.Identity.SessionID, "extensions", hash)
-		cacheDir := filepath.Join(e.dataDir, "extensions", hash, "cache")
-		testassert.Require(t, strings.Contains(body, "session="+sessionDir) && strings.Contains(body, "cache="+cacheDir) && strings.Contains(body, "claim=claimed"), "data result body = %q, want the owned namespaces and the claim", body)
-		testassert.Require(t, fileExists(sessionDir) && fileExists(cacheDir), "namespace directories were not created")
-
-		observation := newParityObservation()
-		observation.set("session", strings.Replace(strings.TrimPrefix(sessionDir, e.dataDir), session.Identity.SessionID, "<session>", 1))
-		observation.set("cache", strings.TrimPrefix(cacheDir, e.dataDir))
-		sentinel := filepath.Join(cacheDir, "cache.sentinel")
-		testassert.NoError(t, os.WriteFile(sentinel, []byte("cache"), 0o600))
-		{
-			_, err := r.ArchiveSession(ctx, testCaller(r), session.Identity.SessionID)
-			testassert.NoError(t, err)
-		}
-		result, err := r.DeleteSession(ctx, testCaller(r), session.Identity.SessionID)
-		testassert.NoError(t, err)
-		testassert.Equal(t, len(result.CleanupFailures), 0)
-		testassert.Require(t, !fileExists(sessionDir), "deleted Session directory still exists")
-		testassert.Require(t, fileExists(sentinel), "reusable extension cache was deleted with the Session")
-		events := readFixtureEvents(t, host.events)
-		cleanupLine := "cleanup:" + session.Identity.SessionID + ";call-session=\"\""
-		testassert.Equal(t, countEvent(events, "cleanup:"+session.Identity.SessionID), 1)
-		testassert.Require(t, slices.Contains(events, cleanupLine), "cleanup event = %v, want no Session grant on the callback context", fixtureEventsWithPrefix(events, "cleanup:"))
-		observation.set("cleanup", fmt.Sprint(countEvent(events, "cleanup:"+session.Identity.SessionID)))
-		return observation
-	})
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// TestExecutableParityConcurrentOperationCredentials proves two concurrently
-// admitted Operations keep their own captured Operation credential: the first
-// Operation was admitted before a section change, the second after it, and
-// each worker/native tool call resolves the value captured for its own
-// admission. Only digests are compared.
-func TestExecutableParityConcurrentOperationCredentials(t *testing.T) {
-	const (
-		firstName   = "PARITY_OPERATION_TOKEN_A"
-		secondName  = "PARITY_OPERATION_TOKEN_B"
-		firstValue  = "parity-operation-value-a"
-		secondValue = "parity-operation-value-b"
-	)
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		t.Setenv(firstName, firstValue)
-		t.Setenv(secondName, secondValue)
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true,"token":"`+firstName+`"}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool"]}}`)
-		hold := filepath.Join(t.TempDir(), "credential-hold")
-		held := `{"mode":"credentials_hold","hold":` + fmt.Sprintf("%q", hold) + `}`
-		script := func(_ context.Context, body string) []string {
-			if lastMessageRole(body) == "tool" {
-				return textTurnEvents("done")
+			var handle extension.Registration
+			tool := &parityFixtureTool{api: api, handle: &handle}
+			handle, err = api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, tool, nil)
+			if err != nil {
+				return nil, err
 			}
-			switch lastUserText(body) {
-			case "held":
-				return toolCallTurnEvents("call-held", "fixture.tool", held)
-			case "fresh":
-				return toolCallTurnEvents("call-fresh", "fixture.tool", `{"mode":"credentials"}`)
+			var removable extension.Registration
+			remover := &parityFixtureTool{api: api, handle: &removable, remove: true}
+			removable, err = api.RegisterTool(model.ToolDefinition{Name: "removable-tool", Parameters: json.RawMessage(`{}`)}, remover, nil)
+			if err != nil {
+				return nil, err
 			}
-			return textTurnEvents("done")
-		}
-		e.server.setScript(script)
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
-		heldSession, err := r.createSession(ctx, e.workspace("parity-held"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("held session: %v", err)
-		}
-		freshSession, err := r.createSession(ctx, e.workspace("parity-fresh"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("fresh session: %v", err)
-		}
-		submitThroughRuntime(t, r, heldSession.Identity.SessionID, "op-held", "held")
-		eventually(t, "the held credential read to start", func() bool {
-			return countEvent(readFixtureEvents(t, host.events), "credential:entered:") == 1
-		})
-
-		configureFixture(t, e, `{"enabled":true,"token":"`+secondName+`"}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool"]}}`)
-		_, err = r.Reload(ctx, testCaller(r))
-		testassert.NoError(t, err)
-		submitThroughRuntime(t, r, freshSession.Identity.SessionID, "op-fresh", "fresh")
-		awaitOperation(t, r, freshSession.Identity.SessionID, "op-fresh", harness.OperationSuccess)
-		testassert.NoError(t, os.WriteFile(hold, []byte("release"), 0o600))
-		awaitOperation(t, r, heldSession.Identity.SessionID, "op-held", harness.OperationSuccess)
-
-		firstDigest := hashHex([]byte(firstValue))
-		secondDigest := hashHex([]byte(secondValue))
-		if firstDigest == secondDigest {
-			t.Fatal("the two captured credential values did not produce distinct digests")
-		}
-		heldBody := e.server.bodyAt(3)
-		freshBody := e.server.bodyAt(2)
-		testassert.Require(t, strings.Contains(heldBody, "credential:"+firstDigest), "held Operation did not observe its own captured credential digest")
-		testassert.Require(t, strings.Contains(freshBody, "credential:"+secondDigest), "fresh Operation did not observe its own captured credential digest")
-		events := readFixtureEvents(t, host.events)
-		testassert.Equal(t, countEvent(events, "credential:result:"), 2)
-		observation := newParityObservation()
-		observation.set("held-digest", firstDigest)
-		observation.set("fresh-digest", secondDigest)
-		observation.set("results", fmt.Sprint(countEvent(events, "credential:result:")))
-		return observation
-	})
-}
-
-// TestExecutableParityRetainedCallRefused proves a service that keeps one
-// callback's Call and uses it after that callback returned is refused with
-// the closed identity on both transports.
-func TestExecutableParityRetainedCallRefused(t *testing.T) {
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":[]}}`)
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
-		snapshot := r.config.current()
-		provider := snapshot.resources.runtime.capabilities["fixture.service"]
-		if provider == nil {
-			t.Fatal("fixture service is not open")
-		}
-		invoke := func(method string, arguments string) (extension.Result, error) {
-			return snapshot.composition.invokeProvider(ctx, provider, provider.capability.Methods, method, json.RawMessage(arguments), nil, callIdentity{revision: snapshot.resources.revisionString()}, false)
-		}
-		assembled, err := invoke("assemble", `{"identity":"fixture","instructions":"","mode":"none"}`)
-		testassert.NoError(t, err)
-		testassert.Require(t, assembled.Failure == nil && len(assembled.Value) != 0, "assemble result = %+v, want the prompt hostcall value", assembled)
-		{
-			_, err := invoke("retain", `{}`)
-			testassert.NoError(t, err)
-		}
-		_, err = invoke("use_retained", `{}`)
-		testassert.Require(t, errors.Is(err, extension.ErrClosed), "retained call error = %v, want the closed identity", err)
-		observation := newParityObservation()
-		observation.set("assemble", "prompt")
-		observation.set("retained", "closed")
-		return observation
-	})
-}
-
-// TestExecutableParityChildLaunchThroughAdmission proves the child-launch
-// host service works from a prepared plan that the real Session admission
-// authorized, on both transports.
-func TestExecutableParityChildLaunchThroughAdmission(t *testing.T) {
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool"]},"child_agent":{"model":"prov/m","system_prompt":"simple","tools":[]}}`)
-		script := func(_ context.Context, body string) []string {
-			if lastUserText(body) == "child task" {
-				return textTurnEvents("child done")
+			_, err = api.RegisterStrategy(harness.StrategyBinding{ID: "worker-strategy", Strategy: parityStrategy{}}, nil)
+			if err != nil {
+				return nil, err
 			}
-			if lastMessageRole(body) == "tool" {
-				return textTurnEvents("done")
+			_, err = api.AttachArguments(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
+				return extension.ArgumentsResult{Arguments: append(json.RawMessage(nil), call.Arguments...)}, nil
+			}, nil)
+			if err != nil {
+				return nil, err
 			}
-			return toolCallTurnEvents("call-child", "fixture.tool", `{"mode":"child"}`)
-		}
-		e.server.setScript(script)
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
-		session, err := r.createSession(ctx, e.workspace("parity-ws"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("session: %v", err)
-		}
-		submitThroughRuntime(t, r, session.Identity.SessionID, "op-parent", "parent")
-		awaitOperation(t, r, session.Identity.SessionID, "op-parent", harness.OperationSuccess)
-		body := ""
-		childID := ""
-		for index := 0; index < e.server.requests(); index++ {
-			candidate := e.server.bodyAt(index)
-			start := strings.Index(candidate, "child=")
-			if start < 0 {
-				continue
+			_, err = api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+				prompt := "worker prompt"
+				return harness.RequestConsequence{Prompt: &prompt}, nil
+			}, nil)
+			if err != nil {
+				return nil, err
 			}
-			rest := candidate[start+len("child="):]
-			end := 0
-			for end < len(rest) && ((rest[end] >= '0' && rest[end] <= '9') || (rest[end] >= 'a' && rest[end] <= 'f')) {
-				end++
+			_, err = api.AttachResult(func(_ context.Context, _ extension.AuthorContext, input harness.ToolOutputInput) (string, error) {
+				return "worker: " + input.Content, nil
+			}, nil)
+			if err != nil {
+				return nil, err
 			}
-			if end != 0 {
-				body = candidate
-				childID = rest[:end]
-				break
-			}
-		}
-		if childID == "" {
-			t.Fatalf("no model request carried the child Session result; requests = %d", e.server.requests())
-		}
-		if !strings.Contains(body, "child="+childID) {
-			t.Fatalf("parent follow-up lacks the child Session: %q", body)
-		}
-		awaitOperation(t, r, childID, "child-op", harness.OperationSuccess)
-		events := readFixtureEvents(t, host.events)
-		observation := newParityObservation()
-		observation.set("child", fmt.Sprint(countEvent(events, "child:")))
-		testassert.Equal(t, countEvent(events, "child:"), 1)
-		return observation
-	})
-}
-
-type failChildReadStore struct {
-	harness.Storage
-	mu    sync.Mutex
-	root  string
-	child string
-	fail  bool
-}
-
-type observeChildTransaction struct {
-	harness.Transaction
-	root  string
-	child string
-}
-
-func (tx *observeChildTransaction) InsertRegister(d harness.RegisterDraft) (harness.Register, error) {
-	reg, err := tx.Transaction.InsertRegister(d)
-	if err == nil && d.Key.Kind == harness.RegisterSession && d.Key.SessionID != tx.root {
-		tx.child = d.Key.SessionID
-	}
-	return reg, err
-}
-
-func (s *failChildReadStore) Transact(ctx context.Context, fn func(harness.Transaction) error) error {
-	s.mu.Lock()
-	root := s.root
-	s.mu.Unlock()
-	tx := &observeChildTransaction{root: root}
-	err := s.Storage.Transact(ctx, func(inner harness.Transaction) error {
-		tx.Transaction = inner
-		return fn(tx)
-	})
-	if err == nil && root != "" && tx.child != "" {
-		s.mu.Lock()
-		s.child, s.fail = tx.child, true
-		s.mu.Unlock()
-	}
-	return err
-}
-
-func (s *failChildReadStore) ReadRegisters(ctx context.Context, id string) ([]harness.Register, error) {
-	s.mu.Lock()
-	fail := s.fail && s.child == id
-	if fail {
-		s.fail = false
-	}
-	s.mu.Unlock()
-	if fail {
-		return nil, fmt.Errorf("%w: injected child materialization failure", harness.ErrStorage)
-	}
-	return s.Storage.ReadRegisters(ctx, id)
-}
-
-// The shipped Agents tool reports the committed Session on both transports.
-func TestExecutableParityTaskCommittedLaunchFailure(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "agents-worker")
-	command := exec.Command("go", "build", "-o", binary, "./testdata/agentsprobe")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("building Agents worker: %v\n%s", err, output)
-	}
-	for _, worker := range []bool{false, true} {
-		name := "native"
-		if worker {
-			name = "worker"
-		}
-		t.Run(name, func(t *testing.T) {
-			store := &failChildReadStore{Storage: storage.NewMemory()}
-			e := newProductionEnv(t, store)
-			writeAgentDefinitions(t, e.configPath, `{"parent":{"model":"prov/m","system_prompt":"simple","tools":["task"]},"child_agent":{"model":"prov/m","system_prompt":"simple","subagent":true,"tools":[]}}`)
-			e.server.setScript(parityScript([]parityStep{{name: "task", arguments: `{"prompt":"child task","subagent_type":"child_agent"}`}}))
-			ctx := context.Background()
-			native := agents.Native(agents.Options{CapabilityIDs: agents.StandardTools, ToolIDs: agents.StandardTools})
-			var r *Melta
-			var err error
-			if worker {
-				installExecutablePackage(t, e.dataDir, executableExtension{Declaration: native.Declaration, EntryPoint: binary})
-				useFixtureStore(t, store)
-				r, err = open(ctx, options{
-					DataDir: e.dataDir, Configuration: NewFileConfigurationSource(e.configPath),
-					Credentials: NewEnvironmentCredentialSource(filepath.Join(e.home, ".melta", ".env")),
-					Locations:   e.locations(),
-				})
-			} else {
-				r, err = e.openPlugins(ctx, native)
-			}
-			testassert.NoError(t, err)
-			defer func() {
-				testassert.Require(t, errors.Is(r.Close(ctx), harness.ErrStorage), "Close must retain the storage failure")
-			}()
-			parent, err := r.createSession(ctx, e.workspace("task-failure"), "parent")
-			testassert.NoError(t, err)
-			store.mu.Lock()
-			store.root = parent.Identity.SessionID
-			store.mu.Unlock()
-			submitThroughRuntime(t, r, parent.Identity.SessionID, "op-parent", "parent")
-			awaitOperation(t, r, parent.Identity.SessionID, "op-parent", harness.OperationSuccess)
-
-			ids, err := store.ListSessionIDs(ctx)
-			testassert.NoError(t, err)
-			testassert.Require(t, len(ids) == 2 && slices.Contains(ids, parent.Identity.SessionID), "committed Session IDs = %v", ids)
-			childID := ids[0]
-			if childID == parent.Identity.SessionID {
-				childID = ids[1]
-			}
-			registers, err := store.ReadRegisters(ctx, childID)
-			testassert.NoError(t, err)
-			testassert.Equal(t, len(registers), 2)
-			testassert.Equal(t, registers[1].Key.Kind, harness.RegisterOperation)
-			childOperation, err := r.harness.ReadOperation(ctx, childID, registers[1].Key.OperationID)
-			testassert.NoError(t, err)
-			testassert.Equal(t, childOperation.State.Status, harness.OperationRunning)
-			view, err := r.harness.ReadSessionView(ctx, parent.Identity.SessionID)
-			testassert.NoError(t, err)
-			testassert.Equal(t, len(view.Background), 0)
-			var entryIDs []string
-			for _, header := range view.History.HistoryHeaders() {
-				entryIDs = append(entryIDs, header.EntryID)
-			}
-			taskFailure := false
-			for _, fact := range view.History.HistoryFacts(entryIDs) {
-				if fact.ToolResult != nil && fact.ToolResult.ToolCallID == "parity-call-0" {
-					taskFailure = fact.ToolResult.Status == model.ResultError && strings.Contains(fact.ToolResult.Content, childID)
+			_, err = api.AttachAuthorization(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
+				if string(input.Arguments) != string([]byte{0xff, '{'}) {
+					return nil, errors.New("authorization arguments changed")
 				}
+				refusal := "denied by worker"
+				return &refusal, nil
+			}, nil)
+			if err != nil {
+				return nil, err
 			}
-			testassert.Require(t, taskFailure, "the shipped task did not persist an error naming the Session")
-			found := false
-			for i := 0; i < e.server.requests(); i++ {
-				body := e.server.bodyAt(i)
-				if strings.Contains(body, "Session ID: "+childID) && strings.Contains(body, "injected child materialization failure") {
-					found = true
+			_, err = api.RegisterOperation(extension.Operation{
+				Target: extension.ExposedTargetHarness,
+				Method: extension.Method{Name: "operation", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+					return extension.Result{Value: args}, nil
+				},
+			}, nil)
+			if err != nil {
+				return nil, err
+			}
+			_, err = api.AttachAdmission(func(_ context.Context, _ extension.AuthorContext, input extension.AdmissionInput) (extension.AdmissionResult, error) {
+				if input.Candidate.Instructions == "skip" {
+					value := "unread"
+					return extension.AdmissionResult{Refusal: &value}, nil
 				}
+				prompt, err := input.Prompt.Default()
+				if err != nil {
+					return extension.AdmissionResult{}, err
+				}
+				return extension.AdmissionResult{Refusal: &prompt}, nil
+			}, nil)
+			if err != nil {
+				return nil, err
 			}
-			testassert.Require(t, found, "the shipped task did not report the failure with its committed Session ID")
-		})
+			_, err = api.RegisterCleanup(func(_ context.Context, _ extension.AuthorContext, session harness.SessionIdentity) error {
+				if session.SessionID != "session" {
+					return errors.New("unexpected session")
+				}
+				return nil
+			}, nil)
+			return nil, err
+		},
 	}
 }
 
-// TestExecutableParityCooperativeCancellation proves an admitted execution
-// that observes its callback cancellation settles the same terminal on both
-// transports without replaying work.
-func TestExecutableParityCooperativeCancellation(t *testing.T) {
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool"]}}`)
-		e.server.setScript(parityScript([]parityStep{{name: "fixture.tool", arguments: `{"mode":"cooperative"}`}}))
+// parityStrategy is the native counterpart of the worker fixture's PlanNone strategy.
+type parityStrategy struct{}
+
+func (parityStrategy) Plan(harness.PlanInput) (harness.PlanOutput, error) {
+	return harness.PlanOutput{Kind: harness.PlanNone}, nil
+}
+
+func (parityStrategy) Consume(harness.ConsumeInput) (harness.PlanOutput, error) {
+	return harness.PlanOutput{Kind: harness.PlanNone}, nil
+}
+
+// TestAuthorTransportBoundaryParity runs the author fixture's registered
+// service values, tool handler chain, strategy, hooks, operation, activation
+// hostcall, activation failure, and pure-scope refusal through both
+// transports and compares the semantic observations.
+func TestAuthorTransportBoundaryParity(t *testing.T) {
+	corpus := []string{
+		"{\n  \"a\": 1,\n  \"nested\": {\"b\": [true, null]}\n}",
+		"[1, 2, 3, \"four\", {\"five\": 5}]",
+		"{\"big\":9007199254740993,\"precise\":1.0000000000000002}",
+		"{\"text\":\"line\\nbreak\\ttab <>& \\u2028 \\u00e9 \\\"quoted\\\"\"}",
+	}
+	eachAuthorTransport(t, func(t *testing.T, workerHost bool, binary string) parityObservation {
+		manifest := authorFixtureManifest()
+		guest := nativeAuthorFixture()
+		if workerHost {
+			guest = executableAuthorExtension(manifest, binary, func(context.Context, []string) ([]string, error) {
+				return append([]string(nil), os.Environ()...), nil
+			})
+		}
+		owner := &configurationService{}
 		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
+		build := func(section string) *nativeCandidate {
+			t.Helper()
+			candidate, err := owner.prepareNativeCandidate(ctx, []nativeActivationSpec{
+				{extension: shHostServicePlugin(), section: json.RawMessage(`{}`)},
+				{extension: guest, section: json.RawMessage(section), installed: workerHost},
+			})
+			testassert.NoError(t, err)
+			return candidate
 		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
-		session, err := r.createSession(ctx, e.workspace("parity-ws"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("session: %v", err)
-		}
-		submitThroughRuntime(t, r, session.Identity.SessionID, "op-cancel", "run")
-		eventually(t, "the cooperative execution to start", func() bool {
-			return countEvent(readFixtureEvents(t, host.events), "tool:cooperative") == 1
-		})
-		testassert.NoError(t, r.InterruptSession(ctx, testCaller(r), session.Identity.SessionID))
-		record := awaitOperation(t, r, session.Identity.SessionID, "op-cancel", harness.OperationInterruption)
-		events := readFixtureEvents(t, host.events)
-		testassert.Equal(t, countEvent(events, "tool:execute:fixture.tool:"), 1)
 		observation := newParityObservation()
-		observation.set("terminal", string(record.State.Status))
-		observation.set("executions", fmt.Sprint(countEvent(events, "tool:execute:fixture.tool:")))
+
+		// An activation that refuses its section stays inactive on both
+		// transports, and the rest of the candidate publishes.
+		failed := build(`{"fail":true}`)
+		testassert.Require(t, failed.inactive[manifest.ID] != nil, "refused activation was not inactive: %v", failed.inactive)
+		failed.release()
+
+		candidate := build(`{}`)
+		defer candidate.release()
+		testassert.Require(t, len(candidate.inactive) == 0, "activation inactive: %v", candidate.inactive)
+		testassert.NoError(t, candidate.publishForTest())
+		observation.set("activation", "ok")
+
+		callScoped := func(service, method string, args json.RawMessage, pure bool) (extension.Result, error) {
+			scope := &nativeCallScope{}
+			if pure {
+				scope = &nativeCallScope{pure: true}
+			}
+			return candidate.callServiceScoped(ctx, service, method, args, scope)
+		}
+		for index, payload := range corpus {
+			result, err := callScoped("worker-service", "relay", json.RawMessage(payload), true)
+			testassert.NoError(t, err)
+			testassert.Require(t, string(result.Value) == payload, "service relay %d = %q, want the exact arguments %q", index, result.Value, payload)
+			observation.set(fmt.Sprintf("relay-%d", index), hashHex(result.Value))
+		}
+		_, err := callScoped("worker-service", "crash", json.RawMessage(`{}`), true)
+		testassert.Require(t, errors.Is(err, ErrDenied) && errors.Is(err, ErrComposition), "pure-scope ServiceIO call = %v, want the composition refusal", err)
+		observation.set("pure-refused", "denied")
+
+		stage := candidate.snapshotForTest()
+		defer stage.release()
+		binding := stage.bindTool("worker-tool")
+		if binding == nil {
+			t.Fatal("worker-tool is not registered")
+		}
+		defer binding.release()
+		tool := binding.entry.value.(nativeTool).tool
+		for index, payload := range corpus {
+			normalized, err := tool.Normalize(extension.AuthorContext{}, model.ToolCall{ID: fmt.Sprintf("call-%d", index), Name: "worker-tool", Arguments: json.RawMessage(payload)})
+			testassert.NoError(t, err)
+			testassert.Require(t, string(normalized) == payload, "normalized arguments %d = %q, want the exact call arguments", index, normalized)
+			observation.set(fmt.Sprintf("normalize-%d", index), hashHex(normalized))
+		}
+		gate := func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+			return extension.Result{Value: json.RawMessage(`{}`)}, nil
+		}
+		plan := tool.Prepare(ctx, extension.AuthorContext{Call: gate}, model.ToolCall{ID: "call", Name: "worker-tool", Arguments: json.RawMessage(`{}`)})
+		if plan.Immediate != nil {
+			t.Fatalf("prepare: %+v", plan.Immediate)
+		}
+		start, err := json.Marshal(plan.Start)
+		testassert.NoError(t, err)
+		observation.set("plan", hashHex(plan.Data)+":"+hashHex(start))
+		outcome := tool.Execute(ctx, extension.AuthorContext{}, plan)
+		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "old handler" && outcome.Evidence == harness.ExecutionObserved, "execute = %+v, want the old handler's observed success", outcome)
+		observation.set("execute", outcome.Result.Content+":"+string(outcome.Evidence))
+
+		strategy := stage.strategies["worker-strategy"]
+		if strategy == nil {
+			t.Fatal("worker-strategy is not registered")
+		}
+		strategyImpl := strategy.value.(harness.StrategyBinding).Strategy
+		planned, err := strategyImpl.Plan(harness.PlanInput{Trigger: "manual"})
+		testassert.NoError(t, err)
+		consumed, err := strategyImpl.Consume(harness.ConsumeInput{Input: harness.PlanInput{Trigger: "manual"}, Output: model.Output{Source: model.ModelRef{Provider: "p", Model: "m"}}})
+		testassert.NoError(t, err)
+		observation.set("strategy", string(planned.Kind)+":"+string(consumed.Kind))
+
+		argumentsHook := stage.hooks["arguments"][0].value.(nativeHook).handler.(extension.ArgumentsHook)
+		repaired, err := argumentsHook(ctx, extension.AuthorContext{}, model.ToolCall{ID: "bad", Name: "worker-tool", Arguments: json.RawMessage{0xff, '{'}})
+		testassert.NoError(t, err)
+		observation.set("hook-arguments", hashHex(repaired.Arguments))
+		requestHook := stage.hooks["request"][0].value.(nativeHook).handler.(extension.AuthorRequestHook)
+		consequence, err := requestHook(ctx, extension.AuthorContext{}, extension.AuthorRequestInput{RequestHookInput: harness.RequestHookInput{Model: model.ModelRef{Provider: "p", Model: "m"}}})
+		testassert.NoError(t, err)
+		testassert.Require(t, consequence.Prompt != nil && *consequence.Prompt == "worker prompt", "request hook = %+v", consequence)
+		observation.set("hook-request", *consequence.Prompt)
+		resultHook := stage.hooks["result"][0].value.(nativeHook).handler.(extension.ResultHook)
+		content, err := resultHook(ctx, extension.AuthorContext{}, harness.ToolOutputInput{Content: "output"})
+		testassert.NoError(t, err)
+		observation.set("hook-result", content)
+		authorizationHook := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
+		refusal, err := authorizationHook(ctx, extension.AuthorContext{}, extension.AuthorizationInput{Arguments: json.RawMessage{0xff, '{'}})
+		testassert.NoError(t, err)
+		testassert.Require(t, refusal != nil && *refusal == "denied by worker", "authorization = %v", refusal)
+		kept, err := authorizationHook(ctx, extension.AuthorContext{}, extension.AuthorizationInput{Arguments: json.RawMessage(`{}`)})
+		testassert.Require(t, err != nil && kept == nil, "authorization with changed arguments = (%v, %v), want the refusal error", kept, err)
+		observation.set("hook-authorization", *refusal+":refused")
+
+		admissionHook := stage.hooks["admission"][0].value.(nativeHook).handler.(extension.AdmissionHook)
+		promptReads := 0
+		admissionResult, err := admissionHook(ctx, extension.AuthorContext{}, extension.AdmissionInput{Candidate: extension.AdmissionCandidate{Model: model.ModelRef{Provider: "p", Model: "m"}}, Prompt: extension.PromptAccess{Default: func() (string, error) {
+			promptReads++
+			return "lazy prompt", nil
+		}}})
+		testassert.NoError(t, err)
+		testassert.Require(t, admissionResult.Refusal != nil && *admissionResult.Refusal == "lazy prompt" && promptReads == 1, "admission = %+v, reads %d", admissionResult, promptReads)
+		promptReads = 0
+		admissionResult, err = admissionHook(ctx, extension.AuthorContext{}, extension.AdmissionInput{Candidate: extension.AdmissionCandidate{
+			Model: model.ModelRef{Provider: "p", Model: "m"}, Instructions: "skip",
+		}, Prompt: extension.PromptAccess{Default: func() (string, error) {
+			promptReads++
+			return "unexpected", nil
+		}}})
+		testassert.NoError(t, err)
+		testassert.Require(t, admissionResult.Refusal != nil && *admissionResult.Refusal == "unread" && promptReads == 0, "unread prompt = %+v, reads %d", admissionResult, promptReads)
+		observation.set("hook-admission", "lazy:1,unread:0")
+
+		cleanupHook := stage.hooks["cleanup"][0].value.(extension.CleanupHook)
+		testassert.NoError(t, cleanupHook(ctx, extension.AuthorContext{ExtensionID: manifest.ID}, harness.SessionIdentity{SessionID: "session"}))
+		testassert.Require(t, cleanupHook(ctx, extension.AuthorContext{ExtensionID: manifest.ID}, harness.SessionIdentity{SessionID: "other"}) != nil, "unexpected session was accepted")
+		observation.set("hook-cleanup", "ok:refused")
+
+		operation := stage.operations[nativeOperationKey{manifest.ID, "operation"}]
+		if operation == nil {
+			t.Fatal("operation is not registered")
+		}
+		operationMethod := operation.value.(struct {
+			target extension.ExposedTargetKind
+			method nativeServiceMethod
+		}).method
+		operationResult, err := operationMethod.handler(ctx, extension.AuthorContext{}, json.RawMessage(`{"number":9007199254740993}`))
+		testassert.NoError(t, err)
+		observation.set("operation", hashHex(operationResult.Value))
 		return observation
 	})
-}
-
-// TestExecutableParityPureCallbacksCannotDispatchServiceIO proves a fixture
-// Normalize or Prepare that attempts a service-I/O hostcall is refused on both
-// transports, with the fixed refusal reaching the model.
-func TestExecutableParityPureCallbacksCannotDispatchServiceIO(t *testing.T) {
-	steps := []parityStep{
-		{name: "fixture.tool", arguments: `{"mode":"normalize_io"}`},
-		{name: "fixture.tool", arguments: `{"mode":"prepare_io"}`},
-	}
-	eachParityHost(t, func(t *testing.T, host parityHost) parityObservation {
-		e := newProductionEnv(t, storage.NewMemory())
-		configureFixture(t, e, `{"enabled":true}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":["fixture.tool"]}}`)
-		e.server.setScript(parityScript(steps))
-		ctx := context.Background()
-		r, err := e.openParity(ctx, host)
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		defer func() { testassert.NoError(t, r.Close(ctx)) }()
-		session, err := r.createSession(ctx, e.workspace("parity-ws"), "fixture_agent")
-		if err != nil {
-			t.Fatalf("session: %v", err)
-		}
-		submitThroughRuntime(t, r, session.Identity.SessionID, "op-pure-io", "run")
-		awaitOperation(t, r, session.Identity.SessionID, "op-pure-io", harness.OperationSuccess)
-		for index := range steps {
-			body := e.server.bodyAt(index + 1)
-			testassert.Require(t, strings.Contains(body, "fixture: service I/O refused"), "tool result %d = %q, want the fixed service-I/O refusal", index, body)
-		}
-		events := readFixtureEvents(t, host.events)
-		testassert.Equal(t, countEvent(events, "tool:normalize:io-refused:fixture.tool"), 1)
-		testassert.Equal(t, countEvent(events, "tool:prepare:io-refused:fixture.tool"), 1)
-		testassert.Equal(t, countEvent(events, "io-granted"), 0)
-		observation := newParityObservation()
-		observation.set("normalize-io", fmt.Sprint(countEvent(events, "tool:normalize:io-refused:fixture.tool")))
-		observation.set("prepare-io", fmt.Sprint(countEvent(events, "tool:prepare:io-refused:fixture.tool")))
-		return observation
-	})
-}
-
-// TestExecutableParityWorkerEnvironment proves the real worker process
-// inherits neither a declared nor a provider secret name while an ordinary
-// marker survives; the fixture reports names only.
-func TestExecutableParityWorkerEnvironment(t *testing.T) {
-	const (
-		declaredName  = "PARITY_ENV_DECLARED_SECRET"
-		declaredValue = "parity-declared-value-never-logged"
-		markerName    = "PARITY_ENV_ORDINARY_MARKER"
-		markerValue   = "parity-marker-value"
-		providerName  = "PRODUCTION_TEST_KEY"
-		providerValue = "production-secret-1"
-	)
-	t.Setenv(declaredName, declaredValue)
-	t.Setenv(markerName, markerValue)
-	binary := buildExecutableFixture(t)
-	e := newProductionEnv(t, storage.NewMemory())
-	configureExtension(t, e, "fixture", `{"enabled":true,"token":"`+declaredName+`"}`, `{"fixture_agent":{"model":"prov/m","system_prompt":"simple","tools":[]}}`)
-	eventPath := filepath.Join(t.TempDir(), "worker-env-events.log")
-	t.Setenv(workerfixture.EventLogEnv, eventPath)
-	ctx := context.Background()
-	r, err := e.openParity(ctx, parityHost{name: "worker", worker: true, binary: binary, events: eventPath})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { testassert.NoError(t, r.Close(ctx)) }()
-	eventually(t, "the worker environment report", func() bool {
-		return countEvent(readFixtureEvents(t, eventPath), "env:"+markerName) == 1
-	})
-	data, err := os.ReadFile(eventPath)
-	testassert.NoError(t, err)
-	events := readFixtureEvents(t, eventPath)
-	for _, name := range []string{declaredName, providerName} {
-		testassert.Require(t, !slices.Contains(events, "env:"+name), "secret name %q reached the worker environment", name)
-	}
-	testassert.Require(t, slices.Contains(events, "env:"+markerName), "ordinary marker %q is missing from the worker environment", markerName)
-	testassert.Require(t, !strings.Contains(string(data), declaredValue) && !strings.Contains(string(data), providerValue), "a secret value was written to the event log")
 }

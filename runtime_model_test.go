@@ -113,8 +113,13 @@ func TestRuntimeBaselineModelAdmission(t *testing.T) {
 			if len(hydration.JSON200.Operations) != btoi(row.admit) {
 				t.Fatalf("operations after submit: %+v", hydration.JSON200.Operations)
 			}
-			if got := hydration.JSON200.Session.AgentSelection.Inputs; got == nil || string(got.Model) != row.selected {
-				t.Fatalf("stored model: %+v, want %q", got, row.selected)
+			stored := hydration.JSON200.Session.Inputs.Model
+			if row.selected == "" {
+				if stored != nil {
+					t.Fatalf("stored model: %+v, want none", stored)
+				}
+			} else if stored == nil || string(*stored) != row.selected {
+				t.Fatalf("stored model: %+v, want %q", stored, row.selected)
 			}
 			for _, warning := range hydration.JSON200.Warnings {
 				if warning.SessionId != nil && (warning.Source != "runtime:prompt" || warning.Kind != "rules_not_found") {

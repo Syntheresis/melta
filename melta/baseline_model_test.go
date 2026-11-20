@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Syntheresis/melta/extension"
+	"github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/storage"
@@ -89,39 +91,57 @@ func TestHostAndDefinitionModelAdmission(t *testing.T) {
 	e.fixtureStore(storage.NewMemory())
 	e.server.setScript(func(_ context.Context, _ string) []string { return textTurnEvents("done") })
 	opts := e.options()
-	host := DefaultAgentInputs()
-	host.Model = model.ModelRef{Provider: "p", Model: "a"}
-	opts.Agent = &host
+	host := model.ModelRef{Provider: "p", Model: "a"}
+	opts.Defaults = harness.SessionInputs{Model: &host}
+	opts.Extensions = []extension.Extension{agents.Author()}
 	ctx := context.Background()
 	r, err := open(ctx, opts)
 	testassert.NoError(t, err)
 	defer r.Close(ctx)
-	createAndSubmit := func(selection *protocol.AgentSelection, op, want string) string {
+	createAndSubmit := func(inputs *protocol.SessionInputs, selected bool, op, want string) string {
 		t.Helper()
-		session, err := r.CreateSession(ctx, testCaller(r), e.dataDir, selection)
-		testassert.NoError(t, err)
+		var sessionID string
+		if selected {
+			args := json.RawMessage(`{}`)
+			workspace := e.dataDir
+			result, err := r.InvokeExtension(ctx, testCaller(r), protocol.ExtensionInvocationRequest{
+				ExtensionId: "agents", Operation: "create", RequestId: op + "-create",
+				Target: protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindWorkspace, Workspace: &workspace}, Arguments: &args,
+			})
+			testassert.NoError(t, err)
+			testassert.Require(t, result.Failure == nil, "Agents create failure: %+v", result.Failure)
+			var receipt struct {
+				SessionID string `json:"session_id"`
+			}
+			testassert.NoError(t, json.Unmarshal(result.Value, &receipt))
+			sessionID = receipt.SessionID
+		} else {
+			session, err := r.CreateSession(ctx, testCaller(r), e.dataDir, inputs)
+			testassert.NoError(t, err)
+			sessionID = session.SessionId
+		}
 		var part protocol.ContentPart
 		testassert.NoError(t, part.FromTextPart(protocol.TextPart{Kind: protocol.TextPartKindText, Text: "hello"}))
-		_, err = r.SubmitSession(ctx, testCaller(r), session.SessionId, protocol.SubmitRequest{OperationId: op, Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{part}})
+		_, err = r.SubmitSession(ctx, testCaller(r), sessionID, protocol.SubmitRequest{OperationId: op, Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{part}})
 		testassert.NoError(t, err)
-		record := awaitOperation(t, r, session.SessionId, op, harness.OperationSuccess)
+		record := awaitOperation(t, r, sessionID, op, harness.OperationSuccess)
 		testassert.Require(t, record.Admission.Execution.Model.String() == want, "captured model %s, want %s", record.Admission.Execution.Model.String(), want)
-		return session.SessionId
+		return sessionID
 	}
-	first := createAndSubmit(nil, "host", "p/a")
-	createAndSubmit(&protocol.AgentSelection{Definition: &protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "primary"}}, "named", "p/b")
-	inputs := projectAgentSelection(harness.AgentSelection{Inputs: &host})
-	inputs.Inputs.Model = "p/missing"
-	createAndSubmit(&inputs, "file-fallback", "p/c")
+	first := createAndSubmit(nil, false, "host", "p/a")
+	createAndSubmit(nil, true, "named", "p/b")
+	missing := protocol.ModelRef("p/missing")
+	inputs := protocol.SessionInputs{Model: &missing}
+	createAndSubmit(&inputs, false, "host-fallback-before-settings", "p/a")
 	view, err := r.GetConfiguration(ctx, testCaller(r))
 	testassert.NoError(t, err)
 	view.Settings.Model = nil
-	_, err = r.UpdateSettings(ctx, testCaller(r), protocol.UpdateSettingsRequest{Settings: &view.Settings})
+	_, err = r.UpdateSettings(ctx, testCaller(r), protocol.UpdateSettingsRequest{Settings: view.Settings})
 	testassert.NoError(t, err)
 	view, err = r.GetConfiguration(ctx, testCaller(r))
 	testassert.NoError(t, err)
 	testassert.Require(t, view.Settings.Model == nil, "host model leaked into settings: %+v", view.Settings.Model)
-	createAndSubmit(&inputs, "host-fallback", "p/a")
+	createAndSubmit(&inputs, false, "host-fallback", "p/a")
 	record := awaitOperation(t, r, first, "host", harness.OperationSuccess)
 	testassert.Require(t, record.Admission.Execution.Model.String() == "p/a", "reload changed prior capture: %+v", record.Admission.Execution)
 }
@@ -144,10 +164,10 @@ func TestBaselineModelBinding(t *testing.T) {
 			t.Setenv("PREP_COMPACT_ABSENT_KEY", "")
 			doc := strings.TrimSuffix(compactPrepConfigDocument("https://prov.test/v1"), "}") + `,"model":"` + row.baseline + `"}`
 			captured, prep := compactPrepWith(t, compactAgentsDocument, doc, "https://prov.test/v1")
-			captured.snapshot.composition.defaultStrategy.RequiresContextWindow = row.requiresWindow
 			sel := compactPrepSelection(t, captured, "solo")
+			sel.strategy.RequiresContextWindow = row.requiresWindow
 			var err error
-			sel.inputs.Model, err = model.Parse(row.chosen)
+			sel.candidate.Model, err = model.Parse(row.chosen)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,8 +187,8 @@ func TestBaselineModelBinding(t *testing.T) {
 			if row.name == "neither" && (!errors.Is(err, config.ErrMissingEnvVar) || strings.Contains(err.Error(), "prov/missing")) {
 				t.Fatalf("final refusal reason: %v", err)
 			}
-			if !row.wantErr && (entry == nil || transport.transport == nil || sel.inputs.Model.String() != row.want) {
-				t.Fatalf("binding: %v %v %s", entry, transport, sel.inputs.Model.String())
+			if !row.wantErr && (entry == nil || transport.transport == nil || sel.candidate.Model.String() != row.want) {
+				t.Fatalf("binding: %v %v %s", entry, transport, sel.candidate.Model.String())
 			}
 		})
 	}
@@ -179,7 +199,7 @@ func TestBaselineModelCaptureAndIndependentCompact(t *testing.T) {
 	doc = strings.TrimSuffix(doc, "}") + `,"model":"prov/m2"}`
 	captured, prep := compactPrepWith(t, compactAgentsDocument, doc, "https://prov.test/v1")
 	sel := compactPrepSelection(t, captured, "solo")
-	sel.inputs.Model = model.ModelRef{Provider: "prov", Model: "missing"}
+	sel.candidate.Model = model.ModelRef{Provider: "prov", Model: "missing"}
 	entry, transport, err := prep.bindModel(context.Background(), &sel)
 	testassert.NoError(t, err)
 	capture, _, err := prep.concretePrepare(context.Background(), compactPrepRequest(), sel, entry, transport)

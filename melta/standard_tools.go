@@ -149,24 +149,15 @@ func boundedDiagnostic(cause error) string {
 	return msg
 }
 
-// canonicalPaths computes the canonical Workspace root and write-dir boundary
-// with the same pathutil canonicalization the shared preparation binds
-// internally, so Harness policy containment and the closures' revalidation
-// agree. An empty write dir stays unconstrained.
-func canonicalPaths(root, writeDir string) (workspace, boundary string, err error) {
+// canonicalPaths computes the canonical Workspace root with the same
+// pathutil canonicalization the shared preparation binds internally, so
+// Harness policy containment and the closures' revalidation agree.
+func canonicalPaths(root string) (string, error) {
 	resolved, err := pathutil.ResolveFilePathFrom("", root)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	workspace = resolved.CanonicalPath
-	if writeDir == "" {
-		return workspace, "", nil
-	}
-	writeResolved, err := pathutil.ResolveFilePathFrom(root, writeDir)
-	if err != nil {
-		return "", "", err
-	}
-	return workspace, writeResolved.CanonicalPath, nil
+	return resolved.CanonicalPath, nil
 }
 
 // canonicalPathsFn is the one seam over preparation canonicalization: both
@@ -248,17 +239,6 @@ func normalizeCallArguments(call model.ToolCall, normalize func(map[string]any) 
 // nil-tracker read path that always returns the bounded requested content.
 type readTool struct{ inst *standardTools }
 
-func (readTool) describe(_ Invocation, _ harness.ToolConstraints, _ harness.SessionIdentity) (ToolDescription, error) {
-	return ToolDescription{
-		Definition: model.ToolDefinition{
-			Name:        "read_file",
-			Description: readFileDescription,
-			Parameters:  json.RawMessage(readFileParameters),
-		},
-		Available: true,
-	}, nil
-}
-
 func (t readTool) Normalize(_ context.Context, tc ToolContext, call model.ToolCall) (json.RawMessage, error) {
 	s, err := t.inst.settings(tc.Invocation)
 	if err != nil {
@@ -280,7 +260,7 @@ func (t readTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall
 	if err != nil {
 		return immediateError(call.ID, err)
 	}
-	workspace, writeDirCanonical, err := canonicalPathsFn(tc.Workspace, tc.Constraints.WriteDir)
+	workspace, err := canonicalPathsFn(tc.Workspace)
 	if err != nil {
 		return immediateDenied(call.ID)
 	}
@@ -291,7 +271,6 @@ func (t readTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall
 	return harness.PreparedTool{
 		Permissions:        permissionPairs(harness.PermissionFileRead, prepared.Targets),
 		CanonicalWorkspace: workspace,
-		CanonicalWriteDir:  writeDirCanonical,
 		Execute: func(ctx context.Context) harness.ToolOutcome {
 			return stringOutcome(ctx, call.ID, prepared, string(call.Arguments), nil)
 		},
@@ -306,17 +285,16 @@ type mutationPrepared struct {
 }
 
 // prepareMutation is the one shared mutation-Prepare body: the strict
-// decode-and-pass of the committed normalized arguments, the canonical
-// root/write-dir binding, the per-call code group, and the assembled executor
-// plan with its file.write pairs. The per-tool callback runs the shared
-// preparation and wraps the outcome; its error is a failed canonical
-// preparation.
-func (in *standardTools) prepareMutation(tc ToolContext, call model.ToolCall, run func(root, rootCanonical, writeDirCanonical string, opts tool.CapabilityOptions, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error)) harness.PreparedTool {
+// decode-and-pass of the committed normalized arguments, the canonical root
+// binding, the per-call code group, and the assembled executor plan with its
+// file.write pairs. The per-tool callback runs the shared preparation and
+// wraps the outcome; its error is a failed canonical preparation.
+func (in *standardTools) prepareMutation(tc ToolContext, call model.ToolCall, run func(root, rootCanonical string, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error)) harness.PreparedTool {
 	args, err := toolargs.Decode(call.Arguments)
 	if err != nil {
 		return immediateError(call.ID, err)
 	}
-	workspace, writeDirCanonical, err := canonicalPathsFn(tc.Workspace, tc.Constraints.WriteDir)
+	workspace, err := canonicalPathsFn(tc.Workspace)
 	if err != nil {
 		return immediateDenied(call.ID)
 	}
@@ -324,14 +302,13 @@ func (in *standardTools) prepareMutation(tc ToolContext, call model.ToolCall, ru
 	if err != nil {
 		return immediateDenied(call.ID)
 	}
-	prepared, err := run(tc.Workspace, workspace, writeDirCanonical, tool.CapabilityOptions{WriteDir: tc.Constraints.WriteDir}, group, args)
+	prepared, err := run(tc.Workspace, workspace, group, args)
 	if err != nil {
 		return immediateDenied(call.ID)
 	}
 	return harness.PreparedTool{
 		Permissions:        permissionPairs(harness.PermissionFileWrite, prepared.targets),
 		CanonicalWorkspace: workspace,
-		CanonicalWriteDir:  writeDirCanonical,
 		Execute:            prepared.execute,
 	}
 }
@@ -339,17 +316,13 @@ func (in *standardTools) prepareMutation(tc ToolContext, call model.ToolCall, ru
 // writeTool is the write_file tool.
 type writeTool struct{ inst *standardTools }
 
-func (t writeTool) describe(_ Invocation, constraints harness.ToolConstraints, _ harness.SessionIdentity) (ToolDescription, error) {
-	return mutationDescription("write_file", writeFileDescription, writeFileParameters, constraints)
-}
-
 func (writeTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
 	return normalizeCallArguments(call, tool.NormalizeWriteArgs)
 }
 
 func (t writeTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) harness.PreparedTool {
-	return t.inst.prepareMutation(tc, call, func(root, rootCanonical, writeDirCanonical string, opts tool.CapabilityOptions, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
-		prepared, err := tool.PrepareWriteCall(root, rootCanonical, writeDirCanonical, opts, group, args)
+	return t.inst.prepareMutation(tc, call, func(root, rootCanonical string, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
+		prepared, err := tool.PrepareWriteCall(root, rootCanonical, group, args)
 		if err != nil {
 			return mutationPrepared{}, err
 		}
@@ -366,17 +339,13 @@ func (t writeTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCal
 // built from the committed normalized arguments and the result.
 type editTool struct{ inst *standardTools }
 
-func (t editTool) describe(_ Invocation, constraints harness.ToolConstraints, _ harness.SessionIdentity) (ToolDescription, error) {
-	return mutationDescription("edit_file", editFileDescription, editFileParameters, constraints)
-}
-
 func (editTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
 	return normalizeCallArguments(call, tool.NormalizeEditArgs)
 }
 
 func (t editTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) harness.PreparedTool {
-	return t.inst.prepareMutation(tc, call, func(root, rootCanonical, writeDirCanonical string, opts tool.CapabilityOptions, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
-		prepared, err := tool.PrepareEditCall(root, rootCanonical, writeDirCanonical, opts, group, args)
+	return t.inst.prepareMutation(tc, call, func(root, rootCanonical string, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
+		prepared, err := tool.PrepareEditCall(root, rootCanonical, group, args)
 		if err != nil {
 			return mutationPrepared{}, err
 		}
@@ -393,17 +362,13 @@ func (t editTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall
 // other selected eligible tool.
 type patchTool struct{ inst *standardTools }
 
-func (t patchTool) describe(_ Invocation, constraints harness.ToolConstraints, _ harness.SessionIdentity) (ToolDescription, error) {
-	return mutationDescription("apply_patch", applyPatchDescription, applyPatchParameters, constraints)
-}
-
 func (patchTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
 	return normalizeCallArguments(call, tool.NormalizePatchArgs)
 }
 
 func (t patchTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) harness.PreparedTool {
-	return t.inst.prepareMutation(tc, call, func(root, rootCanonical, writeDirCanonical string, opts tool.CapabilityOptions, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
-		prepared, err := tool.PreparePatchCall(root, rootCanonical, writeDirCanonical, opts, group, args)
+	return t.inst.prepareMutation(tc, call, func(root, rootCanonical string, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
+		prepared, err := tool.PreparePatchCall(root, rootCanonical, group, args)
 		if err != nil {
 			return mutationPrepared{}, err
 		}
@@ -416,13 +381,7 @@ func (t patchTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCal
 	})
 }
 
-// runCommandTool is the run_command tool: always available; the calling
-// Agent's readonly constraint selects the implementation. The readonly
-// variant authorizes and executes the read-only allowlist's rewritten
-// command; its foreground path keeps the captured default timeout — a model
-// timeout override is ignored — while a background start forwards a model
-// timeout >= 1 (absent/sub-one becomes 0), and write_dir never grants
-// unrestricted command execution. The unconstrained variant decomposes
+// runCommandTool is the run_command tool: always available. It decomposes
 // conclusive simple commands into one command.run target per complete
 // segment, falls back to one complete target for everything else, and always
 // executes through the shell. background=true starts a job through the
@@ -433,21 +392,6 @@ func (t patchTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCal
 type runCommandTool struct {
 	inst *standardTools
 	jobs jobs.Jobs
-}
-
-func (runCommandTool) describe(_ Invocation, constraints harness.ToolConstraints, _ harness.SessionIdentity) (ToolDescription, error) {
-	description := runCommandDescription
-	if constraints.Readonly {
-		description = tool.ReadOnlyRunCommandDescription
-	}
-	return ToolDescription{
-		Definition: model.ToolDefinition{
-			Name:        "run_command",
-			Description: description,
-			Parameters:  json.RawMessage(runCommandParameters),
-		},
-		Available: true,
-	}, nil
 }
 
 func (t runCommandTool) Normalize(_ context.Context, tc ToolContext, call model.ToolCall) (json.RawMessage, error) {
@@ -474,42 +418,30 @@ func (t runCommandTool) Prepare(_ context.Context, tc ToolContext, call model.To
 	command, _ := args["command"].(string)
 	timeoutSec := s.CommandTimeout
 	var targets []string
-	if tc.Constraints.Readonly {
-		// The readonly path retains the trim-and-reject first: empty and
-		// all-blank input settles the fixed rejection like any other
-		// non-allowlisted command, never echoing the raw form.
-		rewritten, err := tool.ReadOnlyCommand(command)
-		if err != nil {
-			return immediateError(call.ID, errors.New(tool.ReadOnlyRunCommandRejected))
+	if command == "" {
+		return immediateError(call.ID, errors.New("run_command: command is required"))
+	}
+	if v, ok := args["timeout"].(json.Number); ok {
+		if n, err := v.Int64(); err == nil {
+			timeoutSec = int(n)
 		}
-		targets = []string{rewritten}
-		command = rewritten
-	} else {
-		if command == "" {
-			return immediateError(call.ID, errors.New("run_command: command is required"))
+	}
+	if segments, ok := shellparse.ParseSimple(command); ok {
+		for _, segment := range segments {
+			targets = append(targets, segment.Text)
 		}
-		if v, ok := args["timeout"].(json.Number); ok {
-			if n, err := v.Int64(); err == nil {
-				timeoutSec = int(n)
-			}
+	}
+	if len(targets) == 0 {
+		// One complete-command fallback: the input with only leading
+		// ASCII blanks/newlines removed, or the complete original input
+		// when nothing remains. The exact text is both target and the
+		// script the shell runs.
+		fallback := strings.TrimLeft(command, " \t\n")
+		if fallback == "" {
+			fallback = command
 		}
-		if segments, ok := shellparse.ParseSimple(command); ok {
-			for _, segment := range segments {
-				targets = append(targets, segment.Text)
-			}
-		}
-		if len(targets) == 0 {
-			// One complete-command fallback: the input with only leading
-			// ASCII blanks/newlines removed, or the complete original input
-			// when nothing remains. The exact text is both target and the
-			// script the shell runs.
-			fallback := strings.TrimLeft(command, " \t\n")
-			if fallback == "" {
-				fallback = command
-			}
-			targets = []string{fallback}
-			command = fallback
-		}
+		targets = []string{fallback}
+		command = fallback
 	}
 	// The converged tail: the resolved command and targets declare the one
 	// shared permission set, and background=true swaps the execute body for
@@ -701,17 +633,6 @@ func commandOutcome(ctx context.Context, callID, command, dir string, timeoutSec
 // execution observes cancellation as an interrupted result.
 type sleepTool struct{}
 
-func (sleepTool) describe(_ Invocation, _ harness.ToolConstraints, _ harness.SessionIdentity) (ToolDescription, error) {
-	return ToolDescription{
-		Definition: model.ToolDefinition{
-			Name:        "sleep",
-			Description: sleepDescription,
-			Parameters:  json.RawMessage(sleepParameters),
-		},
-		Available: true,
-	}, nil
-}
-
 func (sleepTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
 	return normalizeCallArguments(call, tool.NormalizeSleepArgs)
 }
@@ -748,17 +669,6 @@ func (sleepTool) Prepare(_ context.Context, _ ToolContext, call model.ToolCall) 
 // canonical target <session-id>/<job-id> (read/kill) or the fixed target *
 // (list). The jobs service is its own field.
 type processTool struct{ jobs jobs.Jobs }
-
-func (processTool) describe(_ Invocation, _ harness.ToolConstraints, _ harness.SessionIdentity) (ToolDescription, error) {
-	return ToolDescription{
-		Definition: model.ToolDefinition{
-			Name:        "process",
-			Description: processDescription,
-			Parameters:  json.RawMessage(processParameters),
-		},
-		Available: true,
-	}, nil
-}
 
 func (processTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
 	return normalizeCallArguments(call, normalizeProcessArgs)
@@ -843,42 +753,25 @@ func isJobID(id string) bool {
 	return true
 }
 
-// mutationDescription is the shared mutation-tool description: the write
-// tools are unavailable only to a readonly Agent without a configured write
-// dir — with a nonempty write dir the Harness confines every write to it, so
-// the tool stays available. The description consumes the hard constraints
-// only; no execution instance is constructed.
-func mutationDescription(name, description, parameters string, constraints harness.ToolConstraints) (ToolDescription, error) {
-	return ToolDescription{
-		Definition: model.ToolDefinition{
-			Name:        name,
-			Description: description,
-			Parameters:  json.RawMessage(parameters),
-		},
-		Available: !constraints.Readonly || constraints.WriteDir != "",
-	}, nil
-}
-
 // standardToolDeclaration is one owner-constructed standard tool declaration:
-// its model-visible ID and pure description function.
+// its model-visible ID and baseline definition, built from the literal
+// description constants with no constructed state.
 type standardToolDeclaration struct {
-	id       string
-	describe func(Invocation, harness.ToolConstraints, harness.SessionIdentity) (ToolDescription, error)
+	id         string
+	definition model.ToolDefinition
 }
 
 // standardToolDeclarations returns the seven standard tool declarations in
-// declaration order. Every description is pure over the captured Invocation,
-// the hard constraints, and the literal description constants, so the
-// declarations compile once for every composition with no constructed state.
+// declaration order.
 func standardToolDeclarations() []standardToolDeclaration {
 	return []standardToolDeclaration{
-		{id: "read_file", describe: readTool{}.describe},
-		{id: "write_file", describe: writeTool{}.describe},
-		{id: "edit_file", describe: editTool{}.describe},
-		{id: "apply_patch", describe: patchTool{}.describe},
-		{id: "run_command", describe: runCommandTool{}.describe},
-		{id: "process", describe: processTool{}.describe},
-		{id: "sleep", describe: sleepTool{}.describe},
+		{id: "read_file", definition: model.ToolDefinition{Name: "read_file", Description: readFileDescription, Parameters: json.RawMessage(readFileParameters)}},
+		{id: "write_file", definition: model.ToolDefinition{Name: "write_file", Description: writeFileDescription, Parameters: json.RawMessage(writeFileParameters)}},
+		{id: "edit_file", definition: model.ToolDefinition{Name: "edit_file", Description: editFileDescription, Parameters: json.RawMessage(editFileParameters)}},
+		{id: "apply_patch", definition: model.ToolDefinition{Name: "apply_patch", Description: applyPatchDescription, Parameters: json.RawMessage(applyPatchParameters)}},
+		{id: "run_command", definition: model.ToolDefinition{Name: "run_command", Description: runCommandDescription, Parameters: json.RawMessage(runCommandParameters)}},
+		{id: "process", definition: model.ToolDefinition{Name: "process", Description: processDescription, Parameters: json.RawMessage(processParameters)}},
+		{id: "sleep", definition: model.ToolDefinition{Name: "sleep", Description: sleepDescription, Parameters: json.RawMessage(sleepParameters)}},
 	}
 }
 

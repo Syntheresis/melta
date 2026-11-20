@@ -89,11 +89,11 @@ func (scope *nativeCallScope) updateSettings(ctx context.Context, args json.RawM
 		child := &nativeCallScope{
 			nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel},
 			candidate:          scope.candidate, activation: activation, pure: true,
-			workspace: scope.workspace, permissions: scope.permissions, session: scope.session, states: scope.states,
+			workspace: scope.workspace, permissions: scope.permissions, session: scope.session, states: scope.states, requestID: scope.requestID,
 		}
 		result, err := executeNativeProvider(childCtx, extension.AuthorContext{
 			ExtensionID: activation.id, Settings: bytes.Clone(activation.section),
-			Session: scope.session, State: bytes.Clone(scope.states[activation.id]), Call: child.call,
+			Session: scope.session, State: bytes.Clone(scope.states[activation.id]), Call: child.call, RequestID: scope.requestID,
 		}, method.contract, method.handler, "service", input.Service, transformArgs)
 		child.end()
 		if err != nil {

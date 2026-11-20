@@ -77,41 +77,28 @@ func isolateMountedBundledCredentials(t *testing.T) {
 // Runtime-scoped factory that reports one warning through its
 // composition-bound callback at Open, so the generated TypeScript client reads
 // a real plugin:<registered ID> source over the wire.
-func mountedReporterPlugin() extension.Native {
-	return extension.Native{
-		Declaration: extension.Declaration{
-			ID:           "mounted_reporter",
-			Version:      "1",
-			ConfigSchema: []byte(`{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"]}`),
-			Components: []extension.Component{{
-				ID:       "mounted_reporter",
-				Lifetime: extension.LifetimeHarness,
-				Provides: []string{"mounted.reporter"},
-			}},
-			Capabilities: []extension.Capability{
-				extension.ServiceCapability("mounted.reporter", "mounted.reporter.contract", extension.PureMethod("call", `{}`, `{}`)),
-			},
-		},
-		Open: func(_ context.Context, info extension.InstanceContext) (extension.Instance, error) {
-			if info.ReportWarning != nil {
-				info.ReportWarning("mounted_notice", "mounted plugin warning")
+func mountedReporterPlugin() extension.Extension {
+	return extension.Extension{
+		Manifest: extension.Manifest{ID: "mounted_reporter", Version: "1", APIVersion: extension.APIVersion,
+			SettingsSchema: []byte(`{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"]}`),
+			Services:       []string{"melta.warnings"}},
+		Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+			if _, err := api.Call(ctx, "melta.warnings", "report", json.RawMessage(`{"kind":"mounted_notice","message":"mounted plugin warning"}`)); err != nil {
+				return nil, err
 			}
-			return extension.Instance{Capabilities: map[string]extension.Implementation{
-				"mounted.reporter": {Service: map[string]extension.Handler{
-					"call": func(context.Context, extension.CallContext, json.RawMessage) (extension.Result, error) {
-						return extension.Result{Value: json.RawMessage(`{}`)}, nil
-					},
-				}},
-			}}, nil
+			_, err := api.RegisterOperation(extension.Operation{Target: extension.ExposedTargetHarness, Method: extension.PureMethod("call", `{}`, `{}`), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+				return extension.Result{Value: json.RawMessage(`{}`)}, nil
+			}}, nil)
+			return nil, err
 		},
 	}
 }
 
 // TestMountedGeneratedTypeScriptClient mounts the real isolated owner once
 // and proves the generated TypeScript SDK addresses its special provider and
-// Agent identity query values over the real discovery-file handshake. The
-// generated Go client's identical identity coverage lives with the Runtime
-// transport tests.
+// invocation identity query values over the real discovery-file handshake.
+// The generated Go client's identical identity coverage lives with the
+// Runtime transport tests.
 func TestMountedGeneratedTypeScriptClient(t *testing.T) {
 	frontendDir, err := filepath.Abs(filepath.Join("..", "frontend"))
 	testassert.NoError(t, err)

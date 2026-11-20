@@ -567,6 +567,9 @@ func (d *executionDriver) completeMaintenance(execCtx context.Context, input Pla
 		return false, d.settleMaintenance(terminal, err, facts)
 	}
 	binding := *resolved
+	if binding.Release != nil {
+		defer binding.Release()
+	}
 	if binding.Strategy == nil {
 		return false, d.settleMaintenance(OperationFailure, invalidInput("opened strategy binding %q carries no implementation", binding.ID), facts)
 	}
@@ -703,6 +706,11 @@ func (d *executionDriver) runMaintenanceModel(execCtx context.Context, plan *Mod
 	}
 	facts.requestID = stage.request.ID
 	view := newStrategyRequestView(d.capture, facts.consumed.CheckpointEntryID, facts.consumed.BoundaryEntryID, plan.Request)
+	defer func() {
+		if view.release != nil {
+			view.release()
+		}
+	}()
 	if err := view.captureStage(stage.callbacks); err != nil {
 		return stage, model.Output{}, d.settleMaintenance(OperationFailure, err, facts)
 	}
@@ -724,7 +732,7 @@ func (d *executionDriver) runMaintenanceModel(execCtx context.Context, plan *Mod
 		},
 		ModelEffect: d.compactModelEffect(stage, facts, view.parameters, view.contributors),
 		ToolEffect: func(context.Context, model.ToolCall, []string) (model.ToolResult, error) {
-			return model.ToolResult{}, &agent.ProtocolError{Boundary: "tool", Detail: "compact agent has no tools"}
+			return model.ToolResult{}, &agent.ProtocolError{Boundary: "tool", Detail: "compact maintenance run has no tools"}
 		},
 	})
 	if runErr != nil {

@@ -40,20 +40,13 @@ func newTempCodeGroupStore(t *testing.T) testCodeGroupStore {
 
 // execPatch runs one apply_patch through the exported Normalize* + Prepare*
 // entries and returns the structured execution result.
-func execPatch(t *testing.T, root, rootCanonical, writeDirCanonical string, opts CapabilityOptions, store SnapshotStore, args map[string]any) (PreparedPatchResult, error) {
+func execPatch(t *testing.T, root, rootCanonical string, store SnapshotStore, args map[string]any) (PreparedPatchResult, error) {
 	t.Helper()
-	if rootCanonical == "" {
-		var err error
-		rootCanonical, err = bindWorkspaceRoot(root)
-		if err != nil {
-			return PreparedPatchResult{}, err
-		}
-	}
 	norm, err := NormalizePatchArgs(args)
 	if err != nil {
 		return PreparedPatchResult{}, err
 	}
-	call, err := PreparePatchCall(root, rootCanonical, writeDirCanonical, opts, store, norm)
+	call, err := PreparePatchCall(root, rootCanonical, store, norm)
 	if err != nil {
 		return PreparedPatchResult{}, err
 	}
@@ -295,14 +288,14 @@ func producerMutationCases() []producerMutationCase {
 		{
 			name: "write", existing: true, seed: "before", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
 		{
 			name: "edit", existing: true, seed: "before", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execEdit(t, root, "", "", CapabilityOptions{}, store, map[string]any{
+				_, err := execEdit(t, root, "", store, map[string]any{
 					"path": path, "old_string": "before", "new_string": "after",
 				})
 				return err
@@ -311,21 +304,21 @@ func producerMutationCases() []producerMutationCase {
 		{
 			name: "patch_update", existing: true, seed: "a\nB\nc", intended: "a\nB2\nc", partialLine: "M file.txt",
 			run: func(t *testing.T, root, _ string, store testCodeGroupStore) error {
-				_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-B\n+B2")})
+				_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-B\n+B2")})
 				return err
 			},
 		},
 		{
 			name: "write_created", existing: false, seed: "", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
 		{
 			name: "patch_add_created", existing: false, seed: "", intended: "after", partialLine: "A created.txt",
 			run: func(t *testing.T, root, _ string, store testCodeGroupStore) error {
-				_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+after")})
+				_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+after")})
 				return err
 			},
 		},

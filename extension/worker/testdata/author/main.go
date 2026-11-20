@@ -68,7 +68,7 @@ func main() {
 		if mode == "settings" {
 			e = settingsFixture()
 		}
-		if err := worker.ServeAuthor(context.Background(), e, os.Stdin, os.Stdout); err != nil {
+		if err := worker.Serve(context.Background(), e, os.Stdin, os.Stdout); err != nil {
 			os.Exit(1)
 		}
 		return
@@ -190,7 +190,7 @@ func main() {
 			return nil, err
 		},
 	}
-	if err := worker.ServeAuthor(context.Background(), e, os.Stdin, os.Stdout); err != nil {
+	if err := worker.Serve(context.Background(), e, os.Stdin, os.Stdout); err != nil {
 		os.Exit(1)
 	}
 }

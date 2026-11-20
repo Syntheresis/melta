@@ -2,6 +2,7 @@ package melta
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
@@ -408,26 +409,35 @@ func TestObservationJobMemberCurrentPairAndInternalSilence(t *testing.T) {
 	})
 }
 
-// TestObservationPluginReportsLandWithRealAttribution proves the composition
-// binds each Melta-scoped factory's InstanceContext warning callback to its
-// own registered plugin ID: two factories in one scope report distinct real sources, each
-// report lands only in its own global plugin group with the runtime-scoped
-// warning_changed event, identical reports dedupe without a second event,
-// every Session's hydration and the unfiltered read carry both groups, and
-// reports after the warning store's closure are ignored.
+// TestObservationPluginReportsLandWithRealAttribution proves each activation
+// reports warnings under its own extension ID: two activations in one owner
+// report distinct real sources, each report lands only in its own global
+// plugin group with the runtime-scoped warning_changed event, identical
+// reports dedupe without a second event, every Session's hydration and the
+// unfiltered read carry both groups, and reports after the warning store's
+// closure are ignored.
 func TestObservationPluginReportsLandWithRealAttribution(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		e := newOwnerEnv(t)
 		reports := make(map[string]func(kind, message string))
-		reporterPlugin := func(id string) extension.Native {
-			capabilityID := "reporter." + id
-			capability := testServiceCapability(capabilityID)
-			return testNative(id, extension.LifetimeHarness, []extension.Capability{capability}, nil, func(_ context.Context, info extension.InstanceContext) (extension.Instance, error) {
-				reports[id] = info.ReportWarning
+		reporterPlugin := func(id string) extension.Extension {
+			manifest := registrarManifest(id)
+			manifest.Services = []string{"melta.warnings"}
+			return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+				_, err := api.RegisterOperation(extension.Operation{
+					Target: extension.ExposedTargetHarness,
+					Method: extension.Method{Name: "report", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+						return call.Call(ctx, "melta.warnings", "report", args)
+					},
+				}, nil)
+				if err != nil {
+					return nil, err
+				}
 				e.events.add("open:" + id)
-				return extension.Instance{Capabilities: map[string]extension.Implementation{capabilityID: testServiceImplementation()}}, nil
-			})
+				return nil, nil
+			}}
 		}
 		e.fixtureStore(store)
 		enableFixturePlugin(t, e.configPath, "alpha")
@@ -440,7 +450,16 @@ func TestObservationPluginReportsLandWithRealAttribution(t *testing.T) {
 				testassert.Check(t, err == nil, "Close: %v", err)
 			}
 		}()
-		testassert.Require(t, reports["alpha"] != nil && reports["beta"] != nil, "the Melta scope carried no per-plugin ReportWarning closure")
+		for _, id := range []string{"alpha", "beta"} {
+			id := id
+			reports[id] = func(kind, message string) {
+				args, _ := json.Marshal(struct {
+					Kind    string `json:"kind"`
+					Message string `json:"message"`
+				}{kind, message})
+				_, _ = r.invokeRegisteredOperation(ctx, testCaller(r), id, "report", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, args, "")
+			}
+		}
 		session, err := r.createSession(ctx, e.dataDir, "solo")
 		testassert.NoError(t, err)
 		other, err := r.createSession(ctx, e.dataDir, "solo")

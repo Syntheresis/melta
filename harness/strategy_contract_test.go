@@ -1159,7 +1159,7 @@ func TestMaintenanceRequestMessageDomain(t *testing.T) {
 					store := emptyStore(t)
 					prepared := compactPrepared(captureForHandoff(), exec)
 					h := newCompactHarness(t, store, prepared)
-					session, serr := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+					session, serr := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 					testassert.NoError(t, serr)
 					c := leaseCoordinator(t, h, session.Identity.SessionID)
 					runErr = runManualCompact(t, h, c, session.Identity.SessionID, "compact-1")
@@ -1256,7 +1256,7 @@ func TestMaintenanceMalformedRequestAfterOpeningCancellation(t *testing.T) {
 					store = emptyStore(t)
 					prepared := compactPrepared(captureForHandoff(), exec)
 					h := newCompactHarness(t, store, prepared)
-					created, serr := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+					created, serr := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 					testassert.NoError(t, serr)
 					c := leaseCoordinator(t, h, created.Identity.SessionID)
 					session, opID = created.Identity.SessionID, "compact-1"
@@ -1641,6 +1641,8 @@ func TestStrategyContractAcceptedBindingValueSurvivesCallerMutation(t *testing.T
 		t.Run(row.name, func(t *testing.T) {
 			strategy := &bindingMutatingStrategy{replacement: row.replacement}
 			binding := fixtureStrategyBinding(strategy)
+			releases := 0
+			binding.Release = func() { releases++ }
 			strategy.binding = binding
 			exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return streamOf(turnDelta("stop", "binding snapshot pass")), nil
@@ -1649,6 +1651,7 @@ func TestStrategyContractAcceptedBindingValueSurvivesCallerMutation(t *testing.T
 			h, store, c, sessionID := strategyHarness(t, exec)
 			err := runAutomaticMaintenance(t, h, c, exec)
 			testassert.Require(t, err == nil, "the procedure under the mid-procedure binding rewrite = %v, want the accepted implementation still owning Consume", err)
+			testassert.Equal(t, releases, 1)
 			graph, gerr := validateFixture(t, store, sessionID)
 			testassert.NoError(t, gerr)
 			comp := compactedEntryOf(t, graph)

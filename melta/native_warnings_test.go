@@ -43,14 +43,14 @@ func TestScopedServiceWarningsBufferAndPublish(t *testing.T) {
 	if warningExists(r.warnings, "plugin:warning-test", "entry") {
 		t.Fatal("warning escaped before publication")
 	}
-	if err := candidate.publish(); err != nil {
+	if err := candidate.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	if !warningExists(r.warnings, "plugin:warning-test", "entry") {
 		t.Fatal("published warning missing")
 	}
 	target := protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}
-	result, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "warning-test", "report", target, []byte(`{"kind":"later","message":"after"}`), nil)
+	result, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "warning-test", "report", target, []byte(`{"kind":"later","message":"after"}`), "")
 	if err != nil || string(result.Value) != "null" || !warningExists(r.warnings, "plugin:warning-test", "later") {
 		t.Fatalf("later warning = %s, %v", result.Value, err)
 	}
@@ -63,7 +63,7 @@ func TestScopedServiceWarningsBufferAndPublish(t *testing.T) {
 	if _, err := acceptHostMethod(extension.ContractWorkspace, "write", []byte(`{"binding":"x","bytes":"eA==","create_only":null}`), false); !errors.Is(err, harness.ErrInvalid) {
 		t.Fatalf("invalid host document: %v", err)
 	}
-	_, err = r.invokeRegisteredOperation(context.Background(), testCaller(r), "warning-test", "report", target, []byte(`{"kind":"spoof","message":"bad","source":"other"}`), nil)
+	_, err = r.invokeRegisteredOperation(context.Background(), testCaller(r), "warning-test", "report", target, []byte(`{"kind":"spoof","message":"bad","source":"other"}`), "")
 	if !errors.Is(err, harness.ErrInvalid) || warningExists(r.warnings, "plugin:warning-test", "spoof") {
 		t.Fatalf("forged warning source: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestScopedServiceWarningsDeniedAndFailedCandidate(t *testing.T) {
 	if !errors.Is(seen, ErrDenied) {
 		t.Fatalf("unapproved warning: %v", seen)
 	}
-	if err := candidate.publish(); err != nil {
+	if err := candidate.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	if warningExists(r.warnings, "plugin:warning-denied", "denied") {
@@ -118,7 +118,7 @@ func TestScopedServiceWarningsDeniedAndFailedCandidate(t *testing.T) {
 	if next.inactive["warning-failed"] == nil {
 		t.Fatal("failed activation was accepted")
 	}
-	if err := next.publish(); err != nil {
+	if err := next.publishForTest(); err != nil {
 		t.Fatal(err)
 	}
 	if warningExists(r.warnings, "plugin:warning-failed", "failed") {

@@ -14,7 +14,7 @@ import (
 )
 
 func TestAuthorTaskFrozenStart(t *testing.T) {
-	config, err := parse([]byte(`{}`), nil, nil, nil)
+	config, err := parse([]byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}

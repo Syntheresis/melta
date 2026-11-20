@@ -475,13 +475,13 @@ func TestConversationProjectionToolCallLifecycle(t *testing.T) {
 				return textTurnEvents("done")
 			case strings.Contains(body, `"second"`):
 				return []string{
-					`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-3","type":"function","function":{"name":"read","arguments":"{\"third\":1}"}},{"index":1,"id":"call-4","type":"function","function":{"name":"read","arguments":"{\"fourth\":2}"}}]},"finish_reason":null}]}`,
+					`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-3","type":"function","function":{"name":"bg_read","arguments":"{\"third\":1}"}},{"index":1,"id":"call-4","type":"function","function":{"name":"bg_read","arguments":"{\"fourth\":2}"}}]},"finish_reason":null}]}`,
 					`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 				}
 			case strings.Contains(body, `"first"`):
-				return toolCallTurnEvents("call-2", "grep", `{"q":"late"}`)
+				return toolCallTurnEvents("call-2", "bg_grep", `{"q":"late"}`)
 			default:
-				return toolCallTurnEvents("call-1", "read", `{}`)
+				return toolCallTurnEvents("call-1", "bg_read", `{}`)
 			}
 		})
 		// The declared tools' prepared outcomes: the first result carries its
@@ -605,7 +605,7 @@ func TestConversationProjectionSyntheticToolResult(t *testing.T) {
 			if lastMessageRole(body) == "tool" {
 				return nil // the default completed text turn
 			}
-			return toolCallTurnEvents("call-1", "read", `{}`)
+			return toolCallTurnEvents("call-1", "bg_read", `{}`)
 		})
 		// The declared read tool fails its prepared call immediately: the
 		// synthetic error outcome settles the published call.
@@ -629,7 +629,7 @@ func TestConversationProjectionSyntheticToolResult(t *testing.T) {
 // publishing read calls call-1 and call-2 indivisibly.
 func twoReadCallTurnEvents() []string {
 	return []string{
-		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read","arguments":"{}"}},{"index":1,"id":"call-2","type":"function","function":{"name":"read","arguments":"{}"}}]},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bg_read","arguments":"{}"}},{"index":1,"id":"call-2","type":"function","function":{"name":"bg_read","arguments":"{}"}}]},"finish_reason":null}]}`,
 		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 	}
 }
@@ -859,7 +859,7 @@ func TestConversationProjectionForkPrefixIsIndependent(t *testing.T) {
 				return nil // the closing turn: the default completed text turn
 			}
 			if lastUserText(body) == "hello fork" {
-				return toolCallTurnEvents("call-1", "read", `{"n":9007199254740993}`)
+				return toolCallTurnEvents("call-1", "bg_read", `{"n":9007199254740993}`)
 			}
 			return nil // later user turns close with the default turn
 		})

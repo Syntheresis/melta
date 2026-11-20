@@ -1,7 +1,6 @@
 package prompt_test
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,11 +11,10 @@ import (
 	"github.com/Syntheresis/melta/prompt"
 )
 
-func assemblyInput(workspace string, mode prompt.Mode, rules prompt.Rules) prompt.AssemblyInput {
+func assemblyInput(workspace string, rules prompt.Rules) prompt.AssemblyInput {
 	return prompt.AssemblyInput{
 		Identity:      "## Identity\n\nCALLER_IDENTITY_MARKER",
 		Instructions:  "Do the task.",
-		Mode:          mode,
 		Rules:         rules,
 		Workspace:     workspace,
 		SessionStart:  testStart,
@@ -28,9 +26,7 @@ func assemblyInput(workspace string, mode prompt.Mode, rules prompt.Rules) promp
 
 func assembleInput(t *testing.T, input prompt.AssemblyInput) string {
 	t.Helper()
-	assembled, err := prompt.Assemble(input)
-	testassert.NoError(t, err)
-	return assembled
+	return prompt.Assemble(input)
 }
 
 func assertOrder(t *testing.T, text string, markers ...string) {
@@ -44,10 +40,10 @@ func assertOrder(t *testing.T, text string, markers ...string) {
 	}
 }
 
-func TestAssembleFullBaselineSectionsEnvironmentAndRules(t *testing.T) {
+func TestAssembleBaselineSectionsEnvironmentAndRules(t *testing.T) {
 	workspace := t.TempDir()
 	rules := prompt.Rules{GlobalText: "GLOBAL_RULES_MARKER", WorkspaceText: "WORKSPACE_RULES_MARKER"}
-	assembled := assembleInput(t, assemblyInput(workspace, prompt.ModeFull, rules))
+	assembled := assembleInput(t, assemblyInput(workspace, rules))
 
 	for _, want := range []string{
 		"## Identity",
@@ -65,12 +61,11 @@ func TestAssembleFullBaselineSectionsEnvironmentAndRules(t *testing.T) {
 		"## Tone",
 		"## Task Execution",
 		"## Language",
-		"## Your Role and Instructions",
 		"Do the task.",
 		"GLOBAL_RULES_MARKER",
 		"WORKSPACE_RULES_MARKER",
 	} {
-		testassert.Require(t, strings.Contains(assembled, want), "full prompt missing %q\n%s", want, assembled)
+		testassert.Require(t, strings.Contains(assembled, want), "prompt missing %q\n%s", want, assembled)
 	}
 	assertOrder(t, assembled,
 		"## Identity",
@@ -84,66 +79,10 @@ func TestAssembleFullBaselineSectionsEnvironmentAndRules(t *testing.T) {
 		"## Tone",
 		"## Task Execution",
 		"## Language",
-		"## Your Role and Instructions",
 		"Do the task.",
 		"GLOBAL_RULES_MARKER",
 		"WORKSPACE_RULES_MARKER",
 	)
-}
-
-func TestAssembleSimpleBaselineSections(t *testing.T) {
-	workspace := t.TempDir()
-	rules := prompt.Rules{WorkspaceText: "SIMPLE_WORKSPACE_RULES"}
-	assembled := assembleInput(t, assemblyInput(workspace, prompt.ModeSimple, rules))
-
-	for _, want := range []string{
-		"## Identity",
-		"CALLER_IDENTITY_MARKER",
-		"## Core Rules",
-		"## Compaction Awareness",
-		"## Environment",
-		"Working directory: " + workspace,
-		"## Safety",
-		"## Your Role and Instructions",
-		"Do the task.",
-		"SIMPLE_WORKSPACE_RULES",
-	} {
-		testassert.Require(t, strings.Contains(assembled, want), "simple prompt missing %q\n%s", want, assembled)
-	}
-	for _, forbidden := range []string{"## Rules File Guide", "## Tone", "## Task Execution", "## Language"} {
-		testassert.Require(t, !strings.Contains(assembled, forbidden), "simple prompt contains omitted section %q\n%s", forbidden, assembled)
-	}
-	assertOrder(t, assembled,
-		"## Identity",
-		"## Core Rules",
-		"## Compaction Awareness",
-		"## Environment",
-		"Working directory: "+workspace,
-		"## Safety",
-		"## Your Role and Instructions",
-		"SIMPLE_WORKSPACE_RULES",
-	)
-}
-
-func TestAssembleNoneReturnsTrimmedInstructionsAlone(t *testing.T) {
-	workspace := t.TempDir()
-	rules := prompt.Rules{GlobalText: "GLOBAL_RULES_MARKER", WorkspaceText: "WORKSPACE_RULES_MARKER"}
-	input := assemblyInput(workspace, prompt.ModeNone, rules)
-	input.Instructions = "\n  Only compact this transcript.  \n"
-
-	assembled := assembleInput(t, input)
-	testassert.Equal(t, assembled, "Only compact this transcript.")
-	for _, forbidden := range []string{
-		"CALLER_IDENTITY_MARKER",
-		"## Identity",
-		"## Core Rules",
-		"## Environment",
-		"## Safety",
-		"GLOBAL_RULES_MARKER",
-		"WORKSPACE_RULES_MARKER",
-	} {
-		testassert.Require(t, !strings.Contains(assembled, forbidden), "none prompt contains omitted content %q\n%s", forbidden, assembled)
-	}
 }
 
 func TestAssembleHeadingSuppression(t *testing.T) {
@@ -161,39 +100,33 @@ func TestAssembleHeadingSuppression(t *testing.T) {
 	}
 	cases := []struct {
 		name       string
-		mode       prompt.Mode
 		global     string
 		workspace  string
 		suppressed []string
 	}{
-		{"level 1 safety", prompt.ModeFull, "", "# Safety\n\nUSER_SAFETY_MARKER", []string{"safety"}},
-		{"level 2 tone", prompt.ModeFull, "", "## Tone\n\nUSER_TONE_MARKER", []string{"tone"}},
-		{"level 3 task execution", prompt.ModeFull, "", "### Task Execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
-		{"task execution", prompt.ModeFull, "", "## Task Execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
-		{"task underscore", prompt.ModeFull, "", "## task_execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
-		{"task hyphen", prompt.ModeFull, "", "## task-execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
-		{"task tab", prompt.ModeFull, "", "## Task\tExecution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
-		{"task multiple spaces", prompt.ModeFull, "", "## Task  Execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
-		{"task closing hashes", prompt.ModeFull, "", "## Task Execution ##\n\nUSER_TASK_MARKER", []string{"task_execution"}},
-		{"combined headings", prompt.ModeFull, "", "# Safety\ntext\n## Tone\n### Task Execution\n# other\n\nCOMBINED_USER_MARKER", []string{"safety", "tone", "task_execution"}},
-		{"global safety suppression", prompt.ModeFull, "# Safety\n\nGLOBAL_SAFETY_MARKER", "", []string{"safety"}},
-		{"simple safety suppression", prompt.ModeSimple, "", "# Safety\n\nSIMPLE_SAFETY_MARKER", []string{"safety"}},
-		{"unrelated other heading", prompt.ModeFull, "", "## Other\n\nUSER_OTHER_MARKER", nil},
-		{"unrelated environment heading", prompt.ModeFull, "", "## Environment\n\nUSER_ENVIRONMENT_MARKER", nil},
+		{"level 1 safety", "", "# Safety\n\nUSER_SAFETY_MARKER", []string{"safety"}},
+		{"level 2 tone", "", "## Tone\n\nUSER_TONE_MARKER", []string{"tone"}},
+		{"level 3 task execution", "", "### Task Execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
+		{"task execution", "", "## Task Execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
+		{"task underscore", "", "## task_execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
+		{"task hyphen", "", "## task-execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
+		{"task tab", "", "## Task\tExecution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
+		{"task multiple spaces", "", "## Task  Execution\n\nUSER_TASK_MARKER", []string{"task_execution"}},
+		{"task closing hashes", "", "## Task Execution ##\n\nUSER_TASK_MARKER", []string{"task_execution"}},
+		{"combined headings", "", "# Safety\ntext\n## Tone\n### Task Execution\n# other\n\nCOMBINED_USER_MARKER", []string{"safety", "tone", "task_execution"}},
+		{"global safety suppression", "# Safety\n\nGLOBAL_SAFETY_MARKER", "", []string{"safety"}},
+		{"unrelated other heading", "", "## Other\n\nUSER_OTHER_MARKER", nil},
+		{"unrelated environment heading", "", "## Environment\n\nUSER_ENVIRONMENT_MARKER", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rules := prompt.Rules{GlobalText: tc.global, WorkspaceText: tc.workspace}
-			assembled := assembleInput(t, assemblyInput(t.TempDir(), tc.mode, rules))
+			assembled := assembleInput(t, assemblyInput(t.TempDir(), rules))
 			suppressed := make(map[string]bool, len(tc.suppressed))
 			for _, name := range tc.suppressed {
 				suppressed[name] = true
 			}
-			modeSections := sections
-			if tc.mode == prompt.ModeSimple {
-				modeSections = map[string]string{"safety": safetyBody}
-			}
-			for name, body := range modeSections {
+			for name, body := range sections {
 				if suppressed[name] {
 					testassert.Require(t, !strings.Contains(assembled, body), "built-in %s content survived its matching user heading in %q\n%s", name, tc.workspace+tc.global, assembled)
 					continue
@@ -209,22 +142,18 @@ func TestAssembleHeadingSuppression(t *testing.T) {
 	}
 }
 
-func TestAssembleInstructionHeadingNormalization(t *testing.T) {
+func TestAssembleInstructionsInsertedAsGiven(t *testing.T) {
 	workspace := t.TempDir()
-	cases := []struct {
-		instructions string
-		headings     int
-	}{
-		{"Do the task.", 1},
-		{"## Your Role and Instructions\n\nDo the task.", 1},
-		{"# your-role-and-instructions\n\nDo the task.", 0},
-	}
-	for _, tc := range cases {
-		input := assemblyInput(workspace, prompt.ModeFull, prompt.Rules{})
-		input.Instructions = tc.instructions
+	for _, instructions := range []string{
+		"Do the task.",
+		"## Your Role and Instructions\n\nDo the task.",
+		"# Your own heading\n\nDo the task.",
+	} {
+		input := assemblyInput(workspace, prompt.Rules{})
+		input.Instructions = instructions
 		assembled := assembleInput(t, input)
-		testassert.Require(t, strings.Count(assembled, "## Your Role and Instructions") == tc.headings, "instructions %q produced heading count %d, want %d\n%s", tc.instructions, strings.Count(assembled, "## Your Role and Instructions"), tc.headings, assembled)
-		testassert.Require(t, strings.Contains(assembled, "Do the task."), "instructions %q lost their body\n%s", tc.instructions, assembled)
+		testassert.Require(t, strings.Contains(assembled, strings.TrimSpace(instructions)), "instructions %q lost their body\n%s", instructions, assembled)
+		testassert.Require(t, strings.Count(assembled, "## Your Role and Instructions") == strings.Count(instructions, "## Your Role and Instructions"), "instructions %q gained an injected heading\n%s", instructions, assembled)
 	}
 }
 
@@ -236,7 +165,7 @@ func TestAssembleUsesOnlyExplicitInputs(t *testing.T) {
 	t.Setenv("SHELL", "/ambient-shell")
 
 	workspace := t.TempDir()
-	input := assemblyInput(workspace, prompt.ModeFull, prompt.Rules{WorkspaceText: "EXPLICIT_RULES"})
+	input := assemblyInput(workspace, prompt.Rules{WorkspaceText: "EXPLICIT_RULES"})
 	input.Identity = ""
 	input.Shell = "caller-shell"
 	assembled := assembleInput(t, input)
@@ -246,13 +175,13 @@ func TestAssembleUsesOnlyExplicitInputs(t *testing.T) {
 	}
 	testassert.Require(t, strings.Contains(assembled, "Shell: caller-shell") && strings.Contains(assembled, "EXPLICIT_RULES"), "assembly lost an explicit input\n%s", assembled)
 
-	ambientRules := readRules(t, "", workspace, prompt.ModeFull)
+	ambientRules := readRules(t, "", workspace)
 	testassert.Require(t, ambientRules.GlobalText == "" && !strings.Contains(ambientRules.GlobalText, "AMBIENT_HOME_RULES"), "ReadRules looked up the ambient home: %+v", ambientRules)
 }
 
 func TestAssembleDoesNotRereadWorkspaceRules(t *testing.T) {
 	workspace := t.TempDir()
-	input := assemblyInput(workspace, prompt.ModeFull, prompt.Rules{})
+	input := assemblyInput(workspace, prompt.Rules{})
 	writeRules(t, workspace, "LATE_WORKSPACE_RULES")
 	assembled := assembleInput(t, input)
 	testassert.Require(t, !strings.Contains(assembled, "LATE_WORKSPACE_RULES"), "pure assembly read the Workspace instead of the captured rules")
@@ -260,10 +189,10 @@ func TestAssembleDoesNotRereadWorkspaceRules(t *testing.T) {
 
 func TestAssembleIsDeterministicForEqualInputs(t *testing.T) {
 	workspace := t.TempDir()
-	rules := readRules(t, t.TempDir(), workspace, prompt.ModeFull)
-	firstInput := assemblyInput(workspace, prompt.ModeFull, rules)
+	rules := readRules(t, t.TempDir(), workspace)
+	firstInput := assemblyInput(workspace, rules)
 	firstInput.SessionStart = testStart
-	secondInput := assemblyInput(workspace, prompt.ModeFull, rules)
+	secondInput := assemblyInput(workspace, rules)
 	secondInput.SessionStart = testStart.Add(90 * time.Minute)
 	first := assembleInput(t, firstInput)
 	second := assembleInput(t, secondInput)
@@ -274,19 +203,4 @@ func TestAssembleIsDeterministicForEqualInputs(t *testing.T) {
 		testassert.Equal(t, assembleInput(t, firstInput), first)
 		testassert.Equal(t, assembleInput(t, secondInput), second)
 	}
-}
-
-func TestAssembleInvalidModeFails(t *testing.T) {
-	for _, mode := range []prompt.Mode{"", "bogus"} {
-		input := assemblyInput(t.TempDir(), mode, prompt.Rules{WorkspaceText: "RULES"})
-		assembled, err := prompt.Assemble(input)
-		testassert.Require(t, errors.Is(err, prompt.ErrInvalidInput) && assembled == "", "Assemble(%q) = (%q, %v), want ErrInvalidInput and no prompt", mode, assembled, err)
-	}
-}
-
-func TestAssembleNoneSampleTimeIsNotRead(t *testing.T) {
-	input := assemblyInput(t.TempDir(), prompt.ModeNone, prompt.Rules{})
-	input.SessionStart = time.Time{}
-	assembled := assembleInput(t, input)
-	testassert.Equal(t, assembled, "Do the task.")
 }

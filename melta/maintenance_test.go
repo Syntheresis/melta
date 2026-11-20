@@ -42,7 +42,7 @@ func ownerSweepDocument(sessions string) string {
 // instead of failing for absent metadata.
 func ownerSweepProbedDocument(endpoint, sessions string) string {
 	return `{"providers":{"prov":` + nominalProvMember(endpoint, "",
-		`{"m":{"name":"M","context_window":262144,"max_output_tokens":4096}}`) + `},"extensions":{"hooks":{"enabled":true,"tag":"T1"}},"sessions":` + sessions + `}`
+		`{"m":{"name":"M","context_window":262144,"max_output_tokens":4096}}`) + `},"extensions":{"hooks":{"enabled":true,"tag":"T1"},"probe":{"enabled":true},"probe-agent":{"enabled":true}},"sessions":` + sessions + `}`
 }
 
 // ownerSweepAgentsDocument selects the local model and the preparation hook
@@ -368,7 +368,7 @@ func seedStaleSession(t *testing.T, store harness.Storage, workspace string, sta
 		},
 	})
 	testassert.NoError(t, err)
-	rec, err := h.CreateSession(ctx, harness.CreateSessionRequest{Workspace: workspace, AgentSelection: suppliedDefinition("seeded")})
+	rec, err := h.CreateSession(ctx, harness.CreateSessionRequest{Workspace: workspace, ExtensionState: agentState("seeded")})
 	testassert.NoError(t, err)
 	rewriteSessionRegister(t, store, rec.Identity.SessionID, func(state map[string]json.RawMessage) {
 		var last time.Time
@@ -395,8 +395,8 @@ func TestMaintenanceInitialPassRunsAtStartup(t *testing.T) {
 		e.fixtureStore(store)
 		r, err := e.open(context.Background(),
 			hookPlugin(hook),
-			shortScopeProbe("probe", ScopeOperation, &opOpens),
-			shortScopeProbe("probe-agent", ScopeAgent, &agOpens))
+			shortScopeProbe("probe", &opOpens),
+			shortScopeProbe("probe-agent", &agOpens))
 		testassert.NoError(t, err)
 		rec := headerThroughRuntime(t, r, seeded)
 		testassert.Require(t, rec.Lifecycle == harness.LifecycleArchived && rec.ArchivedAt != nil, "seeded Session after startup = %+v, want the initial pass to have archived it", rec)
@@ -429,8 +429,8 @@ func TestMaintenanceControlledTicksSweepUnderTheCurrentPolicy(t *testing.T) {
 		var opOpens, agOpens atomic.Int64
 		e.fixtureStore(wrapped)
 		r, ticks, err := e.openSwept(context.Background(), hookPlugin(hook),
-			shortScopeProbe("probe", ScopeOperation, &opOpens),
-			shortScopeProbe("probe-agent", ScopeAgent, &agOpens))
+			shortScopeProbe("probe", &opOpens),
+			shortScopeProbe("probe-agent", &agOpens))
 		testassert.NoError(t, err)
 		testassert.Equal(t, wrapped.listCount(), 1)
 		created, err := r.createSession(context.Background(), filepath.Join(e.dataDir, "sweep"), "solo")

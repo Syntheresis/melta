@@ -3,7 +3,8 @@
   import { createEventDispatcher } from 'svelte';
   import ModelPicker from '../components/ModelPicker.svelte';
   export let agentType = '';
-  export let selectedModel = ''; // the Session's selected_model, shown separately
+  export let selectedModel = ''; // the Session's model choice, shown separately
+  export let ranModel = ''; // the model that actually ran, from the active or latest operation
   export let models = []; // [{ ref, provider, providerName, displayName, model }]
   export let loading = false;
   export let error = '';
@@ -21,20 +22,23 @@
   on:close={() => dispatch('close')}>
   <div class="dialog-body">
     <div id="model-dialog-title" class="hdr">
-      <span>{#if agentType}Model for agent type <span class="type">{agentType}</span>{:else}Model for this session{/if}</span>
+      <span>{#if agentType}Model for agent type <span class="type">{agentType}</span>{:else}Model choice for this session{/if}</span>
       <button class="close" on:click={() => dialog.close()} aria-label="Close model picker">×</button>
     </div>
     <div class="scope">
       {#if agentType}
-        Changes the model for future messages across <strong>all sessions using this agent type</strong>,
+        Changes the model choice for later messages across <strong>all sessions using this agent type</strong>,
         not only the current session.
       {:else}
-        Changes the model for future messages in <strong>this session</strong>.
+        Changes the model choice for later messages in <strong>this session</strong>.
       {/if}
-      The selected model is shown separately from any model an active operation captured.
+      The model choice is shown separately from the model that ran.
     </div>
     {#if selectedModel}
-      <div class="selected">Currently selected model: <span class="ref">{selectedModel}</span></div>
+      <div class="selected">Model choice: <span class="ref">{selectedModel}</span></div>
+    {/if}
+    {#if ranModel}
+      <div class="selected">Ran with: <span class="ref">{ranModel}</span></div>
     {/if}
     {#if loading}
       <div class="loading">Loading models...</div>

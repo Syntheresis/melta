@@ -9,7 +9,6 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/tool"
 	"github.com/Syntheresis/melta/internal/toolargs"
 	"github.com/Syntheresis/melta/model"
 )
@@ -27,9 +26,9 @@ func (s authorInstance) arguments(_ context.Context, call extension.AuthorContex
 	if !ok {
 		return extension.ArgumentsResult{}, nil
 	}
-	rewritten, err := tool.ReadOnlyCommand(command)
+	rewritten, err := ReadOnlyCommand(command)
 	if err != nil {
-		reason := tool.ReadOnlyRunCommandRejected
+		reason := ReadOnlyRunCommandRejected
 		return extension.ArgumentsResult{Refusal: &reason}, nil
 	}
 	args["command"] = rewritten
@@ -49,11 +48,11 @@ func (s authorInstance) authorize(ctx context.Context, call extension.AuthorCont
 	if definition.Readonly && input.ToolName == "run_command" {
 		args, err := toolargs.Decode(input.Arguments)
 		if err != nil {
-			return refuse(tool.ReadOnlyRunCommandRejected)
+			return refuse(ReadOnlyRunCommandRejected)
 		}
 		command, _ := args["command"].(string)
-		if !tool.ReadOnlyPreparedCommand(command) {
-			return refuse(tool.ReadOnlyRunCommandRejected)
+		if !ReadOnlyPreparedCommand(command) {
+			return refuse(ReadOnlyRunCommandRejected)
 		}
 		if background, _ := args["background"].(bool); !background {
 			var settings struct {

@@ -42,8 +42,8 @@ func publicFixedStrategyResolver(binding *harness.StrategyBinding) func(context.
 	}
 }
 
-func publicSelection(name string) harness.AgentSelection {
-	return harness.AgentSelection{Definition: &harness.DefinitionRef{ExtensionID: "agents", CapabilityID: "agents.definitions", DefinitionID: name}}
+func publicInputs(name string) harness.SessionInputs {
+	return harness.SessionInputs{Instructions: &name}
 }
 
 // publicCapture is the fixed prepared capture of the suite.
@@ -378,7 +378,7 @@ func (f *publicFixture) close() { f.cancel() }
 
 func createSession(t *testing.T, h *harness.Harness) string {
 	t.Helper()
-	session, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: publicSelection("coder")})
+	session, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: "/tmp/works", Inputs: publicInputs("coder")})
 	testassert.NoError(t, err)
 	return session.Identity.SessionID
 }
@@ -454,7 +454,7 @@ func TestPublicTurnLifecycle(t *testing.T) {
 		res, err := submit(t, f.h, session, "op-1", harness.MessageModeRegular, "hello")
 		testassert.Require(t, err == nil && res.Disposition == harness.DispositionAdmitted && res.Operation != nil, "first submit = %+v err %v, want admitted", res, err)
 		rec := res.Operation
-		testassert.Require(t, rec.State.Status == harness.OperationRunning && rec.Admission.AgentSelection.Definition.DefinitionID == "coder" && rec.Admission.Execution.ConfigurationRevision == "rev-1" && rec.Admission.Execution.Model == publicModelRef, "admitted record = %+v", rec)
+		testassert.Require(t, rec.State.Status == harness.OperationRunning && reflect.DeepEqual(rec.Admission.Inputs, publicInputs("coder")) && rec.Admission.Execution.ConfigurationRevision == "rev-1" && rec.Admission.Execution.Model == publicModelRef, "admitted record = %+v", rec)
 		<-script.arrived // parked at the first model boundary: the Session is active
 		{
 			got := texts(script.seen()[0])
@@ -493,7 +493,7 @@ func TestPublicTurnLifecycle(t *testing.T) {
 		second, err := f.h.ReadOperation(context.Background(), session, "op-2")
 		testassert.Require(t, err == nil && second.State.Status == harness.OperationFailure && second.State.Terminal != nil && second.State.Terminal.Detail == "second turn failed", "drained operation = %+v err %v, want terminal failure with its detail", second, err)
 		calls := f.preparationCalls()
-		testassert.Require(t, len(calls) == 2 && calls[0].Session.AgentSelection.Definition.DefinitionID == "coder" && calls[1].Session.AgentSelection.Definition.DefinitionID == "coder", "preparation calls = %+v, want one per admission with the Session type", calls)
+		testassert.Require(t, len(calls) == 2 && reflect.DeepEqual(calls[0].Session.Inputs, publicInputs("coder")) && reflect.DeepEqual(calls[1].Session.Inputs, publicInputs("coder")), "preparation calls = %+v, want one per admission with the Session inputs", calls)
 	})
 }
 
@@ -910,8 +910,8 @@ func TestPublicAgentTypeChange(t *testing.T) {
 			_, err := submit(t, f.h, session, "op-2", harness.MessageModeQueued, "queued-1")
 			testassert.NoError(t, err)
 		}
-		changed, err := f.h.ChangeAgentType(context.Background(), session, publicSelection("reviewer"))
-		testassert.Require(t, err == nil && changed.State.AgentSelection.Definition.DefinitionID == "reviewer", "ChangeAgentType = %+v err %v, want success during the blocked effect", changed, err)
+		changed, err := f.h.SetSessionInputs(context.Background(), session, publicInputs("reviewer"))
+		testassert.Require(t, err == nil && reflect.DeepEqual(changed.State.Inputs, publicInputs("reviewer")), "SetSessionInputs = %+v err %v, want success during the blocked effect", changed, err)
 		script.releaseGate()
 
 		<-f.prepare // the drained admission prepared again
@@ -921,9 +921,9 @@ func TestPublicAgentTypeChange(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		calls := f.preparationCalls()
-		testassert.Require(t, len(calls) == 2 && calls[0].Session.AgentSelection.Definition.DefinitionID == "coder" && calls[1].Session.AgentSelection.Definition.DefinitionID == "reviewer", "preparation agent types = %+v, want the capture-time value then the changed one", calls)
+		testassert.Require(t, len(calls) == 2 && reflect.DeepEqual(calls[0].Session.Inputs, publicInputs("coder")) && reflect.DeepEqual(calls[1].Session.Inputs, publicInputs("reviewer")), "preparation inputs = %+v, want the capture-time value then the changed one", calls)
 		first, err := f.h.ReadOperation(context.Background(), session, "op-1")
-		testassert.Require(t, err == nil && first.Admission.AgentSelection.Definition.DefinitionID == "coder" && first.State.Status == harness.OperationSuccess, "first operation = %+v err %v, want the immutable capture and success", first, err)
+		testassert.Require(t, err == nil && reflect.DeepEqual(first.Admission.Inputs, publicInputs("coder")) && first.State.Status == harness.OperationSuccess, "first operation = %+v err %v, want the immutable capture and success", first, err)
 	})
 }
 
@@ -1381,7 +1381,6 @@ func TestPublicOpenerInputMutationKeepsAdmittedExecution(t *testing.T) {
 				settled := make(chan struct{}, 1)
 				capture := publicCapture()
 				capture.Tools = []model.ToolDefinition{admitted}
-				capture.Capabilities = []string{"cap.one", "cap.two"}
 				f.prepareHook = func(int, harness.PreparationRequest) (harness.PreparedExecution, error) {
 					return harness.PreparedExecution{
 						Capture: capture,
@@ -1391,7 +1390,6 @@ func TestPublicOpenerInputMutationKeepsAdmittedExecution(t *testing.T) {
 								adm.Execution.Tools[0].Name = "renamed"
 								adm.Execution.Tools[0].Description = "renamed"
 								tamper(adm.Execution.Tools[0].Parameters, "admitted", "tampered")
-								adm.Execution.Capabilities[0] = "dropped"
 							}
 							return harness.Execution{
 								OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
@@ -1438,7 +1436,7 @@ func TestPublicOpenerInputMutationKeepsAdmittedExecution(t *testing.T) {
 				testassert.NoError(t, err)
 				testassert.Equal(t, rec.State.Status, harness.OperationSuccess)
 				durable := rec.Admission.Execution
-				testassert.Require(t, len(durable.Tools) == 1 && durable.Tools[0].Name == "echo" && durable.Tools[0].Description == "echoes" && string(durable.Tools[0].Parameters) == string(admittedParams) && reflect.DeepEqual(durable.Capabilities, []string{"cap.one", "cap.two"}), "durable capture = %+v, want the admitted values", durable)
+				testassert.Require(t, len(durable.Tools) == 1 && durable.Tools[0].Name == "echo" && durable.Tools[0].Description == "echoes" && string(durable.Tools[0].Parameters) == string(admittedParams), "durable capture = %+v, want the admitted values", durable)
 			})
 		})
 	}
@@ -1919,7 +1917,6 @@ func TestPublicToolMetadataPersistsOpaqueAcrossStores(t *testing.T) {
 
 // TestPublicPreparedPermissionBoundarySurvivesRestart proves the prepared
 // permission boundary through the public surface on both stores: the
-// committed capture carries the durable permission capability members; the
 // advertised call is normalized at dispatch and the allowed executor consumes
 // the intent's committed bytes; an immediate-success plan that
 // omits its declarations is denied through the public path with the fixed
@@ -1928,8 +1925,6 @@ func TestPublicToolMetadataPersistsOpaqueAcrossStores(t *testing.T) {
 func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		capture := publicCapture()
-		capture.Readonly = true
-		capture.WriteDir = "/w/sub"
 		script := newScriptModel(
 			publicTurn("call-1", "call-2"),
 			publicTurn(),
@@ -1976,7 +1971,6 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 		testassert.Require(t, string(consumed) == `{"x":1}`, "executor saw arguments %s, want the committed normalized bytes", consumed)
 		rec, err := f.h.ReadOperation(context.Background(), session, "op-1")
 		testassert.NoError(t, err)
-		testassert.Require(t, rec.Admission.Execution.Readonly && rec.Admission.Execution.WriteDir == "/w/sub", "committed capture = %v %q, want the durable permission capability members", rec.Admission.Execution.Readonly, rec.Admission.Execution.WriteDir)
 		var normalized, denial, settled int
 		for _, entry := range recoverEntries(t, store, session) {
 			var wire map[string]json.RawMessage
@@ -2018,7 +2012,7 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		after, err := f.h.ReadOperation(context.Background(), session, "op-1")
-		testassert.Require(t, err == nil && after.Admission.Execution.WriteDir == "/w/sub" && after.Admission.Execution.Readonly, "capture after recovery = %+v err %v, want the same durable constraints", after.Admission.Execution, err)
+		testassert.Require(t, err == nil && reflect.DeepEqual(after.Admission.Execution, rec.Admission.Execution), "capture after recovery = %+v err %v, want the committed capture unchanged", after.Admission.Execution, err)
 	})
 }
 
@@ -2070,7 +2064,7 @@ func TestPublicSessionLifecycle(t *testing.T) {
 				testassert.Equal(t, reg.Revision, back.Revision)
 			}
 			testassert.Require(t, back.State.LastActivity.After(originalActivity), "reopen left last activity at %v, want it advanced past %v", back.State.LastActivity, originalActivity)
-			testassert.Require(t, back.Identity == first.Identity && back.State.AgentSelection.Definition.DefinitionID == "coder", "reopen changed identity or Agent type: %+v", back)
+			testassert.Require(t, back.Identity == first.Identity && reflect.DeepEqual(back.State.Inputs, publicInputs("coder")), "reopen changed identity or inputs: %+v", back)
 
 			againOpen, err := f.h.ReopenSession(ctx, session)
 			testassert.Require(t, err == nil && againOpen.Revision == back.Revision && againOpen.State.LastActivity.Equal(back.State.LastActivity), "second reopen = %+v err %v, want the no-write success", againOpen, err)
@@ -2145,7 +2139,7 @@ func TestPublicSessionLifecycle(t *testing.T) {
 			defer closeRelease.Do(func() { close(release) }) // the latch releases in every outcome
 			defer script.releaseGate()                       // the gated attempt releases in every outcome
 			h = f.h
-			session, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: publicSelection("coder")})
+			session, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: "/tmp/works", Inputs: publicInputs("coder")})
 			testassert.NoError(t, err)
 			sessionID = session.Identity.SessionID
 
@@ -2276,7 +2270,7 @@ func TestPublicSessionLifecycle(t *testing.T) {
 				testassert.Require(t, errors.Is(err, harness.ErrNotFound), "submit after delete = err %v, want ErrNotFound", err)
 			}
 			{
-				_, err := f.h.ChangeAgentType(ctx, session, publicSelection("reviewer"))
+				_, err := f.h.SetSessionInputs(ctx, session, publicInputs("reviewer"))
 				testassert.Require(t, errors.Is(err, harness.ErrNotFound), "agent-type change after delete = err %v, want ErrNotFound", err)
 			}
 			{
@@ -2682,7 +2676,7 @@ func seedArchivedSession(t *testing.T, store harness.Storage) string {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	payload := fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q},`+
-			`"state":{"lifecycle":"archived","archived_at":%q,"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},`+
+			`"state":{"lifecycle":"archived","archived_at":%q,"inputs":{"instructions":"coder"},"extension_state":{},`+
 			`"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`, id, now, now, now)
 	err := store.Transact(context.Background(), func(tx harness.Transaction) error {
 		_, err := tx.InsertRegister(harness.RegisterDraft{
@@ -2929,7 +2923,7 @@ func assertRollback(t *testing.T, store harness.Storage, h *harness.Harness, ses
 	testassert.Require(t, after.Revision == before.Revision && bytes.Equal(after.Payload, before.Payload), "failed transition changed the durable register (revision %d -> %d)", before.Revision, after.Revision)
 	got, err := h.ReadSessionHeader(context.Background(), session)
 	testassert.NoError(t, err)
-	testassert.Require(t, got.Revision == want.Revision && got.Lifecycle == want.Lifecycle && got.LastActivity.Equal(want.LastActivity) && reflect.DeepEqual(got.AgentSelection, want.AgentSelection) && ((got.ArchivedAt == nil) == (want.ArchivedAt == nil) && (got.ArchivedAt == nil || got.ArchivedAt.Equal(*want.ArchivedAt))), "cached view after failed transition = %+v, want the pre-attempt record; cached view archived_at after failed transition = %v, want %v", got, got.ArchivedAt, want.ArchivedAt)
+	testassert.Require(t, got.Revision == want.Revision && got.Lifecycle == want.Lifecycle && got.LastActivity.Equal(want.LastActivity) && reflect.DeepEqual(got.Inputs, want.Inputs) && ((got.ArchivedAt == nil) == (want.ArchivedAt == nil) && (got.ArchivedAt == nil || got.ArchivedAt.Equal(*want.ArchivedAt))), "cached view after failed transition = %+v, want the pre-attempt record; cached view archived_at after failed transition = %v, want %v", got, got.ArchivedAt, want.ArchivedAt)
 }
 
 // TestPublicLifecycleRollbackOnTransactionFailure proves the lifecycle row's
@@ -3290,7 +3284,7 @@ func rawSessionRegister(sessionID, currentOp string) string {
 	}
 	return fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q},`+
-			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}}%s,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
+			`"state":{"lifecycle":"open","inputs":{"instructions":"coder"},"extension_state":{}%s,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		sessionID, now, current, now)
 }
 
@@ -3300,10 +3294,10 @@ func rawAdmission(sessionID, operationID, entryID string) string {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	return fmt.Sprintf(
 		`{"session_id":%q,"operation_id":%q,"request_kind":"message",`+
-			`"admitted_entry":{"session_id":%q,"entry_id":%q},"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},`+
+			`"admitted_entry":{"session_id":%q,"entry_id":%q},"inputs":{"instructions":"coder"},`+
 			`"execution":{"configuration_revision":"rev-1","model":{"provider":"prov","model":"gpt-x"},`+
 			`"context_window":4096,"output_reserve":2048,`+
-			`"system_prompt":"system","tools":[%s],"initial_tool_names":["echo"],"readonly":false,"write_dir":"",`+
+			`"system_prompt":"system","tools":[%s],"initial_tool_names":["echo"],`+
 			`"compact":{"model":{"provider":"cprov","model":"compact-x"},"system_prompt":"summarize"},`+
 			`"strategy":{"id":"melta.summary/v1","requires_context_window":true}},"admitted_at":%q}`,
 		sessionID, operationID, sessionID, entryID, rawToolDefinition, now)
@@ -5155,18 +5149,18 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 		})
 	}
 
-	// A malformed persisted execution-capture permission member isolates its
+	// A malformed persisted execution-capture numeric member isolates its
 	// Session with the typed corruption error while a valid sibling stays
 	// usable. The codec table owns the missing/null/wrong-type shape
-	// enumeration for both members; this row proves the recovery routing.
+	// enumeration; this row proves the recovery routing.
 	rows = append(rows, corruptSiblingRow{
-		name: "operation admission execution wire: malformed readonly",
+		name: "operation admission execution wire: malformed context_window",
 		seed: seedCorruptSiblingRunning,
 		mutate: func(t *testing.T, snap *sessionSnapshot) {
 			reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 			reg.Payload = editOperationAdmission(t, reg.Payload, func(admission map[string]json.RawMessage) {
 				admission["execution"] = editPayloadObject(t, admission["execution"], func(exec map[string]json.RawMessage) {
-					exec["readonly"] = json.RawMessage(`"true"`)
+					exec["context_window"] = json.RawMessage(`"x"`)
 				})
 			})
 		},
@@ -5315,7 +5309,7 @@ func rawForkSessionRegister(sessionID, sourceID, boundaryID, currentOp string) s
 	return fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q,`+
 			`"source_session_id":%q,"source_boundary_entry_id":%q},`+
-			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}}%s,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
+			`"state":{"lifecycle":"open","inputs":{"instructions":"coder"},"extension_state":{}%s,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		sessionID, now, sourceID, boundaryID, current, now)
 }
 
@@ -5375,7 +5369,7 @@ func (s *corruptReadStore) ReadRegister(ctx context.Context, key harness.Registe
 // destination execution starts after the commit and projects the copied
 // prefix before the fork input.
 func TestPublicForkPrepareOwnsSelection(t *testing.T) {
-	for _, form := range []string{"definition", "resolved"} {
+	for _, form := range []string{"instructions", "tools"} {
 		t.Run(form, func(t *testing.T) {
 			store := storage.NewMemory()
 			script := newScriptModel(publicTurn(), publicTurn())
@@ -5385,32 +5379,58 @@ func TestPublicForkPrepareOwnsSelection(t *testing.T) {
 			_, err := submit(t, f.h, source, "source-op", harness.MessageModeRegular, "hello")
 			testassert.NoError(t, err)
 			awaitTerminal(t, f.h, source, "source-op")
-			selection := publicSelection("coder")
-			if form == "resolved" {
-				selection = harness.AgentSelection{Inputs: &harness.AgentInputs{AssemblyMode: "full", Tools: []string{"read_file"}, Capabilities: []string{"cap"}, Strategy: harness.StrategySelection{Settings: json.RawMessage(`{"selected":1}`)}}}
+			selection := publicInputs("coder")
+			if form == "tools" {
+				selection = harness.SessionInputs{Tools: []string{"read_file"}, Strategy: &harness.StrategySelection{ID: "strategy", Settings: json.RawMessage(`{"selected":1}`)}}
 			}
-			_, err = f.h.ChangeAgentType(context.Background(), source, selection)
+			_, err = f.h.SetSessionInputs(context.Background(), source, selection)
+			testassert.NoError(t, err)
+			_, err = f.h.SetSessionExtensionState(context.Background(), source, "dormant", []byte(` {"v":1} `))
 			testassert.NoError(t, err)
 			boundary := forkEntryOf(t, store, source, harness.EntryInput, "source-op").ID
 			f.prepareHook = func(_ int, req harness.PreparationRequest) (harness.PreparedExecution, error) {
 				testassert.Require(t, len(req.Content) == 1 && req.Content[0].Text == "fork", "fork preparation input = %+v", req.Content)
-				if req.Session.AgentSelection.Inputs != nil {
-					i := req.Session.AgentSelection.Inputs
-					i.Tools[0], i.Capabilities[0], i.Strategy.Settings[2] = "changed", "changed", 'X'
+				testassert.Equal(t, string(req.Session.ExtensionState["dormant"]), ` {"v":1} `)
+				req.Session.ExtensionState["dormant"][0] = 'x'
+				if form == "tools" {
+					i := req.Session.Inputs
+					i.Tools[0], i.Strategy.Settings[2] = "changed", 'X'
 				} else {
-					req.Session.AgentSelection.Definition.DefinitionID = "changed"
+					*req.Session.Inputs.Instructions = "changed"
 				}
 				return f.defaultPrep, nil
 			}
 			forked, err := f.h.Fork(context.Background(), harness.ForkRequest{Origin: harness.InputOriginUser, SourceSessionID: source, BoundaryEntryID: boundary, OperationID: "fork-op", Content: []model.ContentPart{{Kind: model.PartText, Text: "fork"}}})
 			testassert.NoError(t, err)
 			forkEntryOf(t, store, forked.Session.Identity.SessionID, harness.EntryInput, "fork-op")
-			testassert.Require(t, reflect.DeepEqual(forked.Session.State.AgentSelection, selection) && reflect.DeepEqual(forked.Operation.Admission.AgentSelection, selection), "fork callback changed selection: %+v", forked)
+			testassert.Require(t, reflect.DeepEqual(forked.Session.State.Inputs, selection) && reflect.DeepEqual(forked.Operation.Admission.Inputs, selection) && string(forked.Session.State.ExtensionState["dormant"]) == ` {"v":1} `, "fork callback changed inputs or state: %+v", forked)
 			header, err := f.h.ReadSessionHeader(context.Background(), source)
 			testassert.NoError(t, err)
-			testassert.Require(t, reflect.DeepEqual(header.AgentSelection, selection), "fork callback changed source: %+v", header)
+			testassert.Require(t, reflect.DeepEqual(header.Inputs, selection), "fork callback changed source: %+v", header)
 		})
 	}
+}
+
+func TestPublicForkPreparationRefusalLeavesNoDestination(t *testing.T) {
+	store := storage.NewMemory()
+	f := newPublicFixture(t, store, newScriptModel(publicTurn()), nil)
+	defer f.close()
+	source := createSession(t, f.h)
+	_, err := submit(t, f.h, source, "source-op", harness.MessageModeRegular, "hello")
+	testassert.NoError(t, err)
+	awaitTerminal(t, f.h, source, "source-op")
+	boundary := forkEntryOf(t, store, source, harness.EntryInput, "source-op").ID
+	refused := errors.New("refused preparation")
+	f.prepareHook = func(_ int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
+		return harness.PreparedExecution{}, refused
+	}
+	result, err := f.h.Fork(context.Background(), harness.ForkRequest{
+		Origin: harness.InputOriginUser, SourceSessionID: source, BoundaryEntryID: boundary,
+		OperationID: "refused-fork", Content: []model.ContentPart{{Kind: model.PartText, Text: "fork"}},
+	})
+	testassert.Require(t, errors.Is(err, refused) && result.Session.Identity.SessionID == "", "refused fork = %+v, %v", result, err)
+	sessions, err := f.h.ListSessions(context.Background())
+	testassert.Require(t, err == nil && len(sessions) == 1 && sessions[0].Identity.SessionID == source, "sessions after refusal = %+v, %v", sessions, err)
 }
 
 func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
@@ -5497,7 +5517,7 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		dest := res.Session.Identity.SessionID
 		testassert.Require(t, dest != source && res.Session.Identity.SessionID != "", "fork session identity = %+v, want one fresh identity", res.Session.Identity)
 		testassert.Require(t, len(storedOwners(t, store, dest)) == 0, "durable fork destination owners = %v, want none", storedOwners(t, store, dest))
-		testassert.Require(t, res.Session.Identity.Workspace == "/tmp/works" && res.Session.Identity.SourceSessionID == source && res.Session.Identity.SourceBoundaryEntryID == boundary && (res.Session.State.Lifecycle == harness.LifecycleOpen && res.Session.State.AgentSelection.Definition.DefinitionID == "coder" && len(res.Session.State.Usage.ByModel) == 0 && res.Session.State.CurrentOperationID == "fork-1" && len(res.Session.State.ExternalDataOwners) == 0) && (res.Operation.State.Status == harness.OperationRunning && res.Operation.Admission.OperationID == "fork-1" && res.Operation.Admission.RequestKind == harness.RequestKindMessage && res.Operation.Admission.AgentSelection.Definition.DefinitionID == "coder" && res.Operation.Admission.AdmittedEntry.SessionID == dest && res.Operation.Admission.Execution.ConfigurationRevision == "rev-1"), "fork identity = %+v, want the inherited workspace and source/boundary lineage; fork session state = %+v, want open, the source type, zero usage, and the running fork; fork operation = %+v, want a running message admission with the fresh capture", res.Session.Identity, res.Session.State, res.Operation)
+		testassert.Require(t, res.Session.Identity.Workspace == "/tmp/works" && res.Session.Identity.SourceSessionID == source && res.Session.Identity.SourceBoundaryEntryID == boundary && (res.Session.State.Lifecycle == harness.LifecycleOpen && reflect.DeepEqual(res.Session.State.Inputs, publicInputs("coder")) && len(res.Session.State.Usage.ByModel) == 0 && res.Session.State.CurrentOperationID == "fork-1" && len(res.Session.State.ExternalDataOwners) == 0) && (res.Operation.State.Status == harness.OperationRunning && res.Operation.Admission.OperationID == "fork-1" && res.Operation.Admission.RequestKind == harness.RequestKindMessage && reflect.DeepEqual(res.Operation.Admission.Inputs, publicInputs("coder")) && res.Operation.Admission.AdmittedEntry.SessionID == dest && res.Operation.Admission.Execution.ConfigurationRevision == "rev-1"), "fork identity = %+v, want the inherited workspace and source/boundary lineage; fork session state = %+v; fork operation = %+v", res.Session.Identity, res.Session.State, res.Operation)
 
 		<-forkScript.arrived // the destination execution reached its model boundary
 		{
@@ -5512,7 +5532,7 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		}
 
 		calls := f2.preparationCalls()
-		testassert.Require(t, len(calls) == 1 && calls[0].Session.Identity.Workspace == "/tmp/works" && calls[0].Session.AgentSelection.Definition.DefinitionID == "coder", "fork preparation calls = %+v, want one call with the source workspace and Agent type", calls)
+		testassert.Require(t, len(calls) == 1 && calls[0].Session.Identity.Workspace == "/tmp/works" && reflect.DeepEqual(calls[0].Session.Inputs, publicInputs("coder")), "fork preparation calls = %+v, want one call with the source workspace and inputs", calls)
 
 		// the source is byte-identical after the fork
 		assertForkSourceUnchanged(t, store, source, before)
@@ -6068,7 +6088,7 @@ func TestPublicForkSourceRevisionRace(t *testing.T) {
 			// a foreign writer changes the source under the reservation
 			reg := sessionRegister(t, store, source)
 			edited := editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-				state["agent_selection"] = json.RawMessage(`{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"reviewer"}}`)
+				state["inputs"] = json.RawMessage(`{"instructions":"reviewer"}`)
 			})
 			if err := store.Transact(ctx, func(tx harness.Transaction) error {
 				_, err := tx.ReplaceRegister(harness.RegisterKey{SessionID: source, Kind: harness.RegisterSession}, reg.Revision, edited)
@@ -6105,7 +6125,7 @@ func mustForeignPayload(t *testing.T, snap sessionSnapshot) json.RawMessage {
 	for i := range snap.registers {
 		if snap.registers[i].Key.Kind == harness.RegisterSession {
 			return editStateObject(t, snap.registers[i].Payload, func(state map[string]json.RawMessage) {
-				state["agent_selection"] = json.RawMessage(`{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"reviewer"}}`)
+				state["inputs"] = json.RawMessage(`{"instructions":"reviewer"}`)
 			})
 		}
 	}
@@ -6743,7 +6763,7 @@ func rawSessionRegisterWithCompaction(sessionID, currentOp, compactionEntryID st
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	return fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q},`+
-			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},"current_operation_id":%q,`+
+			`"state":{"lifecycle":"open","inputs":{"instructions":"coder"},"extension_state":{},"current_operation_id":%q,`+
 			`"checkpoint_entry_id":%q,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		sessionID, now, currentOp, compactionEntryID, now)
 }
@@ -6754,10 +6774,10 @@ func rawCompactAdmission(sessionID, operationID string) string {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	return fmt.Sprintf(
 		`{"session_id":%q,"operation_id":%q,"request_kind":"compact",`+
-			`"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},`+
+			`"inputs":{"instructions":"coder"},`+
 			`"execution":{"configuration_revision":"rev-1","model":{"provider":"prov","model":"gpt-x"},`+
 			`"context_window":4096,"output_reserve":2048,`+
-			`"system_prompt":"system","tools":[%s],"initial_tool_names":["echo"],"readonly":false,"write_dir":"",`+
+			`"system_prompt":"system","tools":[%s],"initial_tool_names":["echo"],`+
 			`"compact":{"model":{"provider":"cprov","model":"compact-x"},"system_prompt":"summarize"},`+
 			`"strategy":{"id":"melta.summary/v1","requires_context_window":true}},"admitted_at":%q}`,
 		sessionID, operationID, rawToolDefinition, now)

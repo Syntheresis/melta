@@ -23,7 +23,7 @@ import { RuntimeConnection } from './connection';
 import { extractSettingsText } from './exactjson';
 import { invokeNative } from './results';
 import { assertNativeInvocations } from './nativecontract';
-import { INSTANCE, NEWER, OLDER, definitionSelection, hydration, json, native, session } from './test-fixtures';
+import { INSTANCE, NEWER, OLDER, hydration, json, native, session } from './test-fixtures';
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 
@@ -69,6 +69,12 @@ function bridge(script: Script = {}) {
     if (operation === 'ListSessions') {
       return json(200, [session('root1', NEWER), session('root2', OLDER)]);
     }
+    if (operation === 'GetSessionOperation') {
+      return json(200, {
+        operation: { operation_id: 'op-1', request_kind: 'message', status: 'running', admitted_at: '2026-01-02T03:04:05Z', model: 'prov/m', usage: { by_model: [] } },
+        inputs: { model: 'prov/m', prompt: 'prompt', tools: [], strategy: { id: 'included', settings: '{}' } },
+      });
+    }
     if (operation === 'GetSessionHydration') {
       if (script.hydration && script.hydration.length > 0) {
         const raw = script.hydration.shift()!;
@@ -89,7 +95,6 @@ function bridge(script: Script = {}) {
       return json(200, {
         configuration_revision: { instance_id: INSTANCE, generation: '1' },
         settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, tools: {}, jobs: {}, compaction: {}, extensions: {} },
-        agents: [],
         providers: [],
       });
     }
@@ -131,7 +136,7 @@ function bridge(script: Script = {}) {
     if (operation === 'ForkSession') {
       return json(200, {
         session: session('dest1', NEWER),
-        operation: { operation_id: body.operation_id, request_kind: 'message', status: 'running', admitted_at: '0', agent_selection: definitionSelection('primary'), model: 'prov/m', usage: { totals: { by_model: [] } } },
+        operation: { operation_id: body.operation_id, request_kind: 'message', status: 'running', admitted_at: '0', model: 'prov/m', usage: { totals: { by_model: [] } } },
       });
     }
     if (operation === 'GetWarnings') {
@@ -156,7 +161,7 @@ function bridge(script: Script = {}) {
       if (script.compact === 'throw' || (typeof script.compact === 'function' && script.compact(body) === 'throw')) {
         throw new Error('native bridge: connection lost mid-request');
       }
-      return json(200, { operation_id: body.operation_id, request_kind: 'compact', status: 'running', admitted_at: '0', agent_selection: definitionSelection('primary'), model: 'prov/m', usage: { totals: { by_model: [] } } });
+      return json(200, { operation_id: body.operation_id, request_kind: 'compact', status: 'running', admitted_at: '0', model: 'prov/m', usage: { totals: { by_model: [] } } });
     }
     if (operation === 'InterruptSession') {
       return native(204, '', false);
@@ -217,11 +222,10 @@ async function mountReal(script: Script = {}) {
 }
 
 // One complete ConfigurationView for the actual global read.
-function configurationView(generation: string, agentName: string) {
+function configurationView(generation: string) {
   return {
     configuration_revision: { instance_id: INSTANCE, generation },
     settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, tools: {}, jobs: {}, compaction: {}, extensions: {} },
-    agents: [{ name: agentName, description: agentName, subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] }],
     providers: [],
   };
 }
@@ -284,6 +288,13 @@ describe('real generated stack over the byte bridge', () => {
     expect(hydrationCall?.params).toBe('{"session_id":"root1"}');
     expect(hydrationCall?.generation).toBe('1');
     expect(target.textContent).toContain('root1');
+  });
+
+  it('reads one Operation through the two-address native contract', async () => {
+    const { connection } = await mountReal();
+    const result = await invokeNative(() => connection.getClient(), 'operation', 'GetSessionOperation', '{"session_id":"root1","operation_id":"op-1"}', JSON.parse);
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') expect((result.data as { operation?: { operation_id?: string } }).operation?.operation_id).toBe('op-1');
   });
 
   it('a real native Call rejection is a transport loss, not a server rejection', async () => {
@@ -450,16 +461,16 @@ describe('real generated stack over the byte bridge', () => {
     let releaseRead: () => void = () => {};
     const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
     const retired = variant === 'success'
-      ? json(200, configurationView('9', 'stale'))
+      ? json(200, configurationView('9'))
       : variant === 'loss'
         ? ('throw' as const)
         : native(200, '{not json', true);
     const { target, calls, connection } = await mountReal({
       openGate,
       configuration: [
-        { wait: Promise.resolve(), outcome: json(200, configurationView('1', 'boot')) },
+        { wait: Promise.resolve(), outcome: json(200, configurationView('1')) },
         { wait: readGate, outcome: retired },
-        { wait: Promise.resolve(), outcome: json(200, configurationView('1', 'successor')) },
+        { wait: Promise.resolve(), outcome: json(200, configurationView('1')) },
       ],
       events: [
         JSON.stringify({
@@ -488,14 +499,16 @@ describe('real generated stack over the byte bridge', () => {
     await settle();
     // No extra repair was requested by the retired read...
     expect(vi.mocked(Open).mock.calls.length).toBe(2);
-    // ...the stale payload never repopulated the globals, and the successor's
-    // own payload did.
-    (target.querySelector('[aria-label="Settings"]') as HTMLElement).click();
+    // ...the successor's generation-one hydration is accepted instead of
+    // being trapped behind the retired generation-nine configuration.
+    await vi.waitFor(() => expect(calls.some((call) => call.generation === '2' && call.operation === 'GetSessionHydration')).toBe(true));
     await settle();
     await settle();
-    (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
+    const successorReads = calls.filter((call) => call.generation === '2' && call.operation === 'GetSessionHydration').length;
     await settle();
-    expect(target.textContent).toContain('successor');
+    await settle();
+    expect(calls.filter((call) => call.generation === '2' && call.operation === 'GetSessionHydration')).toHaveLength(successorReads);
+    expect(target.textContent).toContain('root1');
     expect(target.textContent).not.toContain('stale');
   });
 
@@ -564,7 +577,7 @@ describe('real generated stack over the byte bridge', () => {
 describe('Step 8 real generated captures over the byte bridge', () => {
   const RAW_CONFIGURATION = '{"configuration_revision":{"instance_id":"' + INSTANCE + '","generation":"1"},'
     + '"settings":{"sessions":{"auto_archive":true,"archive_after_days":-9223372036854775808,"delete_after_archive_days":1e400},'
-    + '"tools":{"max_output_bytes":9007199254740993},"jobs":{},"compaction":{},"extensions":{}},"agents":[],"providers":[]}';
+    + '"tools":{"max_output_bytes":9007199254740993},"jobs":{},"compaction":{},"extensions":{}},"providers":[]}';
 
   const forkInput = {
     item_id: 'i1',
@@ -579,7 +592,6 @@ describe('Step 8 real generated captures over the byte bridge', () => {
     request_kind: 'message',
     status: 'running',
     admitted_at: '0',
-    agent_selection: definitionSelection('primary'),
     model: 'prov/m',
     usage: { totals: { by_model: [] } },
   };

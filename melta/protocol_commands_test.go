@@ -79,7 +79,8 @@ func commandUserInputEntry(t *testing.T, view harness.SessionReadView, operation
 // TestSessionCommandCreateHeader covers C1, C2 (create half) and C3 (create
 // half): the protocol-shaped wrapper returns the real post-transition
 // snapshot header, the empty workspace wraps the shared ErrInvalid sentinel,
-// and an unknown Agent type stays selectable until the next preparation.
+// and a stored model that does not bind stays selectable until the next
+// preparation.
 func TestSessionCommandCreateHeader(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
@@ -87,7 +88,9 @@ func TestSessionCommandCreateHeader(t *testing.T) {
 		defer closeProjectionRuntime(r)
 
 		workspace := filepath.Join(e.home, "command-ws")
-		header, err := r.CreateSession(ctx, testCaller(r), workspace, wireSelection("solo"))
+		tools := []string{}
+		inputs := protocol.SessionInputs{Tools: &tools}
+		header, err := r.CreateSession(ctx, testCaller(r), workspace, &inputs)
 		testassert.NoError(t, err)
 		snap := sessionViewThroughRuntime(t, r, header.SessionId)
 		if !reflect.DeepEqual(header, projectSession(snap.Header, r.instance)) {
@@ -96,15 +99,15 @@ func TestSessionCommandCreateHeader(t *testing.T) {
 		if header.SessionRevision != wireRevision(snap.Header.Revision, r.instance) {
 			t.Fatalf("create header revision = %+v, want the read pair %+v", header.SessionRevision, wireRevision(snap.Header.Revision, r.instance))
 		}
-		testassert.Require(t, header.Workspace == workspace && header.AgentSelection.Definition.DefinitionId == "solo" && header.Lifecycle == protocol.Open, "create header = %+v, want workspace %q solo open", header, workspace)
+		testassert.Require(t, header.Workspace == workspace && header.Inputs.Tools != nil && len(*header.Inputs.Tools) == 0 && header.Lifecycle == protocol.Open, "create header = %+v, want workspace %q with explicit empty tools", header, workspace)
 
 		unclean := filepath.Join(e.home, "command-ws", "..", "command-ws")
-		uncleanHeader, err := r.CreateSession(ctx, testCaller(r), unclean, wireSelection("solo"))
+		uncleanHeader, err := r.CreateSession(ctx, testCaller(r), unclean, &inputs)
 		testassert.NoError(t, err)
 		testassert.Equal(t, uncleanHeader.Workspace, workspace)
 
 		{
-			_, err := r.CreateSession(ctx, testCaller(r), "", wireSelection("solo"))
+			_, err := r.CreateSession(ctx, testCaller(r), "", &inputs)
 			testassert.Require(t, errors.Is(err, harness.ErrInvalid), "empty workspace header = %v, want harness.ErrInvalid", err)
 		}
 		{
@@ -112,22 +115,31 @@ func TestSessionCommandCreateHeader(t *testing.T) {
 			testassert.Require(t, errors.Is(err, harness.ErrInvalid), "empty workspace record = %v, want harness.ErrInvalid", err)
 		}
 
-		ghost, err := r.CreateSession(ctx, testCaller(r), filepath.Join(e.home, "ghost-ws"), wireSelection("ghost"))
+		missing := protocol.ModelRef("prov/ghost")
+		ghost, err := r.CreateSession(ctx, testCaller(r), filepath.Join(e.home, "ghost-ws"), &protocol.SessionInputs{Model: &missing})
 		testassert.NoError(t, err)
-		testassert.Equal(t, ghost.AgentSelection.Definition.DefinitionId, "ghost")
+		testassert.Require(t, ghost.Inputs.Model != nil && *ghost.Inputs.Model == missing, "stored model = %+v", ghost.Inputs.Model)
+		// With no working default left (the file's model choice removed), the
+		// stored model must fail the next preparation instead of silently
+		// binding another model.
+		settings, err := r.GetConfiguration(ctx, testCaller(r))
+		testassert.NoError(t, err)
+		settings.Settings.Model = nil
+		_, err = r.UpdateSettings(ctx, testCaller(r), protocol.UpdateSettingsRequest{Settings: settings.Settings})
+		testassert.NoError(t, err)
 		{
 			_, err := r.SubmitSession(ctx, testCaller(r), ghost.SessionId, commandSubmitRequest(t, "op-ghost", "hi"))
-			testassert.Require(t, errors.Is(err, harness.ErrInvalid), "submit on unknown agent type = %v, want the preparation-time harness.ErrInvalid", err)
+			testassert.Require(t, errors.Is(err, harness.ErrInvalid), "submit with an unbindable stored model and no default = %v, want the preparation-time harness.ErrInvalid", err)
 		}
 		ghostSnap := sessionViewThroughRuntime(t, r, ghost.SessionId)
-		testassert.Require(t, len(ghostSnap.Operations) == 0 && ghostSnap.Header.CurrentOperationID == "", "unknown-type preparation failure committed state: %+v", ghostSnap.Header)
+		testassert.Require(t, len(ghostSnap.Operations) == 0 && ghostSnap.Header.CurrentOperationID == "", "unbindable-model preparation failure committed state: %+v", ghostSnap.Header)
 	})
 }
 
-// TestSessionCommandAgentType covers C2 (set half) and C3 (set half): the
+// TestSessionCommandInputs covers C2 (set half) and C3 (set half): the
 // selection rule is unchanged, the empty name stays invalid, and the returned
 // header is the real post-transition snapshot.
-func TestSessionCommandAgentType(t *testing.T) {
+func TestSessionCommandInputs(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		r, e := openProjectionRuntime(t, store)
@@ -137,15 +149,17 @@ func TestSessionCommandAgentType(t *testing.T) {
 		testassert.NoError(t, err)
 		sessionID := rec.Identity.SessionID
 
-		header, err := r.SetSessionAgentType(ctx, testCaller(r), sessionID, protocol.SetSessionAgentTypeRequest{AgentSelection: *wireSelection("ghost")})
+		empty := []string{}
+		header, err := r.SetSessionInputs(ctx, testCaller(r), sessionID, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Tools: &empty}})
 		testassert.NoError(t, err)
-		testassert.Equal(t, header.AgentSelection.Definition.DefinitionId, "ghost")
+		testassert.Require(t, header.Inputs.Tools != nil && len(*header.Inputs.Tools) == 0, "explicit empty tools = %+v", header.Inputs)
 		snap := sessionViewThroughRuntime(t, r, sessionID)
 		if !reflect.DeepEqual(header, projectSession(snap.Header, r.instance)) || header.SessionRevision != wireRevision(snap.Header.Revision, r.instance) {
 			t.Fatalf("ghost header = %+v, want the real read projection %+v", header, projectSession(snap.Header, r.instance))
 		}
 
-		worker, err := r.SetSessionAgentType(ctx, testCaller(r), sessionID, protocol.SetSessionAgentTypeRequest{AgentSelection: *wireSelection("worker")})
+		instructions := "next"
+		worker, err := r.SetSessionInputs(ctx, testCaller(r), sessionID, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Instructions: &instructions}})
 		testassert.NoError(t, err)
 		workerSnap := sessionViewThroughRuntime(t, r, sessionID)
 		if !reflect.DeepEqual(worker, projectSession(workerSnap.Header, r.instance)) || worker.SessionRevision != wireRevision(workerSnap.Header.Revision, r.instance) {
@@ -154,14 +168,15 @@ func TestSessionCommandAgentType(t *testing.T) {
 		testassert.Require(t, worker.SessionRevision.DurableRevision != header.SessionRevision.DurableRevision, "durable revision did not advance across the committed change: %+v", worker.SessionRevision)
 
 		{
-			_, err := r.SetSessionAgentType(ctx, testCaller(r), sessionID, protocol.SetSessionAgentTypeRequest{})
-			testassert.Require(t, errors.Is(err, harness.ErrInvalid), "empty agent type = %v, want harness.ErrInvalid", err)
+			invalid := []string{""}
+			_, err := r.SetSessionInputs(ctx, testCaller(r), sessionID, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Tools: &invalid}})
+			testassert.Require(t, errors.Is(err, harness.ErrInvalid), "invalid input = %v, want harness.ErrInvalid", err)
 		}
 		after := sessionViewThroughRuntime(t, r, sessionID)
-		testassert.Equal(t, after.Header.AgentSelection.Definition.DefinitionID, "worker")
+		testassert.Require(t, after.Header.Inputs.Instructions != nil && *after.Header.Inputs.Instructions == "next", "stored inputs = %+v", after.Header.Inputs)
 
 		{
-			_, err := r.SetSessionAgentType(ctx, testCaller(r), "ffffffffffffffffffffffffffffffff", protocol.SetSessionAgentTypeRequest{AgentSelection: *wireSelection("worker")})
+			_, err := r.SetSessionInputs(ctx, testCaller(r), "ffffffffffffffffffffffffffffffff", protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Instructions: &instructions}})
 			testassert.Require(t, errors.Is(err, harness.ErrNotFound), "set on absent session = %v, want harness.ErrNotFound", err)
 		}
 	})
@@ -920,7 +935,7 @@ func TestSessionCommandClosedOwner(t *testing.T) {
 		req := commandSubmitRequest(t, "op-closed", "x")
 
 		{
-			_, err := r.CreateSession(ctx, testCaller(r), workspace, wireSelection("solo"))
+			_, err := r.CreateSession(ctx, testCaller(r), workspace, nil)
 			testassert.Require(t, errors.Is(err, ErrClosed), "closed create header = %v, want ErrClosed", err)
 		}
 		{
@@ -948,8 +963,8 @@ func TestSessionCommandClosedOwner(t *testing.T) {
 			testassert.Require(t, errors.Is(err, ErrClosed), "closed fork = %v, want ErrClosed", err)
 		}
 		{
-			_, err := r.SetSessionAgentType(ctx, testCaller(r), sessionID, protocol.SetSessionAgentTypeRequest{AgentSelection: *wireSelection("solo")})
-			testassert.Require(t, errors.Is(err, ErrClosed), "closed agent type = %v, want ErrClosed", err)
+			_, err := r.SetSessionInputs(ctx, testCaller(r), sessionID, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{}})
+			testassert.Require(t, errors.Is(err, ErrClosed), "closed inputs = %v, want ErrClosed", err)
 		}
 		{
 			_, err := r.ArchiveSession(ctx, testCaller(r), sessionID)

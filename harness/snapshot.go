@@ -52,7 +52,7 @@ type HistoryFact struct {
 type SessionHeader struct {
 	Identity           SessionIdentity
 	Lifecycle          SessionLifecycle
-	AgentSelection     AgentSelection
+	Inputs             SessionInputs
 	CurrentOperationID string
 	LastActivity       time.Time
 	ArchivedAt         *time.Time
@@ -71,7 +71,7 @@ type SessionHeader struct {
 type OperationSummary struct {
 	OperationID      string
 	RequestKind      RequestKind
-	AgentSelection   AgentSelection
+	Inputs           SessionInputs
 	Model            model.ModelRef
 	AdmittedAt       time.Time
 	Status           OperationState
@@ -257,13 +257,13 @@ func captureSessionReadLocked(c *coordinator) SessionReadView {
 // register.
 func ownOperationSummary(rec OperationRecord) OperationSummary {
 	summary := OperationSummary{
-		OperationID:    rec.Admission.OperationID,
-		RequestKind:    rec.Admission.RequestKind,
-		AgentSelection: ownAgentSelection(rec.Admission.AgentSelection),
-		Model:          rec.Admission.Execution.Model,
-		AdmittedAt:     rec.Admission.AdmittedAt,
-		Status:         rec.State.Status,
-		Usage:          ownUsageTotals(rec.State.Usage),
+		OperationID: rec.Admission.OperationID,
+		RequestKind: rec.Admission.RequestKind,
+		Inputs:      rec.Admission.Inputs.Owned(),
+		Model:       rec.Admission.Execution.Model,
+		AdmittedAt:  rec.Admission.AdmittedAt,
+		Status:      rec.State.Status,
+		Usage:       ownUsageTotals(rec.State.Usage),
 	}
 	if rec.State.SettledAt != nil {
 		stamped := *rec.State.SettledAt
@@ -471,7 +471,7 @@ func sessionHeaderLocked(c *coordinator) SessionHeader {
 	header := SessionHeader{
 		Identity:           record.Identity,
 		Lifecycle:          record.State.Lifecycle,
-		AgentSelection:     ownAgentSelection(record.State.AgentSelection),
+		Inputs:             record.State.Inputs.Owned(),
 		CurrentOperationID: record.State.CurrentOperationID,
 		LastActivity:       record.State.LastActivity,
 		Revision:           sessionRevisionLocked(c),

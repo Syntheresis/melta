@@ -11,69 +11,57 @@ import (
 
 const testConfigSchema = `{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"],"additionalProperties":true}`
 
-func testNative(id string, lifetime extension.Lifetime, capabilities []extension.Capability, requires []extension.Binding, open func(context.Context, extension.InstanceContext) (extension.Instance, error)) extension.Native {
-	componentID := id + "#component"
-	provides := make([]string, 0, len(capabilities))
-	for _, capability := range capabilities {
-		provides = append(provides, capability.ID)
-	}
-	return extension.Native{
-		Declaration: extension.Declaration{
-			ID:           id,
-			Version:      "1",
-			ConfigSchema: json.RawMessage(testConfigSchema),
-			Components:   []extension.Component{{ID: componentID, Lifetime: lifetime, Provides: provides, Requires: requires}},
-			Capabilities: capabilities,
-		},
-		Describe: map[string]extension.ToolDescribe{},
-		Open:     open,
+// testNative builds one author extension with the shared fixture manifest.
+func testNative(id string, activate func(context.Context, extension.API) (func(context.Context) error, error)) extension.Extension {
+	return extension.Extension{
+		Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{}`)},
+		Activate: activate,
 	}
 }
 
-func testServiceCapability(id string) extension.Capability {
-	return extension.ServiceCapability(id, id+".contract", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{}`, "", ""))
+// testServiceCapability is one fixture service named name with a single
+// "call" service-IO method answered by testServiceHandler.
+func testServiceCapability(name string) extension.Service {
+	return extension.Service{Name: name, Methods: []extension.RegisteredMethod{{
+		Method:  extension.Method{Name: "call", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+		Handler: testServiceHandler(),
+	}}}
 }
 
-func testServiceHandler() extension.Handler {
-	return func(context.Context, extension.CallContext, json.RawMessage) (extension.Result, error) {
+// testServiceHandler is the shared fixture service handler.
+func testServiceHandler() extension.AuthorHandler {
+	return func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 		return extension.Result{Value: json.RawMessage(`{}`)}, nil
 	}
 }
 
-func testServiceImplementation() extension.Implementation {
-	return extension.Implementation{Service: map[string]extension.Handler{"call": testServiceHandler()}}
-}
-
-func testToolNative(id string, lifetime extension.Lifetime, tool extension.Tool, describe func(context.Context, extension.DescribeInput) (extension.ToolDescription, error)) extension.Native {
-	native := testNative(id, lifetime, []extension.Capability{extension.ToolCapability(id)}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{id: {Tool: tool}}}, nil
+// testToolNative registers one tool named id backed by the given registered
+// implementation, advertised with the shared testDescribeTool definition.
+func testToolNative(id string, tool extension.RegisteredTool) extension.Extension {
+	return testNative(id, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterTool(testDescribeTool(id), tool, nil)
+		return nil, err
 	})
-	if describe != nil {
-		native.Describe[id] = describe
-	}
-	return native
 }
 
-func testDescribeTool(id string) extension.ToolDescribe {
-	return func(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-		return extension.ToolDescription{Definition: model.ToolDefinition{Name: id, Description: id, Parameters: json.RawMessage(`{"type":"object"}`)}, Available: true}, nil
-	}
+// testDescribeTool is the shared fixture tool definition advertised for id.
+func testDescribeTool(id string) model.ToolDefinition {
+	return model.ToolDefinition{Name: id, Description: id, Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func extensionToolDescribe(id string, describe func(Invocation, harness.ToolConstraints, harness.SessionIdentity) (ToolDescription, error)) extension.ToolDescribe {
-	return func(_ context.Context, input extension.DescribeInput) (extension.ToolDescription, error) {
-		description, err := describe(Invocation{}, input.Constraints, input.Session)
-		if err != nil {
-			return extension.ToolDescription{}, err
-		}
-		return extension.ToolDescription{Definition: description.Definition, Available: description.Available}, nil
-	}
+// testRegisteredTool is the shared fixture RegisteredTool: it normalizes
+// arguments unchanged, prepares an immediate success outcome, and executes an
+// empty outcome.
+type testRegisteredTool struct{ Name string }
+
+func (t testRegisteredTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
+	return call.Arguments, nil
 }
 
-func serviceInstance(capabilityID string, closeFn func() error) extension.Instance {
-	instance := extension.Instance{Capabilities: map[string]extension.Implementation{capabilityID: testServiceImplementation()}}
-	if closeFn != nil {
-		instance.Close = func(context.Context, extension.CallContext) error { return closeFn() }
-	}
-	return instance
+func (t testRegisteredTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
+}
+
+func (t testRegisteredTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
+	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "ok"}}
 }

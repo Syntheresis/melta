@@ -37,15 +37,15 @@ func extensionCacheDir(dataDir, extensionID string) string {
 	return filepath.Join(dataDir, "extensions", extensionDataHash(extensionID), "cache")
 }
 
-// dataHandler resolves one fixed melta.data method to its handler.
-func (c *composition) dataHandler(method string) (extension.Handler, bool) {
+// dataHandler resolves one fixed melta.data method to its handler. The
+// claim_external_data method is served through the calling activation's
+// registered cleanup attachments, not from this table.
+func (c *composition) dataHandler(method string) (hostHandler, bool) {
 	switch method {
 	case "session_namespace":
 		return c.sessionNamespaceHandler, true
 	case "cache_namespace":
 		return c.cacheNamespaceHandler, true
-	case "claim_external_data":
-		return c.claimExternalDataHandler, true
 	}
 	return nil, false
 }
@@ -63,7 +63,7 @@ func (c *composition) dataHost() (*hostServices, error) {
 // the host-issued Session identity. It rechecks the Session under the same
 // callback-owned artifact interval and refuses a planted symlink instead of
 // creating or returning an outside path.
-func (c *composition) sessionNamespaceHandler(ctx context.Context, call extension.CallContext, _ json.RawMessage) (extension.Result, error) {
+func (c *composition) sessionNamespaceHandler(ctx context.Context, call hostCall, _ json.RawMessage) (extension.Result, error) {
 	host, err := c.dataHost()
 	if err != nil {
 		return extension.Result{}, err
@@ -96,7 +96,7 @@ func (c *composition) sessionNamespaceHandler(ctx context.Context, call extensio
 
 // cacheNamespaceHandler assigns the calling extension's reusable cache
 // directory. It reads no Session and takes no Session artifact interval.
-func (c *composition) cacheNamespaceHandler(_ context.Context, call extension.CallContext, _ json.RawMessage) (extension.Result, error) {
+func (c *composition) cacheNamespaceHandler(_ context.Context, call hostCall, _ json.RawMessage) (extension.Result, error) {
 	host, err := c.dataHost()
 	if err != nil {
 		return extension.Result{}, err
@@ -117,17 +117,12 @@ func (c *composition) cacheNamespaceHandler(_ context.Context, call extension.Ca
 	return extension.Result{Value: value}, nil
 }
 
-// claimExternalDataHandler durably records the calling extension as an owner
-// of external data for the host-issued Session before that data exists. The
-// claim requires the extension's one declared cleanup capability and keeps
-// the call-owned Session interval through the enclosing callback's external
+// claimExternalData durably records the calling extension as an owner of
+// external data for the host-issued Session before that data exists. The
+// claim requires the extension's registered cleanup attachments and keeps the
+// call-owned Session interval through the enclosing callback's external
 // creation and terminal response.
-func (c *composition) claimExternalDataHandler(ctx context.Context, call extension.CallContext, _ json.RawMessage) (extension.Result, error) {
-	_, cleanup := c.compiled.CleanupCapability(call.ExtensionID)
-	return c.claimExternalData(ctx, call, cleanup)
-}
-
-func (c *composition) claimExternalData(ctx context.Context, call extension.CallContext, cleanup bool) (extension.Result, error) {
+func (c *composition) claimExternalData(ctx context.Context, call hostCall, cleanup bool) (extension.Result, error) {
 	host, err := c.dataHost()
 	if err != nil {
 		return extension.Result{}, err
@@ -136,7 +131,7 @@ func (c *composition) claimExternalData(ctx context.Context, call extension.Call
 		return extension.Result{}, fmt.Errorf("external data claim requires a host-issued Session and extension identity: %w", ErrClosed)
 	}
 	if !cleanup {
-		return extension.Result{}, fmt.Errorf("extension %q declares no %s cleanup capability: %w", call.ExtensionID, extension.ContractSessionCleanup, ErrClosed)
+		return extension.Result{}, fmt.Errorf("extension %q registers no cleanup: %w", call.ExtensionID, ErrClosed)
 	}
 	lease := artifactLeaseFromContext(ctx)
 	if lease == nil {

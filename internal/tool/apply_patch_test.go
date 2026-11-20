@@ -25,7 +25,7 @@ func TestApplyPatchAllOrNothingValidationFailure(t *testing.T) {
 	store := newTempCodeGroupStore(t)
 
 	input := applyPatchInput(t, "*** Add File: new.txt\n+hello\n*** Update File: ghost.go\n@@\n-missing\n+replacement")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil, "Execute err = nil, want non-nil")
 	testassert.Require(t, strings.Contains(err.Error(), "does not exist"), "err = %v, want does-not-exist error", err)
 	{
@@ -43,7 +43,7 @@ func TestApplyPatchAllOrNothingPartialApplyError(t *testing.T) {
 	store := newTempCodeGroupStore(t)
 
 	input := applyPatchInput(t, "*** Add File: new.txt\n+hi\n*** Delete File: ghost.txt")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil, "Execute err = nil, want non-nil")
 	testassert.Require(t, strings.Contains(err.Error(), "does not exist"), "err = %v, want does-not-exist error", err)
 	{
@@ -67,7 +67,7 @@ func TestApplyPatchMidWriteFailureReturnsExitError(t *testing.T) {
 	}
 
 	input := applyPatchInput(t, "*** Add File: new.txt\n+hi\n*** Update File: x.txt\n@@\n alpha\n-BEFORE\n+AFTER\n beta")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil, "Execute err = nil, want non-nil (mid-write failure)")
 	var exitErr *ExitError
 	testassert.Require(t, errors.As(err, &exitErr), "Execute err = %T %v, want *ExitError", err, err)
@@ -85,7 +85,7 @@ func TestApplyPatchRefusesUpdateWhenContentChangesAfterValidation(t *testing.T) 
 	}}
 
 	input := applyPatchInput(t, "*** Add File: first.txt\n+hi\n*** Update File: target.txt\n@@\n alpha\n-BEFORE\n+AFTER\n beta")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "changed after validation"), "Execute err = %v, want changed-after-validation", err)
 	testassert.Equal(t, readFile(t, path), "alpha\nCHANGED\nbeta")
 }
@@ -101,7 +101,7 @@ func TestApplyPatchRefusesDeleteWhenContentChangesAfterValidation(t *testing.T) 
 	}}
 
 	input := applyPatchInput(t, "*** Add File: first.txt\n+hi\n*** Delete File: target.txt")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "changed after validation"), "Execute err = %v, want changed-after-validation", err)
 	testassert.Equal(t, readFile(t, path), "changed")
 }
@@ -118,7 +118,7 @@ func TestApplyPatchRefusesMoveSourceWhenContentChangesAfterDestinationWrite(t *t
 	}}
 
 	input := applyPatchInput(t, "*** Add File: first.txt\n+hi\n*** Update File: old.txt\n*** Move to: new.txt")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "changed after validation"), "Execute err = %v, want changed-after-validation", err)
 	var exitErr *ExitError
 	testassert.Require(t, errors.As(err, &exitErr) && strings.Contains(exitErr.Output, "M new.txt"), "Execute err = %v, want partial summary with M new.txt", err)
@@ -137,7 +137,7 @@ func TestApplyPatchRecordsSnapshotIdentityForAddUpdateAndDelete(t *testing.T) {
 
 	input := applyPatchInput(t, "*** Add File: new.txt\n+created\n*** Update File: update.txt\n@@\n a\n-B\n+B2\n c\n*** Delete File: delete.txt")
 	{
-		_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+		_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 		testassert.NoError(t, err)
 	}
 
@@ -156,7 +156,7 @@ func TestApplyPatchSnapshotsEveryTouchedFile(t *testing.T) {
 
 	input := applyPatchInput(t, "*** Update File: x.txt\n@@\n a\n-B\n+B2\n c\n*** Update File: old.go\n*** Move to: new.go\n@@\n a\n-B\n+B2\n c")
 	{
-		_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+		_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 		testassert.NoError(t, err)
 	}
 	// Expected snapshots: updated (Update), new.go (Move dest, Existed:false),
@@ -171,7 +171,7 @@ func TestApplyPatchAddFailsIfFileExists(t *testing.T) {
 	store := newRecordingCodeGroupStore(t)
 
 	input := applyPatchInput(t, "*** Add File: exists.txt\n+new")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil, "Execute err = nil, want non-nil")
 	testassert.Require(t, strings.Contains(err.Error(), "already exists"), "err = %v, want it to mention already-exists", err)
 	testassert.Equal(t, readFile(t, path), "old")
@@ -187,7 +187,7 @@ func TestApplyPatchMoveFailsIfDestinationExists(t *testing.T) {
 	store := newRecordingCodeGroupStore(t)
 
 	input := applyPatchInput(t, "*** Update File: old.go\n*** Move to: new.go\n@@\n alpha\n-BEFORE\n+AFTER\n beta")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil, "Execute err = nil, want non-nil (move destination already exists)")
 	testassert.Require(t, strings.Contains(err.Error(), "already exists"), "err = %v, want already-exists error", err)
 	testassert.Equal(t, readFile(t, src), "alpha\nBEFORE\nbeta")
@@ -205,7 +205,7 @@ func TestApplyPatchCanonicalCollisionRejectedBeforeApply(t *testing.T) {
 	store := newRecordingCodeGroupStore(t)
 	// "a.txt" and "./a.txt" are different raw paths but resolve to the same canonical.
 	input := applyPatchInput(t, "*** Update File: a.txt\n@@\n-hi\n+bye\n*** Update File: ./a.txt\n@@\n-hi\n+there")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "resolve to the same file"), "Execute err = %v, want canonical collision error", err)
 	testassert.Equal(t, readFile(t, filepath.Join(dir, "a.txt")), "hi")
 	testassert.Equal(t, len(store.calls), 0)
@@ -220,7 +220,7 @@ func TestApplyPatchCanonicalCollisionSymlinkRejected(t *testing.T) {
 	store := newRecordingCodeGroupStore(t)
 	// Two raw paths resolving to the same canonical via symlink.
 	input := applyPatchInput(t, "*** Update File: real.txt\n@@\n content\n+changed\n*** Delete File: link.txt")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, store, map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", store, map[string]any{"input": input})
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "resolve to the same file"), "Execute err = %v, want canonical collision error", err)
 	testassert.Equal(t, readFile(t, real), "content")
 	testassert.Equal(t, len(store.calls), 0)
@@ -233,7 +233,7 @@ func TestApplyPatchFuzzyMatchPreservesActualTrailingWhitespaceContext(t *testing
 
 	input := applyPatchInput(t, "*** Update File: a.go\n@@\n alpha\n-BEFORE\n+AFTER\n beta")
 	{
-		_, err := execPatch(t, dir, "", "", CapabilityOptions{}, newTempCodeGroupStore(t), map[string]any{"input": input})
+		_, err := execPatch(t, dir, "", newTempCodeGroupStore(t), map[string]any{"input": input})
 		testassert.NoError(t, err)
 	}
 	testassert.Equal(t, readFile(t, path), "alpha   \nAFTER\nbeta")
@@ -246,7 +246,7 @@ func TestApplyPatchFuzzyMatchPreservesActualUnicodeContext(t *testing.T) {
 
 	input := applyPatchInput(t, "*** Update File: a.go\n@@\n say \"hello\"\n-BEFORE\n+AFTER\n beta")
 	{
-		_, err := execPatch(t, dir, "", "", CapabilityOptions{}, newTempCodeGroupStore(t), map[string]any{"input": input})
+		_, err := execPatch(t, dir, "", newTempCodeGroupStore(t), map[string]any{"input": input})
 		testassert.NoError(t, err)
 	}
 	testassert.Equal(t, readFile(t, path), "say \u201Chello\u201D\nAFTER\nbeta")
@@ -258,7 +258,7 @@ func TestApplyPatchSyntheticEOFContextDoesNotCreateTrailingNewline(t *testing.T)
 	testassert.NoError(t, os.WriteFile(path, []byte("foo\nbar"), 0o644))
 
 	input := applyPatchInput(t, "*** Update File: a.txt\n@@\n foo\n-bar\n+baz\n ")
-	res, err := execPatch(t, dir, "", "", CapabilityOptions{}, newTempCodeGroupStore(t), map[string]any{"input": input})
+	res, err := execPatch(t, dir, "", newTempCodeGroupStore(t), map[string]any{"input": input})
 	testassert.NoError(t, err)
 	testassert.Equal(t, readFile(t, path), "foo\nbaz")
 	rows := previewRowsFor(t, ApplyPatchPreviewMetadata(res.Previews), "a.txt")
@@ -271,7 +271,7 @@ func TestApplyPatchSyntheticEOFRemoveFails(t *testing.T) {
 	testassert.NoError(t, os.WriteFile(path, []byte("foo"), 0o644))
 
 	input := applyPatchInput(t, "*** Update File: a.txt\n@@\n-\n+bar")
-	_, err := execPatch(t, dir, "", "", CapabilityOptions{}, newTempCodeGroupStore(t), map[string]any{"input": input})
+	_, err := execPatch(t, dir, "", newTempCodeGroupStore(t), map[string]any{"input": input})
 	testassert.Require(t, err != nil, "Execute err = nil, want synthetic EOF remove to fail")
 	testassert.Require(t, strings.HasPrefix(err.Error(), "Failed to find expected lines in a.txt:"), "err = %v, want expected-lines failure", err)
 	testassert.Equal(t, readFile(t, path), "foo")
@@ -283,7 +283,7 @@ func TestApplyPatchRealEOFContextPreservesTrailingNewline(t *testing.T) {
 	testassert.NoError(t, os.WriteFile(path, []byte("foo\nbar\n"), 0o644))
 
 	input := applyPatchInput(t, "*** Update File: a.txt\n@@\n foo\n-bar\n+baz\n ")
-	res, err := execPatch(t, dir, "", "", CapabilityOptions{}, newTempCodeGroupStore(t), map[string]any{"input": input})
+	res, err := execPatch(t, dir, "", newTempCodeGroupStore(t), map[string]any{"input": input})
 	testassert.NoError(t, err)
 	testassert.Equal(t, readFile(t, path), "foo\nbaz\n")
 	rows := previewRowsFor(t, ApplyPatchPreviewMetadata(res.Previews), "a.txt")
@@ -297,7 +297,7 @@ func TestApplyPatchRealEmptyRemoveStillWorks(t *testing.T) {
 
 	input := applyPatchInput(t, "*** Update File: a.txt\n@@\n foo\n-\n+bar\n baz")
 	{
-		_, err := execPatch(t, dir, "", "", CapabilityOptions{}, newTempCodeGroupStore(t), map[string]any{"input": input})
+		_, err := execPatch(t, dir, "", newTempCodeGroupStore(t), map[string]any{"input": input})
 		testassert.NoError(t, err)
 	}
 	testassert.Equal(t, readFile(t, path), "foo\nbar\nbaz")

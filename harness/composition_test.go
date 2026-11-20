@@ -897,7 +897,7 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 		queue = queue[1:]
 		return next, nil
 	})
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	sessionID := session.Identity.SessionID
 	c := leaseCoordinator(t, h, sessionID)

@@ -46,6 +46,7 @@ type requestView struct {
 	tools        []model.ToolDefinition
 	parameters   model.Extra
 	hooks        []RequestHook
+	release      func()
 	summary      bool
 }
 
@@ -148,6 +149,10 @@ func (v *requestView) captureStage(inv InvocationExecution) error {
 	v.parameters = inv.ModelParameters.Clone()
 	if inv.RequestStage != nil {
 		stage := inv.RequestStage()
+		v.release = stage.Release
+		if stage.Error != nil {
+			return stage.Error
+		}
 		v.hooks = slices.Clone(stage.Hooks)
 		if !v.summary {
 			v.capture.Tools = cloneToolDefinitions(stage.Catalog)
@@ -407,6 +412,11 @@ func (d *executionDriver) requestSource() agent.RequestSource {
 			return model.Request{}, fmt.Errorf("%w: %v", ErrStorage, err)
 		}
 		view := newRequestView(capture, checkpointID, boundaryID, canonical)
+		defer func() {
+			if view.release != nil {
+				view.release()
+			}
+		}()
 		if err := view.captureStage(inv.callbacks); err != nil {
 			return model.Request{}, err
 		}

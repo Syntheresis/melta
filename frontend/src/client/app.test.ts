@@ -33,7 +33,6 @@ import {
   INSTANCE,
   NEWER,
   OLDER,
-  definitionSelection,
   hydration,
   json,
   native,
@@ -65,6 +64,8 @@ const sdk: Record<string, ReturnType<typeof vi.fn>> = {
   GetSessionHydration: vi.fn(),
   GetWarnings: vi.fn(),
   InterruptSession: vi.fn(),
+  InvokeExtension: vi.fn(),
+  ListExtensions: vi.fn(),
   ListModels: vi.fn(),
   ListProviders: vi.fn(),
   ListSessions: vi.fn(),
@@ -75,7 +76,7 @@ const sdk: Record<string, ReturnType<typeof vi.fn>> = {
   ResetProviderField: vi.fn(),
   ResetProviderModelField: vi.fn(),
   RevertSessionCode: vi.fn(),
-  SetSessionAgentType: vi.fn(),
+  SetSessionInputs: vi.fn(),
   SetSessionModel: vi.fn(),
   StopSession: vi.fn(),
   SubmitSession: vi.fn(),
@@ -166,13 +167,28 @@ function basicMocks(connection: ReturnType<typeof fakeConnection>) {
   connection.openMock.mockResolvedValue({ instance_id: INSTANCE, generation: '1', workspace: '/ws' });
   vi.mocked(sdk.ListSessions).mockImplementation(async () => json(200, [session('root1', NEWER), session('root2', OLDER)]));
   vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration()));
+  vi.mocked(sdk.ListExtensions).mockResolvedValue(json(200, [{
+    extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: ['task'],
+    operations: [
+      { method: { name: 'create', mode: 'service_io', input: '{}', success: '{}' }, target: 'workspace' },
+      { method: { name: 'list', mode: 'pure', input: '{}', success: '{}' }, target: 'harness' },
+      { method: { name: 'current', mode: 'pure', input: '{}', success: '{}' }, target: 'session' },
+      { method: { name: 'select', mode: 'service_io', input: '{}', success: '{}' }, target: 'session' },
+      { method: { name: 'set_model', mode: 'service_io', input: '{}', success: '{}' }, target: 'harness' },
+    ],
+  }]));
+  vi.mocked(sdk.InvokeExtension).mockImplementation(async (params: string) => {
+    const operation = JSON.parse(params).body.operation;
+    const result = operation === 'list'
+      ? [{ name: 'primary', description: 'Primary agent', subagent: false, model: '' }, { name: 'compact', description: 'Compaction', subagent: false, model: '' }]
+      : operation === 'current' ? { agent: 'primary' }
+      : operation === 'create' ? { session_id: 'root-new' }
+      : null;
+    return json(200, { kind: 'success', result });
+  });
   vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
     configuration_revision: { instance_id: INSTANCE, generation: '1' },
     settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-    agents: [
-      { name: 'primary', ...definitionSelection('primary'), description: 'Primary agent', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-      { name: 'compact', ...definitionSelection('compact'), description: 'Compaction', subagent: false, model: '', readonly: true, write_dir: '', tools: [], capabilities: [] },
-    ],
     providers: [],
   }));
   vi.mocked(sdk.GetWarnings).mockResolvedValue(json(200, {
@@ -252,7 +268,6 @@ describe('initial composition', () => {
     vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
       configuration_revision: { instance_id: INSTANCE, generation: '2' },
       settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [],
       providers: [],
     }));
     const hydrationV1 = hydration();
@@ -280,13 +295,11 @@ describe('initial composition', () => {
       .mockResolvedValueOnce(json(200, {
         configuration_revision: { instance_id: INSTANCE, generation: 'not-a-number' },
         settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-        agents: [],
         providers: [],
       }))
       .mockResolvedValue(json(200, {
         configuration_revision: { instance_id: INSTANCE, generation: '1' },
         settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-        agents: [],
         providers: [],
       }));
     // No hydration floor ever exists: the initial global comparison is the only
@@ -305,13 +318,11 @@ describe('initial composition', () => {
       .mockResolvedValueOnce(json(200, {
         configuration_revision: foreign,
         settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-        agents: [],
         providers: [],
       }))
       .mockResolvedValue(json(200, {
         configuration_revision: { instance_id: INSTANCE, generation: '1' },
         settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-        agents: [],
         providers: [],
       }));
     connection.openMock.mockResolvedValue({ instance_id: INSTANCE, generation: '1', workspace: '/ws' });
@@ -334,7 +345,7 @@ describe('initial composition', () => {
     vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
       configuration_revision: { instance_id: INSTANCE, generation: '1' },
       settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [], providers: [],
+      providers: [],
     }));
     vi.mocked(sdk.GetWarnings).mockResolvedValue(json(200, { warnings_revision: { instance_id: INSTANCE, revision: '1' }, warnings: [] }));
     vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration()));
@@ -367,10 +378,13 @@ describe('initial composition', () => {
     const connection = fakeConnection();
     basicMocks(connection);
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, []));
-    vi.mocked(sdk.CreateSession).mockResolvedValue(json(200, session('primary1', NEWER)));
+    vi.mocked(sdk.InvokeExtension).mockResolvedValue(json(200, { kind: 'success', result: { session_id: 'primary1' } }));
     vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({ session: session('primary1', NEWER) })));
     const { target } = await mountApp(connection);
-    expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledWith('{"body":{"workspace":"/ws","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"}}}}');
+    const request = JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls[0][0]);
+    expect(request.body).toMatchObject({ extension_id: 'agents', operation: 'create', target: { kind: 'workspace', workspace: '/ws' }, arguments: {} });
+    expect(request.body.request_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(vi.mocked(sdk.CreateSession)).not.toHaveBeenCalled();
     expect(vi.mocked(sdk.GetSessionHydration)).toHaveBeenCalledWith('{"session_id":"primary1"}');
     expect(target.textContent).toContain('primary1');
   });
@@ -379,10 +393,11 @@ describe('initial composition', () => {
     const connection = fakeConnection();
     basicMocks(connection);
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, []));
+    vi.mocked(sdk.ListExtensions).mockResolvedValue(json(200, []));
     vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
       configuration_revision: { instance_id: INSTANCE, generation: '1' },
       settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [], providers: [],
+      providers: [],
     }));
     vi.mocked(sdk.CreateSession).mockResolvedValue(json(200, session('baseline', NEWER)));
     vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({ session: session('baseline', NEWER) })));
@@ -393,63 +408,52 @@ describe('initial composition', () => {
   });
 
   it.each([
-    json(200, { configuration_revision: { instance_id: INSTANCE, generation: '1' }, agents: null }),
-    json(200, { configuration_revision: { instance_id: INSTANCE, generation: '1' }, agents: [{ name: 'primary' }] }),
-    json(200, { configuration_revision: { instance_id: INSTANCE, generation: '1' }, agents: [
-      { name: 'primary', ...definitionSelection('primary'), description: '', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-      { name: 'primary', ...definitionSelection('primary'), description: '', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-    ] }),
+    json(200, null),
+    json(200, [{ extension_id: 'agents' }]),
+    json(200, [
+      { extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [] },
+      { extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [] },
+    ]),
     json(500, { code: 'storage', message: 'failed' }),
-  ])('does not create a session after a failed or malformed roster read', async (result) => {
+  ])('does not create a session after failed or malformed discovery', async (result) => {
     const connection = fakeConnection();
     basicMocks(connection);
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, []));
-    vi.mocked(sdk.GetConfiguration).mockResolvedValue(result);
+    vi.mocked(sdk.ListExtensions).mockResolvedValue(result);
     await mountAppNoWait(connection);
     await settle();
     expect(vi.mocked(sdk.CreateSession)).not.toHaveBeenCalled();
+    expect(vi.mocked(sdk.InvokeExtension)).not.toHaveBeenCalled();
   });
 
   it.each([
-    ['foreign primary', [{ name: 'primary', definition: { extension_id: 'guest', capability_id: 'guest.definitions', definition_id: 'primary' }, description: '', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] }]],
-    ['read-only foreign reviewer', [{ name: 'reviewer', definition: { extension_id: 'guest', capability_id: 'guest.definitions', definition_id: 'reviewer' }, description: '', subagent: false, model: '', readonly: true, write_dir: '', tools: [], capabilities: [] }]],
-    ['duplicate names without supplied primary', [
-      { name: 'twin', definition: { extension_id: 'agents', capability_id: 'agents.definitions', definition_id: 'twin' }, description: '', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-      { name: 'twin', definition: { extension_id: 'guest', capability_id: 'guest.definitions', definition_id: 'twin' }, description: '', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-    ]],
-  ])('creates a resolved root for a roster with no supplied primary: %s', async (_name, agents) => {
+    ['foreign extension', [{ extension_id: 'guest', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [] }]],
+    ['inactive Agents', [{ extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [], inactive_reason: 'unavailable' }]],
+    ['Agents without create', [{ extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [] }]],
+  ])('creates a baseline root without an advertised Agents create: %s', async (_name, extensions) => {
     const connection = fakeConnection();
     basicMocks(connection);
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, []));
-    vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
-      configuration_revision: { instance_id: INSTANCE, generation: '1' },
-      settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents,
-      providers: [],
-    }));
+    vi.mocked(sdk.ListExtensions).mockResolvedValue(json(200, extensions));
     vi.mocked(sdk.CreateSession).mockResolvedValue(json(200, session('baseline', NEWER)));
     vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({ session: session('baseline', NEWER) })));
     await mountApp(connection);
     expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledWith('{"body":{"workspace":"/ws"}}');
   });
 
-  it('selects the supplied application primary beside a duplicate foreign name', async () => {
+  it('selects the supplied Agents create beside a foreign extension', async () => {
     const connection = fakeConnection();
     basicMocks(connection);
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, []));
-    vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
-      configuration_revision: { instance_id: INSTANCE, generation: '1' },
-      settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [
-        { name: 'primary', definition: { extension_id: 'guest', capability_id: 'guest.definitions', definition_id: 'primary' }, description: '', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-        { name: 'primary', ...definitionSelection('primary'), description: '', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-      ],
-      providers: [],
-    }));
-    vi.mocked(sdk.CreateSession).mockResolvedValue(json(200, session('primary1', NEWER)));
+    vi.mocked(sdk.ListExtensions).mockResolvedValue(json(200, [
+      { extension_id: 'guest', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [] },
+      { extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [{ method: { name: 'create', mode: 'service_io', input: '{}', success: '{}' }, target: 'workspace' }] },
+    ]));
+    vi.mocked(sdk.InvokeExtension).mockResolvedValue(json(200, { kind: 'success', result: { session_id: 'primary1' } }));
     vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({ session: session('primary1', NEWER) })));
     await mountApp(connection);
-    expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledWith('{"body":{"workspace":"/ws","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"}}}}');
+    expect(JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls[0][0]).body).toMatchObject({ extension_id: 'agents', operation: 'create', target: { kind: 'workspace', workspace: '/ws' } });
+    expect(vi.mocked(sdk.CreateSession)).not.toHaveBeenCalled();
   });
 });
 
@@ -550,7 +554,7 @@ describe('conversation rendering', () => {
 describe('provisional activity', () => {
   function runningHydration() {
     return hydration({
-      active_operation: { operation_id: 'op1', request_kind: 'message', status: 'running', admitted_at: '0', agent_selection: definitionSelection('primary'), model: 'prov/m', usage: { totals: { by_model: [] } } },
+      active_operation: { operation_id: 'op1', request_kind: 'message', status: 'running', admitted_at: '0', model: 'prov/m', usage: { totals: { by_model: [] } } },
     });
   }
 
@@ -824,7 +828,7 @@ describe('composer', () => {
 describe('controls', () => {
   function activeHydration() {
     return hydration({
-      active_operation: { operation_id: 'op1', request_kind: 'message', status: 'running', admitted_at: '0', agent_selection: definitionSelection('primary'), model: 'prov/m', usage: { totals: { by_model: [] } } },
+      active_operation: { operation_id: 'op1', request_kind: 'message', status: 'running', admitted_at: '0', model: 'prov/m', usage: { totals: { by_model: [] } } },
     });
   }
 
@@ -910,7 +914,7 @@ describe('controls', () => {
   });
 
   it('submits a manual compact with a minted caller ID', async () => {
-    vi.mocked(sdk.CompactSession).mockResolvedValue(json(200, { operation_id: 'op1', request_kind: 'compact', status: 'running', admitted_at: '0', agent_selection: definitionSelection('primary'), model: 'prov/m', usage: { totals: { by_model: [] } } }));
+    vi.mocked(sdk.CompactSession).mockResolvedValue(json(200, { operation_id: 'op1', request_kind: 'compact', status: 'running', admitted_at: '0', model: 'prov/m', usage: { totals: { by_model: [] } } }));
     const { target } = await mountBasic();
     // The toolbar has no duplicate Compact; the composer owns the control.
     expect(target.querySelector('.toolbar .compact-btn')).toBeNull();
@@ -925,7 +929,7 @@ describe('controls', () => {
     const connection = fakeConnection();
     basicMocks(connection);
     vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({
-      active_operation: { operation_id: 'op1', request_kind: 'compact', status: 'running', admitted_at: '0', agent_selection: definitionSelection('primary'), model: 'prov/compact-transport', usage: { totals: { by_model: [] } } },
+      active_operation: { operation_id: 'op1', request_kind: 'compact', status: 'running', admitted_at: '0', model: 'prov/compact-transport', usage: { totals: { by_model: [] } } },
     })));
     const { target } = await mountApp(connection);
     await settle();
@@ -949,10 +953,11 @@ describe('keyboard pickers', () => {
   it('dispatches a resolved model edit to the Session owner', async () => {
     const connection = fakeConnection();
     basicMocks(connection);
-    const selected: Hydration['session']['agent_selection'] = { inputs: { model: 'prov/old', instructions: 'keep', assembly_mode: 'full', tools: ['read_file'], capabilities: [], constraints: { readonly: false, write_dir: '' }, strategy: { id: '', settings: '' } } };
-    vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({ session: { ...session('root1', NEWER), agent_selection: selected } })));
+    const selected: Hydration['session']['inputs'] = { model: 'prov/old', instructions: 'keep', tools: ['read_file'] };
+    vi.mocked(sdk.ListExtensions).mockResolvedValue(json(200, []));
+    vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({ session: { ...session('root1', NEWER), inputs: selected } })));
     vi.mocked(sdk.ListModels).mockResolvedValue(json(200, { configuration_revision: { instance_id: INSTANCE, generation: '1' }, models: [{ ref: 'prov/a', provider: 'prov', provider_name: 'Provider', model: 'a', display_name: 'Model A', context_window: 1000, max_output_tokens: 10, hidden: false, provider_hidden: false, incomplete: false, source: 'user' }] }));
-    vi.mocked(sdk.SetSessionModel).mockResolvedValue(json(200, { ...session('root1', NEWER), agent_selection: selected }));
+    vi.mocked(sdk.SetSessionModel).mockResolvedValue(json(200, { ...session('root1', NEWER), inputs: selected }));
     const { target } = await mountApp(connection);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true }));
     await settle();
@@ -996,7 +1001,8 @@ describe('keyboard pickers', () => {
     await settle();
     (target.querySelector('.mp .item') as HTMLElement).click();
     await settle();
-    expect(vi.mocked(sdk.UpdateConfigurationSettings)).toHaveBeenCalledWith('{"body":{"extension_edit":{"extension_id":"agents","edit_id":"set_model","arguments":"{\\"definition_id\\":\\"primary\\",\\"model\\":\\"prov/a\\"}"}}}');
+    const setModel = vi.mocked(sdk.InvokeExtension).mock.calls.map(([value]) => JSON.parse(value)).find((value) => value.body.operation === 'set_model');
+    expect(setModel.body).toMatchObject({ extension_id: 'agents', target: { kind: 'harness' }, arguments: { definition_id: 'primary', model: 'prov/a' } });
     // Correction 5: the success is reported, and the current configuration view
     // is refreshed through its OWN generated read (not by force-adopting the
     // mutation's returned clock).
@@ -1004,25 +1010,55 @@ describe('keyboard pickers', () => {
     await vi.waitFor(() => expect(vi.mocked(sdk.GetConfiguration).mock.calls.length).toBeGreaterThanOrEqual(2));
   });
 
+  it('shows the latest admitted operation model, not the last operation id', async () => {
+    const connection = fakeConnection();
+    basicMocks(connection);
+    vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({
+      selected_model: 'prov/choice',
+      operations: [
+        { operation_id: 'aaa-old', request_kind: 'message', status: 'success', admitted_at: '2026-01-02T03:04:05Z', model: 'prov/old', usage: { by_model: [] } },
+        { operation_id: 'mmm-new', request_kind: 'message', status: 'success', admitted_at: '2026-01-02T03:04:09Z', model: 'prov/new', usage: { by_model: [] } },
+        { operation_id: 'zzz-mid', request_kind: 'message', status: 'success', admitted_at: '2026-01-02T03:04:07Z', model: 'prov/mid', usage: { by_model: [] } },
+      ],
+    })));
+    const { target } = await mountApp(connection);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true }));
+    await settle();
+    await settle();
+    expect(target.textContent).toContain('Ran with:');
+    expect(target.textContent).toContain('prov/new');
+    expect(target.textContent).not.toContain('prov/old');
+    expect(target.textContent).not.toContain('prov/mid');
+  });
+
   it('keeps an unavailable selected_model from the accepted hydration and reports a selection rejection', async () => {
     const connection = fakeConnection();
     basicMocks(connection);
-    vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({ selected_model: 'prov/missing' })));
+    vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({
+      selected_model: 'prov/missing',
+      operations: [{ operation_id: 'ran-op', request_kind: 'message', status: 'success', admitted_at: '2026-01-02T03:04:05Z', model: 'prov/ran', usage: { by_model: [] } }],
+    })));
     vi.mocked(sdk.ListModels).mockResolvedValue(json(200, {
       configuration_revision: { instance_id: INSTANCE, generation: '1' },
       models: [
         { ref: 'prov/available', provider: 'prov', provider_name: 'Provider', model: 'available', display_name: 'Available', context_window: 1000, max_output_tokens: 10, hidden: false, provider_hidden: false, incomplete: false, source: 'user' },
       ],
     }));
-    vi.mocked(sdk.UpdateConfigurationSettings).mockResolvedValue(json(404, { code: 'not_found', message: 'model not available' }));
+    vi.mocked(sdk.InvokeExtension).mockImplementation(async (params: string) => {
+      const op = JSON.parse(params).body.operation;
+      return op === 'current' ? json(200, { kind: 'success', result: { agent: 'primary' } })
+        : json(404, { code: 'not_found', message: 'model not available' });
+    });
     const { target } = await mountApp(connection);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true }));
     await settle();
     await settle();
-    // The accepted hydration's selected_model is retained as-is; the offered
-    // list does not automatically replace it.
-    expect(target.textContent).toContain('Currently selected model:');
+    // The accepted hydration's stored choice is retained as-is; the model
+    // that actually ran is shown separately and never replaces it.
+    expect(target.textContent).toContain('Model choice:');
     expect(target.textContent).toContain('prov/missing');
+    expect(target.textContent).toContain('Ran with:');
+    expect(target.textContent).toContain('prov/ran');
     expect(vi.mocked(sdk.UpdateConfigurationSettings)).not.toHaveBeenCalled();
     (target.querySelector('.mp-btn') as HTMLElement).click();
     await settle();
@@ -1031,7 +1067,8 @@ describe('keyboard pickers', () => {
     await settle();
     // The generated rejection is displayed and the accepted selection is not
     // changed by the client.
-    expect(vi.mocked(sdk.UpdateConfigurationSettings)).toHaveBeenCalledWith('{"body":{"extension_edit":{"extension_id":"agents","edit_id":"set_model","arguments":"{\\"definition_id\\":\\"primary\\",\\"model\\":\\"prov/available\\"}"}}}');
+    const setModel = vi.mocked(sdk.InvokeExtension).mock.calls.map(([value]) => JSON.parse(value)).find((value) => value.body.operation === 'set_model');
+    expect(setModel.body).toMatchObject({ extension_id: 'agents', target: { kind: 'harness' }, arguments: { definition_id: 'primary', model: 'prov/available' } });
     expect(target.querySelector('.note.outcome')?.textContent).toContain('Model selection failed');
     expect(target.querySelector('.note.outcome')?.textContent).toContain('model not available');
     expect(target.textContent).toContain('prov/missing');
@@ -1043,8 +1080,12 @@ describe('keyboard pickers', () => {
       models: [{ ref: 'prov/a', provider: 'prov', provider_name: 'Provider', model: 'a', display_name: 'Model A', context_window: 1000, max_output_tokens: 10, hidden: false, provider_hidden: false, incomplete: false, source: 'user' }],
     }));
     const { promise: modelGate, resolve: resolveModel } = Promise.withResolvers();
-    vi.mocked(sdk.UpdateConfigurationSettings).mockImplementation(() => modelGate);
     const { target } = await mountBasic();
+    vi.mocked(sdk.InvokeExtension).mockImplementation(async (params: string) => {
+      const operation = JSON.parse(params).body.operation;
+      if (operation === 'set_model') return modelGate;
+      return json(200, { kind: 'success', result: { agent: 'primary' } });
+    });
     const opensBefore = target ? 0 : 0;
     void opensBefore;
     const configReadsBefore = vi.mocked(sdk.GetConfiguration).mock.calls.length;
@@ -1054,13 +1095,11 @@ describe('keyboard pickers', () => {
     await settle();
     (target.querySelector('.mp .item') as HTMLElement).click();
     await settle();
+    expect(vi.mocked(sdk.InvokeExtension).mock.calls.some(([value]) => JSON.parse(value).body.operation === 'set_model')).toBe(true);
     // Move the selection to root2 while the model mutation is in flight.
     await selectRoot2(target);
     // The old-owner response finally lands carrying a foreign clock.
-    resolveModel(json(200, {
-      configuration_revision: { instance_id: 'ffffffffffffffffffffffffffffffff', generation: '9' },
-      result: { sessions: { auto_archive: false, archive_after_days: 0, delete_after_archive_days: 0 }, tools: {}, jobs: {}, compaction: {}, extensions: {} },
-    }));
+    resolveModel(json(200, { kind: 'success', result: null }));
     await settle();
     await settle();
     // Success is still reported for the captured address...
@@ -1093,7 +1132,7 @@ describe('child inspection and background', () => {
       workspace: '/ws',
       owner_session_id: 'root1',
       lifecycle,
-      agent_selection: definitionSelection('secondary'),
+      inputs: {},
       created_at: '0',
       last_activity: OLDER,
       session_revision: revision('1'),
@@ -1266,7 +1305,6 @@ describe('child inspection and background', () => {
           request_kind: 'message',
           status: 'running',
           admitted_at: '0',
-          agent_selection: definitionSelection('primary'),
           model: 'prov/m',
           usage: { totals: { by_model: [] } },
         },
@@ -1596,8 +1634,7 @@ describe('repair', () => {
     await vi.waitFor(() => expect(target.textContent).toContain('root2'));
     releaseConfiguration(json(200, {
       configuration_revision: { instance_id: INSTANCE, generation: '2' },
-      settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [{ name: 'reviewer', ...definitionSelection('reviewer'), description: 'Review changes', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] }],
+      settings: { sessions: { auto_archive: false, archive_after_days: 17, delete_after_archive_days: 1 }, extensions: {} },
       providers: [],
     }));
     await settle();
@@ -1609,8 +1646,7 @@ describe('repair', () => {
     (target.querySelector('[aria-label="Settings"]') as HTMLElement).click();
     await settle();
     await settle();
-    (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
-    await vi.waitFor(() => expect(target.textContent).toContain('reviewer'));
+    await vi.waitFor(() => expect((target.querySelector('[aria-label="archive_after_days"]') as HTMLInputElement)?.value).toBe('17'));
   });
 
 // --- Step 8: navigation, configuration, viewer and code tasks ----------------
@@ -1618,7 +1654,7 @@ describe('repair', () => {
 const RAW_CONFIGURATION = '{"configuration_revision":{"instance_id":"' + INSTANCE + '","generation":"1"},'
   + '"settings":{"sessions":{"auto_archive":false,"archive_after_days":-9223372036854775808,"delete_after_archive_days":1},'
   + '"tools":{"max_output_bytes":9007199254740993},"jobs":{},"compaction":{},"extensions":{}},'
-  + '"agents":[],"providers":[]}';
+  + '"providers":[]}';
 
 const EXACT_SETTINGS_TEXT = '{"sessions":{"auto_archive":false,"archive_after_days":-9223372036854775808,"delete_after_archive_days":1},'
   + '"tools":{"max_output_bytes":9007199254740993},"jobs":{},"compaction":{},"extensions":{}}';
@@ -1633,7 +1669,7 @@ const RESET_SETTINGS_TEXT = '{"sessions":{"auto_archive":false,"archive_after_da
   + '"extensions":{"agents":"{\\"enabled\\":true,\\"task\\":{\\"max_concurrent\\":2}}"}}';
 
 const RESET_CONFIGURATION = '{"configuration_revision":{"instance_id":"' + INSTANCE + '","generation":"1"},'
-  + '"settings":' + RESET_SETTINGS_TEXT + ',"agents":[],"providers":[]}';
+  + '"settings":' + RESET_SETTINGS_TEXT + ',"providers":[]}';
 
 // Raw-document editing fixture: every baseline object carries an exact int64
 // unknown member plus ordinary siblings, so deleting one known member can be
@@ -1645,7 +1681,7 @@ const RAW_EDIT_SETTINGS_TEXT = '{"sessions":{"auto_archive":false,"archive_after
   + '"extensions":{"agents":"{\\"enabled\\":true,\\"task\\":{\\"max_concurrent\\":2}}"}}';
 
 const RAW_EDIT_CONFIGURATION = '{"configuration_revision":{"instance_id":"' + INSTANCE + '","generation":"1"},'
-  + '"settings":' + RAW_EDIT_SETTINGS_TEXT + ',"agents":[],"providers":[]}';
+  + '"settings":' + RAW_EDIT_SETTINGS_TEXT + ',"providers":[]}';
 
 function inputItem(itemID: string, origin: 'user' | 'runtime' | 'plugin', operationID?: string) {
   return {
@@ -1664,7 +1700,6 @@ function runningOperation(id: string) {
     request_kind: 'message' as const,
     status: 'running' as const,
     admitted_at: '0',
-    agent_selection: definitionSelection('primary'),
     model: 'p/m',
     usage: { totals: { by_model: [] } },
   };
@@ -1890,13 +1925,12 @@ describe('repair projection ownership', () => {
     expect(target.textContent).toContain('loading…');
   });
 
-  it('a failed fresh configuration/warning read leaves no old-owner roster or warning data', async () => {
+  it('failed fresh discovery and warning reads leave no old-owner Agent control or warning data', async () => {
     const connection = fakeConnection();
     basicMocks(connection);
     vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
       configuration_revision: { instance_id: INSTANCE, generation: '1' },
       settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [{ name: 'other-agent', ...definitionSelection('other-agent'), description: 'Old owner roster', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] }],
       providers: [],
     }));
     vi.mocked(sdk.GetWarnings).mockResolvedValue(json(200, {
@@ -1909,10 +1943,13 @@ describe('repair projection ownership', () => {
     const { target } = await mountApp(connection);
     await settle();
     expect(target.querySelector('[aria-label="Show warnings"]')).not.toBeNull();
+    await openSettings(target);
+    expect(target.querySelector('[aria-label="Agent type"]')).not.toBeNull();
     // The repair's own fresh global reads fail; no stale payload may survive.
     vi.mocked(sdk.GetConfiguration).mockRejectedValue(new Error('configuration down'));
     vi.mocked(sdk.GetWarnings).mockRejectedValue(new Error('warnings down'));
     vi.mocked(sdk.GetSessionHydration).mockRejectedValue(new Error('hydration down'));
+    vi.mocked(sdk.ListExtensions).mockRejectedValue(new Error('discovery down'));
     await repair(connection);
     expect(target.querySelector('[aria-label="Show warnings"]')).toBeNull();
     await openSettings(target);
@@ -2443,13 +2480,13 @@ describe('session picker tasks', () => {
   it('creates an explicit new session from the picker', async () => {
     const connection = fakeConnection();
     basicMocks(connection);
-    vi.mocked(sdk.CreateSession).mockResolvedValue(json(200, session('root-new', NEWER)));
     const { target } = await mountApp(connection);
     await openPicker(target);
     (target.querySelector('[aria-label="New session"]') as HTMLElement).click();
     await settle();
     await settle();
-    expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledWith('{"body":{"workspace":"/ws","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"}}}}');
+    expect(JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls.at(-1)?.[0] as string).body).toMatchObject({ extension_id: 'agents', operation: 'create', target: { kind: 'workspace', workspace: '/ws' } });
+    expect(vi.mocked(sdk.CreateSession)).not.toHaveBeenCalled();
     expect(vi.mocked(sdk.GetSessionHydration).mock.calls.at(-1)?.[0]).toEqual('{"session_id":"root-new"}');
   });
 });
@@ -2731,17 +2768,17 @@ describe('agent type ownership', () => {
   it('offers every returned definition including compact and dispatches the actual name', async () => {
     const connection = fakeConnection();
     basicMocks(connection);
-    vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
-      configuration_revision: { instance_id: INSTANCE, generation: '1' },
-      settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [
-        { name: 'primary', ...definitionSelection('primary'), description: 'Primary agent', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-        { name: 'compact', ...definitionSelection('compact'), description: 'Compaction', subagent: false, model: '', readonly: true, write_dir: '', tools: [], capabilities: [] },
-        { name: 'reviewer', ...definitionSelection('reviewer'), description: 'Reviewer', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] },
-      ],
-      providers: [],
-    }));
-    vi.mocked(sdk.SetSessionAgentType).mockResolvedValue(json(200, session('root1', NEWER)));
+    let rejectSelect = false;
+    vi.mocked(sdk.InvokeExtension).mockImplementation(async (params: string) => {
+      const op = JSON.parse(params).body.operation;
+      if (op === 'list') return json(200, { kind: 'success', result: [
+        { name: 'primary', description: 'Primary agent', subagent: false, model: '' },
+        { name: 'compact', description: 'Compaction', subagent: false, model: '' },
+        { name: 'reviewer', description: 'Reviewer', subagent: false, model: '' },
+      ] });
+      if (op === 'current') return json(200, { kind: 'success', result: { agent: 'primary' } });
+      return rejectSelect ? json(400, { code: 'invalid', message: 'unknown agent type' }) : json(200, { kind: 'success', result: null });
+    });
     const { target } = await mountApp(connection);
     const openAgentPicker = async () => {
       await openSettings(target);
@@ -2753,57 +2790,54 @@ describe('agent type ownership', () => {
     expect(choices.some((text) => text?.includes('primary'))).toBe(true);
     expect(choices.some((text) => text?.includes('compact'))).toBe(true);
     expect(choices.some((text) => text?.includes('reviewer'))).toBe(true);
-    (target.querySelector('[aria-label="Set session agent type compact from agents/agents.definitions"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Set session agent type compact"]') as HTMLElement).click();
     await settle();
     await settle();
-    expect(vi.mocked(sdk.SetSessionAgentType)).toHaveBeenCalledWith('{"session_id":"root1","body":{"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"compact"}}}}');
+    expect(JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls.at(-1)?.[0] as string).body).toMatchObject({ extension_id: 'agents', operation: 'select', target: { kind: 'session', session_id: 'root1' }, arguments: { agent: 'compact' } });
     // A second returned definition dispatches its own actual name as well.
     await openAgentPicker();
-    (target.querySelector('[aria-label="Set session agent type reviewer from agents/agents.definitions"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Set session agent type reviewer"]') as HTMLElement).click();
     await settle();
     await settle();
-    expect(vi.mocked(sdk.SetSessionAgentType).mock.calls.at(-1)?.[0]).toEqual('{"session_id":"root1","body":{"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"reviewer"}}}}');
+    expect(JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls.at(-1)?.[0] as string).body).toMatchObject({ operation: 'select', arguments: { agent: 'reviewer' } });
     // The server stays the accepting owner: a generated rejection is displayed.
-    vi.mocked(sdk.SetSessionAgentType).mockResolvedValue(json(400, { code: 'invalid', message: 'unknown agent type' }));
+    rejectSelect = true;
     await openAgentPicker();
-    (target.querySelector('[aria-label="Set session agent type compact from agents/agents.definitions"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Set session agent type compact"]') as HTMLElement).click();
     await settle();
     await settle();
     expect(target.textContent).toContain('Agent type change failed');
     expect(target.textContent).toContain('unknown agent type');
   });
 
-  it('addresses duplicate display names by full reference and marks the exact current entry', async () => {
+  it('marks the current Agents name and selects the requested name', async () => {
     const connection = fakeConnection();
     basicMocks(connection);
-    const ownTwin = { name: 'twin', definition: { extension_id: 'agents', capability_id: 'agents.definitions', definition_id: 'twin' }, description: 'same description', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] };
-    const guestTwin = { name: 'twin', definition: { extension_id: 'guest', capability_id: 'guest.definitions', definition_id: 'twin' }, description: 'same description', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] };
-    vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
-      configuration_revision: { instance_id: INSTANCE, generation: '1' },
-      settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [ownTwin, guestTwin],
-      providers: [],
-    }));
-    vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({
-      session: { ...session('root1', NEWER), agent_selection: { definition: guestTwin.definition } },
-    })));
-    vi.mocked(sdk.SetSessionAgentType).mockResolvedValue(json(200, session('root1', NEWER)));
+    vi.mocked(sdk.InvokeExtension).mockImplementation(async (params: string) => {
+      const op = JSON.parse(params).body.operation;
+      if (op === 'list') return json(200, { kind: 'success', result: [
+        { name: 'first', description: 'same description', subagent: false, model: '' },
+        { name: 'second', description: 'same description', subagent: false, model: '' },
+      ] });
+      if (op === 'current') return json(200, { kind: 'success', result: { agent: 'second' } });
+      return json(200, { kind: 'success', result: null });
+    });
     const { target } = await mountApp(connection);
     await openSettings(target);
     (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
     await settle();
     const twins = [...target.querySelectorAll('dialog .row')] as HTMLElement[];
     expect(twins.length).toBe(2);
-    expect(twins[0].textContent).toContain('agents/agents.definitions');
-    expect(twins[1].textContent).toContain('guest/guest.definitions');
-    expect(twins[0].getAttribute('aria-label')).toBe('Set session agent type twin from agents/agents.definitions');
-    expect(twins[1].getAttribute('aria-label')).toBe('Set session agent type twin from guest/guest.definitions');
+    expect(twins[0].textContent).toContain('first');
+    expect(twins[1].textContent).toContain('second');
+    expect(twins[0].getAttribute('aria-label')).toBe('Set session agent type first');
+    expect(twins[1].getAttribute('aria-label')).toBe('Set session agent type second');
     expect(twins[0].classList.contains('cur')).toBe(false);
     expect(twins[1].classList.contains('cur')).toBe(true);
     twins[1].click();
     await settle();
     await settle();
-    expect(vi.mocked(sdk.SetSessionAgentType).mock.calls.at(-1)?.[0]).toEqual('{"session_id":"root1","body":{"agent_selection":{"definition":{"extension_id":"guest","capability_id":"guest.definitions","definition_id":"twin"}}}}');
+    expect(JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls.at(-1)?.[0] as string).body).toMatchObject({ operation: 'select', target: { kind: 'session', session_id: 'root1' }, arguments: { agent: 'second' } });
   });
 });
 
@@ -2812,7 +2846,7 @@ describe('settings editor', () => {
     const raw = JSON.stringify({
       configuration_revision: { instance_id: INSTANCE, generation: '1' },
       settings: { model: 'provider/org/model', sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, tools: {}, jobs: {}, compaction: {}, extensions: {} },
-      agents: [], providers: [],
+      providers: [],
     });
     const { target } = await mountApp(settingsRawConnection(raw));
     await openSettings(target);
@@ -2826,23 +2860,29 @@ describe('settings editor', () => {
   });
 
   it.each([
-    ['absent extension', undefined, '{"task":{"max_concurrent":7}}', false],
-    ['absent task', '{"enabled":false}', '{"enabled":false,"task":{"max_concurrent":7}}', false],
-    ['null task', '{"enabled":true,"task":null}', '{"enabled":true,"task":{"max_concurrent":7}}', false],
-    ['object task', '{"enabled":true,"task":{"max_output_bytes":9007199254740993}}', '{"enabled":true,"task":{"max_output_bytes":9007199254740993,"max_concurrent":7}}', false],
-    ['null member', '{"enabled":true,"task":{"max_concurrent":null}}', '{"enabled":true,"task":{"max_concurrent":7}}', false],
-    ['array task', '{"enabled":false,"task":[]}', '{"enabled":false,"task":[]}', true],
-    ['string task', '{"enabled":false,"task":"bad"}', '{"enabled":false,"task":"bad"}', true],
-    ['number task', '{"enabled":false,"task":4}', '{"enabled":false,"task":4}', true],
-    ['boolean task', '{"enabled":false,"task":true}', '{"enabled":false,"task":true}', true],
-  ])('edits task field with %s', async (_name, document, expected, rejected) => {
+    ['absent extension', undefined, '{"task":{"max_concurrent":7}}'],
+    ['absent task', '{"enabled":false}', '{"enabled":false,"task":{"max_concurrent":7}}'],
+    ['null task', '{"enabled":true,"task":null}', '{"enabled":true,"task":null}'],
+    ['object task', '{"enabled":true,"task":{"max_output_bytes":9007199254740993}}', '{"enabled":true,"task":{"max_output_bytes":9007199254740993,"max_concurrent":7}}'],
+    ['null member', '{"enabled":true,"task":{"max_concurrent":null}}', '{"enabled":true,"task":{"max_concurrent":null}}'],
+    ['array task', '{"enabled":false,"task":[]}', '{"enabled":false,"task":[]}'],
+    ['string task', '{"enabled":false,"task":"bad"}', '{"enabled":false,"task":"bad"}'],
+    ['number task', '{"enabled":false,"task":4}', '{"enabled":false,"task":4}'],
+    ['boolean task', '{"enabled":false,"task":true}', '{"enabled":false,"task":true}'],
+  ])('edits opaque extension document with %s', async (_name, document, expected) => {
     const extensions = { ...(document === undefined ? {} : { agents: document }), other: '{ "value":9007199254740993 }' };
-    const raw = JSON.stringify({ configuration_revision: { instance_id: INSTANCE, generation: '1' }, settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, tools: {}, jobs: {}, compaction: {}, extensions }, agents: [], providers: [] });
+    const raw = JSON.stringify({ configuration_revision: { instance_id: INSTANCE, generation: '1' }, settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, tools: {}, jobs: {}, compaction: {}, extensions }, providers: [] });
     const { target } = await mountApp(settingsRawConnection(raw));
     await openSettings(target);
-    await changeInput(target, 'agents max_concurrent', '7');
-    if (rejected) expect(target.textContent).toContain('Edit rejected');
-    else expect(target.textContent).not.toContain('Edit rejected');
+    if (document === undefined) {
+      await changeInput(target, 'Plugin id', 'agents');
+      await changeInput(target, 'Plugin document', expected);
+      (target.querySelector('[aria-label="Author plugin document"]') as HTMLElement).click();
+    } else {
+      await changeInput(target, 'agents raw document', expected);
+    }
+    expect(target.textContent).not.toContain('Edit rejected');
+    expect(target.querySelector('[aria-label="agents max_concurrent"]')).toBeNull();
     (target.querySelector('[aria-label="Save settings"]') as HTMLElement).click();
     await settle();
     await settle();
@@ -2853,10 +2893,10 @@ describe('settings editor', () => {
 
   it('edits task output bytes without enabling its owner', async () => {
     const extensions = { agents: '{"enabled":false,"task":{"max_concurrent":null}}', other: '{ "value":9007199254740993 }' };
-    const raw = JSON.stringify({ configuration_revision: { instance_id: INSTANCE, generation: '1' }, settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, tools: {}, jobs: {}, compaction: {}, extensions }, agents: [], providers: [] });
+    const raw = JSON.stringify({ configuration_revision: { instance_id: INSTANCE, generation: '1' }, settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, tools: {}, jobs: {}, compaction: {}, extensions }, providers: [] });
     const { target } = await mountApp(settingsRawConnection(raw));
     await openSettings(target);
-    await changeInput(target, 'agents max_output_bytes', '2048');
+    await changeInput(target, 'agents raw document', '{"enabled":false,"task":{"max_concurrent":null,"max_output_bytes":2048}}');
     (target.querySelector('[aria-label="Save settings"]') as HTMLElement).click();
     await settle();
     await settle();
@@ -2932,15 +2972,19 @@ describe('settings editor', () => {
       '{"configuration_revision":{"instance_id":"' + INSTANCE + '","generation":"1"},'
       + '"settings":{"sessions":{"auto_archive":false,"archive_after_days":1,"delete_after_archive_days":1},'
       + '"tools":{"max_output_bytes":9007199254740993},"jobs":{},"compaction":{},"extensions":{}},'
-      + '"agents":[{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"description":"Primary","subagent":false,"model":"","readonly":false,"write_dir":"","tools":[],"capabilities":[]},'
-      + '{"name":"compact","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"compact"},"description":"Compaction","subagent":false,"model":"","readonly":true,"write_dir":"","tools":[],"capabilities":[]}],'
       + '"providers":[]}',
     );
     let selectedCompact = false;
-    vi.mocked(sdk.GetSessionHydration).mockImplementation(async () => json(200, hydration({
-      session: { ...session('root1', NEWER), agent_selection: definitionSelection(selectedCompact ? 'compact' : 'primary') },
-    })));
-    vi.mocked(sdk.SetSessionAgentType).mockResolvedValue(json(200, { ...session('root1', NEWER), agent_selection: definitionSelection('compact') }));
+    vi.mocked(sdk.InvokeExtension).mockImplementation(async (params: string) => {
+      const op = JSON.parse(params).body.operation;
+      if (op === 'list') return json(200, { kind: 'success', result: [
+        { name: 'primary', description: 'Primary', subagent: false, model: '' },
+        { name: 'compact', description: 'Compaction', subagent: false, model: '' },
+      ] });
+      if (op === 'current') return json(200, { kind: 'success', result: { agent: selectedCompact ? 'compact' : 'primary' } });
+      if (op === 'select') selectedCompact = true;
+      return json(200, { kind: 'success', result: null });
+    });
     vi.mocked(sdk.ListModels).mockResolvedValue(json(200, {
       configuration_revision: { instance_id: INSTANCE, generation: '1' },
       models: [{ ref: 'prov/compact-model', provider: 'prov', provider_name: 'Provider', model: 'compact-model', display_name: 'Compact model', context_window: 1000, max_output_tokens: 10, hidden: false, provider_hidden: false, incomplete: false, source: 'user' }],
@@ -2961,7 +3005,7 @@ describe('settings editor', () => {
     const body = bodyOf(vi.mocked(sdk.UpdateConfigurationSettings).mock.calls[0][0] as never);
     // The baseline compaction object carries the entered strings exactly and
     // leaves every other settings member intact; the independently selectable
-    // compact Agent is a configuration-view roster entry, not this object.
+    // compact Agent is a harness-level Agents definition, not this object.
     expect(JSON.parse(body).settings.compaction).toEqual({
       model: 'prov/compact-model',
       prompt: 'first line\nsecond line',
@@ -2969,16 +3013,16 @@ describe('settings editor', () => {
     expect(body).toContain('"tools":{"max_output_bytes":9007199254740993}');
     expect(body).toContain('"extensions":{}');
 
-    // The actual compact Agent selection uses SetSessionAgentType, and its
-    // type-wide model action uses the supplied set_model extension edit; the
-    // edit never writes the baseline settings owner.
+    // The actual compact Agent selection uses the Agents select operation,
+    // and its type-wide model action uses the supplied set_model extension
+    // edit; the edit never writes the baseline settings owner.
     (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
     await settle();
-    selectedCompact = true;
-    (target.querySelector('[aria-label="Set session agent type compact from agents/agents.definitions"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Set session agent type compact"]') as HTMLElement).click();
     await settle();
     await settle();
-    expect(vi.mocked(sdk.SetSessionAgentType)).toHaveBeenCalledWith('{"session_id":"root1","body":{"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"compact"}}}}');
+    const selectCall = vi.mocked(sdk.InvokeExtension).mock.calls.map(([value]) => JSON.parse(value)).find((value) => value.body.operation === 'select');
+    expect(selectCall.body).toMatchObject({ target: { kind: 'session', session_id: 'root1' }, arguments: { agent: 'compact' } });
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true }));
     await settle();
     expect(target.textContent).toContain('compact');
@@ -2986,8 +3030,9 @@ describe('settings editor', () => {
     await settle();
     (target.querySelector('.mp .item') as HTMLElement).click();
     await settle();
-    expect(vi.mocked(sdk.UpdateConfigurationSettings)).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(sdk.UpdateConfigurationSettings).mock.calls.at(-1)?.[0]).toBe('{"body":{"extension_edit":{"extension_id":"agents","edit_id":"set_model","arguments":"{\\"definition_id\\":\\"compact\\",\\"model\\":\\"prov/compact-model\\"}"}}}');
+    expect(vi.mocked(sdk.UpdateConfigurationSettings)).toHaveBeenCalledTimes(1);
+    const modelCall = vi.mocked(sdk.InvokeExtension).mock.calls.map(([value]) => JSON.parse(value)).find((value) => value.body.operation === 'set_model');
+    expect(modelCall.body).toMatchObject({ target: { kind: 'harness' }, arguments: { definition_id: 'compact', model: 'prov/compact-model' } });
   });
 
   it('resets only the tools section to defaults', async () => {
@@ -4640,7 +4685,7 @@ describe('read lifetime boundaries', () => {
       return json(200, {
         configuration_revision: { instance_id: INSTANCE, generation: '1' },
         settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-        agents: [], providers: [],
+        providers: [],
       });
     });
     const { target } = await mountApp(connection);
@@ -4907,42 +4952,55 @@ describe('session mutation commits', () => {
 });
 
 describe('global snapshot adoption', () => {
-  const OTHER_AGENT = { name: 'other-agent', ...definitionSelection('other-agent'), description: '', subagent: false, model: '', readonly: false, write_dir: '', tools: [], capabilities: [] };
-
   it.each([
     {
-      title: 'never publishes a stale configuration payload with its older clock',
+      title: 'an older configuration response does not lower the reader floor',
       readGeneration: '0',
-      visible: 'primary',
-      absent: 'other-agent',
     },
     {
-      title: 'adopts an equal-clock configuration payload',
+      title: 'an equal configuration response does not trigger another read',
       readGeneration: '1',
-      visible: 'other-agent',
-      absent: null,
     },
-  ])('$title', async ({ readGeneration, visible, absent }) => {
+  ])('$title', async ({ readGeneration }) => {
     const connection = fakeConnection();
     basicMocks(connection);
     const { target } = await mountApp(connection);
     vi.mocked(sdk.GetConfiguration).mockResolvedValue(json(200, {
       configuration_revision: { instance_id: INSTANCE, generation: readGeneration },
-      settings: { sessions: { auto_archive: false, archive_after_days: 1, delete_after_archive_days: 1 }, extensions: {} },
-      agents: [OTHER_AGENT],
+      settings: { sessions: { auto_archive: false, archive_after_days: 17, delete_after_archive_days: 1 }, extensions: {} },
       providers: [],
     }));
+    const readsBefore = vi.mocked(sdk.GetSessionHydration).mock.calls.length;
     deliverEvent(connection, {
       kind: 'configuration_changed',
       configuration_revision: { instance_id: INSTANCE, generation: '1' },
     });
     await settle();
     await settle();
-    await openSettings(target);
-    (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
-    await settle();
-    expect(target.textContent).toContain(visible);
-    if (absent !== null) expect(target.textContent).not.toContain(absent);
+    expect(vi.mocked(sdk.GetSessionHydration)).toHaveBeenCalledTimes(readsBefore);
+
+    const { promise: freshGate, resolve: releaseFresh } = Promise.withResolvers();
+    const stale = hydration({
+      session: { ...session('root1', NEWER), session_revision: revision('2') },
+      session_revision: revision('2'),
+      configuration_revision: { instance_id: INSTANCE, generation: '0' },
+      conversation: { items: [{ item_id: 'stale', kind: 'input', committed_at: '0', origin: 'user', content: [{ kind: 'text', text: 'stale body' }] } as Hydration['conversation']['items'][number]] },
+    });
+    vi.mocked(sdk.GetSessionHydration)
+      .mockResolvedValueOnce(json(200, stale))
+      .mockImplementationOnce(() => freshGate as never);
+    deliverEvent(connection, {
+      kind: 'session_changed', scope: { kind: 'session', session_id: 'root1' }, session_revision: revision('2'),
+    });
+    await vi.waitFor(() => expect(vi.mocked(sdk.GetSessionHydration)).toHaveBeenCalledTimes(readsBefore + 2));
+    expect(target.textContent).not.toContain('stale body');
+    releaseFresh(json(200, hydration({
+      session: { ...session('root1', NEWER), session_revision: revision('2') },
+      session_revision: revision('2'),
+      conversation: { items: [{ item_id: 'fresh', kind: 'input', committed_at: '0', origin: 'user', content: [{ kind: 'text', text: 'fresh body' }] } as Hydration['conversation']['items'][number]] },
+    })));
+    await vi.waitFor(() => expect(target.textContent).toContain('fresh body'));
+    expect(target.textContent).not.toContain('stale body');
   });
 
   it('never publishes a stale warnings payload with its older clock', async () => {
@@ -5090,9 +5148,9 @@ describe('composition failure outcomes', () => {
     basicMocks(connection);
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, []));
     if (failure === 'known') {
-      vi.mocked(sdk.CreateSession).mockResolvedValueOnce(json(500, { code: 'internal', message: 'create rejected' }));
+      vi.mocked(sdk.InvokeExtension).mockResolvedValueOnce(json(500, { code: 'internal', message: 'create rejected' }));
     } else {
-      vi.mocked(sdk.CreateSession).mockRejectedValueOnce(new Error('create lost'));
+      vi.mocked(sdk.InvokeExtension).mockRejectedValueOnce(new Error('create lost'));
     }
   }
 
@@ -5101,7 +5159,7 @@ describe('composition failure outcomes', () => {
       const connection = fakeConnection();
       compositionMocks(connection, failure);
       const { target } = await mountAppNoWait(connection);
-      await vi.waitFor(() => expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(vi.mocked(sdk.InvokeExtension)).toHaveBeenCalledTimes(1));
       await settle();
       if (failure === 'known') {
         expect(target.querySelector('.note.error')?.textContent).toContain('Session creation failed');
@@ -5113,7 +5171,7 @@ describe('composition failure outcomes', () => {
       }
       expect(target.textContent).toContain('no session');
       // A fresh explicit New creates and adopts its destination.
-      vi.mocked(sdk.CreateSession).mockResolvedValue(json(200, session('created-1', NEWER)));
+      vi.mocked(sdk.InvokeExtension).mockResolvedValue(json(200, { kind: 'success', result: { session_id: 'created-1' } }));
       vi.mocked(sdk.GetSessionHydration).mockImplementation(async (options) => {
         const id = (JSON.parse(options) as { session_id: string }).session_id;
         return json(200, hydration({ session: session(id, NEWER) }));
@@ -5122,7 +5180,7 @@ describe('composition failure outcomes', () => {
       await settle();
       await settle();
       (target.querySelector('[aria-label="New session"]') as HTMLElement).click();
-      await vi.waitFor(() => expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(vi.mocked(sdk.InvokeExtension)).toHaveBeenCalledTimes(2));
       await settle();
       await settle();
       expect(vi.mocked(sdk.GetSessionHydration)).toHaveBeenCalledWith('{"session_id":"created-1"}');
@@ -5140,37 +5198,37 @@ describe('composition failure outcomes', () => {
       ]));
       const { promise: initialGate, resolve: releaseInitial } = Promise.withResolvers();
       const { promise: pickerGate, reject: releasePicker } = Promise.withResolvers();
-      vi.mocked(sdk.CreateSession)
+      vi.mocked(sdk.InvokeExtension)
         .mockImplementationOnce(() => initialGate as never)
         .mockImplementationOnce(() => pickerGate as never)
-        .mockResolvedValue(json(200, session('b-1', NEWER)));
+        .mockResolvedValue(json(200, { kind: 'success', result: { session_id: 'b-1' } }));
       vi.mocked(sdk.GetSessionHydration).mockImplementation(async (options) => {
         const id = (JSON.parse(options) as { session_id: string }).session_id;
         return json(200, hydration({ session: session(id, NEWER) }));
       });
       const { target } = await mountAppNoWait(connection);
-      await vi.waitFor(() => expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(vi.mocked(sdk.InvokeExtension)).toHaveBeenCalledTimes(1));
       // The picker's explicit New parks its own Create against the captured
       // workspace.
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true }));
       await settle();
       await settle();
       (target.querySelector('[aria-label="New session"]') as HTMLElement).click();
-      await vi.waitFor(() => expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(vi.mocked(sdk.InvokeExtension)).toHaveBeenCalledTimes(2));
       // B is chosen; its composition waits behind the parked initial Create.
       (target.querySelector('[aria-label="Select workspace"]') as HTMLElement).click();
       await settle();
       (target.querySelector('[aria-label="Select workspace /wsB"]') as HTMLElement).click();
       await settle();
-      releaseInitial(initial === 'accepted' ? json(200, session('stale-1', NEWER)) : new Error('stale initial lost'));
+      releaseInitial(initial === 'accepted' ? json(200, { kind: 'success', result: { session_id: 'stale-1' } }) : new Error('stale initial lost'));
       await settle();
       await settle();
       // The old initial completion neither adopts nor publishes a note.
       expect(target.textContent).not.toContain('stale-1');
       expect(target.querySelector('.note.outcome')).toBeNull();
       expect(target.querySelector('.note.error')).toBeNull();
-      const workspaces = vi.mocked(sdk.CreateSession).mock.calls.map(
-        (call) => (JSON.parse(call[0] as string) as { body: { workspace: string } }).body.workspace,
+      const workspaces = vi.mocked(sdk.InvokeExtension).mock.calls.map(
+        (call) => (JSON.parse(call[0] as string) as { body: { target: { workspace: string } } }).body.target.workspace,
       );
       expect(workspaces).toEqual(['/ws', '/ws', '/wsB']);
       expect(target.textContent).toContain('b-1');

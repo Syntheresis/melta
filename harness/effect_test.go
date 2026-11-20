@@ -29,7 +29,7 @@ func newAdmittedHarness(t *testing.T, hctx context.Context, prepared PreparedExe
 		return prepared, nil
 	}})
 	testassert.NoError(t, err)
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	{
 		_, disposition := mustAdmitWithoutExecution(t, h, session.Identity.SessionID, testOpID, admissionContent("hello"))
@@ -719,7 +719,7 @@ func foreignEffectRace(t *testing.T, store *graphStorage, sessionID, operationID
 			return err
 		}
 		state := current.State
-		state.AgentSelection = testSelection(agentType)
+		state.Inputs = testInputs(agentType)
 		payload, err := encodeSessionRegister(SessionRecord{Identity: current.Identity, State: state})
 		if err != nil {
 			return err
@@ -764,7 +764,7 @@ func TestEffectTransactionsRematerializeOnRevisionRace(t *testing.T) {
 		testassert.Require(t, errors.Is(err, ErrConflict), "intent over a foreign revision = %v, want the revision-race conflict", err)
 		{
 			session, err := h.ReadSessionHeader(context.Background(), sessionID)
-			testassert.Require(t, err == nil && session.AgentSelection.Definition.DefinitionID == "foreign", "session after the race = %+v (%v), want the foreign agent type", session, err)
+			testassert.Require(t, err == nil && reflect.DeepEqual(session.Inputs, testInputs("foreign")), "session after the race = %+v (%v), want the foreign inputs", session, err)
 		}
 	})
 	t.Run("result transaction", func(t *testing.T) {
@@ -785,7 +785,7 @@ func TestEffectTransactionsRematerializeOnRevisionRace(t *testing.T) {
 		testassert.Require(t, errors.Is(err, ErrConflict), "result over a foreign revision = %v, want the revision-race conflict", err)
 		{
 			session, err := h.ReadSessionHeader(context.Background(), sessionID)
-			testassert.Require(t, err == nil && session.AgentSelection.Definition.DefinitionID == "foreign", "session after the race = %+v (%v), want the foreign agent type", session, err)
+			testassert.Require(t, err == nil && reflect.DeepEqual(session.Inputs, testInputs("foreign")), "session after the race = %+v (%v), want the foreign inputs", session, err)
 		}
 	})
 }
@@ -994,7 +994,7 @@ func TestExecuteOpensOnceWithCommittedAdmission(t *testing.T) {
 	testassert.Require(t, opens[0].ctx.Err() == context.Canceled, "opener context after retirement = %v, want the owner's cancellation", opens[0].ctx.Err())
 	testassert.Require(t, h.ctx.Err() == nil, "the Harness context was canceled by retirement: %v", h.ctx.Err())
 	adm := opens[0].adm
-	testassert.Require(t, adm.SessionID == sessionID && adm.OperationID == testOpID && adm.AgentSelection.Definition.DefinitionID == "coder" && reflect.DeepEqual(adm.Execution, testCapture()), "opener admission = %+v, want the owned committed admission; opener capture = %+v, want the prepared capture", adm, adm.Execution)
+	testassert.Require(t, adm.SessionID == sessionID && adm.OperationID == testOpID && reflect.DeepEqual(adm.Inputs, testInputs("coder")) && reflect.DeepEqual(adm.Execution, testCapture()), "opener admission = %+v, want the owned committed admission; opener capture = %+v, want the prepared capture", adm, adm.Execution)
 	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
 	testassert.NoError(t, err)
 	testassert.Equal(t, rec.State.Status, OperationSuccess)
@@ -1695,12 +1695,11 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 		}
 	})
 	allowAllWrites := ResolvePermissionPolicy(json.RawMessage(`{"rules":[{"permission":"file.write","target":"*","access":"allow"}]}`), nil)
-	filePlanRoots := func(workspace, writeDir string, permissions ...PermissionRequest) func(ctx context.Context, call model.ToolCall) PreparedTool {
+	filePlanRoot := func(workspace string, permissions ...PermissionRequest) func(ctx context.Context, call model.ToolCall) PreparedTool {
 		return func(ctx context.Context, call model.ToolCall) PreparedTool {
 			return PreparedTool{
 				Permissions:        permissions,
 				CanonicalWorkspace: workspace,
-				CanonicalWriteDir:  writeDir,
 				Execute: func(context.Context) ToolOutcome {
 					return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
 				},
@@ -1708,16 +1707,10 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 		}
 	}
 	filePlan := func(permissions ...PermissionRequest) func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return filePlanRoots("/w", "/w/sub", permissions...)
-	}
-	captureWith := func(writeDir string, readonly bool) ExecutionCapture {
-		capture := testCapture()
-		capture.WriteDir, capture.Readonly = writeDir, readonly
-		return capture
+		return filePlanRoot("/w", permissions...)
 	}
 	cases := []struct {
 		name         string
-		capture      ExecutionCapture
 		evaluator    PermissionEvaluator // nil selects the included built-in policy
 		plan         func(ctx context.Context, call model.ToolCall) PreparedTool
 		wantContent  string
@@ -1776,84 +1769,21 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 		},
 		{
 			name:        "a relative canonical Workspace root is denied",
-			plan:        filePlanRoots("w", "/w/sub", PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
+			plan:        filePlanRoot("w", PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
 			wantContent: PermissionDeniedContent, wantDenied: true,
 		},
 		{
 			name:        "a lexically unclean canonical Workspace root is denied",
-			plan:        filePlanRoots("/w/../w", "/w/sub", PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
+			plan:        filePlanRoot("/w/../w", PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
 			wantContent: PermissionDeniedContent, wantDenied: true,
 		},
 		{
-			name:        "a relative canonical write root is denied",
-			capture:     captureWith("/w/sub", false),
-			evaluator:   allowAllWrites,
-			plan:        filePlanRoots("/w", "sub", PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "a lexically unclean canonical write root is denied",
-			capture:     captureWith("/w/sub", false),
-			evaluator:   allowAllWrites,
-			plan:        filePlanRoots("/w", "/w/sub/../sub", PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "readonly without write_dir denies file.write",
-			capture:     captureWith("", true),
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "readonly without write_dir still allows file.read",
-			capture:     captureWith("", true),
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name:        "write_dir confines file.write inside it",
-			capture:     captureWith("/w/sub", false),
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/a.txt"}),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name:        "write_dir denies file.write outside it even when policy allows",
-			capture:     captureWith("/w/sub", false),
-			evaluator:   allowAllWrites,
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/other.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:      "configured write_dir without a canonical prepared write root is denied",
-			capture:   captureWith("/w/sub", false),
-			evaluator: allowAllWrites,
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{
-					Permissions:        []PermissionRequest{{Permission: PermissionFileWrite, Target: "/w/sub/a.txt"}},
-					CanonicalWorkspace: "/w",
-					Execute: func(context.Context) ToolOutcome {
-						return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-					},
-				}
-			},
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "readonly with write_dir allows confined writes",
-			capture:     captureWith("/w/sub", true),
-			evaluator:   allowAllWrites,
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/a.txt"}),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name:        "write_dir does not lift the built-in sensitive-basename denial",
-			capture:     captureWith("/w/sub", false),
+			name:        "the built-in sensitive-basename denial applies to file.write",
 			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/.env"}),
 			wantContent: PermissionDeniedContent, wantDenied: true,
 		},
 		{
-			name:        "an explicit user rule overrides the sensitive denial inside write_dir",
-			capture:     captureWith("/w/sub", false),
+			name:        "an explicit user rule overrides the sensitive denial",
 			evaluator:   allowAllWrites,
 			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/.env"}),
 			wantContent: "ran", wantExecuted: true,
@@ -1911,8 +1841,8 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 			wantContent: "done",
 		},
 		{
-			name:    "immediate success denied by the boundary carries no result content",
-			capture: captureWith("", true),
+			name:      "immediate success denied by the boundary carries no result content",
+			evaluator: &recordingEvaluator{decision: PermissionDeny},
 			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
 				return PreparedTool{
 					Permissions:        []PermissionRequest{{Permission: PermissionFileWrite, Target: "/w/a.txt"}},
@@ -1920,7 +1850,7 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 					Immediate:          &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}},
 				}
 			},
-			wantContent: PermissionDeniedContent, wantDenied: true,
+			wantContent: PermissionDeniedContent, wantDenied: true, wantCalls: 1,
 		},
 		{
 			name:      "supplied evaluator receives the complete prepared action and allows",
@@ -1930,7 +1860,6 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 				ToolName:           "echo",
 				Arguments:          json.RawMessage(`{"x":1}`),
 				CanonicalWorkspace: "/w",
-				CanonicalWriteDir:  "/w/sub",
 				Permissions:        []PermissionRequest{{Permission: PermissionFileRead, Target: "/w/a.txt"}},
 			},
 			wantContent: "ran", wantExecuted: true, wantCalls: 1,
@@ -1954,24 +1883,9 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 			wantContent: PermissionDeniedContent, wantDenied: true, wantCalls: 1,
 		},
 		{
-			name:        "always-allow evaluator cannot delegate the readonly constraint",
-			capture:     captureWith("", true),
-			evaluator:   &recordingEvaluator{decision: PermissionAllow},
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true, wantCalls: 0,
-		},
-		{
-			name:        "always-allow evaluator cannot delegate write_dir confinement",
-			capture:     captureWith("/w/sub", false),
-			evaluator:   &recordingEvaluator{decision: PermissionAllow},
-			plan:        filePlanRoots("/w", "/w/sub", PermissionRequest{Permission: PermissionFileWrite, Target: "/w/other.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true, wantCalls: 0,
-		},
-		{
 			name:      "multi-target plan reaches the evaluator as one complete action",
-			capture:   captureWith("/w/sub", false),
 			evaluator: &recordingEvaluator{decision: PermissionAllow},
-			plan: filePlanRoots("/w", "/w/sub",
+			plan: filePlanRoot("/w",
 				PermissionRequest{Permission: PermissionFileRead, Target: "/w/src.txt"},
 				PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/dst.txt"},
 			),
@@ -1979,7 +1893,6 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 				ToolName:           "echo",
 				Arguments:          json.RawMessage(`{"x":1}`),
 				CanonicalWorkspace: "/w",
-				CanonicalWriteDir:  "/w/sub",
 				Permissions: []PermissionRequest{
 					{Permission: PermissionFileRead, Target: "/w/src.txt"},
 					{Permission: PermissionFileWrite, Target: "/w/sub/dst.txt"},
@@ -2000,10 +1913,7 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			capture := tc.capture
-			if capture.ConfigurationRevision == "" {
-				capture = testCapture()
-			}
+			capture := testCapture()
 			preparedAdmission := preparedExecutionFor(capture, func(context.Context, OperationAdmission) (Execution, error) {
 				return Execution{}, nil
 			})
@@ -3510,7 +3420,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 					return preparedExecuting(exec), nil
 				}})
 				testassert.NoError(t, err)
-				session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+				session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 				testassert.NoError(t, err)
 				c := leaseCoordinator(t, h, session.Identity.SessionID)
 				mustAdmitWithoutExecution(t, h, session.Identity.SessionID, testOpID, admissionContent("hello"))
@@ -3913,10 +3823,10 @@ func TestSessionGraphReplaceOperation(t *testing.T) {
 	record := func(id string, revision int64) OperationRecord {
 		return OperationRecord{
 			Admission: OperationAdmission{
-				SessionID:      testSessionID,
-				OperationID:    id,
-				RequestKind:    RequestKindMessage,
-				AgentSelection: testSelection("coder"),
+				SessionID:   testSessionID,
+				OperationID: id,
+				RequestKind: RequestKindMessage,
+				Inputs:      testInputs("coder"),
 			},
 			State: OperationCurrentState{
 				Status:    OperationRunning,

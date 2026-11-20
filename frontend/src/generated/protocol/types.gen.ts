@@ -59,23 +59,19 @@ export type InstallExtensionPackageRequest = {
     source_dir: string;
 };
 
-export type ExtensionCapabilityCatalog = {
+export type RegisteredExtension = {
     extension_id: string;
     version: string;
-    configuration_schema: ExtensionConfigDocument;
+    configuration_schema?: ExtensionConfigDocument;
     settings: ExtensionConfigDocument;
-    capabilities: Array<ExtensionCapability>;
-    exposed: Array<ExtensionExposure>;
+    tools: Array<string>;
+    operations: Array<RegisteredExtensionOperation>;
+    inactive_reason?: string;
 };
 
-export type ExtensionCapability = {
-    capability_id: string;
-    contract_id: string;
-    contract_version: string;
-    kind: 'service' | 'tool' | 'hook' | 'strategy';
-    methods: Array<ExtensionMethod>;
-    hooks?: Array<ExtensionHook>;
-    strategy?: ExtensionStrategy;
+export type RegisteredExtensionOperation = {
+    method: ExtensionMethod;
+    target: 'harness' | 'workspace' | 'session';
 };
 
 export type ExtensionMethod = {
@@ -87,28 +83,9 @@ export type ExtensionMethod = {
     partial?: ExtensionConfigDocument;
 };
 
-export type ExtensionHook = {
-    boundary: 'prepare' | 'request' | 'before_tool' | 'after_tool';
-    mode: 'pure' | 'effectful';
-};
-
-export type ExtensionStrategy = {
-    requires_context_window: boolean;
-};
-
-export type ExtensionExposure = {
-    capability_id: string;
-    method: string;
-    kind: 'query' | 'management' | 'session_work';
-    target: 'harness' | 'workspace' | 'session';
-};
-
 export type ExtensionInvocationRequest = {
     extension_id: string;
-    capability_id: string;
-    contract_id: string;
-    contract_version: string;
-    method: string;
+    operation: string;
     target: ExtensionInvocationTarget;
     /**
      * One owned JSON value validated against the selected method's input schema. The value itself may be any JSON, including null.
@@ -202,7 +179,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '18';
+    protocol_version: '19';
 };
 
 /**
@@ -334,7 +311,7 @@ export type Session = {
     owner_session_id?: string;
     source_session_id?: string;
     lifecycle: SessionLifecycle;
-    agent_selection: AgentSelection;
+    inputs: SessionInputs;
     current_operation_id?: string;
     created_at: string;
     last_activity: string;
@@ -344,7 +321,7 @@ export type Session = {
 
 export type CreateSessionRequest = {
     workspace: string;
-    agent_selection?: AgentSelection;
+    inputs?: SessionInputs;
 };
 
 export type Operation = {
@@ -353,10 +330,27 @@ export type Operation = {
     status: 'running' | 'success' | 'failure' | 'interruption';
     admitted_at: string;
     settled_at?: string;
-    agent_selection: AgentSelection;
     model: ModelRef;
     detail?: string;
     usage: UsageTotals;
+};
+
+export type SessionOperation = {
+    operation: Operation;
+    inputs: OperationInputs;
+};
+
+export type OperationInputs = {
+    model: ModelRef;
+    prompt: string;
+    tools: Array<OperationTool>;
+    strategy: StrategySelection;
+};
+
+export type OperationTool = {
+    name: string;
+    description: string;
+    parameters: JsonObject;
 };
 
 export type PendingInput = {
@@ -554,38 +548,20 @@ export type ForkResult = {
     operation: Operation;
 };
 
-export type SetSessionAgentTypeRequest = {
-    agent_selection: AgentSelection;
+export type SetSessionInputsRequest = {
+    inputs: SessionInputs;
 };
 
 export type SetSessionModelRequest = {
     model: ModelRef;
 };
 
-export type AgentSelection = {
-    inputs?: AgentInputs;
-    definition?: DefinitionRef;
-};
-
-export type DefinitionRef = {
-    extension_id: string;
-    capability_id: string;
-    definition_id: string;
-};
-
-export type AgentInputs = {
-    model: ModelRef;
-    instructions: string;
-    assembly_mode: 'full' | 'simple' | 'none';
-    tools: Array<string>;
-    capabilities: Array<string>;
-    constraints: ToolConstraints;
-    strategy: StrategySelection;
-};
-
-export type ToolConstraints = {
-    readonly: boolean;
-    write_dir: string;
+export type SessionInputs = {
+    model?: ModelRef;
+    instructions?: string;
+    prompt?: string;
+    tools?: Array<string>;
+    strategy?: StrategySelection;
 };
 
 export type StrategySelection = {
@@ -685,22 +661,9 @@ export type Settings = {
     extensions: ExtensionsSettings;
 };
 
-export type Agent = {
-    name: string;
-    definition: DefinitionRef;
-    description: string;
-    subagent: boolean;
-    model: ModelRef;
-    readonly: boolean;
-    write_dir: string;
-    tools: Array<string>;
-    capabilities: Array<string>;
-};
-
 export type ConfigurationView = {
     configuration_revision: ConfigurationRevision;
     settings: Settings;
-    agents: Array<Agent>;
     providers: Array<Provider>;
 };
 
@@ -709,20 +672,10 @@ export type RevisionResponse = {
 };
 
 /**
- * Exactly one of the complete settings shape or one declared extension configuration edit; the accepting owner rejects zero or both.
+ * The complete settings shape to publish.
  */
 export type UpdateSettingsRequest = {
-    settings?: Settings;
-    extension_edit?: ExtensionEdit;
-};
-
-export type ExtensionEdit = {
-    extension_id: string;
-    edit_id: string;
-    /**
-     * The edit call's JSON document, carried as exact text.
-     */
-    arguments: string;
+    settings: Settings;
 };
 
 export type SettingsMutation = {
@@ -995,6 +948,8 @@ export type Event = ({
 } & ToolFinishedEvent);
 
 export type SessionId = string;
+
+export type OperationId = string;
 
 export type WorkspaceQuery = string;
 
@@ -1324,32 +1279,32 @@ export type ForkSessionResponses = {
 
 export type ForkSessionResponse = ForkSessionResponses[keyof ForkSessionResponses];
 
-export type SetSessionAgentTypeData = {
-    body: SetSessionAgentTypeRequest;
+export type SetSessionInputsData = {
+    body: SetSessionInputsRequest;
     path: {
         id: string;
     };
     query?: never;
-    url: '/v1/sessions/{id}/agent-type';
+    url: '/v1/sessions/{id}/inputs';
 };
 
-export type SetSessionAgentTypeErrors = {
+export type SetSessionInputsErrors = {
     /**
      * One schema-defined typed error.
      */
     default: Error;
 };
 
-export type SetSessionAgentTypeError = SetSessionAgentTypeErrors[keyof SetSessionAgentTypeErrors];
+export type SetSessionInputsError = SetSessionInputsErrors[keyof SetSessionInputsErrors];
 
-export type SetSessionAgentTypeResponses = {
+export type SetSessionInputsResponses = {
     /**
-     * The Session header; only subsequent admissions use the new Agent type.
+     * The Session header; only subsequent admissions use the new inputs.
      */
     200: Session;
 };
 
-export type SetSessionAgentTypeResponse = SetSessionAgentTypeResponses[keyof SetSessionAgentTypeResponses];
+export type SetSessionInputsResponse = SetSessionInputsResponses[keyof SetSessionInputsResponses];
 
 export type SetSessionModelData = {
     body: SetSessionModelRequest;
@@ -1433,6 +1388,34 @@ export type GetSessionHistoryResponses = {
 };
 
 export type GetSessionHistoryResponse = GetSessionHistoryResponses[keyof GetSessionHistoryResponses];
+
+export type GetSessionOperationData = {
+    body?: never;
+    path: {
+        id: string;
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/sessions/{id}/operations/{operation_id}';
+};
+
+export type GetSessionOperationErrors = {
+    /**
+     * One schema-defined typed error.
+     */
+    default: Error;
+};
+
+export type GetSessionOperationError = GetSessionOperationErrors[keyof GetSessionOperationErrors];
+
+export type GetSessionOperationResponses = {
+    /**
+     * The Operation header and its effective execution inputs.
+     */
+    200: SessionOperation;
+};
+
+export type GetSessionOperationResponse = GetSessionOperationResponses[keyof GetSessionOperationResponses];
 
 export type GetSessionCodeSnapshotsData = {
     body?: never;
@@ -1691,31 +1674,31 @@ export type InstallExtensionPackageResponses = {
 
 export type InstallExtensionPackageResponse = InstallExtensionPackageResponses[keyof InstallExtensionPackageResponses];
 
-export type ListExtensionCapabilitiesData = {
+export type ListExtensionsData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/v1/extensions/capabilities';
+    url: '/v1/extensions';
 };
 
-export type ListExtensionCapabilitiesErrors = {
+export type ListExtensionsErrors = {
     /**
      * One schema-defined typed error.
      */
     default: Error;
 };
 
-export type ListExtensionCapabilitiesError = ListExtensionCapabilitiesErrors[keyof ListExtensionCapabilitiesErrors];
+export type ListExtensionsError = ListExtensionsErrors[keyof ListExtensionsErrors];
 
-export type ListExtensionCapabilitiesResponses = {
+export type ListExtensionsResponses = {
     /**
-     * Every enabled extension's configuration schema, captured non-secret settings, declared capabilities and methods, and explicit exposures. The order is registration order.
+     * Registered extension tools and client operations in activation order.
      *
      */
-    200: Array<ExtensionCapabilityCatalog>;
+    200: Array<RegisteredExtension>;
 };
 
-export type ListExtensionCapabilitiesResponse = ListExtensionCapabilitiesResponses[keyof ListExtensionCapabilitiesResponses];
+export type ListExtensionsResponse = ListExtensionsResponses[keyof ListExtensionsResponses];
 
 export type InvokeExtensionData = {
     body: ExtensionInvocationRequest;

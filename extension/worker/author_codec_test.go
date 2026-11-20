@@ -12,6 +12,22 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
+func TestAuthorCallContextRequestIDOptional(t *testing.T) {
+	for _, requestID := range []string{"", "request-1"} {
+		raw, err := json.Marshal(worker.AuthorCallContext{Token: "grant", RequestID: requestID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw, []byte(`"request_id"`)) != (requestID != "") {
+			t.Fatalf("request ID %q encoded as %s", requestID, raw)
+		}
+		var decoded worker.AuthorCallContext
+		if err := json.Unmarshal(raw, &decoded); err != nil || decoded.Token != "grant" || decoded.RequestID != requestID {
+			t.Fatalf("decoded context = %+v, %v", decoded, err)
+		}
+	}
+}
+
 func TestAuthorAdmissionCodecsWireShape(t *testing.T) {
 	empty := ""
 	result := extension.AdmissionResult{Candidate: &extension.AdmissionCandidate{

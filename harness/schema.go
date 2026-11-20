@@ -220,16 +220,11 @@ func (p *ModelPricing) Clone() *ModelPricing {
 // ExecutionCapture is the complete non-secret configuration required to
 // interpret one Operation: the stable configuration revision, the complete
 // model identity, the system prompt, the advertised tool definitions in
-// preserved order, the selected capability names in preserved order, the
-// Agent definition's permission capability constraints, and the compaction
-// configuration — the effective compact model's selection and its prompt.
-// Pricing is the captured conversation model's rates; absence means the
-// model's pricing was unknown. Readonly and WriteDir
-// are the configured lexical constraint copied from the one Harness-selected
-// definition; WriteDir is already trimmed at projection and stays unchanged in
-// the capture. The captured ConfigurationRevision also identifies the
-// governing permission policy; no rules are durable. Capability names are
-// validated for shape only: no plugin is loaded to read a historical capture.
+// preserved order, and the compaction configuration — the effective compact
+// model's selection and its prompt. Pricing is the captured conversation
+// model's rates; absence means the model's pricing was unknown. The captured
+// ConfigurationRevision also identifies the governing permission policy; no
+// rules are durable.
 // No resolved secret, callback, permission representation, retry policy or
 // executable value is durable; implementation provenance retains only the
 // extension identity/version and its non-secret captured section bytes.
@@ -245,9 +240,6 @@ type ExecutionCapture struct {
 	// present empty list means none. The canonical durable payload always
 	// carries the materialized array.
 	InitialToolNames []string                `json:"initial_tool_names"`
-	Capabilities     []string                `json:"capabilities,omitempty"`
-	Readonly         bool                    `json:"readonly"`
-	WriteDir         string                  `json:"write_dir"`
 	Pricing          *ModelPricing           `json:"pricing,omitempty"`
 	Compact          CompactCapture          `json:"compact"`
 	Strategy         StrategyCapture         `json:"strategy"`
@@ -258,9 +250,10 @@ type ExecutionCapture struct {
 // implementation that participated in this execution: the implementing
 // extension root, its implementation version, and its captured section bytes.
 type ImplementationCapture struct {
-	ExtensionID string          `json:"extension_id"`
-	Version     string          `json:"version"`
-	Settings    json.RawMessage `json:"settings,omitempty"`
+	ExtensionID string            `json:"extension_id"`
+	Version     string            `json:"version"`
+	Settings    json.RawMessage   `json:"settings,omitempty"`
+	State       SessionStateValue `json:"state,omitempty"`
 }
 
 // StrategyCapture is the resolved selected context-strategy input of one
@@ -303,13 +296,14 @@ type SessionIdentity struct {
 // checkpoint entry whose messages define the model-visible context. ArchivedAt is
 // present exactly when the lifecycle is archived.
 type SessionState struct {
-	Lifecycle          SessionLifecycle `json:"lifecycle"`
-	ArchivedAt         *time.Time       `json:"archived_at,omitempty"`
-	AgentSelection     AgentSelection   `json:"agent_selection"`
-	CurrentOperationID string           `json:"current_operation_id,omitempty"`
-	CheckpointEntryID  string           `json:"checkpoint_entry_id,omitempty"`
-	Usage              UsageTotals      `json:"usage"`
-	LastActivity       time.Time        `json:"last_activity"`
+	Lifecycle          SessionLifecycle             `json:"lifecycle"`
+	ArchivedAt         *time.Time                   `json:"archived_at,omitempty"`
+	Inputs             SessionInputs                `json:"inputs"`
+	ExtensionState     map[string]SessionStateValue `json:"extension_state"`
+	CurrentOperationID string                       `json:"current_operation_id,omitempty"`
+	CheckpointEntryID  string                       `json:"checkpoint_entry_id,omitempty"`
+	Usage              UsageTotals                  `json:"usage"`
+	LastActivity       time.Time                    `json:"last_activity"`
 
 	// ExternalDataOwners is the ordered unique set of installed extension IDs
 	// that durably claimed external data for this Session. Fork copies leave
@@ -327,15 +321,15 @@ type SessionRecord struct {
 }
 
 // OperationAdmission is the immutable admission section of one Operation
-// register. It is the sole durable Agent-type field for its Operation.
+// register: the admitted Session choices and the effective execution capture.
 type OperationAdmission struct {
-	SessionID      string           `json:"session_id"`
-	OperationID    string           `json:"operation_id"`
-	RequestKind    RequestKind      `json:"request_kind"`
-	AdmittedEntry  EntryRef         `json:"admitted_entry"`
-	AgentSelection AgentSelection   `json:"agent_selection"`
-	Execution      ExecutionCapture `json:"execution"`
-	AdmittedAt     time.Time        `json:"admitted_at"`
+	SessionID     string           `json:"session_id"`
+	OperationID   string           `json:"operation_id"`
+	RequestKind   RequestKind      `json:"request_kind"`
+	AdmittedEntry EntryRef         `json:"admitted_entry"`
+	Inputs        SessionInputs    `json:"inputs"`
+	Execution     ExecutionCapture `json:"execution"`
+	AdmittedAt    time.Time        `json:"admitted_at"`
 }
 
 // ActiveEffect names the one in-flight effect of a running Operation and the

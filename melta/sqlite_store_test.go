@@ -58,7 +58,7 @@ func (e *composeEnv) locations() Locations {
 	}
 }
 
-func (e *composeEnv) options(plugins ...extension.Native) Options {
+func (e *composeEnv) options(plugins ...extension.Extension) Options {
 	return Options{
 		DataDir:       e.dataDir,
 		Configuration: NewFileConfigurationSource(e.configPath),
@@ -342,7 +342,7 @@ func seedRunningOperationCounted(t *testing.T, store harness.Storage, workspace 
 		},
 	})
 	testassert.NoError(t, err)
-	rec, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: workspace, AgentSelection: suppliedDefinition("seeded")})
+	rec, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: workspace, ExtensionState: agentState("seeded")})
 	testassert.NoError(t, err)
 	{
 		_, err := h.Submit(context.Background(), harness.SubmitRequest{

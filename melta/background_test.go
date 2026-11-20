@@ -16,43 +16,38 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// backgroundProbe records the native call view of every prepared call.
+// backgroundProbe records the author call view of every prepared call.
 type backgroundProbe struct {
-	seen []extension.CallContext
+	seen []extension.AuthorContext
 }
 
-func (p *backgroundProbe) record(tc extension.ToolContext) {
-	p.seen = append(p.seen, tc.Calls)
+func (p *backgroundProbe) record(tc extension.AuthorContext) {
+	p.seen = append(p.seen, tc)
 }
 
 type backgroundProbeTool struct {
 	probe *backgroundProbe
 }
 
-func (t backgroundProbeTool) describe(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-	return extension.ToolDescription{Definition: model.ToolDefinition{Name: "bg_probe", Description: "records the prepared call view", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, Available: true}, nil
-}
-
-func (t backgroundProbeTool) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (t backgroundProbeTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
 	return runtimeNormalize(call)
 }
 
-func (t backgroundProbeTool) Prepare(_ context.Context, tc extension.ToolContext, call model.ToolCall) extension.ToolPlan {
+func (t backgroundProbeTool) Prepare(_ context.Context, tc extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	t.probe.record(tc)
 	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "probed"}}}
 }
 
-func (t backgroundProbeTool) Execute(context.Context, extension.ToolContext, extension.ToolPlan) harness.ToolOutcome {
+func (t backgroundProbeTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
 	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "probed"}}
 }
 
-func backgroundProbePlugin(probe *backgroundProbe) extension.Native {
+func backgroundProbePlugin(probe *backgroundProbe) extension.Extension {
 	tool := backgroundProbeTool{probe: probe}
-	native := testNative("bgprobe", extension.LifetimeHarness, []extension.Capability{extension.ToolCapability("bg_probe")}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"bg_probe": {Tool: tool}}}, nil
+	return testNative("bgprobe", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterTool(testDescribeTool("bg_probe"), tool, nil)
+		return nil, err
 	})
-	native.Describe["bg_probe"] = tool.describe
-	return native
 }
 
 // TestBackgroundBridgeArmingAcrossPublication pins the arming pattern on the
@@ -78,7 +73,7 @@ func TestBackgroundBridgeArmingAcrossPublication(t *testing.T) {
 
 	probe := &backgroundProbe{}
 	useFixtureStore(t, store)
-	r, err := Open(ctx, testOptions(dataDir, configPath, home, backgroundProbePlugin(probe), fixtureAgentPlugin(backgroundProbePlugin(probe))))
+	r, err := Open(ctx, testOptions(dataDir, configPath, home, backgroundProbePlugin(probe), fixtureAgentPlugin()))
 	testassert.NoError(t, err)
 	// The unarmed-to-armed window ends before publication: construction
 	// and publication observe nothing.
@@ -107,9 +102,9 @@ func TestNativeToolPlansDoNotExecuteBeforeAuthorization(t *testing.T) {
 			if lastMessageRole(body) == "tool" {
 				return nil
 			}
-			calls := []string{`{"index":0,"id":"call-invalid","type":"function","function":{"name":"read","arguments":"{}"}}`,
-				`{"index":1,"id":"call-immediate","type":"function","function":{"name":"read","arguments":"{}"}}`,
-				`{"index":2,"id":"call-valid","type":"function","function":{"name":"read","arguments":"{}"}}`}
+			calls := []string{`{"index":0,"id":"call-invalid","type":"function","function":{"name":"bg_read","arguments":"{}"}}`,
+				`{"index":1,"id":"call-immediate","type":"function","function":{"name":"bg_read","arguments":"{}"}}`,
+				`{"index":2,"id":"call-valid","type":"function","function":{"name":"bg_read","arguments":"{}"}}`}
 			return []string{
 				`{"choices":[{"delta":{"role":"assistant","tool_calls":[` + strings.Join(calls, ",") + `]},"finish_reason":null}]}`,
 				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
