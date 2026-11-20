@@ -123,6 +123,11 @@ func (c *composition) cacheNamespaceHandler(_ context.Context, call extension.Ca
 // the call-owned Session interval through the enclosing callback's external
 // creation and terminal response.
 func (c *composition) claimExternalDataHandler(ctx context.Context, call extension.CallContext, _ json.RawMessage) (extension.Result, error) {
+	_, cleanup := c.compiled.CleanupCapability(call.ExtensionID)
+	return c.claimExternalData(ctx, call, cleanup)
+}
+
+func (c *composition) claimExternalData(ctx context.Context, call extension.CallContext, cleanup bool) (extension.Result, error) {
 	host, err := c.dataHost()
 	if err != nil {
 		return extension.Result{}, err
@@ -130,7 +135,7 @@ func (c *composition) claimExternalDataHandler(ctx context.Context, call extensi
 	if host.harness == nil || call.SessionID == "" || call.ExtensionID == "" {
 		return extension.Result{}, fmt.Errorf("external data claim requires a host-issued Session and extension identity: %w", ErrClosed)
 	}
-	if _, ok := c.compiled.CleanupCapability(call.ExtensionID); !ok {
+	if !cleanup {
 		return extension.Result{}, fmt.Errorf("extension %q declares no %s cleanup capability: %w", call.ExtensionID, extension.ContractSessionCleanup, ErrClosed)
 	}
 	lease := artifactLeaseFromContext(ctx)

@@ -385,12 +385,9 @@ func settingsSection(raw json.RawMessage) json.RawMessage {
 // extension document keeps its exact bytes.
 func (s *configurationService) editExtension(ctx context.Context, extensionID, editID string, arguments json.RawMessage) configurationEdit {
 	return configurationEdit{apply: func(roots rawRoots, seed configurationCapture) (editedFile, error) {
-		if len(roots.config["extensions"]) == 0 {
-			return 0, fmt.Errorf("extension %q is unavailable: %w", extensionID, harness.ErrInvalid)
-		}
-		extensions, err := decodeRoot(roots.config["extensions"])
+		extensions, err := extensionSections(roots, extensionID)
 		if err != nil {
-			return 0, configurationFailure(err)
+			return 0, err
 		}
 		if !s.nativeIDs[extensionID] || !sectionEnabled(extensions[extensionID]) {
 			return 0, fmt.Errorf("extension %q is unavailable: %w", extensionID, harness.ErrInvalid)
@@ -436,13 +433,29 @@ func (s *configurationService) editExtension(ctx context.Context, extensionID, e
 		if result.Failure != nil {
 			return 0, fmt.Errorf("%s: %s", result.Failure.Code, result.Failure.Message)
 		}
-		extensions[extensionID] = append(json.RawMessage(nil), result.Value...)
-		roots.config["extensions"], err = marshalRawObject(extensions, true)
-		if err != nil {
-			return 0, err
-		}
-		return editMainConfig, nil
+		return writeExtensionSection(roots, extensions, extensionID, result.Value)
 	}}
+}
+
+func extensionSections(roots rawRoots, id string) (map[string]json.RawMessage, error) {
+	if len(roots.config["extensions"]) == 0 {
+		return nil, fmt.Errorf("extension %q is unavailable: %w", id, harness.ErrInvalid)
+	}
+	sections, err := decodeRoot(roots.config["extensions"])
+	if err != nil {
+		return nil, configurationFailure(err)
+	}
+	return sections, nil
+}
+
+func writeExtensionSection(roots rawRoots, sections map[string]json.RawMessage, id string, value json.RawMessage) (editedFile, error) {
+	sections[id] = bytes.Clone(value)
+	raw, err := marshalRawObject(sections, true)
+	if err != nil {
+		return 0, err
+	}
+	roots.config["extensions"] = raw
+	return editMainConfig, nil
 }
 
 // decodeRoot decodes one input document into its root object with every

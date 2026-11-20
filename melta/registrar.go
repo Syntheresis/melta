@@ -9,17 +9,20 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/Syntheresis/melta/extension"
+	"github.com/Syntheresis/melta/extension/worker"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 )
 
 type nativeActivationSpec struct {
-	extension extension.Extension
-	section   json.RawMessage
-	bindings  map[string]declaredBinding
-	installed bool
+	extension        extension.Extension
+	section          json.RawMessage
+	bindings         map[string]declaredBinding
+	approvedServices []string
+	installed        bool
 }
 
 type nativeCandidate struct {
@@ -37,8 +40,11 @@ type nativeActivation struct {
 	owner     *configurationService
 	id        string
 	version   string
+	manifest  extension.Manifest
 	section   json.RawMessage
 	bindings  map[string]declaredBinding
+	services  map[string]bool
+	warnings  *resourceSet
 	entries   []*nativeRegistration
 	close     func(context.Context) error
 	holds     int
@@ -60,6 +66,19 @@ type nativeRegistration struct {
 }
 
 type nativeAPI struct{ activation *nativeActivation }
+
+func (a *nativeActivation) unavailableLocked() error {
+	if a.closed {
+		return extension.ErrClosed
+	}
+	return a.lost
+}
+
+func (a *nativeActivation) unavailable() error {
+	a.owner.nativeMu.Lock()
+	defer a.owner.nativeMu.Unlock()
+	return a.unavailableLocked()
+}
 
 func (a *nativeActivation) markLost(cause error) {
 	s := a.owner
@@ -245,6 +264,12 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 			continue
 		}
 		manifest := spec.extension.Manifest
+		services := make(map[string]bool)
+		for _, name := range manifest.Services {
+			if spec.approvedServices == nil || slices.Contains(spec.approvedServices, name) {
+				services[name] = true
+			}
+		}
 		err := extension.ValidateManifestSection(manifest, spec.section)
 		if err == nil && spec.extension.Activate == nil {
 			err = errors.New("missing extension entry point")
@@ -258,14 +283,17 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 		if previous != nil {
 			for _, a := range previous.activations {
 				if a != nil && previous.ready[a] && !a.closed && a.lost == nil && a.id == id && a.version == manifest.Version &&
-					bytes.Equal(a.section, spec.section) && maps.Equal(a.bindings, spec.bindings) {
+					bytes.Equal(a.section, spec.section) && maps.Equal(a.bindings, spec.bindings) && maps.Equal(a.services, services) {
 					activation = a
 					break
 				}
 			}
 		}
 		if activation == nil {
-			activation = &nativeActivation{owner: s, id: id, version: manifest.Version, section: bytes.Clone(spec.section), bindings: maps.Clone(spec.bindings), construct: c, installed: spec.installed}
+			manifest.SettingsSchema = bytes.Clone(manifest.SettingsSchema)
+			manifest.Services = slices.Clone(manifest.Services)
+			manifest.Secrets = slices.Clone(manifest.Secrets)
+			activation = &nativeActivation{owner: s, id: id, version: manifest.Version, manifest: manifest, section: bytes.Clone(spec.section), bindings: maps.Clone(spec.bindings), services: services, warnings: &resourceSet{owner: s}, construct: c, installed: spec.installed}
 			activation.entry.ctx, activation.entry.cancel = context.WithCancel(ctx)
 		}
 		activation.holds++
@@ -345,7 +373,24 @@ func (c *nativeCandidate) publish() error {
 			c.inactive[id] = err
 		}
 	}
-	c.owner.nativeCurrent = c
+	publish := func() []Event {
+		c.owner.nativeCurrent = c
+		changed := false
+		for _, activation := range c.activations {
+			if activation != nil && c.ready[activation] && activation.lost == nil {
+				changed = activation.warnings.commitWarnings() || changed
+			}
+		}
+		if changed {
+			return []Event{warningChangedEvent(c.owner.instance, runtimeEventScope(), c.owner.warnings.storeRevision())}
+		}
+		return nil
+	}
+	if c.owner.obs != nil {
+		c.owner.obs.publish(publish)
+	} else {
+		publish()
+	}
 	return nil
 }
 
@@ -666,9 +711,12 @@ func (api nativeAPI) Call(ctx context.Context, service, method string, args json
 	s := a.owner
 	s.nativeMu.Lock()
 	c := a.construct
-	closed := a.closed
+	unavailable := a.unavailableLocked()
 	s.nativeMu.Unlock()
-	if closed || c == nil {
+	if unavailable != nil {
+		return extension.Result{}, unavailable
+	}
+	if c == nil {
 		return extension.Result{}, extension.ErrClosed
 	}
 	callCtx, finish, err := a.entry.admit(ctx)
@@ -676,13 +724,86 @@ func (api nativeAPI) Call(ctx context.Context, service, method string, args json
 		return extension.Result{}, err
 	}
 	defer finish()
-	return c.callService(callCtx, service, method, args, false)
+	if service == "melta.warnings" {
+		if !a.services[service] {
+			return extension.Result{}, ErrDenied
+		}
+		args, err = acceptHostMethod(service, method, args, false)
+		if err != nil {
+			return extension.Result{}, err
+		}
+		return a.reportWarning(callCtx, method, args)
+	}
+	return c.callServiceScoped(callCtx, service, method, args, &nativeCallScope{candidate: c, activation: a})
 }
 
 type nativeCallScope struct {
 	nativeCallLifetime
-	candidate *nativeCandidate
-	pure      bool
+	candidate        *nativeCandidate
+	activation       *nativeActivation
+	pure             bool
+	workspace        *nativeWorkspace
+	workspaceBind    bool
+	permissions      []harness.PermissionRequest
+	session          harness.SessionIdentity
+	states           map[string]harness.SessionStateValue
+	host             *composition
+	lease            *artifactCallLease
+	operationSecrets map[string]map[string]string
+	commandScope     CallerScope
+	receipt          *nativeReceipt
+}
+
+type nativeReceipt struct {
+	mu        sync.Mutex
+	committed bool
+	result    *extension.Result
+	partial   json.RawMessage
+}
+
+func (r *nativeReceipt) mark() {
+	if r != nil {
+		r.mu.Lock()
+		r.committed = true
+		r.mu.Unlock()
+	}
+}
+
+func (r *nativeReceipt) command(result extension.Result, err error) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err == nil {
+		owned := ownResult(result)
+		r.result = &owned
+		r.partial = nil
+		r.committed = true
+		return
+	}
+	var partial *extension.CallError
+	if errors.As(err, &partial) && len(partial.Partial) != 0 {
+		r.result = nil
+		r.partial = bytes.Clone(partial.Partial)
+		r.committed = true
+	}
+}
+
+func (r *nativeReceipt) observed() (*extension.Result, json.RawMessage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.result != nil {
+		result := ownResult(*r.result)
+		return &result, bytes.Clone(r.partial)
+	}
+	return nil, bytes.Clone(r.partial)
+}
+
+func (r *nativeReceipt) hasCommit() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.committed
 }
 
 func (scope *nativeCallScope) call(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
@@ -691,15 +812,86 @@ func (scope *nativeCallScope) call(ctx context.Context, service, method string, 
 		return extension.Result{}, err
 	}
 	defer finish()
-	return scope.candidate.callService(callCtx, service, method, args, scope.pure)
+	if scope.activation != nil {
+		if err := scope.activation.unavailable(); err != nil {
+			return extension.Result{}, err
+		}
+	}
+	if service == "melta.workspace" {
+		if scope.activation == nil || !scope.activation.services[service] || scope.workspace == nil {
+			return extension.Result{}, ErrDenied
+		}
+		args, err = acceptHostMethod(service, method, args, scope.pure && !scope.workspaceBind)
+		if err != nil {
+			return extension.Result{}, err
+		}
+		if method == "bind" {
+			if !scope.workspaceBind {
+				return extension.Result{}, ErrDenied
+			}
+			return scope.workspace.bind(args)
+		}
+		if scope.pure || scope.workspaceBind {
+			return extension.Result{}, ErrDenied
+		}
+		return scope.workspace.execute(callCtx, method, args, scope.permissions)
+	}
+	if service == "melta.settings" {
+		if scope.activation == nil || !scope.activation.services[service] || scope.pure || scope.commandScope.Kind != CallerScopeHarness {
+			return extension.Result{}, ErrDenied
+		}
+		args, err = acceptHostMethod(service, method, args, false)
+		if err != nil {
+			return extension.Result{}, err
+		}
+		result, err := scope.updateSettings(callCtx, args)
+		if err == nil {
+			scope.receipt.mark()
+		}
+		return result, err
+	}
+	if service == "melta.warnings" {
+		if scope.activation == nil {
+			return extension.Result{}, extension.ErrClosed
+		}
+		if !scope.activation.services[service] {
+			return extension.Result{}, ErrDenied
+		}
+		args, err = acceptHostMethod(service, method, args, scope.pure)
+		if err != nil {
+			return extension.Result{}, err
+		}
+		return scope.activation.reportWarning(callCtx, method, args)
+	}
+	if service == extension.ContractCommands {
+		if scope.activation == nil || !scope.activation.services[service] || scope.pure || scope.commandScope.Kind == "" {
+			return extension.Result{}, ErrDenied
+		}
+		if scope.host == nil {
+			return extension.Result{}, extension.ErrClosed
+		}
+		handler, ok := scope.host.commandsHandler(method)
+		if !ok {
+			return extension.Result{}, fmt.Errorf("command method %q: %w", method, harness.ErrNotFound)
+		}
+		callCtx = context.WithValue(callCtx, grantContextKey{}, nativeGrant{commands: true, commandScope: scope.commandScope})
+		result, err := handler(callCtx, extension.CallContext{ExtensionID: scope.activation.id, SessionID: scope.session.SessionID, Workspace: scope.session.Workspace}, args)
+		scope.receipt.command(result, err)
+		return result, err
+	}
+	if service == extension.ContractData || service == extension.ContractCredentials {
+		return scope.callGuardedHost(callCtx, service, method, args)
+	}
+	return scope.candidate.callServiceScoped(callCtx, service, method, args, scope)
 }
 
-func (c *nativeCandidate) callService(ctx context.Context, service, method string, args json.RawMessage, pure bool) (extension.Result, error) {
+func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method string, args json.RawMessage, parent *nativeCallScope) (extension.Result, error) {
 	s := c.owner
 	s.nativeMu.Lock()
 	var target *nativeActivation
 	var binding nativeServiceMethod
 	var registration *nativeRegistration
+	var unavailable error
 	for _, other := range c.activations {
 		if other == nil || !c.ready[other] {
 			continue
@@ -712,12 +904,23 @@ func (c *nativeCandidate) callService(ctx context.Context, service, method strin
 			}
 		}
 	}
-	if target != nil && binding.contract != nil {
+	if target != nil && (target.closed || target.lost != nil) {
+		unavailable = target.lost
+		if unavailable == nil {
+			unavailable = extension.ErrClosed
+		}
+	} else if target != nil && binding.contract != nil {
 		registration.holds++
 	}
 	s.nativeMu.Unlock()
-	if target == nil || binding.contract == nil {
-		return extension.Result{}, errors.New("service unavailable")
+	if target == nil {
+		return extension.Result{}, &worker.Error{Class: worker.ClassUnavailable, Message: "service unavailable"}
+	}
+	if unavailable != nil {
+		return extension.Result{}, unavailable
+	}
+	if binding.contract == nil {
+		return extension.Result{}, fmt.Errorf("service method %q: %w", method, harness.ErrNotFound)
 	}
 	defer func() {
 		s.nativeMu.Lock()
@@ -728,7 +931,7 @@ func (c *nativeCandidate) callService(ctx context.Context, service, method strin
 			release()
 		}
 	}()
-	args, err := acceptNativeMethod(binding.contract, args, pure)
+	args, err := acceptNativeMethod(binding.contract, args, parent.pure)
 	if err != nil {
 		return extension.Result{}, err
 	}
@@ -736,8 +939,8 @@ func (c *nativeCandidate) callService(ctx context.Context, service, method strin
 		return extension.Result{}, err
 	}
 	childCtx, cancel := context.WithCancel(ctx)
-	scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, pure: pure || binding.contract.Mode == extension.ModePure}
-	return executeNativeProvider(childCtx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Call: scope.call}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+	scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, pure: parent.pure || binding.contract.Mode == extension.ModePure, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, receipt: parent.receipt}
+	return executeNativeProvider(childCtx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 		defer scope.end()
 		return binding.handler(ctx, call, args)
 	}, "service", service, args)

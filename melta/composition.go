@@ -557,27 +557,31 @@ func (c *composition) credentialsHandler(ctx context.Context, call extension.Cal
 	if !ok {
 		return extension.Result{}, fmt.Errorf("extension %q is not installed: %w", call.ExtensionID, ErrClosed)
 	}
+	return declaredCredentialHandler(ctx, call, request.Field, declaration.Declaration.Secrets)
+}
+
+func declaredCredentialHandler(ctx context.Context, call extension.CallContext, field string, secrets []extension.SecretRef) (extension.Result, error) {
 	var declared *extension.SecretRef
-	for i := range declaration.Declaration.Secrets {
-		if declaration.Declaration.Secrets[i].Field == request.Field {
-			declared = &declaration.Declaration.Secrets[i]
+	for i := range secrets {
+		if secrets[i].Field == field {
+			declared = &secrets[i]
 			break
 		}
 	}
 	if declared == nil {
-		return extension.Result{}, fmt.Errorf("credential field %q is not declared: %w", request.Field, ErrComposition)
+		return extension.Result{}, fmt.Errorf("credential field %q is not declared: %w", field, ErrComposition)
 	}
 	values := secretValuesFrom(ctx)
 	var value string
 	var found bool
 	if declared.Lifetime == extension.SecretActivation {
-		value, found = values.activation[request.Field]
+		value, found = values.activation[field]
 	} else {
 		perExtension := values.operation[call.ExtensionID]
-		value, found = perExtension[request.Field]
+		value, found = perExtension[field]
 	}
 	if !found || value == "" {
-		return extension.Result{}, fmt.Errorf("credential %q is unavailable: %w", request.Field, ErrClosed)
+		return extension.Result{}, fmt.Errorf("credential %q is unavailable: %w", field, ErrClosed)
 	}
 	raw, err := json.Marshal(struct {
 		Value string `json:"value"`

@@ -233,7 +233,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if err := candidate.publish(); err != nil {
 				t.Fatal(err)
 			}
-			result, err := candidate.callService(context.Background(), "worker-service", "relay", json.RawMessage(`{"value":123}`), true)
+			result, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"value":123}`), &nativeCallScope{pure: true})
 			if err != nil || string(result.Value) != `{"value":123}` {
 				t.Fatalf("nested worker call: %s, %v", result.Value, err)
 			}
@@ -427,11 +427,11 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 				t.Fatal("admission capture failed")
 			}
 			defer captured.release()
-			_, err = candidate.callService(context.Background(), "worker-service", "crash", json.RawMessage(`{}`), false)
+			_, err = candidate.callServiceScoped(context.Background(), "worker-service", "crash", json.RawMessage(`{}`), &nativeCallScope{})
 			if err == nil || harness.DeclaredExecutionKnowledge(err) != harness.ExecutionUnknown {
 				t.Fatalf("lost terminal evidence: %v", err)
 			}
-			if _, err := candidate.callService(context.Background(), "worker-service", "relay", json.RawMessage(`{}`), true); err == nil {
+			if _, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{}`), &nativeCallScope{pure: true}); err == nil {
 				t.Fatal("lost activation served another call")
 			}
 			if _, err := captured.stage(); err == nil {
@@ -450,7 +450,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if nextStage.services["worker-service"] != nil || nextStage.services["host-service"] == nil {
 				t.Fatal("new admission did not omit only the failed worker")
 			}
-			if result, err := candidate.callService(context.Background(), "host-service", "echo", json.RawMessage(`{"ok":true}`), true); err != nil || string(result.Value) != `{"ok":true}` {
+			if result, err := candidate.callServiceScoped(context.Background(), "host-service", "echo", json.RawMessage(`{"ok":true}`), &nativeCallScope{pure: true}); err != nil || string(result.Value) != `{"ok":true}` {
 				t.Fatalf("healthy sibling: %s, %v", result.Value, err)
 			}
 			makeCandidate := func(section string, secret string, enabled bool) *nativeCandidate {
@@ -629,7 +629,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	}
 	parkedStage.release()
 	binding.release()
-	if _, err := old.callService(context.Background(), "worker-service", "crash", json.RawMessage(`{}`), false); err == nil {
+	if _, err := old.callServiceScoped(context.Background(), "worker-service", "crash", json.RawMessage(`{}`), &nativeCallScope{}); err == nil {
 		t.Fatal("retired worker did not fail")
 	}
 	if _, err := captured.stage(); err == nil {
@@ -642,7 +642,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 		t.Fatalf("healthy successor omitted: %v", err)
 	}
 	stage.release()
-	if result, err := successor.callService(context.Background(), "worker-service", "relay", json.RawMessage(`{"ok":true}`), true); err != nil || string(result.Value) != `{"ok":true}` {
+	if result, err := successor.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"ok":true}`), &nativeCallScope{pure: true}); err != nil || string(result.Value) != `{"ok":true}` {
 		t.Fatalf("healthy successor: %s, %v", result.Value, err)
 	}
 	reused := build(`{"revision":2}`)

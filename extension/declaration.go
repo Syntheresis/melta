@@ -24,6 +24,9 @@ const (
 	ContractSessionCleanup   = "melta.session_cleanup"
 	ContractCredentials      = "melta.credentials" // #nosec G101 -- Protocol contract identifier, not a credential value.
 	ContractCommands         = "melta.commands"
+	ContractWorkspace        = "melta.workspace"
+	ContractSettings         = "melta.settings"
+	ContractWarnings         = "melta.warnings"
 
 	// ContractVersion is the one accepted version of every fixed contract.
 	ContractVersion = "4"
@@ -384,6 +387,12 @@ func hostCapability(id string) (CapabilityDefinition, bool) {
 		return hostCredentialsDefinition(), true
 	case ContractCommands:
 		return hostCommandsDefinition(), true
+	case ContractWorkspace:
+		return hostWorkspaceDefinition(), true
+	case ContractSettings:
+		return hostSettingsDefinition(), true
+	case ContractWarnings:
+		return hostWarningsDefinition(), true
 	}
 	return CapabilityDefinition{}, false
 }

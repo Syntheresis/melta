@@ -9,8 +9,10 @@ import (
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
+	"github.com/Syntheresis/melta/extension/worker"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
+	"github.com/Syntheresis/melta/protocol"
 )
 
 type registrarTestTool struct{ name string }
@@ -27,6 +29,165 @@ func (c registrarContext) Err() error {
 
 func registrarManifest(id string) extension.Manifest {
 	return extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)}
+}
+
+func TestRegistrarServiceAuthorityChangeReplacesActivation(t *testing.T) {
+	owner := &configurationService{}
+	manifest := registrarManifest("authority")
+	manifest.Services = []string{"melta.first"}
+	e := extension.Extension{Manifest: manifest, Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+		return nil, nil
+	}}
+	first, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.release()
+	if err := first.publish(); err != nil {
+		t.Fatal(err)
+	}
+	e.Manifest.Services = []string{"melta.second"}
+	second, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.release()
+	if first.activations[0] == second.activations[0] {
+		t.Fatal("activation reused after service authority changed")
+	}
+}
+
+func TestRegistrarServiceAuthorityIntersection(t *testing.T) {
+	manifest := registrarManifest("authority")
+	manifest.Services = []string{"melta.one", "melta.two"}
+	e := extension.Extension{Manifest: manifest, Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+		return nil, nil
+	}}
+	for _, test := range []struct {
+		name     string
+		approved []string
+		want     map[string]bool
+	}{
+		{"unrestricted", nil, map[string]bool{"melta.one": true, "melta.two": true}},
+		{"none", []string{}, map[string]bool{}},
+		{"intersection", []string{"melta.one", "melta.other"}, map[string]bool{"melta.one": true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			owner := &configurationService{}
+			candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{
+				extension: e, section: []byte(`{}`), approvedServices: test.approved,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer candidate.release()
+			if got := candidate.activations[0].services; !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("services = %v, want %v", got, test.want)
+			}
+			if len(test.approved) > 0 {
+				test.approved[0] = "changed"
+				if !candidate.activations[0].services["melta.one"] {
+					t.Fatal("activation authority changed with host input")
+				}
+			}
+		})
+	}
+}
+
+func TestRegistrarServiceAuthorityNarrowingReplacesActivation(t *testing.T) {
+	owner := &configurationService{}
+	manifest := registrarManifest("authority")
+	manifest.Services = []string{"melta.one"}
+	e := extension.Extension{Manifest: manifest, Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+		return nil, nil
+	}}
+	first, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.release()
+	if err := first.publish(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`), approvedServices: []string{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.release()
+	if first.activations[0] == second.activations[0] {
+		t.Fatal("activation reused after host narrowed service authority")
+	}
+}
+
+func TestScopedServicePreservesIssuingContextValues(t *testing.T) {
+	type key struct{}
+	origin, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "origin"))
+	scope := &nativeCallLifetime{ctx: origin, cancel: cancel}
+	defer scope.end()
+	supplied := context.WithValue(context.Background(), key{}, "forged")
+	merged, finish, err := scope.admit(supplied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer finish()
+	if got := merged.Value(key{}); got != "origin" {
+		t.Fatalf("callback context value = %v, want issuing context", got)
+	}
+}
+
+func TestScopedServiceNestedProviderIdentityAndState(t *testing.T) {
+	owner := &configurationService{}
+	method := func(name string) extension.Method {
+		return extension.Method{Name: name, Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)}
+	}
+	provider := extension.Extension{Manifest: registrarManifest("provider"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterService(extension.Service{Name: "inner/opaque", Methods: []extension.RegisteredMethod{{
+			Method: method("call/opaque"),
+			Handler: func(_ context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
+				if call.ExtensionID != "provider" || string(call.Settings) != `{"owner":"provider"}` || string(call.State) != `{"state":"provider"}` || call.Session.SessionID != "session" {
+					return extension.Result{}, errors.New("wrong serving context")
+				}
+				return extension.Result{Value: []byte(`null`)}, nil
+			},
+		}}}, nil)
+		return nil, err
+	}}
+	outerManifest := registrarManifest("outer")
+	outer := extension.Extension{Manifest: outerManifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterService(extension.Service{Name: "outer/opaque", Methods: []extension.RegisteredMethod{{
+			Method: method("call/opaque"),
+			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+				if call.ExtensionID != "outer" || string(call.State) != `{"state":"outer"}` {
+					return extension.Result{}, errors.New("wrong outer context")
+				}
+				return call.Call(ctx, "inner/opaque", "call/opaque", args)
+			},
+		}}}, nil)
+		return nil, err
+	}}
+	callerManifest := registrarManifest("caller")
+	caller := extension.Extension{Manifest: callerManifest, Activate: func(context.Context, extension.API) (func(context.Context) error, error) { return nil, nil }}
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{
+		{extension: provider, section: []byte(`{"owner":"provider"}`)},
+		{extension: outer, section: []byte(`{}`)},
+		{extension: caller, section: []byte(`{}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.release()
+	ctx, cancel := context.WithCancel(context.Background())
+	scope := &nativeCallScope{
+		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
+		candidate:          candidate, activation: candidate.activations[2], pure: true,
+		session: harness.SessionIdentity{SessionID: "session"},
+		states:  map[string]harness.SessionStateValue{"outer": []byte(`{"state":"outer"}`), "provider": []byte(`{"state":"provider"}`)},
+	}
+	defer scope.end()
+	result, err := scope.call(ctx, "outer/opaque", "call/opaque", []byte(`{}`))
+	if err != nil || string(result.Value) != "null" {
+		t.Fatalf("nested provider: %s %v", result.Value, err)
+	}
 }
 
 func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
@@ -521,6 +682,15 @@ func TestRegistrarEntryServiceVisibility(t *testing.T) {
 		if err != nil || string(value.Value) != `"ok"` {
 			t.Fatalf("ready service: %s, %v", value.Value, err)
 		}
+		_, err = api.Call(ctx, "own", "missing", []byte(`{}`))
+		if !errors.Is(err, harness.ErrNotFound) {
+			t.Fatalf("missing method: %v", err)
+		}
+		_, err = api.Call(ctx, "missing", "get", []byte(`{}`))
+		var failure *worker.Error
+		if !errors.As(err, &failure) || failure.Class != worker.ClassUnavailable {
+			t.Fatalf("missing service: %v", err)
+		}
 		if _, err := api.RegisterService(service("private"), nil); err != nil {
 			return nil, err
 		}
@@ -531,7 +701,7 @@ func TestRegistrarEntryServiceVisibility(t *testing.T) {
 			t.Fatal("failed entry visible")
 		}
 		before := getCalls
-		if _, err := api.Call(ctx, "own", "get", []byte(`[]`)); !errors.Is(err, extension.ErrInvalid) || getCalls != before {
+		if _, err := api.Call(ctx, "own", "get", []byte(`[]`)); !errors.Is(err, extension.ErrInvalid) || ErrorCode(err) != protocol.ErrorCodeInvalid || getCalls != before {
 			t.Fatalf("invalid arguments: err=%v handler calls=%d", err, getCalls-before)
 		}
 		for _, method := range []string{"bad_result", "bad_partial"} {
@@ -683,7 +853,7 @@ func TestRegistrarNestedServiceScope(t *testing.T) {
 					if _, err := call.Call(ctx, "service", "nested", []byte(`{}`)); err != nil {
 						return extension.Result{}, err
 					}
-					if _, err := call.Call(ctx, "service", "effect", []byte(`{}`)); err == nil {
+					if _, err := call.Call(ctx, "service", "effect", []byte(`{}`)); !errors.Is(err, ErrDenied) {
 						return extension.Result{}, errors.New("pure call invoked effectful method")
 					}
 					return extension.Result{Value: []byte(`null`)}, nil

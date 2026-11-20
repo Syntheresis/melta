@@ -108,8 +108,14 @@ func (v *nativeCallLifetime) admit(supplied context.Context) (context.Context, f
 		finish()
 		return nil, nil, err
 	}
-	merged, cancel := context.WithCancel(supplied)
-	stop := context.AfterFunc(v.ctx, cancel)
+	var merged context.Context
+	var cancel context.CancelFunc
+	if deadline, ok := supplied.Deadline(); ok {
+		merged, cancel = context.WithDeadline(v.ctx, deadline)
+	} else {
+		merged, cancel = context.WithCancel(v.ctx)
+	}
+	stop := context.AfterFunc(supplied, cancel)
 	finish = func() { stop(); cancel(); v.wg.Done() }
 	if err := v.ctx.Err(); err != nil {
 		finish()
@@ -364,11 +370,11 @@ func (c *composition) invokeAcceptedProvider(ctx context.Context, provider *capa
 
 func acceptNativeMethod(method *extension.CompiledMethod, args json.RawMessage, pure bool) (json.RawMessage, error) {
 	if pure && method.Mode != extension.ModePure {
-		return nil, fmt.Errorf("pure callback cannot invoke %s method %q: %w", method.Mode, method.Name, ErrComposition)
+		return nil, fmt.Errorf("pure callback cannot invoke %s method %q: %w: %w", method.Mode, method.Name, ErrDenied, ErrComposition)
 	}
 	args = append(json.RawMessage(nil), args...)
 	if err := method.ValidateArguments(args); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", harness.ErrInvalid, err)
 	}
 	return args, nil
 }

@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/Syntheresis/melta/extension"
+	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/protocol"
 )
 
@@ -61,14 +63,73 @@ func (r *Melta) cleanupDeletedSessions(ctx context.Context, deletions []deletedS
 	defer func() {
 		_ = snapshot.resources.release()
 	}()
+	r.config.nativeMu.Lock()
+	var registered *nativeSnapshot
+	if current := r.config.nativeCurrent; current != nil && current.holds > 0 {
+		var activations []*nativeActivation
+		for _, active := range current.activations {
+			if active != nil && current.ready[active] {
+				activations = append(activations, active)
+			}
+		}
+		registered = current.snapshotLocked(activations)
+	}
+	r.config.nativeMu.Unlock()
+	if registered != nil {
+		defer registered.release()
+	}
 	for _, deletion := range deletions {
 		for _, owner := range deletion.owners {
-			if failure := r.cleanupExternalOwner(ctx, snapshot, deletion.sessionID, owner); failure != nil {
+			var failure *protocol.CleanupFailure
+			if registered != nil && registered.hasActivation(owner) {
+				failure = registered.cleanupOwner(ctx, deletion.sessionID, owner)
+			} else {
+				failure = r.cleanupExternalOwner(ctx, snapshot, deletion.sessionID, owner)
+			}
+			if failure != nil {
 				failures = append(failures, *failure)
 			}
 		}
 	}
 	return failures
+}
+
+func (s *nativeSnapshot) hasActivation(id string) bool {
+	for _, activation := range s.candidate.activations {
+		if activation != nil && activation.id == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *nativeSnapshot) cleanupOwner(ctx context.Context, sessionID, owner string) *protocol.CleanupFailure {
+	extensionID := owner
+	failure := &protocol.CleanupFailure{ExtensionId: &extensionID, Code: "unavailable", Message: cleanupUnavailableMessage}
+	found, failed := false, false
+	for _, registration := range s.hooks["cleanup"] {
+		if registration.activation.id != owner {
+			continue
+		}
+		activation := registration.activation
+		found = true
+		if activation.unavailable() != nil {
+			failed = true
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(ctx, cleanupCallDeadline)
+		scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel}, candidate: s.candidate, activation: activation}
+		call := extension.AuthorContext{ExtensionID: owner, Settings: append(json.RawMessage(nil), activation.section...), Call: scope.call}
+		err := registration.value.(extension.CleanupHook)(callCtx, call, harness.SessionIdentity{SessionID: sessionID})
+		scope.end()
+		if err != nil {
+			failed = true
+		}
+	}
+	if !found || failed {
+		return failure
+	}
+	return nil
 }
 
 // appendOwnerFailures marks every recorded owner unavailable when the current

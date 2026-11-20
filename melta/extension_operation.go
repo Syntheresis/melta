@@ -161,25 +161,11 @@ func (r *Melta) InvokeExtension(ctx context.Context, c Caller, request protocol.
 		if !ok {
 			return fmt.Errorf("capability %q method %q is not exposed: %w", request.CapabilityId, request.Method, ErrDenied)
 		}
-		target, err := resolveInvocationTarget(request.Target, exposed.Target)
+		target, session, err := r.invocationTarget(ctx, c, h, request.Target, exposed.Target)
 		if err != nil {
 			return err
 		}
-		if err := r.authorize(c, ctx, h, target); err != nil {
-			return err
-		}
-		sessionID, workspace := "", ""
-		switch target.Kind {
-		case CallerScopeSession:
-			header, err := h.ReadSessionHeader(ctx, target.SessionID)
-			if err != nil {
-				return err
-			}
-			sessionID = target.SessionID
-			workspace = header.Identity.Workspace
-		case CallerScopeWorkspace:
-			workspace = target.Workspace
-		}
+		sessionID, workspace := session.SessionID, session.Workspace
 		if err := method.ValidateArguments(arguments); err != nil {
 			return fmt.Errorf("%w: %w", harness.ErrInvalid, err)
 		}
@@ -219,7 +205,7 @@ func (r *Melta) InvokeExtension(ctx context.Context, c Caller, request protocol.
 			// deleted. The owner read is cancellation-independent so a late
 			// request cancellation cannot replace a produced result, and only
 			// an actually deleted Session replaces it with not-found.
-			if _, err := h.ReadSessionHeader(context.WithoutCancel(ctx), target.SessionID); err != nil {
+			if err := recheckInvocationSession(ctx, h, target); err != nil {
 				return err
 			}
 		}
@@ -228,6 +214,29 @@ func (r *Melta) InvokeExtension(ctx context.Context, c Caller, request protocol.
 		return extension.Result{}, err
 	}
 	return result, nil
+}
+
+func (r *Melta) invocationTarget(ctx context.Context, caller Caller, h *harness.Harness, input protocol.ExtensionInvocationTarget, declared extension.ExposedTargetKind) (CallerScope, harness.SessionIdentity, error) {
+	target, err := resolveInvocationTarget(input, declared)
+	if err != nil {
+		return CallerScope{}, harness.SessionIdentity{}, err
+	}
+	if err := r.authorize(caller, ctx, h, target); err != nil {
+		return CallerScope{}, harness.SessionIdentity{}, err
+	}
+	if target.Kind == CallerScopeSession {
+		header, err := h.ReadSessionHeader(ctx, target.SessionID)
+		if err != nil {
+			return CallerScope{}, harness.SessionIdentity{}, err
+		}
+		return target, header.Identity, nil
+	}
+	return target, harness.SessionIdentity{Workspace: target.Workspace}, nil
+}
+
+func recheckInvocationSession(ctx context.Context, h *harness.Harness, target CallerScope) error {
+	_, err := h.ReadSessionHeader(context.WithoutCancel(ctx), target.SessionID)
+	return err
 }
 
 // validateInvocationAddress enforces the nonempty addressing strings and the

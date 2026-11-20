@@ -72,16 +72,7 @@ func (s *configurationService) prepareResources(Caller context.Context, snapshot
 	snapshot.composition.hosts = s.composition.hosts
 	var report func(string, string, string)
 	if s.composition.reportWarning != nil {
-		report = func(id, kind, message string) {
-			r.mu.Lock()
-			if !r.committed {
-				r.warnings = append(r.warnings, [3]string{id, kind, message})
-				r.mu.Unlock()
-				return
-			}
-			r.mu.Unlock()
-			s.composition.reportWarning(id, kind, message)
-		}
+		report = r.reportWarning
 	}
 	runtimeInfo := ScopeInfo{Kind: ScopeRuntime, DataDir: s.dataDir, Revision: fmt.Sprint(r.revision)}
 	runtimeInfo.sections = snapshot.extensions
@@ -119,6 +110,19 @@ func (s *configurationService) prepareResources(Caller context.Context, snapshot
 	r.workspaces = newWorkspaceScopes(ctx, snapshot.composition, []*scope{runtime}, s.obs, snapshot.extensions, snapshot.declaredBindings)
 	snapshot.resources = r
 	return nil
+}
+
+func (r *resourceSet) reportWarning(id, kind, message string) {
+	r.mu.Lock()
+	if !r.committed {
+		r.warnings = append(r.warnings, [3]string{id, kind, message})
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	if r.owner.composition != nil && r.owner.composition.reportWarning != nil {
+		r.owner.composition.reportWarning(id, kind, message)
+	}
 }
 
 // acquireExecutables retains the activation of every executable extension the

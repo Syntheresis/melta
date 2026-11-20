@@ -196,6 +196,29 @@ func CleanupCapability(id string) Capability {
 	return Capability{ID: id, ContractID: ContractSessionCleanup, ContractVersion: ContractVersion, Kind: KindService, Methods: cleanupMethods()}
 }
 
+func hostWorkspaceDefinition() CapabilityDefinition {
+	outcome := `{"type":"object","required":["outcome"],"properties":{"outcome":{"const":"completed"}},"additionalProperties":false}`
+	partial := `{"type":"object","required":["outcome"],"properties":{"outcome":{"enum":["completed","uncertain"]}},"additionalProperties":false}`
+	return CapabilityDefinition{ContractID: ContractWorkspace, ContractVersion: ContractVersion, Kind: KindService, Methods: []Method{
+		method("bind", ModePure, `{"type":"object","required":["path"],"properties":{"path":{"type":"string","minLength":1}},"additionalProperties":false}`, `{"type":"object","required":["binding","canonical_path","exists"],"properties":{"binding":{"type":"string"},"canonical_path":{"type":"string"},"exists":{"type":"boolean"}},"additionalProperties":false}`, "", ""),
+		method("read", ModeServiceIO, `{"type":"object","required":["binding"],"properties":{"binding":{"type":"string","minLength":1}},"additionalProperties":false}`, `{"type":"object","required":["bytes"],"properties":{"bytes":{"type":"string"}},"additionalProperties":false}`, "", ""),
+		method("write", ModeServiceIO, `{"type":"object","required":["binding","bytes","create_only"],"properties":{"binding":{"type":"string","minLength":1},"bytes":{"type":"string"},"create_only":{"type":"boolean"}},"additionalProperties":false}`, outcome, "", partial),
+		method("delete", ModeServiceIO, `{"type":"object","required":["binding"],"properties":{"binding":{"type":"string","minLength":1}},"additionalProperties":false}`, outcome, "", partial),
+	}}
+}
+
+func hostSettingsDefinition() CapabilityDefinition {
+	return CapabilityDefinition{ContractID: ContractSettings, ContractVersion: ContractVersion, Kind: KindService, Methods: []Method{
+		method("update", ModeServiceIO, `{"type":"object","required":["service","method","arguments"],"properties":{"service":{"type":"string","minLength":1},"method":{"type":"string","minLength":1},"arguments":{}},"additionalProperties":false}`, `{"type":"null"}`, "", ""),
+	}}
+}
+
+func hostWarningsDefinition() CapabilityDefinition {
+	return CapabilityDefinition{ContractID: ContractWarnings, ContractVersion: ContractVersion, Kind: KindService, Methods: []Method{
+		method("report", ModePure, `{"type":"object","required":["kind","message"],"properties":{"kind":{"type":"string"},"message":{"type":"string"}},"additionalProperties":false}`, `{"type":"null"}`, "", ""),
+	}}
+}
+
 // hostDataDefinition is the fixed melta.data host service: the extension's
 // own Session and cache namespaces plus the durable external-data claim.
 func hostDataDefinition() CapabilityDefinition {
