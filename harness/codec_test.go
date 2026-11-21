@@ -376,6 +376,22 @@ func TestEntryPayloadRoundTrip(t *testing.T) {
 			encode: func() (json.RawMessage, error) {
 				v := validAssistantEntry(testOpID)
 				v.Usage = testUsage(3)
+				v.RetryUsage = testUsage(2)
+				v.RetryUsageUnknown = true
+				return encodeAssistantEntry(v)
+			},
+			decode: func(env Entry) error { _, err := decodeAssistantEntry(env); return err },
+		},
+		{
+			name: "interrupted assistant",
+			env:  Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Sequence: 1, CommittedAt: testTime},
+			encode: func() (json.RawMessage, error) {
+				v := validAssistantEntry(testOpID)
+				v.Status = model.OutputInterrupted
+				v.Content = []model.ContentPart{{Kind: model.PartText, Text: "partial"}}
+				v.ToolCalls = nil
+				v.Usage = testUsage(3)
+				v.RetryUsage = testUsage(2)
 				return encodeAssistantEntry(v)
 			},
 			decode: func(env Entry) error { _, err := decodeAssistantEntry(env); return err },
@@ -424,7 +440,15 @@ func TestEntryPayloadRoundTrip(t *testing.T) {
 			name: "operation_settlement",
 			env:  Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Sequence: 1, CommittedAt: testTime},
 			encode: func() (json.RawMessage, error) {
-				return encodeOperationSettlementEntry(validSettlementEntry())
+				v := validSettlementEntry()
+				v.Status = OperationFailure
+				v.Detail = "boom"
+				ref := testModelRef()
+				v.Model = &ref
+				v.Usage = testUsage(1)
+				v.RetryUsage = testUsage(2)
+				v.RetryUsageUnknown = true
+				return encodeOperationSettlementEntry(v)
 			},
 			decode: func(env Entry) error { _, err := decodeOperationSettlementEntry(env); return err },
 		},
@@ -434,6 +458,8 @@ func TestEntryPayloadRoundTrip(t *testing.T) {
 			encode: func() (json.RawMessage, error) {
 				v := validCompactionEntry(testOpID)
 				v.Facts[0].Usage = testUsage(3)
+				v.Facts[0].RetryUsage = testUsage(2)
+				v.Facts[0].RetryUsageUnknown = true
 				return encodeContextCheckpointEntry(v)
 			},
 			decode: func(env Entry) error { _, err := decodeContextCheckpointEntry(env); return err },
@@ -604,6 +630,101 @@ func TestEntryPayloadOperationlessRules(t *testing.T) {
 	{
 		_, err := decodeAssistantEntry(env)
 		testassert.Require(t, err != nil, "operationless assistant with stored usage must be rejected")
+	}
+
+	withRetry := validAssistantEntry("")
+	withRetry.RetryUsage = testUsage(2)
+	if _, err := encodeAssistantEntry(withRetry); err == nil {
+		t.Fatalf("encode of operationless assistant with retry usage must fail")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("operationless retry usage rejection must use ErrInvalid, got %v", err)
+	}
+	withRetryUnknown := validAssistantEntry("")
+	withRetryUnknown.RetryUsageUnknown = true
+	if _, err := encodeAssistantEntry(withRetryUnknown); err == nil {
+		t.Fatalf("encode of operationless assistant with retry usage unknown must fail")
+	}
+	for name, payload := range map[string]json.RawMessage{
+		"retry usage":         setKey(raw, "retry_usage", json.RawMessage(`{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0}`)),
+		"retry usage unknown": setKey(raw, "retry_usage_unknown", json.RawMessage(`true`)),
+	} {
+		env.Payload = payload
+		{
+			_, err := decodeAssistantEntry(env)
+			testassert.Require(t, err != nil, "operationless assistant with stored %s must be rejected", name)
+		}
+	}
+
+	// A copied checkpoint fact carries neither retry member.
+	checkpointRetry := validCompactionEntry("")
+	checkpointRetry.Facts[0].RetryUsage = testUsage(2)
+	if _, err := encodeContextCheckpointEntry(checkpointRetry); err == nil {
+		t.Fatalf("encode of operationless checkpoint with retry usage must fail")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("operationless checkpoint retry usage rejection must use ErrInvalid, got %v", err)
+	}
+	checkpointUnknown := validCompactionEntry("")
+	checkpointUnknown.Facts[0].RetryUsageUnknown = true
+	if _, err := encodeContextCheckpointEntry(checkpointUnknown); err == nil {
+		t.Fatalf("encode of operationless checkpoint with retry usage unknown must fail")
+	}
+	checkpoint := validCompactionEntry("")
+	checkpointRaw, err := encodeContextCheckpointEntry(checkpoint)
+	testassert.NoError(t, err)
+	checkpointEnv := Entry{SessionID: testSessionID, ID: testEntryID, Kind: EntryCompaction, Sequence: 1, CommittedAt: testTime}
+	forcedFact := func(member string, value json.RawMessage) json.RawMessage {
+		var obj, fact map[string]json.RawMessage
+		testassert.NoError(t, json.Unmarshal(checkpointRaw, &obj))
+		var facts []json.RawMessage
+		testassert.NoError(t, json.Unmarshal(obj["facts"], &facts))
+		testassert.NoError(t, json.Unmarshal(facts[0], &fact))
+		fact[member] = value
+		encoded, err := json.Marshal(fact)
+		testassert.NoError(t, err)
+		facts[0] = encoded
+		encodedFacts, err := json.Marshal(facts)
+		testassert.NoError(t, err)
+		obj["facts"] = encodedFacts
+		out, err := json.Marshal(obj)
+		testassert.NoError(t, err)
+		return out
+	}
+	for name, payload := range map[string]json.RawMessage{
+		"retry usage":         forcedFact("retry_usage", json.RawMessage(`{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0}`)),
+		"retry usage unknown": forcedFact("retry_usage_unknown", json.RawMessage(`true`)),
+	} {
+		checkpointEnv.Payload = payload
+		{
+			_, err := decodeContextCheckpointEntry(checkpointEnv)
+			testassert.Require(t, err != nil, "operationless checkpoint fact with stored %s must be rejected", name)
+		}
+	}
+}
+
+// TestRetryUsageUnknownMemberOnlyTrue proves the shared retried-attempt member
+// rule on a decoded record: retry_usage_unknown may only be present as true,
+// while an absent member leaves it unset.
+func TestRetryUsageUnknownMemberOnlyTrue(t *testing.T) {
+	raw, err := encodeAssistantEntry(validAssistantEntry(testOpID))
+	testassert.NoError(t, err)
+	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Sequence: 1, CommittedAt: testTime}
+	for name, payload := range map[string]json.RawMessage{
+		"false":     setKey(raw, "retry_usage_unknown", json.RawMessage(`false`)),
+		"null":      setKey(raw, "retry_usage_unknown", json.RawMessage(`null`)),
+		"non-bool":  setKey(raw, "retry_usage_unknown", json.RawMessage(`1`)),
+		"bad retry": setKey(raw, "retry_usage", json.RawMessage(`{"input_tokens":1}`)),
+	} {
+		env.Payload = payload
+		{
+			_, err := decodeAssistantEntry(env)
+			testassert.Require(t, err != nil, "retry member %s must be rejected", name)
+		}
+	}
+	env.Payload = setKey(raw, "retry_usage_unknown", json.RawMessage(`true`))
+	{
+		decoded, err := decodeAssistantEntry(env)
+		testassert.NoError(t, err)
+		testassert.Require(t, decoded.RetryUsageUnknown && decoded.RetryUsage == nil, "decoded retry usage unknown = %v retry usage = %+v, want the unknown marker alone", decoded.RetryUsageUnknown, decoded.RetryUsage)
 	}
 }
 
@@ -1458,17 +1579,15 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			_, err := encodeInputEntry(v)
 			return err
 		}},
-		{"assistant empty partial", func() error {
+		{"assistant errored with text", func() error {
 			v := validAssistantEntry(testOpID)
 			v.Status = model.OutputErrored
-			v.Content = []model.ContentPart{}
 			_, err := encodeAssistantEntry(v)
 			return err
 		}},
-		{"assistant errored with calls", func() error {
+		{"assistant interrupted with text and calls", func() error {
 			v := validAssistantEntry(testOpID)
-			v.Status = model.OutputErrored
-			v.Refusal = "no"
+			v.Status = model.OutputInterrupted
 			v.ToolCalls = []toolCallRecord{validToolCallRecord()}
 			_, err := encodeAssistantEntry(v)
 			return err
@@ -1501,9 +1620,16 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			_, err := encodeToolResultEntry(v)
 			return err
 		}},
+		{"removed continuation signal", func() error {
+			v := validSignalEntry(testOpID)
+			v.Signal = SignalKind("model_failure_continuation")
+			v.Content = "The previous model response failed after partial output. Continue from the retained response."
+			_, err := encodeSignalEntry(v)
+			return err
+		}},
 		{"signal wrong content", func() error {
 			v := validSignalEntry(testOpID)
-			v.Signal = SignalModelFailureContinuation
+			v.Content = "A different model-visible message."
 			_, err := encodeSignalEntry(v)
 			return err
 		}},
@@ -1519,6 +1645,30 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			v.Detail = "d"
 			v.Usage = testUsage(1)
 			_, err := encodeOperationSettlementEntry(v)
+			return err
+		}},
+		{"settlement retry usage without model", func() error {
+			v := validSettlementEntry()
+			v.Status = OperationFailure
+			v.Detail = "d"
+			v.RetryUsage = testUsage(1)
+			_, err := encodeOperationSettlementEntry(v)
+			return err
+		}},
+		{"settlement retry unknown without model", func() error {
+			v := validSettlementEntry()
+			v.Status = OperationFailure
+			v.Detail = "d"
+			v.RetryUsageUnknown = true
+			_, err := encodeOperationSettlementEntry(v)
+			return err
+		}},
+		{"interrupted assistant without started text or refusal", func() error {
+			v := validAssistantEntry(testOpID)
+			v.Status = model.OutputInterrupted
+			v.Content = nil
+			v.Extra = model.Extra{"reasoning": json.RawMessage(`"thought"`)}
+			_, err := encodeAssistantEntry(v)
 			return err
 		}},
 		{"session root with half lineage", func() error {

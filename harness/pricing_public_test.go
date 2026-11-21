@@ -34,8 +34,8 @@ func TestTerminalModelProducerIdentityAtSharedSettlement(t *testing.T) {
 			testassert.Require(t, record.State.Status == harness.OperationFailure, "settled record = %+v, want terminal failure", record)
 
 			settlement := settlementFact(t, f, session)
-			testassert.Require(t, settlement.Model != nil && *settlement.Model == publicModelRef && settlement.Usage == nil,
-				"settlement entry = %+v, want the live conversation model identity beside an absent usage report", settlement)
+			testassert.Require(t, settlement.Model != nil && *settlement.Model == publicModelRef && settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown,
+				"settlement entry = %+v, want the live conversation model identity beside absent usage and retry usage reports", settlement)
 		})
 		t.Run("failure with no model intent names no producer", func(t *testing.T) {
 			script := newScriptModel()

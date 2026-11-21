@@ -6608,9 +6608,18 @@ func TestPublicForkAcrossCompaction(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		conversation := newScriptModel(publicTurn(), publicTurn(), publicTurn()) // op-1, op-2, fork-1
-		compact := newScriptModel(summaryAttempt("summary one"))
+		compact := newScriptModel(publicAttempt{stream: publicPartialTurnStream()}, summaryAttempt("summary one"))
 		f := newPublicFixtureWithJobs(t, store, nil, conversation, nil, compact.effect)
 		f.defaultPrep.Capture = compactManualCapture()
+		policyCalls := 0
+		f.defaultPrep.Open = func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
+			exec := publicExecution(conversation.effect, compact.effect)
+			exec.Retry = func(error, int) (time.Duration, bool) {
+				policyCalls++
+				return 0, policyCalls == 1
+			}
+			return exec, nil
+		}
 		defer f.close()
 		source := createSession(t, f.h)
 
@@ -6653,7 +6662,9 @@ func TestPublicForkAcrossCompaction(t *testing.T) {
 				} `json:"content"`
 			} `json:"messages"`
 			Facts []struct {
-				Usage *harness.UsageCount `json:"usage"`
+				Usage             *harness.UsageCount `json:"usage"`
+				RetryUsage        *harness.UsageCount `json:"retry_usage"`
+				RetryUsageUnknown bool                `json:"retry_usage_unknown"`
 			} `json:"facts"`
 		}
 		var sourceWire compactionWire
@@ -6666,10 +6677,14 @@ func TestPublicForkAcrossCompaction(t *testing.T) {
 			sourceSummary = sourceWire.Messages[0].Content[0].Text
 		}
 		sourceUsage := (*harness.UsageCount)(nil)
+		sourceRetryUsage := (*harness.UsageCount)(nil)
+		sourceRetryUnknown := false
 		if len(sourceWire.Facts) > 0 {
 			sourceUsage = sourceWire.Facts[0].Usage
+			sourceRetryUsage = sourceWire.Facts[0].RetryUsage
+			sourceRetryUnknown = sourceWire.Facts[0].RetryUsageUnknown
 		}
-		testassert.Require(t, sourceWire.OperationID == "c-1" && sourceSummary == "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]" && sourceUsage != nil, "source compaction entry = %+v, want the c-1-owned committed summary with usage", sourceWire)
+		testassert.Require(t, sourceWire.OperationID == "c-1" && sourceSummary == "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]" && sourceUsage != nil && sourceRetryUsage != nil && *sourceRetryUsage == (harness.UsageCount{InputTokens: 5, OutputTokens: 7}) && !sourceRetryUnknown, "source compaction entry = %+v, want the c-1-owned committed summary with its usage and the broken attempt's retry usage", sourceWire)
 
 		res, err := f.h.Fork(ctx, harness.ForkRequest{Origin: harness.InputOriginUser,
 			SourceSessionID: source,
@@ -6727,10 +6742,14 @@ func TestPublicForkAcrossCompaction(t *testing.T) {
 			copiedSummary = copiedWire.Messages[0].Content[0].Text
 		}
 		copiedUsage := (*harness.UsageCount)(nil)
+		copiedRetryUsage := (*harness.UsageCount)(nil)
+		copiedRetryUnknown := false
 		if len(copiedWire.Facts) > 0 {
 			copiedUsage = copiedWire.Facts[0].Usage
+			copiedRetryUsage = copiedWire.Facts[0].RetryUsage
+			copiedRetryUnknown = copiedWire.Facts[0].RetryUsageUnknown
 		}
-		testassert.Require(t, copiedWire.OperationID == "" && copiedUsage == nil && copiedSummary == "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]", "got %v, want %v; copied compaction entry usage = %+v, want none; got %v, want %v", copiedWire.OperationID, "", copiedUsage, copiedSummary, "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]")
+		testassert.Require(t, copiedWire.OperationID == "" && copiedUsage == nil && copiedRetryUsage == nil && !copiedRetryUnknown && copiedSummary == "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]", "got %v, want %v; copied compaction entry usage = %+v/%+v (unknown %v), want none; got %v, want %v", copiedWire.OperationID, "", copiedUsage, copiedRetryUsage, copiedRetryUnknown, copiedSummary, "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]")
 		expectedBoundary, ok := idMap[sourceWire.BoundaryEntryID]
 		testassert.Require(t, ok, "the source boundary %q is not inside the copied prefix", sourceWire.BoundaryEntryID)
 		testassert.Require(t, copiedWire.BoundaryEntryID == expectedBoundary && copiedWire.ConfigurationRevision == sourceWire.ConfigurationRevision, "got %v, want %v; got %v, want %v", copiedWire.BoundaryEntryID, expectedBoundary, copiedWire.ConfigurationRevision, sourceWire.ConfigurationRevision)

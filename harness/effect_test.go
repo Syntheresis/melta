@@ -3583,7 +3583,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				committed, _, _, err := commitTerminalSettlement(tx, sessionID, testOpID, session, op, sreg.Revision, oreg.Revision, OperationSuccess, "", nil, model.ModelRef{}, nil, false, nil, "")
+				committed, _, _, err := commitTerminalSettlement(tx, sessionID, testOpID, session, op, sreg.Revision, oreg.Revision, OperationSuccess, "", nil, model.ModelRef{}, attemptUsage{}, false, nil, "")
 				if err != nil {
 					return err
 				}

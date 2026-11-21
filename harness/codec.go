@@ -476,11 +476,11 @@ func decodeToolDefinition(raw json.RawMessage) (model.ToolDefinition, error) {
 	return d, nil
 }
 
-// validOutputStatus reports whether the status is one of the landed closed
-// output statuses.
+// validOutputStatus reports whether the status is one of the assistant entry's
+// closed output statuses.
 func validOutputStatus(s model.OutputStatus) bool {
 	switch s {
-	case model.OutputCompleted, model.OutputErrored, model.OutputInterrupted:
+	case model.OutputCompleted, model.OutputInterrupted:
 		return true
 	default:
 		return false

@@ -853,6 +853,45 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 		}
 	})
 
+	t.Run("retried attempt usage counted in totals", func(t *testing.T) {
+		fixture := validTestGraph()
+		session := &fixture.session
+		session.State.CurrentOperationID = ""
+		op := &fixture.ops[0]
+		stamped := testTime
+		op.State.Status = OperationSuccess
+		op.State.SettledAt = &stamped
+		op.State.Terminal = &OperationTerminal{SettlementEntry: EntryRef{SessionID: testSessionID, EntryID: hexID(3)}}
+		ref := testModelRef()
+		settlement := operationSettlementEntry{
+			SessionID:   testSessionID,
+			EntryID:     hexID(3),
+			OperationID: testOpID,
+			Status:      OperationSuccess,
+			Model:       &ref,
+			Usage:       testUsage(5),
+			RetryUsage:  testUsage(2),
+		}
+		fixture.entries = append(fixture.entries, testEntry{
+			env:        Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryOperationSettlement, Sequence: 3, CommittedAt: testTime},
+			settlement: &settlement,
+		})
+		totals := UsageTotals{ByModel: []ModelUsage{{Model: ref, Usage: UsageCount{InputTokens: 7, CachedInputTokens: 7, OutputTokens: 7}}}}
+		op.State.Usage = totals
+		session.State.Usage = totals
+		{
+			_, err := validateFixture(t, fixture.storage(t), testSessionID)
+			testassert.NoError(t, err)
+		}
+		// The sibling that omits the retried member is corrupt.
+		op.State.Usage = UsageTotals{ByModel: []ModelUsage{{Model: ref, Usage: *testUsage(5)}}}
+		session.State.Usage = op.State.Usage
+		{
+			_, err := validateFixture(t, fixture.storage(t), testSessionID)
+			testassert.Require(t, err != nil, "usage totals omitting the retried attempts must be rejected")
+		}
+	})
+
 	t.Run("fork prefix copies", func(t *testing.T) {
 		fixture := &testGraph{session: validSessionRecord()}
 		fixture.session.Identity.SourceSessionID = otherSession()

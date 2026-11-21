@@ -39,9 +39,12 @@ const (
 	// request purpose; 22 records positional request edits, advertised tool
 	// definitions, body parameters, and materialized summary inputs; 23
 	// replaces the durable Agent selection with per-extension Session state;
-	// 24 adds the before-tool refusal consequence to successful hook results.
+	// 24 adds the before-tool refusal consequence to successful hook results;
+	// 25 adds retried-attempt usage to assistant entries, settlements and
+	// maintenance facts, narrows assistant entries to completed or interrupted,
+	// and removes the model-failure continuation signal.
 	// The SQL tables are unchanged.
-	sqliteSchemaVersion = 24
+	sqliteSchemaVersion = 25
 
 	// sqlitePoolDSN configures every physical connection of the long-lived
 	// pool: write-ahead logging, full synchronous durability, immediate

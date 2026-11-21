@@ -351,6 +351,8 @@ func copyForkEntry(tx Transaction, destID, sourceID string, decoded graphEntry, 
 		copied := *decoded.Assistant
 		copied.SessionID, copied.EntryID, copied.OperationID = destID, newID, ""
 		copied.Usage = nil // copied prefix entries carry no source usage
+		copied.RetryUsage = nil
+		copied.RetryUsageUnknown = false
 		copied.Evidence = copyRequestEvidencePointer(decoded.Assistant.Evidence)
 		remapEvidenceRefs(copied.Evidence, entryIDs)
 		for i := range copied.ToolCalls {
@@ -407,6 +409,8 @@ func copyForkEntry(tx Transaction, destID, sourceID string, decoded graphEntry, 
 		copied.Facts = cloneMaintenanceFacts(decoded.Compaction.Facts)
 		for i := range copied.Facts {
 			copied.Facts[i].Usage = nil // copied prefix entries carry no source usage
+			copied.Facts[i].RetryUsage = nil
+			copied.Facts[i].RetryUsageUnknown = false
 		}
 		// the boundary reference is rewritten when its target is in the copied prefix
 		if published, ok := entryIDs[copied.BoundaryEntryID]; ok {

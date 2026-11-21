@@ -91,6 +91,10 @@ func cloneMaintenanceFacts(facts []maintenanceFact) []maintenanceFact {
 			usage := *fact.Usage
 			out[i].Usage = &usage
 		}
+		if fact.RetryUsage != nil {
+			usage := *fact.RetryUsage
+			out[i].RetryUsage = &usage
+		}
 	}
 	return out
 }
@@ -318,29 +322,37 @@ func summaryFact(maintenanceID string, produced model.ModelRef, evidence *Reques
 	}
 }
 
-// retainUsage lands one model attempt's reported usage on the newest fact
-// before the effect settles; an attempt reporting no usage leaves the fact's
-// usage absent, and a reported zero stays known zero.
-func (f *maintenanceFacts) retainUsage(usage *model.Usage) {
+// retainUsage lands one model effect's accepted-attempt usage on the newest
+// fact before the effect settles: the last accepted attempt's report, the
+// retried attempts' summed reports, and whether any retried attempt reported
+// none. An attempt reporting no usage leaves the corresponding member absent,
+// and a reported zero stays known zero.
+func (f *maintenanceFacts) retainUsage(usage attemptUsage) {
 	if len(f.facts) == 0 {
 		return
 	}
-	if counts := usageCount(usage); counts != nil {
-		f.facts[len(f.facts)-1].Usage = counts
-	}
+	fact := &f.facts[len(f.facts)-1]
+	fact.Usage = usage.last
+	fact.RetryUsage = usage.retry
+	fact.RetryUsageUnknown = usage.retryUnknown
 }
 
 // factsUsageContribution renders the ordered facts' reported usage as the
 // one totals contribution: per fact, absent usage contributes nothing and a
-// reported zero stays known zero.
+// reported zero stays known zero. Each fact's last accepted attempt usage and
+// its retried attempts' usage are both counted under the fact's model.
 func factsUsageContribution(facts []maintenanceFact) (UsageTotals, error) {
 	var contribution UsageTotals
 	for _, fact := range facts {
-		if fact.Usage == nil {
-			continue
+		part, err := usageContribution(fact.Model, attemptUsage{
+			last:         fact.Usage,
+			retry:        fact.RetryUsage,
+			retryUnknown: fact.RetryUsageUnknown,
+		})
+		if err != nil {
+			return UsageTotals{}, err
 		}
-		var err error
-		contribution, err = addUsageTotals(contribution, UsageTotals{ByModel: []ModelUsage{{Model: fact.Model, Usage: *fact.Usage}}})
+		contribution, err = addUsageTotals(contribution, part)
 		if err != nil {
 			return UsageTotals{}, err
 		}
@@ -424,7 +436,7 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		// between the committed intent and the callback settles the Operation
 		// as terminal interruption without ever starting the callback.
 		if ctx.Err() != nil {
-			return d.interruptModelEffect(intent, nil, facts)
+			return d.interruptModelEffect(intent, attemptUsage{}, facts)
 		}
 		// Result and terminal transactions run without cancellation so an
 		// already-produced result or required terminal settlement publishes.
@@ -446,36 +458,32 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		// compact transport. The physical attempt carries the opened
 		// maintenance invocation and this producer's own reserved identity.
 		var output model.Output
-		var attemptFailure error
-		var failureUsage *model.Usage
-		switch res := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, d.execution.Retry); res.kind {
-		case attemptAccepted:
-			out, attemptErr := assemble(intent.expected, h.observeStream(intent.sessionID, operationID, res.stream)) // exactly one assembly after acceptance; the enclosing Operation owns the deltas
-			if attemptErr != nil {
-				var streamErr *agent.StreamError
-				if !errors.As(attemptErr, &streamErr) { // every other assembly error settles as a boundary failure.
-					return settle(attemptErr)
-				}
-				attemptFailure = attemptErr
-				failureUsage = streamErr.Usage
-			} else {
-				output = out
-			}
-		case attemptInterrupted:
-			return d.interruptModelEffect(intent, nil, facts)
-		case attemptInvalid:
-			return settle(res.err)
-		case attemptFailed:
-			attemptFailure = res.err
+		var usage attemptUsage
+		attemptRes := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, func(stream model.Stream) (model.Output, error) {
+			return assemble(intent.expected, h.observeStream(intent.sessionID, operationID, stream)) // the enclosing Operation owns the deltas
+		}, d.execution.Retry)
+		if attemptRes.usageErr != nil { // an inexact retried-usage sum aborts before any fact or settlement publication
+			return agent.ModelSettlement{}, attemptRes.usageErr
 		}
-		if attemptFailure != nil {
-			// The attempt's reported usage lands on the request's maintenance
+		switch attemptRes.kind {
+		case attemptSettled:
+			output = attemptRes.output
+			usage = attemptRes.usage
+		case attemptInterrupted:
+			// The request's maintenance fact carries the accepted attempts'
+			// usage; the interruption settlement itself names no model usage.
+			facts.retainUsage(attemptRes.usage)
+			return d.interruptModelEffect(intent, attemptUsage{}, facts)
+		case attemptInvalid:
+			return settle(attemptRes.err)
+		case attemptFailed:
+			// The attempts' reported usage lands on the request's maintenance
 			// fact before the terminal settlement; a pre-acceptance failure has none.
-			facts.retainUsage(failureUsage)
-			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(attemptFailure)}
+			facts.retainUsage(attemptRes.usage)
+			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(attemptRes.err)}
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
 				terminal:      OperationFailure,
-				detail:        failureDetail(attemptFailure),
+				detail:        failureDetail(attemptRes.err),
 				compaction:    true,
 				facts:         facts,
 				maintenanceID: facts.producer(),
@@ -484,10 +492,10 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 			}
 			return committed, nil
 		}
-		// The assembled output's reported usage lands on the carrier's
-		// newest fact before that output settles; an output reporting no
-		// usage leaves the fact's usage absent.
-		facts.retainUsage(output.Usage)
+		// The accepted attempts' reported usage lands on the carrier's
+		// newest fact before that output settles; an attempt reporting no
+		// usage leaves the fact's corresponding member absent.
+		facts.retainUsage(usage)
 		if output.Status == model.OutputCompleted {
 			// The empty running result inserts no entry, clears the active
 			// effect, and replaces both registers with no usage; the reserved
@@ -1024,7 +1032,7 @@ func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanIn
 			// The interruption wins the publication hold: the existing
 			// ordinary interruption settlement publishes with all incurred
 			// facts and the previous checkpoint stays current.
-			settledOp, settledSess, settledEntries, err := commitTerminalSettlement(tx, sessionID, operationID, committedSess, nextOp, sreg.Revision, oreg.Revision, OperationInterruption, executionInterruptedDetail, nil, model.ModelRef{}, nil, true, mergedFacts, mergedFacts.producer())
+			settledOp, settledSess, settledEntries, err := commitTerminalSettlement(tx, sessionID, operationID, committedSess, nextOp, sreg.Revision, oreg.Revision, OperationInterruption, executionInterruptedDetail, nil, model.ModelRef{}, attemptUsage{}, true, mergedFacts, mergedFacts.producer())
 			if err != nil {
 				return err
 			}
@@ -1135,7 +1143,7 @@ func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanIn
 			if checkpoint == nil && mergedFacts.hasInput() {
 				settlementFacts = mergedFacts
 			}
-			settledOp, settledSess, settledEntries, err := commitTerminalSettlement(tx, sessionID, operationID, committedSess, nextOp, replacedSession.Revision, replaced.Revision, OperationSuccess, "", nil, model.ModelRef{}, nil, settlementFacts != nil, settlementFacts, mergedFacts.producer())
+			settledOp, settledSess, settledEntries, err := commitTerminalSettlement(tx, sessionID, operationID, committedSess, nextOp, replacedSession.Revision, replaced.Revision, OperationSuccess, "", nil, model.ModelRef{}, attemptUsage{}, settlementFacts != nil, settlementFacts, mergedFacts.producer())
 			if err != nil {
 				return err
 			}
