@@ -355,9 +355,9 @@ func TestModelEffectStandardClassifierRows(t *testing.T) {
 
 // TestModelEffectAcceptedStreamNeverRetries proves the acceptance boundary:
 // an accepted stream whose read fails mid-body never re-enters physical
-// retry — exactly one request — and its real classification stands: the
-// retained partial commits with the fixed continuation signal and the next
-// projection continues from the committed history.
+// retry — exactly one request and no policy consultation — and its broken
+// attempt settles terminal failure carrying the reported usage on the
+// settlement, with no assistant entry and no signal.
 func TestModelEffectAcceptedStreamNeverRetries(t *testing.T) {
 	srv, hits, _ := sseChatServer(t, scriptedResponses{status: http.StatusOK})
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -369,8 +369,9 @@ func TestModelEffectAcceptedStreamNeverRetries(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, `data: {"choices":[{"delta":{"role":"assistant","content":"partial"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"usage":{"prompt_tokens":5,"completion_tokens":7}}`+"\n\n")
 		if f, ok := w.(http.Flusher); ok {
-			f.Flush() // the partial event reaches the client before the sever
+			f.Flush() // both events reach the client before the sever
 		}
 		panic(http.ErrAbortHandler) // sever the accepted connection mid-body: a read failure, never a new request
 	})
@@ -380,38 +381,37 @@ func TestModelEffectAcceptedStreamNeverRetries(t *testing.T) {
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	})))
-	testassert.Equal(t, len(spy.attempts), 0)
+	testassert.Equal(t, len(spy.attempts), 0) // the policy is never consulted after acceptance.
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
-	var assistant *assistantEntry
-	var signal *signalEntry
+	assistants, settlements, signals := 0, 0, 0
+	var settlement *operationSettlementEntry
 	for i := range graph.Entries {
 		if graph.Entries[i].Assistant != nil {
-			assistant = graph.Entries[i].Assistant
-		}
-		if graph.Entries[i].Signal != nil {
-			signal = graph.Entries[i].Signal
-		}
-	}
-	testassert.Require(t, assistant != nil && assistant.Status == model.OutputCompleted && assistant.Content[0].Text == "after", "last assistant entry = %+v, want the next round's completed turn", assistant)
-	testassert.Require(t, signal != nil && signal.Signal == SignalModelFailureContinuation, "signal entry = %+v, want the fixed continuation signal", signal)
-	graphCount, gerr := validateFixture(t, store, sessionID)
-	testassert.NoError(t, gerr)
-	assistants, settlements := 0, 0
-	for _, entry := range graphCount.Entries {
-		if entry.Assistant != nil {
 			assistants++
 		}
-		if entry.Settlement != nil {
+		if graph.Entries[i].Signal != nil {
+			signals++
+		}
+		if graph.Entries[i].Settlement != nil {
 			settlements++
+			settlement = graph.Entries[i].Settlement
 		}
 	}
-	testassert.Require(t, assistants == 2 && settlements == 1, "committed %d assistants and %d settlements, want the partial and the next turn beside the terminal", assistants, settlements)
-	// Partial continuation: the next context projection reads the committed
-	// partial from history ahead of the next round's turn.
+	testassert.Require(t, assistants == 0 && settlements == 1 && signals == 0, "committed %d assistants, %d settlements and %d signals, want none, one and none", assistants, settlements, signals)
+	testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, "stream body read failed"), "settlement = %+v, want the broken-stream failure terminal", settlement)
+	testassert.Require(t, settlement.Model != nil && *settlement.Model == testModelRef() && settlement.Usage != nil && *settlement.Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}), "settlement model/usage = %+v/%+v, want the broken attempt's reported usage", settlement.Model, settlement.Usage)
+	want := UsageTotals{ByModel: []ModelUsage{{Model: testModelRef(), Usage: UsageCount{InputTokens: 5, OutputTokens: 7}}}}
+	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
+	testassert.NoError(t, err)
+	testassert.Require(t, usageTotalsEqual(rec.State.Usage, want), "operation usage = %+v, want %+v", rec.State.Usage, want)
+	view, err := h.ReadSessionView(context.Background(), sessionID)
+	testassert.NoError(t, err)
+	testassert.Require(t, usageTotalsEqual(view.TotalUsage, want), "session usage = %+v, want %+v", view.TotalUsage, want)
+	// Nothing from the failed attempt reaches history.
 	msgs, err := fixtureProjection(h, c)(context.Background())
 	testassert.NoError(t, err)
-	testassert.Require(t, len(msgs) >= 4 && msgs[2].Role == model.RoleAssistant && msgs[2].TextContent() == "partial", "projected partial = %+v, want the committed errored assistant", msgs)
+	testassert.Require(t, len(msgs) == 2, "projection = %#v, want the system prompt and admitted input only", msgs)
 }
 
 // TestModelEffectOneAssemblyAndClose pins the ownership boundary on an

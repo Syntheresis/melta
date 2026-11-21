@@ -10,12 +10,12 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// erroredContinue builds one valid continue settlement carrying a distinct errored output so pointer identity pins which settlement the terminal retained.
-func erroredContinue(n int) ModelSettlement {
-	return ModelSettlement{Disposition: DispoContinue, Output: mkOutput(model.OutputErrored, fmt.Sprintf("e%d", n), nil)}
+// readyCall builds one ready settlement carrying a distinct completed call so the loop continues through its tool batch.
+func readyCall(id string) ModelSettlement {
+	return ModelSettlement{Disposition: DispoReady, Output: mkOutput(model.OutputCompleted, "", []model.ToolCall{{ID: id, Name: "fn"}})}
 }
 
-// TestRunContinuationUsesFreshSnapshotPerEffect pins that every logical model effect — a continue disposition and, separately, a settled tool batch — repeats from a freshly obtained context snapshot carried into its own request.
+// TestRunContinuationUsesFreshSnapshotPerEffect pins that every logical model effect — each settled tool batch — repeats from a freshly obtained context snapshot carried into its own request.
 func TestRunContinuationUsesFreshSnapshotPerEffect(t *testing.T) {
 	f := &runFakes{}
 	snaps := [][]model.Message{userSnapshot("a"), userSnapshot("b"), userSnapshot("c")}
@@ -25,17 +25,16 @@ func TestRunContinuationUsesFreshSnapshotPerEffect(t *testing.T) {
 		}
 		return snaps[call-1], nil
 	}
-	callsOut := mkCallsTerminalOutput()
 	f.modelSet = setScript(
-		ModelSettlement{Disposition: DispoReady, Output: callsOut},
-		ModelSettlement{Disposition: DispoContinue, Output: mkOutput(model.OutputErrored, "boom", nil)},
+		readyCall("c1"),
+		readyCall("c2"),
 		ModelSettlement{Disposition: DispoReady, Output: mkOutput(model.OutputCompleted, "", nil)},
 	)
 
 	res, err := Run(context.Background(), f.invocation())
 	testassert.Require(t, err == nil && res.Status == TerminalSuccess, "run = %#v, %v; want success", res, err)
-	testassert.Require(t, f.sourceCalls == 3 && f.modelCalls == 3, "source=%d model=%d, want 3/3", f.sourceCalls, f.modelCalls)
-	for i, want := range []string{"a", "b", "c"} { // one fresh snapshot per logical effect: after the settled batch and after the continue disposition alike.
+	testassert.Require(t, f.sourceCalls == 3 && f.modelCalls == 3 && f.toolCalls == 2, "source=%d model=%d tool=%d, want 3/3/2", f.sourceCalls, f.modelCalls, f.toolCalls)
+	for i, want := range []string{"a", "b", "c"} { // one fresh snapshot per logical effect: after each settled batch.
 		{
 			got := f.reqs[i].Messages[0].TextContent()
 			testassert.Require(t, got == want, "request %d snapshot = %q, want %q", i, got, want)
@@ -140,16 +139,17 @@ func TestRunContinuesPast25ModelEffects(t *testing.T) {
 	f := &runFakes{}
 	sets := make([]ModelSettlement, 51)
 	for i := range sets[:50] {
-		sets[i] = erroredContinue(i)
+		sets[i] = readyCall(fmt.Sprintf("c%d", i))
 	}
-	sets[50] = ModelSettlement{Disposition: DispoReady, Output: mkOutput(model.OutputCompleted, "", nil)}
+	final := mkOutput(model.OutputCompleted, "", nil)
+	sets[50] = ModelSettlement{Disposition: DispoReady, Output: final}
 	f.modelSet = setScript(sets...)
 
 	res, err := Run(context.Background(), f.invocation())
 	testassert.NoError(t, err)
-	testassert.Require(t, res.Status == TerminalSuccess, "terminal = %s/%q, want success after 50 continuations", res.Status, res.Detail)
-	testassert.Equal(t, res.LastOutput, sets[50].Output)
-	testassert.Require(t, f.modelCalls == 51 && f.sourceCalls == 51, "model=%d source=%d, want 51/51", f.modelCalls, f.sourceCalls)
+	testassert.Require(t, res.Status == TerminalSuccess, "terminal = %s/%q, want success after 50 tool batches", res.Status, res.Detail)
+	testassert.Equal(t, res.LastOutput, final)
+	testassert.Require(t, f.modelCalls == 51 && f.sourceCalls == 51 && f.toolCalls == 50, "model=%d source=%d tool=%d, want 51/51/50", f.modelCalls, f.sourceCalls, f.toolCalls)
 }
 
 // TestRunFinalTextFromEffect25Succeeds pins success at the former request boundary.
@@ -157,7 +157,7 @@ func TestRunFinalTextFromEffect25Succeeds(t *testing.T) {
 	f := &runFakes{}
 	sets := make([]ModelSettlement, 25)
 	for i := range sets[:24] {
-		sets[i] = erroredContinue(i)
+		sets[i] = readyCall(fmt.Sprintf("c%d", i))
 	}
 	sets[24] = ModelSettlement{Disposition: DispoReady, Output: mkOutput(model.OutputCompleted, "", nil)}
 	f.modelSet = setScript(sets...)

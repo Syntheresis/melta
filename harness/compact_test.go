@@ -290,8 +290,8 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 
 	t.Run("failed summary settles the reported usage", func(t *testing.T) {
 		compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
-			// The failing response reports usage before the read failure:
-			// the errored assembly retains it.
+			// The accepted stream reports usage before it breaks: the stream
+			// failure carries it into the settlement.
 			return failStream(errors.New("provider failure"),
 				turnDelta("", "partial"), usageDelta(model.Usage{InputTokens: 5, CachedInputTokens: 5, OutputTokens: 5})), nil
 		}
@@ -632,16 +632,16 @@ func TestRunCompactionEmptySnapshotFailsNothingToCompact(t *testing.T) {
 	}
 }
 
-// TestRunCompactionErroredSummaryCarriesOutputThroughTheRun proves the carried
-// output through a real agent.Run: an errored summary with a retained payload
-// settles its terminal inside its own effect and the returned failure
-// settlement carries the errored output, satisfying the run's callback gate —
-// the run returns the summary's own failure detail, never a settlement-shape
+// TestRunCompactionBrokenSummarySettlesFailureThroughTheRun proves the carried
+// failure through a real agent.Run: an accepted summary stream that breaks
+// before its finish reason settles its terminal inside its own effect with no
+// output, and the returned failure settlement satisfies the run's callback gate
+// — the run returns the summary's own failure detail, never a settlement-shape
 // boundary violation about an outputless settlement.
-func TestRunCompactionErroredSummaryCarriesOutputThroughTheRun(t *testing.T) {
+func TestRunCompactionBrokenSummarySettlesFailureThroughTheRun(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
 	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
-		return erroredTurnStream(), nil // text "partial" with usage, then the read failure
+		return brokenBeforeFinishStream(), nil // text "partial" with usage, then the read failure
 	}, (&retrySpy{limit: 0}).retry)
 	prepared := compactPrepared(testCapture(), exec)
 	h := newCompactHarness(t, store, prepared)
@@ -652,6 +652,33 @@ func TestRunCompactionErroredSummaryCarriesOutputThroughTheRun(t *testing.T) {
 	testassert.NoError(t, gerr)
 	settlement := settlementEntryOfOperation(t, graph, "compact-1")
 	testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, "provider failure"), "settlement entry = %+v, want the failure terminal", settlement)
+	testassert.Require(t, settlement.Facts[0].Model == testCompactCapture().Model, "settlement fact model = %+v, want the compact model identity", settlement.Facts[0].Model)
+	testassert.Require(t, settlement.Facts[0].Usage != nil && *settlement.Facts[0].Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}) && settlement.CompactionUsage, "settlement fact usage = %+v, want the reported counts; settlement compaction_usage = false, want the summary usage provenance marked", settlement.Facts[0].Usage)
+	for i := range graph.Entries {
+		testassert.Require(t, graph.Entries[i].Compaction == nil, "compaction entry committed on a failure path")
+	}
+}
+
+// TestRunCompactionErroredSummaryCarriesOutputThroughTheRun proves the carried
+// output through a real agent.Run: an errored summary settles its terminal
+// inside its own effect and the returned failure settlement carries the errored
+// output, satisfying the run's callback gate — the run returns the summary's own
+// failure detail, never a settlement-shape boundary violation about an
+// outputless settlement.
+func TestRunCompactionErroredSummaryCarriesOutputThroughTheRun(t *testing.T) {
+	store := idleFixture(t, validTestGraph(), hexID(20))
+	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
+		return streamOf(turnDelta("length", "partial"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7})), nil
+	}, (&retrySpy{limit: 0}).retry)
+	prepared := compactPrepared(testCapture(), exec)
+	h := newCompactHarness(t, store, prepared)
+	c := leaseCoordinator(t, h, testSessionID)
+	err := runManualCompact(t, h, c, testSessionID, "compact-1")
+	testassert.Require(t, err != nil && strings.Contains(err.Error(), `unsupported finish reason "length"`), "error %v, want the summary's own failure detail, not a settlement-shape boundary violation", err)
+	graph, gerr := validateFixture(t, store, testSessionID)
+	testassert.NoError(t, gerr)
+	settlement := settlementEntryOfOperation(t, graph, "compact-1")
+	testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, `unsupported finish reason "length"`), "settlement entry = %+v, want the failure terminal", settlement)
 	testassert.Require(t, settlement.Facts[0].Model == testCompactCapture().Model, "settlement fact model = %+v, want the compact model identity", settlement.Facts[0].Model)
 	testassert.Require(t, settlement.Facts[0].Usage != nil && *settlement.Facts[0].Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}) && settlement.CompactionUsage, "settlement fact usage = %+v, want the reported counts; settlement compaction_usage = false, want the summary usage provenance marked", settlement.Facts[0].Usage)
 	for i := range graph.Entries {

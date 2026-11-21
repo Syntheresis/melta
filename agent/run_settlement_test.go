@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Syntheresis/melta/internal/testassert"
@@ -24,19 +25,6 @@ func TestRunForgedModelSettlementsRejected(t *testing.T) {
 			testassert.Require(t, f.modelCalls == 1 && f.toolCalls == 0, "model=%d tool=%d, want the run to stop at the forged settlement", f.modelCalls, f.toolCalls)
 		})
 	}
-}
-
-// TestRunContinueCompletedOutputContinues pins the newly permitted continuation row: a completed output carrying no tool calls settles as continue and the loop proceeds to the next model effect from a fresh snapshot.
-func TestRunContinueCompletedOutputContinues(t *testing.T) {
-	f := &runFakes{}
-	f.modelSet = setScript(
-		ModelSettlement{Disposition: DispoContinue, Output: mkOutput(model.OutputCompleted, "", nil)},
-		ModelSettlement{Disposition: DispoReady, Output: mkOutput(model.OutputCompleted, "", nil)},
-	)
-
-	res, err := Run(context.Background(), f.invocation())
-	testassert.Require(t, err == nil && res.Status == TerminalSuccess, "run = %#v, %v; want success after completed continuation", res, err)
-	testassert.Require(t, f.modelCalls == 2 && f.sourceCalls == 2 && f.toolCalls == 0, "model=%d source=%d tool=%d, want the continuation to fetch a fresh snapshot", f.modelCalls, f.sourceCalls, f.toolCalls)
 }
 
 // TestRunForgedToolResultsRejected pins the shared tool-result validator inside the batch: a settlement answering another call, carrying an unclosed status, or omitting mandated content ends the run with one typed "tool" violation, and no later call in the batch starts.
@@ -108,11 +96,10 @@ func TestRunDuplicateCallIDSettlementsRejected(t *testing.T) {
 	}
 }
 
-// TestRunDetailMismatchDispositionsRejectedThroughRun pins the empty-detail rows of the closed disposition table at loop level: ready and continue settlements that smuggle in diagnostic detail never proceed.
+// TestRunDetailMismatchDispositionsRejectedThroughRun pins the empty-detail row of the closed disposition table at loop level: a ready settlement that smuggles in diagnostic detail never proceeds.
 func TestRunDetailMismatchDispositionsRejectedThroughRun(t *testing.T) {
 	rows := []ModelSettlement{
 		{Disposition: DispoReady, Output: mkOutput(model.OutputCompleted, "", nil), Detail: "extra"},
-		{Disposition: DispoContinue, Output: mkOutput(model.OutputErrored, "boom", nil), Detail: "extra"},
 	}
 
 	for i, set := range rows {
@@ -126,12 +113,12 @@ func TestRunDetailMismatchDispositionsRejectedThroughRun(t *testing.T) {
 	}
 }
 
-// TestRunInfraErrorAfterPriorContinuationVerbatim pins that a model-effect infrastructure error in a later iteration still returns verbatim with a zero terminal after an earlier authoritative settlement: prior state grants it no reclassification.
-func TestRunInfraErrorAfterPriorContinuationVerbatim(t *testing.T) {
+// TestRunInfraErrorAfterPriorEffectVerbatim pins that a model-effect infrastructure error in a later iteration still returns verbatim with a zero terminal after earlier authoritative settlements: prior state grants it no reclassification.
+func TestRunInfraErrorAfterPriorEffectVerbatim(t *testing.T) {
 	f := &runFakes{}
 	f.modelSet = func(call int, req model.Request, cb AssemblyCallback) (ModelSettlement, error) {
 		if call <= 30 {
-			return erroredContinue(call), nil
+			return readyCall(fmt.Sprintf("c%d", call)), nil
 		}
 		return ModelSettlement{}, errInfra
 	}
@@ -139,7 +126,7 @@ func TestRunInfraErrorAfterPriorContinuationVerbatim(t *testing.T) {
 	res, err := Run(context.Background(), f.invocation())
 	requireZeroTerminal(t, res)
 	testassert.Require(t, errors.Is(err, errInfra), "error = %v, want the infrastructure error verbatim", err)
-	testassert.Require(t, f.modelCalls == 31 && f.sourceCalls == 31 && f.toolCalls == 0, "model=%d source=%d tool=%d, want 31/31/0", f.modelCalls, f.sourceCalls, f.toolCalls)
+	testassert.Require(t, f.modelCalls == 31 && f.sourceCalls == 31 && f.toolCalls == 30, "model=%d source=%d tool=%d, want 31/31/30", f.modelCalls, f.sourceCalls, f.toolCalls)
 }
 
 // TestDuplicateCallIDSharedValidator pins the one identity rule under both shared validators: a completed output whose tool calls repeat an ID is rejected naming the "model" boundary from the settlement validator and the "agent" boundary from the terminal validator, while distinct IDs pass both — the nearest allowed sibling.

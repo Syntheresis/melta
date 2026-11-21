@@ -127,6 +127,25 @@ func TestSSEFramingRules(t *testing.T) { // single combined body per sub-case ke
 		}
 	})
 
+	t.Run("bodyEOFWithoutTerminatorIsBroken", func(t *testing.T) { // a well-formed body that simply ends without [DONE] delivers its events, then reports the missing terminator.
+		body := "data: {\"choices\":[{\"delta\":{\"content\":\"last-event\"}}]}\n\n" // one complete event, then raw EOF: no [DONE] follows.
+
+		s := newStream(newTinyChunkReader(body, 6), "")
+		got, err := recvUntilTerminal(t, s)
+
+		if !errors.Is(err, ErrStreamBroken) {
+			t.Fatalf("terminal error = %v; want ErrStreamBroken at body EOF without [DONE]", err)
+		} else if errors.Is(err, io.EOF) {
+			t.Fatalf("body EOF without [DONE] surfaced as io.EOF; the terminator is the only clean end")
+		} else if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("terminal error = %v; want io.ErrUnexpectedEOF reachable", err)
+		} else if len(got) != 1 || got[0].ContentFragments[0].Text != "last-event" {
+			t.Fatalf("received %#v; want the one complete event before the broken end", got)
+		} else if cerr := s.Close(); cerr != nil {
+			t.Fatalf("Close returned error: %v", cerr)
+		}
+	})
+
 }
 
 // compile-time proof that our custom reader genuinely satisfies the interface newStream expects for its body parameter, and that the concrete stream type implements the public Stream contract — swapping readers or implementations later stays safe by construction rather than convention.
@@ -135,7 +154,7 @@ var (
 	_ Stream        = (*httpStream)(nil)
 )
 
-// TestSSEPendsUnterminatedDataEventsAtEOF pins the exact EOF-pending rule from both directions: when raw body ends with data lines that never received their terminating blank line, those pending events are decoded FIRST before any io.EOF is reported — covering BOTH code paths for how such a tail can arrive (final fragment without newline vs complete final data-line followed by immediate stream end).
+// TestSSEPendsUnterminatedDataEventsAtEOF pins the exact EOF-pending rule from both directions: when raw body ends with data lines that never received their terminating blank line, those pending events are decoded FIRST, and only then does the missing [DONE] terminator report the broken stream — covering BOTH code paths for how such a tail can arrive (final fragment without newline vs complete final data-line followed by immediate stream end).
 func TestSSEPendsUnterminatedDataEventsAtEOF(t *testing.T) { // two sub-cases because the framing loop reaches pending-data-flush through DIFFERENT branches depending on whether that last line carried its own trailing newline... (both must behave identically per contract but only one exercises each internal path).
 
 	t.Run("finalFragmentWithoutAnyTrailingNewline", func(t *testing.T) { // body ends with raw data bytes and NO final \n at all — ReadString returns them together with io.EOF in a single call.
@@ -150,10 +169,12 @@ func TestSSEPendsUnterminatedDataEventsAtEOF(t *testing.T) { // two sub-cases be
 			t.Fatalf("flushed pending event = %#v, want the unterminated tail's full text fragment", delta) // same self-explanatory failure message style as everywhere else in this file set for consistency.
 		}
 
-		if _, againErr := s.Recv(); !errors.Is(againErr, io.EOF) { // SECOND receive now sees true termination — nothing remains after flushing that one pending event... (pinning the exact two-step sequence is what makes "flush first then EOF" provable rather than merely plausible).
-			t.Fatalf("second Recv after flushed tail = %v; want io.EOF", againErr) // message explicitly names which step of the contract this asserts so future readers can map it directly back to plan wording without re-deriving context.
+		if _, againErr := s.Recv(); !errors.Is(againErr, ErrStreamBroken) || !errors.Is(againErr, io.ErrUnexpectedEOF) { // SECOND receive now reports the missing [DONE] terminator — the body ended after a decodable pending event.
+			t.Fatalf("second Recv after flushed tail = %v; want ErrStreamBroken wrapping io.ErrUnexpectedEOF", againErr) // message explicitly names which step of the contract this asserts so future readers can map it directly back to the stream contract without re-deriving context.
 		} else if cerr := s.Close(); cerr != nil {
 			t.Fatalf("Close returned error: %v", cerr) // quiet release after clean two-step termination — same idempotent-friendly guarantee pinned everywhere else in the suite for parity's sake... (cheap insurance against cleanup-path state corruption hiding behind otherwise-green read assertions).
+		} else if _, afterClose := s.Recv(); !errors.Is(afterClose, io.EOF) { // Close is the other end that reports io.EOF.
+			t.Fatalf("Recv after Close = %v; want io.EOF", afterClose)
 		}
 	})
 
@@ -169,12 +190,31 @@ func TestSSEPendsUnterminatedDataEventsAtEOF(t *testing.T) { // two sub-cases be
 			t.Fatalf("flushed pending event = %#v, want the newline-terminated tail's full text fragment", delta) // message names exactly which variant produced what for quick visual comparison when triaging side-by-side failures across both sub-cases simultaneously.
 		}
 
-		if _, againErr := s.Recv(); !errors.Is(againErr, io.EOF) { // second receive terminates cleanly as in sibling — the two-step flush-then-EOF sequence holds regardless of HOW that tail's final bytes were physically delivered... (this uniformity is exactly what makes callers above this boundary able to rely on one stable rule).
-			t.Fatalf("second Recv after flushed complete-line tail = %v; want io.EOF", againErr) // explicit step-naming in message mirrors sibling phrasing for consistency across the pair.
+		if _, againErr := s.Recv(); !errors.Is(againErr, ErrStreamBroken) || !errors.Is(againErr, io.ErrUnexpectedEOF) { // second receive reports the missing [DONE] terminator exactly like its sibling sub-case... (this uniformity is exactly what makes callers above this boundary able to rely on one stable rule).
+			t.Fatalf("second Recv after flushed complete-line tail = %v; want ErrStreamBroken wrapping io.ErrUnexpectedEOF", againErr) // explicit step-naming in message mirrors sibling phrasing for consistency across the pair.
 		} else if cerr := s.Close(); cerr != nil {
 			t.Fatalf("Close returned error: %v", cerr) // final quiet-release pin completing this sub-case's end-to-end story about terminal state stability under its specific delivery pattern... (no further receives may surface anything but EOF from here on out).
-		} else if _, third := s.Recv(); !errors.Is(third, io.EOF) { // one extra belt-and-suspenders receive beyond the mandatory two-step check above — proving termination is sticky rather than transient even when probed a third time... (costs exactly one line and removes an entire class of "works twice but breaks on repeat" state bugs from consideration).
+		} else if _, third := s.Recv(); !errors.Is(third, io.EOF) { // one extra belt-and-suspenders receive beyond the mandatory two-step check above — Close is the other reportable end.
 			t.Fatalf("third Recv after Close = %v; want io.EOF", third) // consistent phrasing with every other repeated-receive assertion in the suite so future readers find them all via identical search terms.
+		}
+	})
+
+	t.Run("undecodableUnterminatedTailIsTruncationNotProtocol", func(t *testing.T) { // a pending event at body EOF that does not decode is a truncated response, never a malformed complete event.
+		body := "data: {\"choices\":[{\"delta\":" // the body stops mid-JSON with no newline and no terminator.
+
+		s := newStream(newTinyChunkReader(body, 4), "")
+		delta, err := s.Recv()
+
+		if !errors.Is(err, ErrStreamBroken) {
+			t.Fatalf("Recv at truncated tail = %v; want ErrStreamBroken", err)
+		} else if errors.Is(err, ErrProtocol) {
+			t.Fatalf("truncated tail = %v; an undecodable pending event at body EOF is a truncation, not a malformed complete event", err)
+		} else if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("truncated tail = %v; want io.ErrUnexpectedEOF reachable", err)
+		} else if delta.HasChoice || len(delta.ContentFragments) != 0 {
+			t.Fatalf("truncated tail delivered delta %#v; want no value", delta)
+		} else if cerr := s.Close(); cerr != nil {
+			t.Fatalf("Close returned error: %v", cerr)
 		}
 	})
 
@@ -186,7 +226,7 @@ func TestSSEPendsUnterminatedDataEventsAtEOF(t *testing.T) { // two sub-cases be
 	}
 }
 
-// TestSSEMalformedPayloadsAreTypedProtocolErrorsNotSkipped pins that malformed event payloads — invalid JSON in general AND valid-JSON-but-wrong-top-level-shape specifically — surface through Recv as typed ErrProtocol failures wrapping their cause, never skipped silently nor retried by anything inside this package... (the stream stays terminated afterwards exactly like every other read-failure shape).
+// TestSSEMalformedPayloadsAreTypedProtocolErrorsNotSkipped pins that malformed event payloads — invalid JSON in general AND valid-JSON-but-wrong-top-level-shape specifically — surface through Recv as typed ErrProtocol failures wrapping their cause, never skipped silently nor retried by anything inside this package... (the stream stays terminated on that same error afterwards).
 func TestSSEMalformedPayloadsAreTypedProtocolErrorsNotSkipped(t *testing.T) { // each row drives its own small body through a fresh stream so captured failure state cannot leak between cases — same per-row isolation discipline as everywhere else in this file set.
 
 	cases := []struct{ name, payload string }{ // table form keeps both malformed classes visible side by side and trivially extendable if future wire shapes need pinning too... (the distinction matters because they fail at DIFFERENT layers internally: validity check vs structural decode).
@@ -207,10 +247,12 @@ func TestSSEMalformedPayloadsAreTypedProtocolErrorsNotSkipped(t *testing.T) { //
 				t.Fatalf("malformed payload %s surfaced as io.EOF instead of a protocol error", tc.name) // explicit about the exact conflation pattern being guarded against so future readers understand WHY this check exists separately from the positive one above it.
 			}
 
-			if _, againErr := s.Recv(); !errors.Is(againErr, io.EOF) { // post-failure terminal state: further receives see EOF through done flag rather than re-attempting or erroring repeatedly... (completing this row's end-to-end story about what a malformed payload leaves behind).
-				t.Fatalf("second Recv after protocol failure = %v; want io.EOF", againErr) // mirrors every other post-failure terminal check in the suite for consistency — future readers should never have to wonder whether THIS particular shape was intentionally left unasserted.
+			if _, againErr := s.Recv(); !errors.Is(againErr, ErrProtocol) { // post-failure terminal state: the complete-event failure is sticky, never io.EOF.
+				t.Fatalf("second Recv after protocol failure = %v; want the same ErrProtocol failure", againErr) // mirrors every other post-failure terminal check in the suite for consistency — future readers should never have to wonder whether THIS particular shape was intentionally left unasserted.
 			} else if cerr := s.Close(); cerr != nil {
 				t.Fatalf("Close returned error following protocol failure: %v", cerr) // releasing after a failed read must still behave like every other Close in the suite — quiet, idempotent-friendly cleanup with no transport facts surfaced to consumers at this point... (included because close-after-error is exactly the kind of edge where state corruption hides best).
+			} else if _, afterClose := s.Recv(); !errors.Is(afterClose, io.EOF) { // Close is the other end that reports io.EOF.
+				t.Fatalf("Recv after Close following protocol failure = %v; want io.EOF", afterClose)
 			}
 
 			// unreachable type-assertion guard documenting that NO retry-related method surface exists on our stream type under any name — its real value is forcing conscious acknowledgment that skipping/retrying malformed events is categorically impossible by construction rather than merely unimplemented today... (structural tests catch fields; this catches behavioral-method additions specifically at the stream boundary level).
@@ -273,7 +315,7 @@ func (b *failingBody) Read(p []byte) (int, error) { // io.Reader contract with a
 }
 
 func (b *failingBody) Close() error { return nil } // no resources to release beyond what caller already owns: same minimalism as every other reader in this file by construction... (implementing ReadCloser keeps it drop-in compatible with newStream's body parameter without wrapper structs anywhere).
-// TestSSEReadFailureIsTypedAndTerminal distinguishes a body failure from the pending-event rule for raw EOF.
+// TestSSEReadFailureIsTypedAndTerminal distinguishes a body failure from the pending-event rule for raw EOF: the failure is a broken stream wrapping its cause, and every later Recv returns that same failure until Close makes the stream report io.EOF.
 func TestSSEReadFailureIsTypedAndTerminal(t *testing.T) { // one well-formed event delivered first to prove normal path works up to that point, THEN a synthetic mid-read injection fault triggers the interesting behavior under test... (separating setup from exercise keeps each assertion's intent unambiguous in failure output).
 
 	body := "data:{\"choices\":[{\"delta\":{\"content\":\"before-fault\"}}]}\n\n" + // one complete well-formed event FIRST so normal delivery is proven working up to this exact moment... (its successful parse below doubles as precondition check for everything interesting that follows).
@@ -290,18 +332,22 @@ func TestSSEReadFailureIsTypedAndTerminal(t *testing.T) { // one well-formed eve
 	}
 
 	dropped, derr := s.Recv()
-	if !errors.Is(derr, ErrProtocol) {
-		t.Fatalf("Recv at injected fault = %v, want ErrProtocol", derr)
+	if !errors.Is(derr, ErrStreamBroken) {
+		t.Fatalf("Recv at injected fault = %v, want ErrStreamBroken", derr)
+	} else if errors.Is(derr, ErrProtocol) {
+		t.Fatalf("read failure = %v; a body read failure must not classify as a malformed event", derr)
 	} else if !errors.Is(derr, src.fault) {
 		t.Fatalf("injected fault not reachable through %v", derr)
 	} else if dropped.HasChoice || len(dropped.ContentFragments) != 0 {
 		t.Fatalf("non-EOF fault returned a non-zero delta %#v; want the pending event discarded", dropped)
 	}
 
-	if _, again := s.Recv(); !errors.Is(again, io.EOF) { // post-fault terminal state: further receives see EOF through done flag rather than re-surfacing the same fault repeatedly... (uniformity across ALL read-error shapes is what callers can rely on above this boundary).
-		t.Fatalf("Recv after injected fault = %v; want sustained io.EOF", again) // mirrors every other post-failure terminal check in the suite for consistency — future readers should never have to wonder whether THIS particular shape was intentionally left unasserted.
+	if _, again := s.Recv(); !errors.Is(again, ErrStreamBroken) || !errors.Is(again, src.fault) { // every later receive returns the same terminal failure rather than falling through to io.EOF.
+		t.Fatalf("Recv after injected fault = %v; want the same broken-stream failure", again) // mirrors every other post-failure terminal check in the suite for consistency — future readers should never have to wonder whether THIS particular shape was intentionally left unasserted.
 	} else if cerr := s.Close(); cerr != nil {
 		t.Fatalf("Close returned error following injected fault: %v", cerr) // releasing after a failed read must still behave like every other Close in the suite — quiet, idempotent-friendly cleanup with no transport facts surfaced to consumers at this point... (included because close-after-error is exactly the kind of edge where state corruption hides best).
+	} else if _, afterClose := s.Recv(); !errors.Is(afterClose, io.EOF) { // Close is the other end that reports io.EOF.
+		t.Fatalf("Recv after Close following injected fault = %v; want io.EOF", afterClose)
 	}
 
 }

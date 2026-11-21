@@ -6,28 +6,12 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// validateSettlement is the shared settlement validator: it checks one settlement returned by a model effect against the closed disposition table and the invocation's expected identity. Ready is exactly its completed callback output with empty detail; continue is its errored output that retains an assistant payload or its completed output carrying no tool calls, with empty detail (the caller has already settled any continuation facts); failure non-empty detail plus no accepted stream or that same errored output — a completed output never settles as failure; interruption non-empty detail plus one of three states, nothing before acceptance, the interrupted callback output while generation was in flight over it, or a retained completed output when cancellation followed successful completion. A present output must itself satisfy every ordinary model-output invariant and carry exactly the expected source identity field-for-field (String() rendering is lossy on first-slash splits, so both fields are compared separately) and its completed tool calls must carry pairwise-unique IDs. The own flag selects the two existing uses: own=true (the exported ValidateModelSettlement) returns the validated settlement whose output is the deep copy from the public model constructor built exactly once here, while own=false (the run's read-only check) applies the identical checks through the read-only model validator, retains nothing and returns the original settlement untouched — the caller keeps its original settlement and output pointer. Disposition and detail are plain value copies. Every violation returns one typed boundary-protocol error naming the "model" boundary; nothing here coerces a malformed settlement into another shape.
+// validateSettlement is the shared settlement validator: it checks one settlement returned by a model effect against the closed disposition table and the invocation's expected identity. Ready is exactly its completed callback output with empty detail; failure non-empty detail plus no accepted stream, a broken accepted stream with no output, or that same errored output — a completed output never settles as failure; interruption non-empty detail plus one of three states, nothing before acceptance, the interrupted callback output while generation was in flight over it, or a retained completed output when cancellation followed successful completion. A present output must itself satisfy every ordinary model-output invariant and carry exactly the expected source identity field-for-field (String() rendering is lossy on first-slash splits, so both fields are compared separately) and its completed tool calls must carry pairwise-unique IDs. The own flag selects the two existing uses: own=true (the exported ValidateModelSettlement) returns the validated settlement whose output is the deep copy from the public model constructor built exactly once here, while own=false (the run's read-only check) applies the identical checks through the read-only model validator, retains nothing and returns the original settlement untouched — the caller keeps its original settlement and output pointer. Disposition and detail are plain value copies. Every violation returns one typed boundary-protocol error naming the "model" boundary; nothing here coerces a malformed settlement into another shape.
 func validateSettlement(set ModelSettlement, expected model.ModelRef, own bool) (ModelSettlement, error) {
 	switch set.Disposition {
 	case DispoReady: // completed callback output only; empty detail checked below.
 		if err := requireDispositionOutput("ready", set.Output, model.OutputCompleted); err != nil {
 			return ModelSettlement{}, err
-		}
-	case DispoContinue: // errored output retaining an assistant payload, or a completed one carrying no tool calls; empty detail checked below.
-		if set.Output == nil {
-			return ModelSettlement{}, newBoundaryViolation("model", "continue disposition requires its callback output, got none")
-		}
-		switch set.Output.Status {
-		case model.OutputErrored:
-			if !model.HasAssistantContent(set.Output.Message) {
-				return ModelSettlement{}, newBoundaryViolation("model", "continue disposition requires an errored output retaining an assistant payload (content part, refusal, or finalized extra)")
-			}
-		case model.OutputCompleted:
-			if set.Output.Message != nil && len(set.Output.Message.ToolCalls) > 0 {
-				return ModelSettlement{}, newBoundaryViolation("model", "continue disposition requires a completed output with no tool calls")
-			}
-		default:
-			return ModelSettlement{}, newBoundaryViolation("model", fmt.Sprintf("continue disposition requires an errored or completed callback output, got %s", string(set.Output.Status)))
 		}
 	case DispoFailure:
 		if set.Detail == "" { // failure always carries diagnostic text.
@@ -40,16 +24,16 @@ func validateSettlement(set ModelSettlement, expected model.ModelRef, own bool) 
 		if set.Detail == "" { // interruption always carries diagnostic text.
 			return ModelSettlement{}, newBoundaryViolation("model", "interruption disposition requires non-empty detail")
 		}
-		switch { // three payload states are valid; errored never rides an interruption (that shape belongs to the continue and failure rows only).
+		switch { // three payload states are valid; errored never rides an interruption (that shape belongs to the failure row only).
 		case set.Output == nil: // nothing was accepted before cancellation.
 		case set.Output.Status != model.OutputInterrupted && set.Output.Status != model.OutputCompleted:
 			return ModelSettlement{}, newBoundaryViolation("model", fmt.Sprintf("interruption disposition requires no output, an interrupted one, or a completed one retained after successful completion, got %s", string(set.Output.Status)))
 		}
 	default: // unknown or empty dispositions fail before any other field is consulted.
-		return ModelSettlement{}, newBoundaryViolation("model", fmt.Sprintf("unknown disposition %q (closed set: ready, continue, failure, interruption)", string(set.Disposition)))
+		return ModelSettlement{}, newBoundaryViolation("model", fmt.Sprintf("unknown disposition %q (closed set: ready, failure, interruption)", string(set.Disposition)))
 	}
 
-	if (set.Disposition == DispoReady || set.Disposition == DispoContinue) && set.Detail != "" { // the two empty-detail rows; non-emptiness was already enforced above for the other two.
+	if set.Disposition == DispoReady && set.Detail != "" { // the empty-detail row; non-emptiness was already enforced above for the other two.
 		return ModelSettlement{}, newBoundaryViolation("model", fmt.Sprintf("%s disposition requires an empty detail", string(set.Disposition)))
 	}
 
@@ -105,7 +89,7 @@ func requireUniqueCallIDs(boundary string, calls []model.ToolCall) error {
 	return nil
 }
 
-// requireDispositionOutput enforces presence and exact status for ready (completed) and continue (errored): a nil output or any other closed status is an invalid combination settled as one typed error naming what was found.
+// requireDispositionOutput enforces presence and exact status for ready (completed): a nil output or any other closed status is an invalid combination settled as one typed error naming what was found.
 func requireDispositionOutput(disposition string, out *model.Output, want model.OutputStatus) error {
 	if out == nil { // required callback output missing entirely.
 		return newBoundaryViolation("model", disposition+" disposition requires its callback output, got none")

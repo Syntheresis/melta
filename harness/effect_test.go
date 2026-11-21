@@ -200,10 +200,9 @@ func completedTurnStream(calls ...model.ToolCall) *scriptStream {
 	return streamOf(turnDelta(finish, "done", calls...), usageDelta(model.Usage{InputTokens: 3, CachedInputTokens: 1, OutputTokens: 2}))
 }
 
-// erroredTurnStream assembles to the fixture errored partial: text "partial"
-// with the fixture usage, then the read failure — an accepted stream whose
-// assembly errors while retaining the partial.
-func erroredTurnStream() *scriptStream {
+// brokenBeforeFinishStream is an accepted stream that breaks before any
+// finish reason: text "partial" with the fixture usage, then the read failure.
+func brokenBeforeFinishStream() *scriptStream {
 	return failStream(errors.New("provider failure"),
 		turnDelta("", "partial"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7}))
 }
@@ -302,63 +301,50 @@ func TestModelEffectReadyRemainsRunning(t *testing.T) {
 	testassert.NoError(t, <-done)
 }
 
-// TestModelEffectContinueRemainsRunning proves the continuation transition:
-// the retained partial assistant commits with the fixed continuation signal
-// and the Operation stays running.
-func TestModelEffectContinueRemainsRunning(t *testing.T) {
-	modelCalls := 0
-	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-		modelCalls++
-		if modelCalls == 1 {
-			return erroredTurnStream(), nil
-		}
-		return completedTurnStream(), nil
-	}
-	// The second request source runs after the continuation result and before
-	// its model intent; park there to observe the settled running state.
-	secondArrived := make(chan struct{}, 1)
-	secondGate := make(chan struct{})
-	hookRounds := 0
-	hook := RequestHook{ID: "park.second", ExtensionID: "park-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-		hookRounds++
-		if hookRounds == 2 {
-			secondArrived <- struct{}{}
-			<-secondGate
-		}
-		return RequestConsequence{}, nil
-	}}
-	h, store, c, sessionID := newEffectHarness(t, modelFn)
-	exec := requestHookFixtureExecution(modelFn, nil, hook)
-	prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+// TestModelEffectErroredResponseSettlesFailure proves the completed-error
+// transition: an errored assembled response publishes no assistant entry and
+// no signal, settles the Operation as failure with its detail and reported
+// usage on the settlement, and never consults the retry policy.
+func TestModelEffectErroredResponseSettlesFailure(t *testing.T) {
+	spy := &retrySpy{limit: 5}
+	h, store, c, sessionID := newEffectHarness(t, nil)
+	exec := effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+		return streamOf(turnDelta("length", "partial"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7})), nil
+	}, nil)
+	exec.Retry = spy.retry
+	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
-	})
-	done := make(chan error, 1)
-	go func() { done <- executeDirect(h, c, h.ctx, testOpID, prepared) }()
-	<-secondArrived // the continuation committed and the next request is live
+	})))
+	testassert.Equal(t, len(spy.attempts), 0) // the policy is never asked about an assembled response.
+
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
-	var assistant *assistantEntry
-	var signal *signalEntry
+	var settlement *operationSettlementEntry
+	assistants, settlements, signals := 0, 0, 0
 	for i := range graph.Entries {
 		if graph.Entries[i].Assistant != nil {
-			assistant = graph.Entries[i].Assistant
+			assistants++
 		}
 		if graph.Entries[i].Signal != nil {
-			signal = graph.Entries[i].Signal
+			signals++
+		}
+		if graph.Entries[i].Settlement != nil {
+			settlements++
+			settlement = graph.Entries[i].Settlement
 		}
 	}
-	testassert.Require(t, assistant != nil && assistant.Status == model.OutputErrored && len(assistant.Content) == 1 && assistant.Content[0].Text == "partial", "assistant entry = %+v, want the retained errored partial", assistant)
-	testassert.Require(t, signal != nil && signal.Signal == SignalModelFailureContinuation && signal.Content == signalModelFailureContinuationContent, "signal entry = %+v, want the fixed continuation signal", signal)
+	testassert.Require(t, assistants == 0 && settlements == 1 && signals == 0, "committed %d assistants, %d settlements and %d signals, want none, one and none", assistants, settlements, signals)
+	testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, `unsupported finish reason "length"`), "settlement = %+v, want the failure terminal with the matrix detail", settlement)
+	testassert.Require(t, settlement.Model != nil && *settlement.Model == testModelRef() && settlement.Usage != nil && *settlement.Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}), "settlement model/usage = %+v/%+v, want the reported usage on the settlement", settlement.Model, settlement.Usage)
 	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
 	testassert.NoError(t, err)
-	testassert.Require(t, rec.State.Status == OperationRunning && rec.State.ActiveEffect == nil && len(rec.State.PendingToolCalls) == 0, "operation state = %+v, want running with the effect cleared and no pending calls", rec.State)
+	testassert.Require(t, rec.State.Status == OperationFailure && rec.State.Terminal != nil, "operation state = %+v, want terminal failure", rec.State)
 	want := UsageTotals{ByModel: []ModelUsage{{Model: testModelRef(), Usage: UsageCount{InputTokens: 5, OutputTokens: 7}}}}
 	testassert.Require(t, usageTotalsEqual(rec.State.Usage, want), "operation usage = %+v, want %+v", rec.State.Usage, want)
 	view, err := h.ReadSessionView(context.Background(), sessionID)
 	testassert.NoError(t, err)
-	testassert.Require(t, view.Header.CurrentOperationID == testOpID && usageTotalsEqual(view.TotalUsage, want), "session view = %+v, want the running operation and updated usage", view)
-	close(secondGate)
-	testassert.NoError(t, <-done)
+	testassert.Require(t, usageTotalsEqual(view.TotalUsage, want), "session usage = %+v, want %+v", view.TotalUsage, want)
+	requireSessionCleared(t, h, sessionID)
 }
 
 // TestModelEffectTerminalSettlement restores the live reserved-identity
@@ -379,8 +365,14 @@ func TestModelEffectTerminalSettlement(t *testing.T) {
 			reservedID = readReservedIntent(t, store, sessionID)
 			// The read failure is observed under the canceled execution
 			// context after the partial arrived: assembly classifies the
-			// accepted stream's output as interrupted, preserving the partial.
-			stream := failStream(errors.New("model failure"), turnDelta("", "partial"))
+			// accepted stream's output as interrupted, preserving the partial
+			// with its reasoning and raw extras.
+			delta := turnDelta("", "partial")
+			delta.MessageExtra = model.Extra{
+				"reasoning_content": json.RawMessage(`"thinking"`),
+				"raw":               json.RawMessage(`1`),
+			}
+			stream := failStream(errors.New("model failure"), delta)
 			stream.onExhausted = cancel
 			return stream, nil
 		}
@@ -402,11 +394,39 @@ func TestModelEffectTerminalSettlement(t *testing.T) {
 			"assistant entry %v does not consume the reserved identity %s", assistant, reservedID)
 		testassert.Require(t, assistant.Status == model.OutputInterrupted && len(assistant.Content) == 1 && assistant.Content[0].Text == "partial",
 			"assistant entry = %+v, want the retained interrupted partial", assistant)
+		testassert.Require(t, string(assistant.Extra["reasoning_content"]) == `"thinking"` && string(assistant.Extra["raw"]) == `1`,
+			"assistant entry extras = %#v, want the raw reasoning and arbitrary extras", assistant.Extra)
 		requireSessionCleared(t, h, sessionID)
 		rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
 		testassert.NoError(t, err)
 		testassert.Require(t, rec.State.Status == OperationInterruption && rec.State.Terminal != nil && rec.State.Terminal.Detail == "stream interrupted: context canceled",
 			"operation state = %+v, want terminal interruption with the assembly's detail", rec.State)
+	})
+
+	t.Run("reasoning-only interruption settles without an assistant", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+			stream := failStream(errors.New("model failure"),
+				model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`)}},
+				usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7}))
+			stream.onExhausted = cancel
+			return stream, nil
+		}
+		h, store, c, sessionID := newEffectHarness(t, nil)
+		prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+			return effectExecution(modelFn, nil), nil
+		})
+		testassert.NoError(t, executeDirect(h, c, ctx, testOpID, prepared))
+		graph, err := validateFixture(t, store, sessionID)
+		testassert.NoError(t, err)
+		for i := range graph.Entries {
+			testassert.Require(t, graph.Entries[i].Assistant == nil, "assistant entry %s published for a reasoning-only interruption", graph.Entries[i].Envelope.ID)
+		}
+		settlement := settlementEntryOf(t, graph)
+		testassert.Require(t, settlement.Status == OperationInterruption && settlement.Detail == "stream interrupted: context canceled", "settlement = %+v, want the interruption terminal", settlement)
+		testassert.Require(t, settlement.Model != nil && *settlement.Model == testModelRef() && settlement.Usage != nil && *settlement.Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}), "settlement model/usage = %+v/%+v, want the reported usage on the settlement", settlement.Model, settlement.Usage)
+		requireSessionCleared(t, h, sessionID)
 	})
 
 	t.Run("nonretryable invocation failure settles under the reserved identity without an assistant payload", func(t *testing.T) {
@@ -485,9 +505,9 @@ func TestModelEffectRepeatedCallIDSettlesFailure(t *testing.T) {
 	requireSessionCleared(t, h, sessionID)
 }
 
-// TestModelEffectTerminalNoOutputUsageOnSettlement proves a terminal output
-// that reported usage without an eligible payload lands that usage on the
-// settlement entry and both totals.
+// TestModelEffectTerminalNoOutputUsageOnSettlement proves a broken accepted
+// stream that reported usage lands that usage on the settlement entry and both
+// totals.
 func TestModelEffectTerminalNoOutputUsageOnSettlement(t *testing.T) {
 	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return failStream(errors.New("empty failure"), usageDelta(model.Usage{InputTokens: 4, CachedInputTokens: 2, OutputTokens: 6})), nil
@@ -2510,7 +2530,7 @@ func TestExecuteBetweenEffectCancellationSettlesInterruption(t *testing.T) {
 			// and the run's next checkpoint settles the interruption
 			return &cancelOnCloseStream{scriptStream: completedTurnStream(), cancel: cancel}, nil
 		}
-		return erroredTurnStream(), nil
+		return completedTurnStream(testToolCall("call-1")), nil
 	}
 	h, store, c, sessionID, prepared, harnessCancel := newExecutionHarness(t, modelFn, func(ctx context.Context, call model.ToolCall) PreparedTool {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
@@ -2551,7 +2571,7 @@ func TestExecutePast25ModelEffectsSettlesSuccessAndDrainsSteering(t *testing.T) 
 		if n > 30 {
 			return completedTurnStream(), nil // the drained successor's own turn
 		}
-		return erroredTurnStream(), nil
+		return completedTurnStream(testToolCall(fmt.Sprintf("call-%d", n))), nil
 	}
 	h, store, c, sessionID, prepared, _ := newExecutionHarness(t, modelFn, func(ctx context.Context, call model.ToolCall) PreparedTool {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
@@ -2584,7 +2604,7 @@ func TestExecutePast25ModelEffectsSettlesSuccessAndDrainsSteering(t *testing.T) 
 			signals++
 		}
 	}
-	testassert.Require(t, assistants == 30 && signals == 30, "%d assistants and %d signals committed, want 30 of each", assistants, signals)
+	testassert.Require(t, assistants == 30 && signals == 0, "%d assistants and %d signals committed, want 30 assistants and no signal", assistants, signals)
 	{
 		owner, _ := steeringInputOwner(t, store, sessionID, "s1")
 		testassert.Equal(t, owner, "op-2")

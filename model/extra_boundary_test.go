@@ -62,11 +62,11 @@ func TestAcceptingBoundariesRejectInvalidExtraJSON(t *testing.T) {
 			return err
 		}},
 		{"output boundary rejects", malformed, func(e Extra) error {
-			_, err := NewOutput(Output{Status: OutputErrored, Source: fullRef, Detail: "d", Message: &Message{Role: RoleAssistant, Source: fullRef, Extra: e}})
+			_, err := NewOutput(Output{Status: OutputInterrupted, Source: fullRef, Detail: "d", Message: &Message{Role: RoleAssistant, Source: fullRef, Extra: e}})
 			return err
 		}},
 		{"output boundary rejects empty value", empty, func(e Extra) error {
-			_, err := NewOutput(Output{Status: OutputErrored, Source: fullRef, Detail: "d", Message: &Message{Role: RoleAssistant, Source: fullRef, Extra: e}})
+			_, err := NewOutput(Output{Status: OutputInterrupted, Source: fullRef, Detail: "d", Message: &Message{Role: RoleAssistant, Source: fullRef, Extra: e}})
 			return err
 		}},
 		{"delta boundary rejects content fragment scope", malformed, func(e Extra) error {

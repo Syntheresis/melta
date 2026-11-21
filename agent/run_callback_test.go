@@ -9,7 +9,7 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// TestRunCallbackZeroCallsWithOutputRejected pins that a settlement carrying an output requires exactly one callback invocation: an effect that never accepts work through the callback cannot settle an output at all, and a call-bearing output must never reach dispatch.
+// TestRunCallbackZeroCallsWithOutputRejected pins that a settlement carrying an output requires a callback invocation that produced one: an effect that never accepts work through the callback cannot settle an output at all, and a call-bearing output must never reach dispatch.
 func TestRunCallbackZeroCallsWithOutputRejected(t *testing.T) {
 	f := &runFakes{noCallbackFill: true}
 	callsOut := mkCallsTerminalOutput()
@@ -23,7 +23,7 @@ func TestRunCallbackZeroCallsWithOutputRejected(t *testing.T) {
 	testassert.Require(t, f.modelCalls == 1 && f.toolCalls == 0, "model=%d tool=%d, want the run to stop before dispatch", f.modelCalls, f.toolCalls)
 }
 
-// TestRunCallbackOneCallWithNoOutputSettlementRejected pins the other half of the count rule: an outputless settlement (a legitimate no-accepted-stream failure shape) requires zero callbacks, so accepting model work and then discarding its output is a protocol violation too.
+// TestRunCallbackOneCallWithNoOutputSettlementRejected pins the other half of the output rule: an outputless settlement requires that the most recent callback invocation produced no output, so accepting model work and then discarding its output is a protocol violation too.
 func TestRunCallbackOneCallWithNoOutputSettlementRejected(t *testing.T) {
 	f := &runFakes{noCallbackFill: true}
 	stream := newFakeStream(deltaStep(choiceDelta(txtPos(0, "x"))))
@@ -39,8 +39,8 @@ func TestRunCallbackOneCallWithNoOutputSettlementRejected(t *testing.T) {
 	requireZeroTerminal(t, res)
 }
 
-// TestRunCallbackSecondAttemptRejectedWithoutSecondAssembly pins that a second callback is always a model boundary-protocol violation: the attempt fails without entering another assembly path (its stream is never read or closed), and an effect that ignores the reported error still cannot settle with the first output.
-func TestRunCallbackSecondAttemptRejectedWithoutSecondAssembly(t *testing.T) {
+// TestRunCallbackInvocationAfterOutputRejectedWithoutSecondAssembly pins that a callback invocation after one that returned an output is a model boundary-protocol violation: the attempt fails without entering another assembly path (its stream is never read or closed), and an effect that ignores the reported error still cannot settle with the first output.
+func TestRunCallbackInvocationAfterOutputRejectedWithoutSecondAssembly(t *testing.T) {
 	f := &runFakes{noCallbackFill: true}
 	firstStream := newFakeStream(deltaStep(choiceDelta(txtPos(0, "first"))))
 	secondStream := newFakeStream(deltaStep(choiceDelta(txtPos(0, "second"))))
@@ -63,6 +63,31 @@ func TestRunCallbackSecondAttemptRejectedWithoutSecondAssembly(t *testing.T) {
 	requireZeroTerminal(t, res)
 	testassert.Require(t, secondStream.recvCount == 0 && secondStream.closeCount == 0, "second callback entered an assembly path: recv=%d close=%d", secondStream.recvCount, secondStream.closeCount)
 	testassert.Equal(t, firstStream.closeCount, 1)
+}
+
+// TestRunCallbackInvocationAfterStreamErrorSettlesLastOutput pins the retry shape of the callback contract: an invocation that failed with a *StreamError may be followed by another one, and the settlement carries the most recent invocation's output without comparing content.
+func TestRunCallbackInvocationAfterStreamErrorSettlesLastOutput(t *testing.T) {
+	f := &runFakes{noCallbackFill: true}
+	broken := newFakeStream(errStep(errors.New("read failure")))
+	good := newFakeStream(deltaStep(choiceDelta(txtPos(0, "second"))))
+	f.modelSet = func(_ int, _ model.Request, cb AssemblyCallback) (ModelSettlement, error) {
+		{
+			_, err := cb(testRef, broken)
+			var streamErr *StreamError
+			testassert.Require(t, errors.As(err, &streamErr), "first callback returned %v, want a *StreamError", err)
+		}
+		out, err := cb(testRef, good)
+		if err != nil {
+			return ModelSettlement{}, err
+		}
+		return ModelSettlement{Disposition: DispoReady, Output: &out}, nil
+	}
+
+	res, err := Run(context.Background(), f.invocation())
+	testassert.NoError(t, err)
+	testassert.Require(t, res.Status == TerminalSuccess && res.LastOutput != nil && res.LastOutput.Message.TextContent() == "second", "terminal = %#v, want success carrying the second invocation's output", res)
+	testassert.Equal(t, broken.closeCount, 1)
+	testassert.Equal(t, good.closeCount, 1)
 }
 
 // TestRunCallbackForeignSourceRejectedEvenWithValidSettlement pins the callback-source rule: a source unequal to the invocation's expected model identity fails the callback before assembly (the stream is never touched), and an effect that ignores that error still cannot rescue the run with an otherwise-valid expected-source settlement.

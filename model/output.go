@@ -17,8 +17,8 @@ type OutputStatus string
 
 const (
 	OutputCompleted   OutputStatus = "completed"   // requires one assistant message with an eligible payload and empty detail.
-	OutputErrored     OutputStatus = "errored"     // requires non-empty detail; the optional partial message carries no tool calls.
-	OutputInterrupted OutputStatus = "interrupted" // same shape rules as errored: non-empty detail, tool-call-free partial message when present.
+	OutputErrored     OutputStatus = "errored"     // requires non-empty detail and no message.
+	OutputInterrupted OutputStatus = "interrupted" // requires non-empty detail and a tool-call-free partial message when present.
 )
 
 func validOutputStatus(s OutputStatus) bool {
@@ -50,7 +50,7 @@ func NewProtocolWarning(in ProtocolWarning) (ProtocolWarning, error) {
 	return in, nil
 }
 
-// Output is the finalized result of one model response attempt: closed status, always-complete source identity, optional assistant message (nil means no eligible partial content was retained), optional usage, and detail text. Completed requires exactly one assistant payload; errored/interrupted require non-empty detail and a tool-call-free message when present. Detail stays empty for completed output and is mandatory otherwise.
+// Output is the finalized result of one model response attempt: closed status, always-complete source identity, optional assistant message (nil means no eligible partial content was retained), optional usage, and detail text. Completed requires exactly one assistant payload; errored requires non-empty detail and carries no message; interrupted requires non-empty detail and a tool-call-free message when present. Detail stays empty for completed output and is mandatory otherwise.
 type Output struct {
 	Status  OutputStatus // closed enum: completed / errored / interrupted.
 	Source  ModelRef     // always complete (nonzero); the model identity that produced this output.
@@ -85,7 +85,7 @@ func hasAssistantPayload(m *Message) bool {
 	return HasAssistantContent(m) || m != nil && len(m.ToolCalls) > 0
 }
 
-// ValidateOutput applies exactly the NewOutput accepting rules — closed status set; complete nonzero output source; present messages re-validated at this trust boundary (closed role, per-role field combinations) and assistant-role carrying exactly the output's own source identity; completed requires one message with an eligible payload plus empty detail; errored/interrupted require non-empty detail and a tool-call-free optional partial message — and returns the first violation with the constructor's exact error identity, precedence and detail. It retains and mutates nothing: it is the validation-only read of the same contract, for callers that keep their original value.
+// ValidateOutput applies exactly the NewOutput accepting rules — closed status set; complete nonzero output source; present messages re-validated at this trust boundary (closed role, per-role field combinations) and assistant-role carrying exactly the output's own source identity; completed requires one message with an eligible payload plus empty detail; errored requires no message and non-empty detail; interrupted requires non-empty detail and a tool-call-free optional partial message — and returns the first violation with the constructor's exact error identity, precedence and detail. It retains and mutates nothing: it is the validation-only read of the same contract, for callers that keep their original value.
 func ValidateOutput(in Output) error {
 	if !validOutputStatus(in.Status) {
 		return fmt.Errorf("%w: %q", ErrInvalidStatus, in.Status)
@@ -108,13 +108,16 @@ func ValidateOutput(in Output) error {
 		if in.Detail != "" {
 			return fmt.Errorf("%w: completed output must carry empty detail", ErrForbiddenField)
 		}
-	default: // errored/interrupted may omit the message entirely.
+	default: // errored must omit the message; interrupted may carry a partial one.
+		if in.Status == OutputErrored && in.Message != nil {
+			return fmt.Errorf("%w: errored output must not carry a message", ErrForbiddenField)
+		}
 		if in.Message != nil {
 			if err := validateOutputMessage(*in.Message, in.Source); err != nil {
 				return err
 			}
 			if len(in.Message.ToolCalls) > 0 {
-				return errors.New("errored or interrupted output message must not carry tool calls")
+				return errors.New("interrupted output message must not carry tool calls")
 			}
 		}
 		if in.Detail == "" {
@@ -124,7 +127,7 @@ func ValidateOutput(in Output) error {
 	return nil
 }
 
-// NewOutput validates in and returns an independent owned copy. Rules enforced — closed status set; complete nonzero output source; present messages are re-validated at this trust boundary (closed role, per-role field combinations) and must be assistant-role carrying exactly the output's own source identity; completed requires one message with an eligible payload plus empty detail; errored/interrupted require non-empty detail and a tool-call-free optional partial message. Usage pointers are copied by value so caller mutations never reach retained outputs.
+// NewOutput validates in and returns an independent owned copy. Rules enforced — closed status set; complete nonzero output source; present messages are re-validated at this trust boundary (closed role, per-role field combinations) and must be assistant-role carrying exactly the output's own source identity; completed requires one message with an eligible payload plus empty detail; errored requires no message and non-empty detail; interrupted requires non-empty detail and a tool-call-free optional partial message. Usage pointers are copied by value so caller mutations never reach retained outputs.
 func NewOutput(in Output) (Output, error) {
 	if err := ValidateOutput(in); err != nil {
 		return Output{}, err

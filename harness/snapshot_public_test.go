@@ -1200,9 +1200,9 @@ func matrixTurnStream(callID string) *publicScriptStream {
 	}}
 }
 
-// usageOnlyFailedStream assembles to one payload-less errored output whose
-// reported usage rides the consuming settlement entry: no assistant entry is
-// written and the settlement carries the model identity and usage pointers.
+// usageOnlyFailedStream is one accepted stream that breaks before its finish
+// reason after reporting usage: no assistant entry is written and the failure
+// settlement carries the model identity and usage pointers.
 func usageOnlyFailedStream() *publicScriptStream {
 	return &publicScriptStream{
 		deltas: []model.StreamDelta{{Usage: &model.Usage{InputTokens: 5, CachedInputTokens: 1, OutputTokens: 7}}},

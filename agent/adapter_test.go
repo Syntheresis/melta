@@ -331,7 +331,7 @@ func TestAdaptModelEffectPreservesCallbackError(t *testing.T) {
 	testassert.Require(t, errors.Is(rerr, io.EOF), "Recv after the callback failure = %v, want io.EOF: the adapter must have closed the callback-rejected stream instead of leaving it open", rerr)
 }
 
-// erroredSSE is a streaming body with a partial payload under an unsupported finish reason: assembly finalizes it as an errored output that retains the partial assistant text.
+// erroredSSE is a streaming body with a partial payload under an unsupported finish reason: assembly finalizes it as an errored output that carries no message.
 const erroredSSE = `data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"partial"}}]}
 
 data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
@@ -340,7 +340,7 @@ data: [DONE]
 
 `
 
-// TestAdaptModelEffectOutputMapping pins the finalized-output side of the settlement algebra over live streams: an errored assembly maps to failure retaining the partial output and its own detail, and an interrupted assembly maps to interruption carrying its output and detail.
+// TestAdaptModelEffectOutputMapping pins the finalized-output side of the settlement algebra over live streams: an errored assembly maps to failure retaining the errored output and its own detail with no message, an accepted stream that breaks before its finish reason maps to failure with no output, and an interrupted assembly maps to interruption carrying its output and detail.
 func TestAdaptModelEffectOutputMapping(t *testing.T) {
 	ref := model.ModelRef{Provider: "acme", Model: "m-1"}
 	assemble := func(ctx context.Context) agent.AssemblyCallback {
@@ -353,7 +353,7 @@ func TestAdaptModelEffectOutputMapping(t *testing.T) {
 		Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}},
 	})}}
 
-	t.Run("errored-output-settles-failure-retaining-partial", func(t *testing.T) {
+	t.Run("errored-output-settles-failure-without-message", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, erroredSSE)
@@ -367,7 +367,25 @@ func TestAdaptModelEffectOutputMapping(t *testing.T) {
 		testassert.NoError(t, err)
 		testassert.Require(t, set.Disposition == agent.DispoFailure && set.Output != nil && set.Output.Status == model.OutputErrored && set.Detail != "", "settlement = %+v, want failure carrying the errored output with non-empty detail", set)
 		testassert.Check(t, set.Detail == set.Output.Detail, "failure detail = %q, want the output's own detail preserved", set.Detail)
-		testassert.Check(t, set.Output.Message != nil && set.Output.Message.TextContent() == "partial", "retained partial = %+v, want the errored output to carry its assistant payload", set.Output.Message)
+		testassert.Check(t, set.Output.Message == nil, "errored output message = %#v, want none", set.Output.Message)
+		_, verr := agent.ValidateModelSettlement(ref, set)
+		testassert.NoError(t, verr)
+	})
+
+	t.Run("broken-stream-settles-failure-without-output", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"partial\"}}]}\n\n")
+			// The connection ends here without a finish reason or [DONE].
+		}))
+		defer srv.Close()
+		transport, err := model.NewTransport(model.ResolvedTransport{Model: ref, BaseURL: srv.URL})
+		testassert.NoError(t, err)
+
+		ctx := context.Background()
+		set, err := agent.AdaptModelEffect(ref, transport)(ctx, request, assemble(ctx))
+		testassert.NoError(t, err)
+		testassert.Require(t, set.Disposition == agent.DispoFailure && set.Output == nil && set.Detail != "", "settlement = %+v, want failure carrying the stream failure's detail and no output", set)
 		_, verr := agent.ValidateModelSettlement(ref, set)
 		testassert.NoError(t, verr)
 	})

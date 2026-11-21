@@ -5,9 +5,9 @@
 // independently usable on their own (the melta-engine surface) without private
 // wiring. A later Harness layer supplies its own durable request, model-effect,
 // and tool-effect functions instead of these adapters; this package owns turning
-// an accepted model.Stream into exactly one finalized model.Output, sequencing
-// those caller boundaries under one cancellation invariant, validating what
-// those caller boundaries return, and the adapters' lookup and settlement
+// an accepted model.Stream into one finalized model.Output or a *StreamError,
+// sequencing those caller boundaries under one cancellation invariant, validating
+// what those caller boundaries return, and the adapters' lookup and settlement
 // mapping. Retry policy, persistence, and events belong to layers above these
 // contracts. It imports only the standard library and melta/model.
 package agent
@@ -46,7 +46,6 @@ type ModelDisposition string
 // The closed disposition values of every settlement returned by a model effect; any other value is invalid wherever a settlement is validated.
 const (
 	DispoReady        ModelDisposition = "ready"
-	DispoContinue     ModelDisposition = "continue"
 	DispoFailure      ModelDisposition = "failure"
 	DispoInterruption ModelDisposition = "interruption"
 )
@@ -68,6 +67,15 @@ type ProtocolError struct {
 // ErrBoundaryProtocol is the sentinel every ProtocolError classifies under through errors.Is, so callers can branch by category without parsing rendered text.
 var ErrBoundaryProtocol = errors.New("caller boundary protocol violation")
 
+// StreamError is one accepted stream's failure before a finish reason arrived under a live run context. Err is the stream's own failure; Usage is the last usage the stream reported before failing, nil when it reported none. The retry policy above the Agent decides what happens next.
+type StreamError struct {
+	Err   error
+	Usage *model.Usage
+}
+
+func (e *StreamError) Error() string { return e.Err.Error() }
+func (e *StreamError) Unwrap() error { return e.Err }
+
 func (e *ProtocolError) Error() string { return fmt.Sprintf("%s: %s", e.Boundary, e.Detail) }
 
 // Is reports whether target is the package's single boundary-protocol sentinel, keeping every ProtocolError reachable through both errors.Is and errors.As at any wrap depth.
@@ -87,7 +95,7 @@ type Invocation struct {
 type ModelSettlement struct {
 	Disposition ModelDisposition // closed enum; any other value fails settlement validation outright.
 	Output      *model.Output
-	Detail      string // empty for ready/continue, non-empty for failure/interruption — mismatch in either direction is a protocol violation.
+	Detail      string // empty for ready, non-empty for failure/interruption — mismatch in either direction is a protocol violation.
 }
 
 type TerminalResult struct {

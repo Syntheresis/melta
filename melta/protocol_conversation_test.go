@@ -711,23 +711,18 @@ func TestConversationProjectionSyntheticInterruptedResult(t *testing.T) {
 	})
 }
 
-// TestConversationProjectionErroredPartialAssistant proves the errored
-// partial axis: a stream that fails after yielding its partial answer keeps
-// that content visible, rides the typed model_failure_continuation signal,
-// and the operation's later failure still ends the conversation in committed
-// order — distinct from both the interruption and the no-assistant failure.
-func TestConversationProjectionErroredPartialAssistant(t *testing.T) {
+// TestConversationProjectionMalformedStreamEventFailsWithoutAssistant proves the
+// malformed stream event axis: a complete event that does not decode fails the
+// response after its accepted fragment, the Operation settles failure, and the
+// conversation carries no assistant item and no signal — the failed attempt
+// leaves nothing behind.
+func TestConversationProjectionMalformedStreamEventFailsWithoutAssistant(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
 		stopper := newLifecycleStopper()
 		bg := openBackgroundRuntime(t, store, stopper)
 		defer closeProjectionRuntime(bg.r)
 		session := bg.session("errored")
 		bg.e.server.setScript(func(_ context.Context, body string) []string {
-			if strings.Contains(body, "The previous model response failed after partial output.") {
-				// The continuation request fails nonretryably: the operation
-				// settles failure carrying the provider's diagnostic.
-				return []string{"HTTP 400", `{"error":{"message":"model down"}}`}
-			}
 			// The first turn: the partial answer streams, then the malformed
 			// event fails the response after its accepted fragment.
 			return []string{
@@ -736,31 +731,21 @@ func TestConversationProjectionErroredPartialAssistant(t *testing.T) {
 			}
 		})
 		submitThroughRuntime(t, bg.r, session, "op-1", "work")
-		// Request 2's arrival is the rendezvous proving the errored partial
-		// assistant and its continuation signal committed.
-		bg.e.server.awaitRequests(2)
 		awaitOperation(t, bg.r, session, "op-1", harness.OperationFailure)
+		testassert.Equal(t, bg.e.server.requests(), 1)
 
 		items := projectSessionItems(t, bg.r, session)
-		if len(items) != 4 ||
-			itemKind(t, items[0]) != "input" || itemKind(t, items[1]) != "assistant" ||
-			itemKind(t, items[2]) != "signal" || itemKind(t, items[3]) != "operation_end" {
-			t.Fatalf("items = %d (%s), want the committed order input, assistant, signal, end", len(items), itemKinds(t, items))
+		if len(items) != 2 || itemKind(t, items[0]) != "input" || itemKind(t, items[1]) != "operation_end" {
+			t.Fatalf("items = %d (%s), want the committed order input, end", len(items), itemKinds(t, items))
 		}
-		partial, err := items[1].AsAssistantItem()
-		testassert.Require(t, err == nil && partial.Status == protocol.AssistantItemStatusErrored, "partial assistant = %+v err %v, want the errored status", partial, err)
-		textPart, err := partial.Content[0].AsTextPart()
-		testassert.Require(t, err == nil && textPart.Text == "partial answer", "partial content = %+v, want the retained fragment", partial.Content)
-		continuation, err := items[2].AsSignalItem()
-		testassert.Require(t, err == nil && continuation.Subtype == protocol.SignalItemSubtypeModelFailureContinuation && continuation.Content == "The previous model response failed after partial output. Continue from the retained response.", "continuation signal = %+v err %v, want the typed signal with its required content", continuation, err)
-		end, err := items[3].AsOperationEndItem()
-		testassert.Require(t, err == nil && end.Status == protocol.OperationEndItemStatusFailure && strings.Contains(end.Detail, "model down"), "end = %+v err %v, want the failure detail", end, err)
+		end, err := items[1].AsOperationEndItem()
+		testassert.Require(t, err == nil && end.Status == protocol.OperationEndItemStatusFailure && strings.Contains(end.Detail, "streaming protocol violation"), "end = %+v err %v, want the protocol failure detail", end, err)
 	})
 }
 
 // TestConversationProjectionInterruptedPartialAssistant proves a stream
-// interruption after partial output keeps the errored/interrupted assistant
-// visible beside its typed signal and terminal end.
+// interruption after partial output keeps the interrupted assistant visible
+// beside its typed signal and terminal end.
 func TestConversationProjectionInterruptedPartialAssistant(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
 		stopper := newLifecycleStopper()

@@ -318,19 +318,16 @@ func summaryFact(maintenanceID string, produced model.ModelRef, evidence *Reques
 	}
 }
 
-// retainUsage lands one assembled output's reported usage on the newest
-// fact before that output settles; an output reporting no usage leaves the
-// fact's usage absent, and a reported zero stays known zero.
+// retainUsage lands one model attempt's reported usage on the newest fact
+// before the effect settles; an attempt reporting no usage leaves the fact's
+// usage absent, and a reported zero stays known zero.
 func (f *maintenanceFacts) retainUsage(usage *model.Usage) {
-	if usage == nil || len(f.facts) == 0 {
+	if len(f.facts) == 0 {
 		return
 	}
-	counts := UsageCount{
-		InputTokens:       int64(usage.InputTokens),
-		CachedInputTokens: int64(usage.CachedInputTokens),
-		OutputTokens:      int64(usage.OutputTokens),
+	if counts := usageCount(usage); counts != nil {
+		f.facts[len(f.facts)-1].Usage = counts
 	}
-	f.facts[len(f.facts)-1].Usage = &counts
 }
 
 // factsUsageContribution renders the ordered facts' reported usage as the
@@ -375,8 +372,8 @@ func factsUsageContribution(facts []maintenanceFact) (UsageTotals, error) {
 // through the strategy's Consume after the settlement. A maintenance failure
 // and an interruption settle through the effect's own terminal settlement with
 // the retained maintenance facts — the conversation effect's own shape, and
-// the run's callback gate requires it whenever the assembly callback ran —
-// while pre-assembly failures and cancellations return no output. The
+// the run's callback gate requires it whenever the assembly callback produced
+// an output — while pre-assembly failures and cancellations return no output. The
 // invocation's callbacks come from the opened maintenance invocation; its
 // retry classifier is the enclosing Operation's.
 func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maintenanceFacts, parameters model.Extra, hookIDs []HookIdentity) agent.ModelEffect {
@@ -449,22 +446,36 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		// compact transport. The physical attempt carries the opened
 		// maintenance invocation and this producer's own reserved identity.
 		var output model.Output
+		var attemptFailure error
+		var failureUsage *model.Usage
 		switch res := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, d.execution.Retry); res.kind {
 		case attemptAccepted:
 			out, attemptErr := assemble(intent.expected, h.observeStream(intent.sessionID, operationID, res.stream)) // exactly one assembly after acceptance; the enclosing Operation owns the deltas
 			if attemptErr != nil {
-				return settle(attemptErr)
+				var streamErr *agent.StreamError
+				if !errors.As(attemptErr, &streamErr) { // every other assembly error settles as a boundary failure.
+					return settle(attemptErr)
+				}
+				attemptFailure = attemptErr
+				failureUsage = streamErr.Usage
+			} else {
+				output = out
 			}
-			output = out
 		case attemptInterrupted:
 			return d.interruptModelEffect(intent, nil, facts)
 		case attemptInvalid:
 			return settle(res.err)
 		case attemptFailed:
-			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(res.err)}
+			attemptFailure = res.err
+		}
+		if attemptFailure != nil {
+			// The attempt's reported usage lands on the request's maintenance
+			// fact before the terminal settlement; a pre-acceptance failure has none.
+			facts.retainUsage(failureUsage)
+			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(attemptFailure)}
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
 				terminal:      OperationFailure,
-				detail:        failureDetail(res.err),
+				detail:        failureDetail(attemptFailure),
 				compaction:    true,
 				facts:         facts,
 				maintenanceID: facts.producer(),
