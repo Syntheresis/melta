@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/protocol"
 )
@@ -19,7 +18,6 @@ const (
 	setupSource    = "runtime:setup"
 	promptSource   = "runtime:prompt"
 	catalogSource  = "runtime:catalog"
-	agentsSource   = "runtime:agents"
 	protocolSource = "runtime:protocol"
 )
 
@@ -258,7 +256,7 @@ func formatWarningRevision(revision uint64) string {
 }
 
 // setupWarningKinds are the retained setup diagnostics: no provider is
-// connected, the primary type configures no model, or its model is
+// connected, the baseline model is unset, or the baseline model is
 // unavailable because its provider is not connected or the model is
 // incomplete. The connection samples come from the candidate's own capture,
 // never a second catalog or a live environment read.
@@ -273,9 +271,9 @@ const (
 
 // setupWarnings derives the setup group from one published candidate and its
 // frozen credential observations under the retained rules: any connected
-// provider clears no_provider, and the primary definition's configured model
-// must resolve to a usable (positive-window) model of a connected provider.
-// The connection samples come from the candidate's own capture, never a live
+// provider clears no_provider, and the supplied baseline model must resolve
+// to a usable (positive-window) model of a connected provider. The
+// connection samples come from the candidate's own capture, never a live
 // environment read.
 func setupWarnings(c *configuration, credentials map[string]CredentialValue) []protocol.Warning {
 	connected := func(prov *catalog.Provider) bool {
@@ -292,18 +290,7 @@ func setupWarnings(c *configuration, credentials map[string]CredentialValue) []p
 	if !anyConnected {
 		out = append(out, protocol.Warning{Source: setupSource, Kind: setupNoProviderKind, Message: setupNoProviderMessage})
 	}
-	// The named model warning addresses only the supplied application
-	// definition, exactly like client root creation. A foreign resolver's
-	// primary display name is never a substitute; absent supplied primary
-	// leaves only the independent provider-connectivity posture above.
-	primary, ok := c.projectedDefinition(harness.DefinitionRef{ExtensionID: "agents", CapabilityID: "agents.definitions", DefinitionID: "primary"})
-	if !ok {
-		return out
-	}
-	// Its Model is the resolver input, zero when the definition configures
-	// none — every accepted nonempty model is already parseable, so no
-	// parse-failure case exists.
-	configured := primary.inputs.Model
+	configured := c.baselineModel
 	switch {
 	case configured.IsZero():
 		out = append(out, protocol.Warning{Source: setupSource, Kind: setupNoModelKind, Message: setupNoModelMessage})

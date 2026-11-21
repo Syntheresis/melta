@@ -95,8 +95,9 @@ func (h *Harness) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	}
 	prepared, capture, prepCtx, cleanup, err := h.prepareExecution(ctx, PreparationSession{
 		Identity:       SessionIdentity{SessionID: destID, Workspace: view.Identity.Workspace},
-		AgentSelection: view.State.AgentSelection,
-	}, RequestKindMessage)
+		Inputs:         view.State.Inputs,
+		ExtensionState: view.State.ExtensionState,
+	}, RequestKindMessage, content)
 	if err != nil {
 		return ForkResult{}, err
 	}
@@ -120,7 +121,7 @@ func (h *Harness) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	// The committed destination installs as a stable cell with its committed
 	// graph and a call-owned pin; the destination execution retains its own
 	// use, so the destination graph stays live across the call's release.
-	dest := &coordinator{sessionID: destID, graph: &sessionGraph{Session: commit.session, Operations: []OperationRecord{commit.operation}, Entries: commit.entries}, bgState: bgOpen}
+	dest := &coordinator{sessionID: destID, graph: &sessionGraph{Session: commit.session, Operations: []OperationRecord{commit.operation}, Entries: commit.entries}}
 	dest.identity = commit.session.Identity
 	dest.everLoaded = true
 	dest.uses = 1
@@ -128,7 +129,8 @@ func (h *Harness) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	h.sessions[destID] = dest
 	h.mu.Unlock()
 	defer h.releaseUse(dest)
-	h.observeInvalidation(dest)                       // the durable fork destination creation
+	h.observeInvalidation(dest) // the durable fork destination creation
+	h.observeOperationAdmitted(commit.operation.Admission.SessionID, commit.operation.Admission.OperationID)
 	h.startExecution(dest, req.OperationID, prepared) // destination execution starts after commit
 	return ForkResult{Session: ownSessionRecord(commit.session), Operation: ownOperationRecord(commit.operation)}, nil
 }
@@ -261,7 +263,8 @@ func (h *Harness) forkTransaction(tx Transaction, destID string, view SessionRec
 		},
 		State: SessionState{
 			Lifecycle:      LifecycleOpen,
-			AgentSelection: ownAgentSelection(source.State.AgentSelection),
+			Inputs:         source.State.Inputs.Owned(),
+			ExtensionState: ownSessionStateValues(source.State.ExtensionState),
 			Usage:          UsageTotals{},
 			LastActivity:   now,
 		},

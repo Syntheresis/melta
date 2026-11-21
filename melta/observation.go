@@ -6,10 +6,16 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
+
+// observerQueueCapacity is the host-owned bound of one observer
+// registration's delivery queue. Observation is passive: a slow or stalled
+// observer loses only its own subscription.
+const observerQueueCapacity = 256
 
 // Event is the generated closed event union: every passive notification the
 // Melta publishes on the bounded observation bus is a protocol Event built
@@ -58,13 +64,165 @@ func (s *Subscription) Done() <-chan struct{} { return s.closed }
 // saturated subscriber is removed and closed while delivery continues to
 // healthy ones.
 type observation struct {
-	mu     sync.Mutex
-	subs   map[*Subscription]struct{}
-	closed bool
+	mu sync.Mutex
+	// observers is every live observer registration delivery state; attach
+	// adds and detach removes under the same mutex. It grants no authority and
+	// carries no event data.
+	observers map[*observerDelivery]struct{}
+	subs      map[*Subscription]struct{}
+	closed    bool
 }
 
 func newObservation() *observation {
-	return &observation{subs: make(map[*Subscription]struct{})}
+	return &observation{observers: make(map[*observerDelivery]struct{}), subs: make(map[*Subscription]struct{})}
+}
+
+// observerDelivery is one observer registration's delivery lifetime. It is
+// owned by its nativeRegistration entry and ends exactly when that entry stops
+// being current: Remove, replacement, activation close/loss, owner close, and
+// its own overflow/error/panic all take the same end path under nativeMu.
+type observerDelivery struct {
+	owner      *observation
+	activation *nativeActivation
+	entry      *nativeRegistration
+	observer   extension.Observer
+	ctx        context.Context
+	cancel     context.CancelFunc
+	queue      chan extension.Fact
+	done       chan struct{}
+	runDone    chan struct{}
+
+	mu    sync.Mutex
+	ended bool
+	calls sync.WaitGroup
+}
+
+// attachObserver creates and starts one registration's delivery state. The
+// caller holds nativeMu, so the delivery cannot outlive a closing activation.
+func (o *observation) attachObserver(activation *nativeActivation, observer extension.Observer, entry *nativeRegistration) *observerDelivery {
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &observerDelivery{
+		owner: o, activation: activation, entry: entry, observer: observer,
+		ctx: ctx, cancel: cancel,
+		queue:   make(chan extension.Fact, observerQueueCapacity),
+		done:    make(chan struct{}),
+		runDone: make(chan struct{}),
+	}
+	o.mu.Lock()
+	if o.closed {
+		o.mu.Unlock()
+		d.close()
+		return d
+	}
+	o.observers[d] = struct{}{}
+	o.mu.Unlock()
+	go d.run()
+	return d
+}
+
+// close is the delivery's terminal state: no observer call starts after it,
+// its context is cancelled and it leaves the owner's live set.
+func (d *observerDelivery) close() {
+	d.mu.Lock()
+	if d.ended {
+		d.mu.Unlock()
+		return
+	}
+	d.ended = true
+	close(d.done)
+	d.mu.Unlock()
+	d.cancel()
+	d.owner.mu.Lock()
+	delete(d.owner.observers, d)
+	d.owner.mu.Unlock()
+}
+
+// enqueue offers one committed fact in the same critical section as the ended
+// check. A full queue ends the registration.
+func (d *observerDelivery) enqueue(fact extension.Fact) {
+	d.mu.Lock()
+	if d.ended {
+		d.mu.Unlock()
+		return
+	}
+	select {
+	case d.queue <- fact:
+		d.mu.Unlock()
+	default:
+		d.mu.Unlock()
+		d.selfEnd()
+	}
+}
+
+// run calls the observer sequentially until the delivery ends. Queued facts
+// after the end are dropped and no later call starts.
+func (d *observerDelivery) run() {
+	defer close(d.runDone)
+	for {
+		select {
+		case <-d.done:
+			return
+		case fact := <-d.queue:
+			if !d.beginCall() {
+				return
+			}
+			if err := d.call(fact); err != nil {
+				d.selfEnd()
+				return
+			}
+		}
+	}
+}
+
+// beginCall admits one observer call before the ended check's critical
+// section, so activation close can wait on every in-flight call.
+func (d *observerDelivery) beginCall() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.ended {
+		return false
+	}
+	d.calls.Add(1)
+	return true
+}
+
+// call runs one observer under the delivery's own context, which is cancelled
+// when the delivery ends. Observer delivery carries no callback mark: a
+// command issued from an observer is an independent command.
+func (d *observerDelivery) call(fact extension.Fact) (err error) {
+	defer d.calls.Done()
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("melta: observer detached")
+		}
+	}()
+	return d.observer(d.ctx, fact)
+}
+
+// selfEnd ends this delivery through the one registration path; the entry
+// stops being current exactly like Remove.
+func (d *observerDelivery) selfEnd() {
+	a := d.activation
+	s := a.owner
+	s.nativeMu.Lock()
+	release := endRegistrationLocked(a, d.entry)
+	s.nativeMu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// wait blocks until no observer call is in flight or ctx ends.
+func (d *observerDelivery) wait(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		d.calls.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // publish runs one producer's observation section: the produce callback
@@ -118,16 +276,27 @@ func (o *observation) unsubscribe(s *Subscription) {
 }
 
 // closeAll ends observation after the complete Melta cleanup has published
-// every remaining scope event.
+// every remaining scope event. Remaining observer registrations end through
+// their activation's registration path without waiting; activations were
+// closed first.
 func (o *observation) closeAll() {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	o.closed = true
+	observers := make([]*observerDelivery, 0, len(o.observers))
+	for d := range o.observers {
+		observers = append(observers, d)
+	}
+	o.mu.Unlock()
+	for _, d := range observers {
+		d.activation.endObserver(d)
+	}
+	o.mu.Lock()
 	for sub := range o.subs {
 		delete(o.subs, sub)
 		close(sub.events)
 		close(sub.closed)
 	}
+	o.mu.Unlock()
 }
 
 // eventString renders one scope member as its optional wire pointer; an
@@ -343,10 +512,99 @@ type observationAdapter struct {
 
 	// h is the bound Harness; the adapter is constructed before it exists.
 	h *harness.Harness
+
+	// captureMu owns the Session -> admission capture association retained
+	// from preparation until its PreparedExecution.Release. The capture is
+	// bound to its Operation by the admitted fact; a settled fact resolves it
+	// only when the identities match.
+	captureMu         sync.Mutex
+	capturesBySession map[string]*operationCapture
+}
+
+// operationCapture is one prepared execution's retained admission capture and
+// its bound Operation identity.
+type operationCapture struct {
+	capture     *nativeAdmissionCapture
+	operationID string
 }
 
 func newObservationAdapter(obs *observation, warnings *warningStore) *observationAdapter {
-	return &observationAdapter{obs: obs, warnings: warnings}
+	return &observationAdapter{obs: obs, warnings: warnings, capturesBySession: make(map[string]*operationCapture)}
+}
+
+// retainCapture stores one successful preparation's admission capture until
+// its release. The association is keyed by the prepared Session and bound to
+// its Operation by the admitted fact.
+func (a *observationAdapter) retainCapture(sessionID string, capture *nativeAdmissionCapture) {
+	if a == nil || sessionID == "" || capture == nil {
+		return
+	}
+	a.captureMu.Lock()
+	defer a.captureMu.Unlock()
+	a.capturesBySession[sessionID] = &operationCapture{capture: capture}
+}
+
+// releaseCapture drops one prepared execution's association after its final
+// release. A later fact carrying that Operation resolves no capture.
+func (a *observationAdapter) releaseCapture(sessionID string, capture *nativeAdmissionCapture) {
+	if a == nil || sessionID == "" || capture == nil {
+		return
+	}
+	a.captureMu.Lock()
+	defer a.captureMu.Unlock()
+	entry := a.capturesBySession[sessionID]
+	if entry == nil || entry.capture != capture {
+		return
+	}
+	delete(a.capturesBySession, sessionID)
+}
+
+// captureForSession resolves one fact's Session capture: an admitted fact binds
+// the capture's Operation identity; a settled fact resolves it only when the
+// identities match.
+func (a *observationAdapter) captureForSession(sessionID, operationID string, settled bool) *nativeAdmissionCapture {
+	a.captureMu.Lock()
+	defer a.captureMu.Unlock()
+	entry := a.capturesBySession[sessionID]
+	if entry == nil {
+		return nil
+	}
+	if settled {
+		if entry.operationID != operationID {
+			return nil
+		}
+		return entry.capture
+	}
+	entry.operationID = operationID
+	return entry.capture
+}
+
+// observeOperationFact delivers one committed admission or terminal fact to
+// the observers of its captured activations. The committed kind, the capture
+// visibility and the activation's granted scope all filter before any
+// enqueue; an Operation with no live capture is delivered to no one.
+func (a *observationAdapter) observeOperationFact(fact harness.HarnessFact) {
+	settled := fact.Kind == harness.FactOperationSettled
+	capture := a.captureForSession(fact.SessionID, fact.OperationID, settled)
+	if capture == nil {
+		return
+	}
+	kind := extension.FactOperationAdmitted
+	if settled {
+		kind = extension.FactOperationSettled
+	}
+	value := extension.Fact{Kind: kind, SessionID: fact.SessionID, OperationID: fact.OperationID}
+	if fact.Kind == harness.FactOperationSettled {
+		value.Status = string(fact.OperationStatus)
+	}
+	for _, activation := range capture.activations {
+		if !scopeContainsSession(activation.scope, fact.SessionID, a.h) {
+			continue
+		}
+		for _, delivery := range activation.observerDeliveries() {
+			delivery.enqueue(value)
+		}
+	}
 }
 
 // observe is the Harness fact callback: one fact publishes at most one event.
@@ -354,7 +612,11 @@ func newObservationAdapter(obs *observation, warnings *warningStore) *observatio
 // publication time; a Session that is deleted, corrupt, or unestablished
 // suppresses its hint; progress events carry the Operation's scope.
 func (a *observationAdapter) observe(fact harness.HarnessFact) {
-	if a == nil {
+	switch fact.Kind {
+	case harness.FactOperationAdmitted, harness.FactOperationSettled:
+		// Committed Operation facts feed extension observers only; the client
+		// protocol keeps its Session invalidation.
+		a.observeOperationFact(fact)
 		return
 	}
 	a.obs.publish(func() []Event {

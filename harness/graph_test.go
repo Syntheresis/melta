@@ -388,7 +388,7 @@ func conversationModelEffect(resultID string) (*ActiveEffect, *RunningRequest) {
 		Purpose:       InvocationPurposeConversation,
 		Evidence:      evidence,
 	}
-	return effect, &RunningRequest{RequestID: "request-active", BoundaryEntryID: hexID(1)}
+	return effect, &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1)}
 }
 
 // toolBoundHookEffect returns a coherent tool-bound hook active effect for
@@ -433,7 +433,7 @@ func validateFixture(t *testing.T, store *graphStorage, sessionID string) (*sess
 	return validateSessionGraph(context.Background(), store, sessionID)
 }
 
-func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
+func TestEvidenceAdvertisementAndCopiedPrefix(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		names []string
@@ -441,7 +441,7 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 	}{
 		{"empty", []string{}, true},
 		{"ordered subset", []string{"echo", "other"}, true},
-		{"foreign", []string{"foreign"}, false},
+		{"stage-only definition", []string{"foreign"}, true},
 		{"reordered", []string{"other", "echo"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -449,7 +449,7 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 			tool := testToolDefinition()
 			tool.Name = "other"
 			fixture.ops[0].Admission.Execution.Tools = append(fixture.ops[0].Admission.Execution.Tools, tool)
-			fixture.entries[1].assistant.Evidence.ToolNames = tc.names
+			fixture.entries[1].assistant.Evidence.Tools = fixtureDefinitions(tc.names...)
 			_, err := validateFixture(t, fixture.storage(t), testSessionID)
 			if (err == nil) != tc.valid {
 				t.Fatalf("validate = %v, want valid %v", err, tc.valid)
@@ -461,13 +461,13 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 		names []string
 		valid bool
 	}{
-		{"active allowed", []string{"echo"}, true}, {"active foreign", []string{"foreign"}, false},
+		{"active allowed", []string{"echo"}, true}, {"active stage-only definition", []string{"foreign"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := validTestGraph()
 			fixture.entries = fixture.entries[:1]
 			effect, request := conversationModelEffect(hexID(9))
-			effect.Evidence.ToolNames = tc.names
+			effect.Evidence.Tools = fixtureDefinitions(tc.names...)
 			fixture.ops[0].State.ActiveEffect, fixture.ops[0].State.Request = effect, request
 			_, err := validateFixture(t, fixture.storage(t), testSessionID)
 			if (err == nil) != tc.valid {
@@ -483,9 +483,9 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 	fixture.entries[1].env.OperationID = ""
 	assistant := fixture.entries[1].assistant
 	assistant.OperationID = ""
-	assistant.Evidence.ToolNames = []string{"foreign"}
+	assistant.Evidence.Tools = fixtureDefinitions("foreign")
 	call := validToolCallRecord()
-	call.Name, call.ResultEntryID, call.NormalizedArguments = "foreign", hexID(4), json.RawMessage(`{"x":1}`)
+	call.Name, call.ResultEntryID = "foreign", hexID(4)
 	assistant.ToolCalls = []toolCallRecord{call}
 	result := validToolResultEntry("")
 	result.EntryID, result.AssistantEntry.EntryID = hexID(4), hexID(2)
@@ -502,36 +502,28 @@ func TestEvidenceCatalogOwnershipAndCopiedPrefix(t *testing.T) {
 	stored, err := encodeAssistantEntry(*assistant)
 	testassert.NoError(t, err)
 	for _, tc := range []struct {
-		name   string
-		detail string
-		mutate func(map[string]json.RawMessage)
+		name       string
+		advertised []string
 	}{
-		{"advertised without normalization", "advertised call", func(obj map[string]json.RawMessage) {
-			var calls []map[string]json.RawMessage
-			testassert.NoError(t, json.Unmarshal(obj["tool_calls"], &calls))
-			delete(calls[0], "normalized_arguments_base64")
-			obj["tool_calls"] = mustMarshal(calls)
-		}},
-		{"unadvertised with normalization", "unadvertised call", func(obj map[string]json.RawMessage) {
-			evidence := wireObject(t, obj["evidence"])
-			evidence["tool_names"] = mustMarshal([]string{"echo"})
-			obj["evidence"] = mustMarshal(evidence)
-		}},
+		{"advertised", []string{"foreign"}},
+		{"unadvertised", []string{"echo"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			obj := wireObject(t, stored)
-			tc.mutate(obj)
+			evidence := wireObject(t, obj["evidence"])
+			raw, err := encodeRequestTools(fixtureDefinitions(tc.advertised...))
+			testassert.NoError(t, err)
+			evidence["tools"] = raw
+			obj["evidence"] = mustMarshal(evidence)
 			fixture.entries[1].rawOverride = mustMarshal(obj)
-			_, err := validateFixture(t, fixture.storage(t), testSessionID)
-			if err == nil || !strings.Contains(err.Error(), tc.detail) {
-				t.Fatalf("copied normalization violation = %v", err)
-			}
+			_, err = validateFixture(t, fixture.storage(t), testSessionID)
+			testassert.NoError(t, err)
 		})
 	}
 }
 
-func TestEvidenceCatalogForCommittedOwners(t *testing.T) {
-	for _, owner := range []string{"hook", "checkpoint", "settlement"} {
+func TestEvidenceAdvertisementForCommittedOwners(t *testing.T) {
+	for _, owner := range []string{"hook", "settlement"} {
 		for _, foreign := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/foreign=%v", owner, foreign), func(t *testing.T) {
 				fixture := validTestGraph()
@@ -543,36 +535,33 @@ func TestEvidenceCatalogForCommittedOwners(t *testing.T) {
 				case "hook":
 					hook := validRequestBoundHookResult(hookSucceeded)
 					hook.EntryID, hook.RequestID = hexID(3), "request-one"
-					hook.InputEvidence.ToolNames = names
+					hook.InputEvidence.Tools = fixtureDefinitions(names...)
 					assistant := fixture.entries[1]
 					assistant.env.Sequence = 3
 					assistant.assistant.RequestID = "request-one"
 					assistant.assistant.Evidence.HookIDs = []HookIdentity{{ExtensionID: hook.ExtensionID, HookID: hook.HookID}}
 					fixture.entries = []testEntry{fixture.entries[0], {env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryHookResult, Sequence: 2, CommittedAt: testTime}, hookResult: &hook}, assistant}
-				case "checkpoint":
-					comp := validCompactionEntry(testOpID)
-					comp.EntryID = hexID(5)
-					comp.Evidence.ToolNames = names
-					fixture.entries = append(fixture.entries, testEntry{env: Entry{SessionID: testSessionID, ID: hexID(5), OperationID: testOpID, Kind: EntryCompaction, Sequence: 3, CommittedAt: testTime}, compaction: &comp})
-					fixture.session.State.CheckpointEntryID = hexID(5)
 				case "settlement":
 					settlement := validSettlementEntry()
 					settlement.EntryID = hexID(3)
 					settlement.RequestID = "settled-request"
-					settlement.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1), ToolNames: names}
+					settlement.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1), Tools: fixtureDefinitions(names...)}
 					fixture.entries = append(fixture.entries, testEntry{env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryOperationSettlement, Sequence: 3, CommittedAt: testTime}, settlement: &settlement})
 					stamp := testTime
 					fixture.ops[0].State.Status, fixture.ops[0].State.SettledAt = OperationSuccess, &stamp
 					fixture.ops[0].State.Terminal = &OperationTerminal{SettlementEntry: EntryRef{SessionID: testSessionID, EntryID: hexID(3)}}
 					fixture.session.State.CurrentOperationID = ""
 				}
-				_, err := validateFixture(t, fixture.storage(t), testSessionID)
-				if foreign && (err == nil || !strings.Contains(err.Error(), "evidence tool name")) {
-					t.Fatalf("foreign names: %v", err)
+				graph, err := validateFixture(t, fixture.storage(t), testSessionID)
+				testassert.NoError(t, err)
+				committed := graph.Entries[2]
+				var evidence *RequestEvidence
+				if owner == "hook" {
+					evidence = graph.Entries[1].HookResult.InputEvidence
+				} else {
+					evidence = committed.Settlement.Evidence
 				}
-				if !foreign && err != nil {
-					t.Fatalf("valid names: %v", err)
-				}
+				testassert.Equal(t, evidence.Tools[0].Name, names[0])
 			})
 		}
 	}
@@ -726,6 +715,9 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 		result.Status = model.ResultInterrupted
 		result.Content = "agent interrupted"
 		result.OriginalContent = "agent interrupted"
+		result.Evidence = ExecutionNotStarted
+		result.Implementation = nil
+		result.NormalizedArguments = nil
 		fixture.entries = append(fixture.entries,
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(5), OperationID: testOpID, Kind: EntryHookResult, Sequence: 3, CommittedAt: testTime}, hookResult: &hook},
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryToolResult, Sequence: 4, CommittedAt: testTime}, toolResult: &result},
@@ -743,7 +735,7 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 			env: Entry{SessionID: testSessionID, ID: hexID(5), OperationID: testOpID, Kind: EntryCompaction, Sequence: 3, CommittedAt: testTime}, compaction: &comp,
 		})
 		fixture.session.State.CheckpointEntryID = hexID(5)
-		fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(5)}
+		fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(5)}
 		if _, err := validateFixture(t, fixture.storage(t), testSessionID); err != nil {
 			t.Fatalf("summary-only running request boundary: %v", err)
 		}
@@ -760,7 +752,7 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(6), OperationID: testOpID, Kind: EntrySignal, Sequence: 4, CommittedAt: testTime}, signal: &signal},
 		)
 		fixture.session.State.CheckpointEntryID = hexID(5)
-		fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(6)}
+		fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(6)}
 		if _, err := validateFixture(t, fixture.storage(t), testSessionID); err != nil {
 			t.Fatalf("later canonical tail boundary: %v", err)
 		}
@@ -779,7 +771,6 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 		fixture.ops = append(fixture.ops, second)
 		comp := validCompactionEntry("op-2")
 		comp.EntryID = hexID(3)
-		comp.ConsumedRequestID = "" // the dedicated compact Operation's own maintenance carries no conversation source
 		settlement := validSettlementEntry()
 		settlement.EntryID = hexID(4)
 		settlement.OperationID = "op-2"
@@ -943,6 +934,7 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 		firstResult.EntryID = hexID(4)
 		firstResult.AssistantEntry = EntryRef{SessionID: testSessionID, EntryID: hexID(2)}
 		firstResult.ToolCallID = "c"
+		firstResult.HookIDs = []HookIdentity{{ExtensionID: one.ExtensionID, HookID: one.HookID}}
 		fixture.entries = append(fixture.entries,
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryHookResult, Sequence: 3, CommittedAt: testTime}, hookResult: &one},
 			testEntry{env: Entry{SessionID: testSessionID, ID: hexID(4), OperationID: testOpID, Kind: EntryToolResult, Sequence: 4, CommittedAt: testTime}, toolResult: &firstResult},
@@ -1721,7 +1713,7 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 			fixture.entries = append(fixture.entries, testEntry{
 				env: Entry{SessionID: testSessionID, ID: hexID(4), OperationID: testOpID, Kind: EntryHookResult, Sequence: 4, CommittedAt: testTime}, hookResult: &failed,
 			})
-			fixture.ops[0].State.ActiveEffect = &ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{"x":1}`)}
+			fixture.ops[0].State.ActiveEffect = &ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{"x":1}`), Implementation: &ToolImplementation{ID: "echo"}}
 		}},
 		{"interrupted hook with an error tool result", func(t *testing.T, fixture *testGraph) {
 			assistant := validAssistantEntry(testOpID)
@@ -1908,10 +1900,10 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 		}},
 		{"active request hook names itself in its consumed provenance", func(t *testing.T, fixture *testGraph) {
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
-				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.two", ExtensionID: "ext.two", RequestID: "request-active",
+				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.two", ExtensionID: "ext.two", RequestID: "request-active", Purpose: InvocationPurposeConversation,
 				Evidence: &RequestEvidence{BoundaryEntryID: hexID(1), HookIDs: []HookIdentity{{ExtensionID: "ext.two", HookID: "cap.hook.two"}}},
 			}
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", BoundaryEntryID: hexID(1)}
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1)}
 		}},
 		{"active request hook provenance omits a committed request hook", func(t *testing.T, fixture *testGraph) {
 			hook := validRequestBoundHookResult(hookSucceeded)
@@ -1921,10 +1913,10 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 				env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryHookResult, Sequence: 2, CommittedAt: testTime}, hookResult: &hook,
 			})
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
-				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.two", ExtensionID: "ext.two", RequestID: "request-one",
+				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.two", ExtensionID: "ext.two", RequestID: "request-one", Purpose: InvocationPurposeConversation,
 				Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)},
 			}
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-one", BoundaryEntryID: hexID(1), HookResults: []EntryRef{{SessionID: testSessionID, EntryID: hexID(3)}}}
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-one", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1), HookResults: []EntryRef{{SessionID: testSessionID, EntryID: hexID(3)}}}
 		}},
 		{"running request hook results reference committed hooks out of order", func(t *testing.T, fixture *testGraph) {
 			first := validRequestBoundHookResult(hookSucceeded)
@@ -1940,10 +1932,10 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 				testEntry{env: Entry{SessionID: testSessionID, ID: hexID(4), OperationID: testOpID, Kind: EntryHookResult, Sequence: 3, CommittedAt: testTime}, hookResult: &second},
 			)
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
-				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.three", ExtensionID: "ext.three", RequestID: "request-one",
+				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.three", ExtensionID: "ext.three", RequestID: "request-one", Purpose: InvocationPurposeConversation,
 				Evidence: &RequestEvidence{BoundaryEntryID: hexID(1), HookIDs: []HookIdentity{{ExtensionID: "ext.one", HookID: "cap.hook.one"}, {ExtensionID: "ext.one", HookID: "cap.hook.two"}}},
 			}
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-one", BoundaryEntryID: hexID(1), HookResults: []EntryRef{{SessionID: testSessionID, EntryID: hexID(4)}, {SessionID: testSessionID, EntryID: hexID(3)}}}
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-one", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1), HookResults: []EntryRef{{SessionID: testSessionID, EntryID: hexID(4)}, {SessionID: testSessionID, EntryID: hexID(3)}}}
 		}},
 		{"settled request evidence names a hook result committed later", func(t *testing.T, fixture *testGraph) {
 			stamped := testTime
@@ -2029,6 +2021,7 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
 				Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1",
 				FinalArguments: json.RawMessage(`{"x":1}`),
+				Implementation: &ToolImplementation{ID: "echo"},
 			}
 		}},
 		{"tool result provenance names a hook effect committed after the result", func(t *testing.T, fixture *testGraph) {
@@ -2076,6 +2069,7 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
 				Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1",
 				FinalArguments:  json.RawMessage(`{"x":1}`),
+				Implementation:  &ToolImplementation{ID: "echo"},
 				ContributionIDs: []HookIdentity{{ExtensionID: "ext.one", HookID: "cap.hook.two"}, {ExtensionID: "ext.one", HookID: "cap.hook.one"}},
 			}
 		}},
@@ -2086,7 +2080,7 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 				env: Entry{SessionID: testSessionID, ID: hexID(5), OperationID: testOpID, Kind: EntryCompaction, Sequence: 3, CommittedAt: testTime}, compaction: &comp,
 			})
 			fixture.session.State.CheckpointEntryID = hexID(5)
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)}
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)}
 		}},
 		{"active request hook effect references a boundary its checkpoint covered", func(t *testing.T, fixture *testGraph) {
 			comp := validCompactionEntry(testOpID)
@@ -2096,18 +2090,10 @@ func TestGraphValidatorSurfacesCorruption(t *testing.T) {
 			})
 			fixture.session.State.CheckpointEntryID = hexID(5)
 			fixture.ops[0].State.ActiveEffect = &ActiveEffect{
-				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.one", ExtensionID: "ext.one", RequestID: "request-active",
+				Kind: EffectHook, ResultEntryID: hexID(9), HookID: "cap.hook.one", ExtensionID: "ext.one", RequestID: "request-active", Purpose: InvocationPurposeConversation,
 				Evidence: &RequestEvidence{CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)},
 			}
-			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)}
-		}},
-		{"automatic maintenance record names no consumed conversation request", func(t *testing.T, fixture *testGraph) {
-			comp := validCompactionEntry(testOpID)
-			comp.EntryID = hexID(3)
-			comp.ConsumedRequestID = ""
-			fixture.entries = append(fixture.entries, testEntry{
-				env: Entry{SessionID: testSessionID, ID: hexID(3), OperationID: testOpID, Kind: EntryCompaction, Sequence: 3, CommittedAt: testTime}, compaction: &comp,
-			})
+			fixture.ops[0].State.Request = &RunningRequest{RequestID: "request-active", Purpose: InvocationPurposeConversation, CheckpointEntryID: hexID(5), BoundaryEntryID: hexID(1)}
 		}},
 	}
 	// The input-ownership rows share ONE generic typed-corruption diagnostic:
@@ -2382,7 +2368,7 @@ func TestGraphValidatorBackgroundCompletionOwnership(t *testing.T) {
 
 	t.Run("child with operationless completion validates", func(t *testing.T) {
 		fixture := &testGraph{session: validSessionRecord()}
-		fixture.session.Identity.ParentSessionID = otherSession()
+		fixture.session.Identity.OwnerSessionID = otherSession()
 		fixture.entries = []testEntry{completion(hexID(9), 1)}
 		{
 			_, err := validateFixture(t, fixture.storage(t), testSessionID)
@@ -2403,7 +2389,7 @@ func TestGraphValidatorBackgroundCompletionOwnership(t *testing.T) {
 
 	t.Run("operationless fixed-kind signal on a child corrupts", func(t *testing.T) {
 		fixture := &testGraph{session: validSessionRecord()}
-		fixture.session.Identity.ParentSessionID = otherSession()
+		fixture.session.Identity.OwnerSessionID = otherSession()
 		copied := validSignalEntry("")
 		copied.EntryID = hexID(9)
 		fixture.entries = []testEntry{
@@ -2717,10 +2703,17 @@ func TestForkCopyCompactionEntries(t *testing.T) {
 		}
 		testassert.Equal(t, len(copiedCompactions), 2)
 		testassert.Require(t, copiedCompactionIDs[0] != hexID(3) && copiedCompactionIDs[1] != hexID(4), "copied compaction identities %v are not both fresh", copiedCompactionIDs)
+		copiedIDs := make(map[string]bool, len(commit.entries))
+		for i := range commit.entries {
+			copiedIDs[commit.entries[i].Envelope.ID] = true
+		}
 		for i, v := range copiedCompactions {
 			testassert.Require(t, v.SessionID == destID && v.EntryID == copiedCompactionIDs[i], "copied compaction identity %s/%s, want destination identities", v.SessionID, v.EntryID)
-			testassert.Require(t, v.ConsumedRequestID == "request-two", "copied compaction %s consumed source = %q, want the source identity carried unchanged and informational", v.EntryID, v.ConsumedRequestID)
 			testassert.Equal(t, v.OperationID, "")
+			testassert.Require(t, v.Evidence != nil && copiedIDs[v.Evidence.BoundaryEntryID], "copied compaction evidence = %+v, want a destination-local boundary reference", v.Evidence)
+			if v.Evidence.CheckpointEntryID != "" {
+				testassert.Require(t, copiedIDs[v.Evidence.CheckpointEntryID], "copied compaction evidence = %+v, want a destination-local checkpoint reference", v.Evidence)
+			}
 			for _, fact := range v.Facts {
 				if fact.Usage != nil {
 					t.Fatalf("copied compaction carries source usage %+v", *fact.Usage)

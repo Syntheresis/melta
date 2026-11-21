@@ -268,13 +268,13 @@ function rows(prefix: string, count: number, kind0: 'add' | 'remove' | 'same' = 
   }));
 }
 
-describe('Conversation apply_patch multi-file preview', () => {
+describe('Conversation multi-file preview metadata', () => {
   const applyPatchItems = [
     {
       item_id: 'a1', kind: 'assistant', committed_at: '0', status: 'completed', source: 'p/m',
       content: [{ kind: 'text', text: 'patched three files' }],
       tool_calls: [{
-        id: 'call-patch', name: 'apply_patch', arguments: '{}', status: 'success', content: '',
+        id: 'call-patch', name: 'model_patch', arguments: '{}', status: 'success', content: '',
         metadata: {
           edit_preview_files: [
             { path: 'a.go', op: 'A', preview: { hunks: [{ rows: rows('added', 7) }] } },

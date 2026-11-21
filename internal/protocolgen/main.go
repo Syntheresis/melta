@@ -68,6 +68,9 @@ type operation struct {
 	method        string
 	session       string
 	sessionType   string
+	operation     string
+	operationName string
+	operationType string
 	field         string
 	fieldType     string
 	query         string
@@ -397,13 +400,14 @@ func isDigits(value string) bool {
 // a body must be exactly one required application/json object.
 func projectOperation(definition codegen.OperationDefinition, name string, status int) (operation, error) {
 	op := operation{
-		id:      name,
-		method:  definition.OperationId,
-		status:  status,
-		session: modeForbidden,
-		field:   modeForbidden,
-		query:   modeForbidden,
-		body:    modeForbidden,
+		id:        name,
+		method:    definition.OperationId,
+		status:    status,
+		session:   modeForbidden,
+		operation: modeForbidden,
+		field:     modeForbidden,
+		query:     modeForbidden,
+		body:      modeForbidden,
 	}
 	if len(definition.HeaderParams) != 0 {
 		return operation{}, fmt.Errorf("declares %d header parameters, want none", len(definition.HeaderParams))
@@ -432,8 +436,30 @@ func projectOperation(definition codegen.OperationDefinition, name string, statu
 		} else {
 			return operation{}, fmt.Errorf("path parameter %q has no supported addressing", parameter.ParamName)
 		}
+	case 2:
+		for _, parameter := range definition.PathParams {
+			schema := parameter.Schema.OAPISchema
+			if schema == nil || schema.Type == nil || !schema.Type.Is("string") {
+				return operation{}, fmt.Errorf("path parameter %q is not the string type", parameter.ParamName)
+			}
+			emitted, err := pathType(parameter.Schema.TypeDecl())
+			if err != nil {
+				return operation{}, fmt.Errorf("path parameter %q: %w", parameter.ParamName, err)
+			}
+			switch parameter.ParamName {
+			case "id":
+				op.session = modeRequired
+				op.sessionType = emitted
+			case "operation_id":
+				op.operation = modeRequired
+				op.operationName = parameter.ParamName
+				op.operationType = emitted
+			default:
+				return operation{}, fmt.Errorf("path parameter %q has no supported addressing", parameter.ParamName)
+			}
+		}
 	default:
-		return operation{}, fmt.Errorf("declares %d path parameters, want at most one", len(definition.PathParams))
+		return operation{}, fmt.Errorf("declares %d path parameters, want at most two", len(definition.PathParams))
 	}
 	for _, parameter := range definition.QueryParams {
 		schema := parameter.Schema.OAPISchema
@@ -528,6 +554,9 @@ var operationDescriptors = map[string]descriptor{
 {{- if .Session}}
 		session: memberRequired,
 {{- end}}
+{{- if .Operation}}
+		operation: memberRequired,
+{{- end}}
 {{- if .Field}}
 		field: memberRequired,
 {{- end}}
@@ -541,6 +570,9 @@ var operationDescriptors = map[string]descriptor{
 		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
 {{- if .Session}}
 			pathValue := {{.SessionType}}(env.session)
+{{- end}}
+{{- if .Operation}}
+			operationValue := {{.OperationType}}(env.operation)
 {{- end}}
 {{- if .Field}}
 			pathValue := {{.FieldType}}(env.field)
@@ -571,6 +603,8 @@ type armView struct {
 	ID            string
 	Session       bool
 	SessionType   string
+	Operation     bool
+	OperationType string
 	Field         bool
 	FieldType     string
 	Query         bool
@@ -594,16 +628,18 @@ func renderSource(operations []operation) ([]byte, error) {
 	data := sourceData{Imports: len(operations) != 0}
 	for _, op := range operations {
 		view := armView{
-			ID:          op.id,
-			Session:     op.session != modeForbidden,
-			SessionType: op.sessionType,
-			Field:       op.field != modeForbidden,
-			FieldType:   op.fieldType,
-			Query:       op.query != modeForbidden,
-			QueryType:   op.method + "Params",
-			Body:        op.body != modeForbidden,
-			Status:      op.status,
-			Call:        callExpression(op),
+			ID:            op.id,
+			Session:       op.session != modeForbidden,
+			SessionType:   op.sessionType,
+			Operation:     op.operation != modeForbidden,
+			OperationType: op.operationType,
+			Field:         op.field != modeForbidden,
+			FieldType:     op.fieldType,
+			Query:         op.query != modeForbidden,
+			QueryType:     op.method + "Params",
+			Body:          op.body != modeForbidden,
+			Status:        op.status,
+			Call:          callExpression(op),
 		}
 		view.QueryOptional = op.query == modeOptional
 		if len(op.queryRequired) != 0 {
@@ -643,6 +679,9 @@ func callExpression(op operation) string {
 	if op.session != modeForbidden || op.field != modeForbidden {
 		arguments = append(arguments, "pathValue")
 	}
+	if op.operation != modeForbidden {
+		arguments = append(arguments, "operationValue")
+	}
 	if op.query != modeForbidden {
 		arguments = append(arguments, "&query")
 	}
@@ -660,9 +699,12 @@ type contractMember struct {
 	Type     string `json:"type"`
 }
 
-// contractOperation is one operation's published contract.
+// contractOperation is one operation's published contract; the path
+// parameter's own name is the dynamic member key.
 type contractOperation struct {
 	SessionID    string                    `json:"session_id"`
+	Operation    string                    `json:"operation"`
+	OperationKey string                    `json:"-"`
 	Field        string                    `json:"field"`
 	Query        string                    `json:"query"`
 	Body         string                    `json:"body"`
@@ -673,19 +715,25 @@ type contractOperation struct {
 // one entry per native operation, keyed by native operation ID, with sorted
 // keys and no stream entry.
 func renderContract(operations []operation) ([]byte, error) {
-	doc := make(map[string]contractOperation, len(operations))
+	doc := make(map[string]map[string]any, len(operations))
 	for _, op := range operations {
 		members := make(map[string]contractMember, len(op.queryMembers))
 		for _, member := range op.queryMembers {
 			members[member.name] = contractMember{Required: member.required, Type: member.kind}
 		}
-		doc[op.id] = contractOperation{
-			SessionID:    op.session,
-			Field:        op.field,
-			Query:        op.query,
-			Body:         op.body,
-			QueryMembers: members,
+		entry := map[string]any{
+			"session_id":    op.session,
+			"field":         op.field,
+			"query":         op.query,
+			"body":          op.body,
+			"query_members": members,
 		}
+		if op.operation != modeForbidden {
+			entry[op.operationName] = op.operation
+		} else {
+			entry["operation_id"] = modeForbidden
+		}
+		doc[op.id] = entry
 	}
 	rendered, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

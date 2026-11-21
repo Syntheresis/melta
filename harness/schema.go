@@ -109,28 +109,34 @@ type HookIdentity struct {
 
 // RequestEvidence is the one closed request-evidence value: the canonical
 // boundary/checkpoint references of the projection actually consumed at that
-// boundary, concrete effective prompt and tool names, request-only additions,
-// and contributing hook identities in order. Unchanged history is referenced,
-// never copied.
+// boundary, effective prompt, ordered message edits and advertised definitions,
+// body parameters, and contributing hook identities. Unchanged conversation
+// history is referenced, never copied.
 type RequestEvidence struct {
-	CheckpointEntryID string          `json:"checkpoint_entry_id,omitempty"`
-	BoundaryEntryID   string          `json:"boundary_entry_id"`
-	Prompt            string          `json:"prompt"`
-	Messages          []model.Message `json:"messages,omitempty"`
-	ToolNames         []string        `json:"tool_names"`
-	HookIDs           []HookIdentity  `json:"hook_ids,omitempty"`
+	CheckpointEntryID string         `json:"checkpoint_entry_id,omitempty"`
+	BoundaryEntryID   string         `json:"boundary_entry_id"`
+	Prompt            string         `json:"prompt"`
+	HookIDs           []HookIdentity `json:"hook_ids,omitempty"`
+	Edits             []RequestMessageEdit
+	Tools             []model.ToolDefinition
+	Parameters        model.Extra
+	SummaryBase       []model.Message
+	SummaryInput      []model.Message
 }
 
-// RunningRequest is the one suspended conversation request state: the request
-// identity bound before contributions, the frozen canonical
-// boundary/checkpoint references, and the committed effectful request-hook
+// RunningRequest is the one suspended request state: the request identity
+// bound before contributions, the frozen canonical
+// boundary/checkpoint references of the projection or strategy request that
+// request is shaping, and the committed effectful request-hook
 // result references in commit order. It is published and advanced only inside
-// existing effect/checkpoint transactions.
+// existing effect/checkpoint transactions; a conversation request and a
+// maintenance summary request both use this one slot.
 type RunningRequest struct {
-	RequestID         string     `json:"request_id"`
-	CheckpointEntryID string     `json:"checkpoint_entry_id,omitempty"`
-	BoundaryEntryID   string     `json:"boundary_entry_id"`
-	HookResults       []EntryRef `json:"hook_results,omitempty"`
+	RequestID         string            `json:"request_id"`
+	Purpose           InvocationPurpose `json:"purpose"`
+	CheckpointEntryID string            `json:"checkpoint_entry_id,omitempty"`
+	BoundaryEntryID   string            `json:"boundary_entry_id"`
+	HookResults       []EntryRef        `json:"hook_results,omitempty"`
 }
 
 // operationRef addresses one Operation of one Session. It is a codec value
@@ -214,16 +220,11 @@ func (p *ModelPricing) Clone() *ModelPricing {
 // ExecutionCapture is the complete non-secret configuration required to
 // interpret one Operation: the stable configuration revision, the complete
 // model identity, the system prompt, the advertised tool definitions in
-// preserved order, the selected capability names in preserved order, the
-// Agent definition's permission capability constraints, and the compaction
-// configuration — the effective compact model's selection and its prompt.
-// Pricing is the captured conversation model's rates; absence means the
-// model's pricing was unknown. Readonly and WriteDir
-// are the configured lexical constraint copied from the one Harness-selected
-// definition; WriteDir is already trimmed at projection and stays unchanged in
-// the capture. The captured ConfigurationRevision also identifies the
-// governing permission policy; no rules are durable. Capability names are
-// validated for shape only: no plugin is loaded to read a historical capture.
+// preserved order, and the compaction configuration — the effective compact
+// model's selection and its prompt. Pricing is the captured conversation
+// model's rates; absence means the model's pricing was unknown. The captured
+// ConfigurationRevision also identifies the governing permission policy; no
+// rules are durable.
 // No resolved secret, callback, permission representation, retry policy or
 // executable value is durable; implementation provenance retains only the
 // extension identity/version and its non-secret captured section bytes.
@@ -239,9 +240,6 @@ type ExecutionCapture struct {
 	// present empty list means none. The canonical durable payload always
 	// carries the materialized array.
 	InitialToolNames []string                `json:"initial_tool_names"`
-	Capabilities     []string                `json:"capabilities,omitempty"`
-	Readonly         bool                    `json:"readonly"`
-	WriteDir         string                  `json:"write_dir"`
 	Pricing          *ModelPricing           `json:"pricing,omitempty"`
 	Compact          CompactCapture          `json:"compact"`
 	Strategy         StrategyCapture         `json:"strategy"`
@@ -252,9 +250,10 @@ type ExecutionCapture struct {
 // implementation that participated in this execution: the implementing
 // extension root, its implementation version, and its captured section bytes.
 type ImplementationCapture struct {
-	ExtensionID string          `json:"extension_id"`
-	Version     string          `json:"version"`
-	Settings    json.RawMessage `json:"settings,omitempty"`
+	ExtensionID string            `json:"extension_id"`
+	Version     string            `json:"version"`
+	Settings    json.RawMessage   `json:"settings,omitempty"`
+	State       SessionStateValue `json:"state,omitempty"`
 }
 
 // StrategyCapture is the resolved selected context-strategy input of one
@@ -281,14 +280,14 @@ type CompactCapture struct {
 
 // SessionIdentity is the immutable identity section of one Session register.
 // A root omits every lineage field; a fork requires both source fields; a
-// child carries parent_session_id and neither source field.
+// an owned Session carries owner_session_id and neither source field.
 type SessionIdentity struct {
 	SessionID             string    `json:"session_id"`
 	Workspace             string    `json:"workspace"`
 	CreatedAt             time.Time `json:"created_at"`
 	SourceSessionID       string    `json:"source_session_id,omitempty"`
 	SourceBoundaryEntryID string    `json:"source_boundary_entry_id,omitempty"`
-	ParentSessionID       string    `json:"parent_session_id,omitempty"`
+	OwnerSessionID        string    `json:"owner_session_id,omitempty"`
 }
 
 // SessionState is the mutable state section of one Session register.
@@ -297,13 +296,14 @@ type SessionIdentity struct {
 // checkpoint entry whose messages define the model-visible context. ArchivedAt is
 // present exactly when the lifecycle is archived.
 type SessionState struct {
-	Lifecycle          SessionLifecycle `json:"lifecycle"`
-	ArchivedAt         *time.Time       `json:"archived_at,omitempty"`
-	AgentSelection     AgentSelection   `json:"agent_selection"`
-	CurrentOperationID string           `json:"current_operation_id,omitempty"`
-	CheckpointEntryID  string           `json:"checkpoint_entry_id,omitempty"`
-	Usage              UsageTotals      `json:"usage"`
-	LastActivity       time.Time        `json:"last_activity"`
+	Lifecycle          SessionLifecycle             `json:"lifecycle"`
+	ArchivedAt         *time.Time                   `json:"archived_at,omitempty"`
+	Inputs             SessionInputs                `json:"inputs"`
+	ExtensionState     map[string]SessionStateValue `json:"extension_state"`
+	CurrentOperationID string                       `json:"current_operation_id,omitempty"`
+	CheckpointEntryID  string                       `json:"checkpoint_entry_id,omitempty"`
+	Usage              UsageTotals                  `json:"usage"`
+	LastActivity       time.Time                    `json:"last_activity"`
 
 	// ExternalDataOwners is the ordered unique set of installed extension IDs
 	// that durably claimed external data for this Session. Fork copies leave
@@ -321,15 +321,15 @@ type SessionRecord struct {
 }
 
 // OperationAdmission is the immutable admission section of one Operation
-// register. It is the sole durable Agent-type field for its Operation.
+// register: the admitted Session choices and the effective execution capture.
 type OperationAdmission struct {
-	SessionID      string           `json:"session_id"`
-	OperationID    string           `json:"operation_id"`
-	RequestKind    RequestKind      `json:"request_kind"`
-	AdmittedEntry  EntryRef         `json:"admitted_entry"`
-	AgentSelection AgentSelection   `json:"agent_selection"`
-	Execution      ExecutionCapture `json:"execution"`
-	AdmittedAt     time.Time        `json:"admitted_at"`
+	SessionID     string           `json:"session_id"`
+	OperationID   string           `json:"operation_id"`
+	RequestKind   RequestKind      `json:"request_kind"`
+	AdmittedEntry EntryRef         `json:"admitted_entry"`
+	Inputs        SessionInputs    `json:"inputs"`
+	Execution     ExecutionCapture `json:"execution"`
+	AdmittedAt    time.Time        `json:"admitted_at"`
 }
 
 // ActiveEffect names the one in-flight effect of a running Operation and the
@@ -337,10 +337,10 @@ type OperationAdmission struct {
 // actual model, and purpose; a conversation model effect also carries the
 // effective request evidence it consumes, a maintenance effect never does. A
 // tool effect requires the tool-call ID, addresses the matching first pending
-// call, and carries the accepted normalized selection plus the contributing
-// argument-hook provenance. A hook effect carries its extension and hook
-// identities plus its consumed input under exactly one binding: the tool-call
-// ID of the first pending call it runs for, or the request identity of a
+// call, and carries the bound implementation, accepted normalized selection,
+// and contributing argument-hook provenance. A hook effect carries its
+// extension and hook identities plus its consumed input under exactly one
+// binding: the tool-call ID of the first pending call, or the request identity of a
 // request-bound hook.
 type ActiveEffect struct {
 	Kind          EffectKind `json:"kind"`
@@ -348,14 +348,21 @@ type ActiveEffect struct {
 	ToolCallID    string     `json:"tool_call_id,omitempty"`
 	HookID        string     `json:"hook_id,omitempty"`
 
-	RequestID            string            `json:"request_id,omitempty"`
-	Model                *model.ModelRef   `json:"model,omitempty"`
-	Purpose              InvocationPurpose `json:"purpose,omitempty"`
-	Evidence             *RequestEvidence  `json:"evidence,omitempty"`
-	ExtensionID          string            `json:"hook_extension_id,omitempty"`
-	InputArgumentsBase64 string            `json:"input_arguments_base64,omitempty"`
-	FinalArguments       json.RawMessage   `json:"final_arguments,omitempty"`
-	ContributionIDs      []HookIdentity    `json:"hook_ids,omitempty"`
+	RequestID            string              `json:"request_id,omitempty"`
+	Model                *model.ModelRef     `json:"model,omitempty"`
+	Purpose              InvocationPurpose   `json:"purpose,omitempty"`
+	Evidence             *RequestEvidence    `json:"evidence,omitempty"`
+	ExtensionID          string              `json:"hook_extension_id,omitempty"`
+	InputArgumentsBase64 string              `json:"input_arguments_base64,omitempty"`
+	FinalArguments       json.RawMessage     `json:"final_arguments,omitempty"`
+	ContributionIDs      []HookIdentity      `json:"hook_ids,omitempty"`
+	Implementation       *ToolImplementation `json:"implementation,omitempty"`
+}
+
+// ToolImplementation identifies the bound host tool or extension capability.
+type ToolImplementation struct {
+	ID          string `json:"id"`
+	ExtensionID string `json:"extension_id,omitempty"`
 }
 
 // PendingToolCall is one unresolved published tool call: the assistant entry
@@ -378,10 +385,11 @@ type OperationTerminal struct {
 // OperationCurrentState is the mutable state section of one Operation
 // register. Running forbids the settlement time and terminal section;
 // terminal states require both and forbid active and pending effects.
-// Request, when present, is the one suspended conversation request state
-// published with the first existing effect/checkpoint transition and cleared
-// at the conversation result without a pending batch, the final pending tool
-// result, or the terminal settlement. UnreportedMaintenance records the
+// Request, when present, is the one suspended request state published with
+// the first existing effect transition and cleared when its request settles
+// without a pending batch, at the final pending tool result, or at the
+// terminal settlement. A conversation request and a maintenance summary
+// request in flight share this one slot. UnreportedMaintenance records the
 // knowledge that a completed maintenance model intent's facts are not yet
 // durably recorded: set when the empty running result clears a completed
 // maintenance intent, preserved across every later transition and recovery,
@@ -428,20 +436,13 @@ type inputEntry struct {
 
 // toolCallRecord is one published assistant tool call: opaque call identity,
 // zero-based ordinal, raw base64 arguments, and the reserved result entry.
-// Exactly one of NormalizedArguments and NormalizationFailure is present for
-// an advertised call and neither for an unadvertised one: the successful
-// normalization of the original, or the bounded failure diagnostic its one
-// normalization produced, both committed by the producer. Later dispatch
-// consumes the committed member and never normalizes the original again.
 type toolCallRecord struct {
-	ID                   string          `json:"id"`
-	Ordinal              int64           `json:"ordinal"`
-	Name                 string          `json:"name"`
-	ArgumentsBase64      string          `json:"arguments_base64"`
-	Extra                model.Extra     `json:"extra,omitempty"`
-	NormalizedArguments  json.RawMessage `json:"normalized_arguments,omitempty"`
-	NormalizationFailure string          `json:"normalization_failure,omitempty"`
-	ResultEntryID        string          `json:"result_entry_id"`
+	ID              string      `json:"id"`
+	Ordinal         int64       `json:"ordinal"`
+	Name            string      `json:"name"`
+	ArgumentsBase64 string      `json:"arguments_base64"`
+	Extra           model.Extra `json:"extra,omitempty"`
+	ResultEntryID   string      `json:"result_entry_id"`
 }
 
 // assistantEntry is one finalized model output: status, complete source
@@ -491,6 +492,7 @@ type toolResultEntry struct {
 	Metadata            json.RawMessage        `json:"metadata,omitempty"`
 	NormalizedArguments json.RawMessage        `json:"normalized_arguments,omitempty"`
 	HookIDs             []HookIdentity         `json:"hook_ids,omitempty"`
+	Implementation      *ToolImplementation    `json:"implementation,omitempty"`
 }
 
 // hookResultStatus is the closed status of one settled effectful hook
@@ -510,9 +512,10 @@ const (
 // never both. Every entry carries the extension and hook identities, the
 // consumed input evidence the hook actually received before I/O, and the
 // execution knowledge independently of status. A successful tool-bound result
-// carries the one normalized replacement object; a successful request-bound
-// result carries the closed consequence (an empty consequence is a valid
-// no-op); every other status carries a non-empty error and no consequence.
+// carries its raw consequence bytes or the refusal that denied the call; a
+// successful request-bound result carries the closed consequence (an empty
+// consequence is a valid no-op); every other status carries a non-empty error
+// and no consequence.
 type hookResultEntry struct {
 	SessionID   string            `json:"session_id"`
 	EntryID     string            `json:"entry_id"`
@@ -521,9 +524,11 @@ type hookResultEntry struct {
 	ExtensionID string            `json:"extension_id"`
 	ToolCallID  string            `json:"tool_call_id,omitempty"`
 	RequestID   string            `json:"request_id,omitempty"`
+	Purpose     InvocationPurpose `json:"purpose,omitempty"`
 	Status      hookResultStatus  `json:"status"`
 	Evidence    ExecutionEvidence `json:"evidence"`
 	Arguments   json.RawMessage   `json:"arguments,omitempty"`
+	Refusal     string            `json:"refusal,omitempty"`
 	Error       string            `json:"error,omitempty"`
 
 	InputArgumentsBase64 string              `json:"input_arguments_base64,omitempty"`
@@ -560,10 +565,12 @@ type signalEntry struct {
 // settle once on the successful checkpoint or on the terminal settlement,
 // never both.
 type maintenanceFact struct {
-	RequestID string          `json:"request_id"`
-	Model     model.ModelRef  `json:"model"`
-	Input     []model.Message `json:"input"`
-	Usage     *UsageCount     `json:"usage,omitempty"`
+	RequestID  string          `json:"request_id"`
+	Model      model.ModelRef  `json:"model"`
+	Input      []model.Message `json:"input"`
+	Usage      *UsageCount     `json:"usage,omitempty"`
+	Parameters model.Extra
+	HookIDs    []HookIdentity
 }
 
 // operationSettlementEntry publishes one terminal Operation outcome. It is
@@ -575,27 +582,24 @@ type maintenanceFact struct {
 // family directly and its ordered Facts carry the procedure's per-request
 // usage. RequestID is the
 // settlement's own request witness — the answered conversation request, a live
-// model intent's identity, or a maintenance settlement's producer identity;
-// ConsumedRequestID names the conversation request whose frozen view an
-// automatic maintenance settlement consumed, present only beside maintenance
-// evidence and distinct from that producer. Evidence is the final effective
-// request evidence owned by a no-output settlement, and Facts are the actual
-// tool-free logical maintenance requests the procedure reached with their
-// producing models and reported usage. Maintenance facts settle once on the
-// successful checkpoint or on the terminal settlement, never both.
+// model intent's identity, or a maintenance settlement's producer identity.
+// Evidence is the final effective request evidence owned by a no-output
+// settlement, and Facts are the actual tool-free logical maintenance requests
+// the procedure reached with their producing models and reported usage.
+// Maintenance facts settle once on the successful checkpoint or on the
+// terminal settlement, never both.
 type operationSettlementEntry struct {
-	SessionID         string            `json:"session_id"`
-	EntryID           string            `json:"entry_id"`
-	OperationID       string            `json:"operation_id"`
-	Status            OperationState    `json:"status"`
-	Detail            string            `json:"detail,omitempty"`
-	Model             *model.ModelRef   `json:"model,omitempty"`
-	Usage             *UsageCount       `json:"usage,omitempty"`
-	CompactionUsage   bool              `json:"compaction_usage,omitempty"`
-	RequestID         string            `json:"request_id,omitempty"`
-	ConsumedRequestID string            `json:"consumed_request_id,omitempty"`
-	Evidence          *RequestEvidence  `json:"evidence,omitempty"`
-	Facts             []maintenanceFact `json:"facts,omitempty"`
+	SessionID       string            `json:"session_id"`
+	EntryID         string            `json:"entry_id"`
+	OperationID     string            `json:"operation_id"`
+	Status          OperationState    `json:"status"`
+	Detail          string            `json:"detail,omitempty"`
+	Model           *model.ModelRef   `json:"model,omitempty"`
+	Usage           *UsageCount       `json:"usage,omitempty"`
+	CompactionUsage bool              `json:"compaction_usage,omitempty"`
+	RequestID       string            `json:"request_id,omitempty"`
+	Evidence        *RequestEvidence  `json:"evidence,omitempty"`
+	Facts           []maintenanceFact `json:"facts,omitempty"`
 }
 
 // contextCheckpointEntry is one immutable context checkpoint commit: the
@@ -603,11 +607,9 @@ type operationSettlementEntry struct {
 // frozen conversation up to its covered boundary entry, the selected strategy
 // identity that produced them, the governing configuration revision, and the
 // procedure's ordered maintenance facts — the producing request identities,
-// models, actual tool-free inputs and optional reported usage.
-// ConsumedRequestID names the conversation request whose frozen contribution
-// view the automatic procedure consumed (manual maintenance omits it), and
-// Evidence is the effective contribution evidence consumed at that frozen
-// canonical boundary.
+// models, actual tool-free inputs and optional reported usage. Evidence is the
+// frozen canonical input the procedure consumed; no conversation request
+// exists at that boundary.
 // Independently copied fork-prefix entries omit the owning Operation identity
 // and carry no source usage.
 type contextCheckpointEntry struct {
@@ -619,7 +621,6 @@ type contextCheckpointEntry struct {
 	BoundaryEntryID       string            `json:"boundary_entry_id"`
 	ConfigurationRevision string            `json:"configuration_revision"`
 	Facts                 []maintenanceFact `json:"facts"`
-	ConsumedRequestID     string            `json:"consumed_request_id,omitempty"`
 	Evidence              *RequestEvidence  `json:"evidence"`
 }
 

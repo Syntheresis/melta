@@ -62,13 +62,15 @@ type Dependencies struct {
 // receives.
 type PreparationSession struct {
 	Identity       SessionIdentity
-	AgentSelection AgentSelection
+	Inputs         SessionInputs
+	ExtensionState map[string]SessionStateValue
 }
 
 // PreparationRequest is the input of one preparation call.
 type PreparationRequest struct {
 	Session     PreparationSession
 	RequestKind RequestKind
+	Content     []model.ContentPart
 }
 
 // PreparedExecution is the outcome of one preparation: the durable capture,
@@ -138,30 +140,43 @@ type EffectError struct {
 func (e *EffectError) Error() string { return e.Err.Error() }
 func (e *EffectError) Unwrap() error { return e.Err }
 
+// ToolArgumentsResult is one argument hook's consequence: replacement bytes or
+// a deliberate refusal with its model-facing reason. Arguments is the
+// replacement; Refusal is present instead of a replacement when the hook
+// denies the call.
+type ToolArgumentsResult struct {
+	Arguments json.RawMessage
+	Refusal   *string
+}
+
 // ToolArgumentsHook is one argument hook: before a concrete tool call
-// prepares, it may rewrite the call's raw argument bytes. Its successful
-// replacement must be exactly one JSON object the execution's normalizer
-// accepts; it can never replace the call identity, tool name, or another
-// call's arguments. An effectful hook's execution is a Harness-settled
-// Operation effect with durable hook_result evidence; a pure hook coalesces
-// in memory. Run receives owned call data.
+// prepares, it may rewrite the call's raw argument bytes or refuse the call
+// with a reason. Its successful unchanged output passes through verbatim; a
+// changed output must be one JSON object. The bound tool normalizes after the
+// hook chain. Hooks cannot replace the call identity, tool name, or another
+// call's arguments. An effectful hook is a Harness-settled Operation effect; a
+// pure hook runs in memory. Run receives owned call data.
 type ToolArgumentsHook struct {
 	ID          string
 	ExtensionID string
 	Mode        HookMode
-	Run         func(context.Context, model.ToolCall) (json.RawMessage, error)
+	Run         func(context.Context, model.ToolCall) (ToolArgumentsResult, error)
 }
 
 // RequestHookInput is one request hook's owned input: the bound request
-// identity, the frozen canonical conversation messages and canonical
-// references they were projected from, the captured rendered prompt, and the
-// captured eligible tool catalog. The CanonicalMessages are the round-frozen
-// projection without any request contribution, CapturedPrompt the captured
+// identity with its purpose and actual model, the frozen canonical messages
+// and canonical references they were projected from, the captured rendered
+// prompt, and the captured eligible tool catalog. The CanonicalMessages are
+// the round-frozen view without any request contribution, CapturedPrompt the
 // baseline the current Prompt evolved from, and Catalog the full eligible
-// catalog behind whatever Tools are currently visible. Every mutable member is
-// a deep-owned copy; the hook cannot reach the coordinator's state.
+// catalog behind whatever Tools are currently visible. A strategy-authored
+// request exposes its own leading system prompt and always an empty catalog
+// and advertisement. Every mutable member is a deep-owned copy; the hook
+// cannot reach the coordinator's state.
 type RequestHookInput struct {
 	RequestID         string
+	Purpose           InvocationPurpose
+	Model             model.ModelRef         // the actual model the request will dispatch on
 	CanonicalMessages []model.Message        // the round-frozen canonical view, contributions excluded
 	Messages          []model.Message        // the effective conversation view accepted so far
 	CheckpointEntryID string                 // the named current checkpoint, empty when uncompacted
@@ -170,22 +185,62 @@ type RequestHookInput struct {
 	Prompt            string                 // the effective prompt text
 	Catalog           []model.ToolDefinition // the full captured eligible catalog
 	Tools             []model.ToolDefinition // the currently visible tool view
+	MessagePositions  []*int                 // parallel to Messages; nil denotes a request-only message
+	Parameters        model.Extra
+}
+
+// RequestMessageEdit retains a frozen position, optionally replacing its
+// content, or supplies one request-only message.
+type RequestMessageEdit struct {
+	Position *int
+	Content  []model.ContentPart
+	Message  *model.Message
 }
 
 // RequestConsequence is one request hook's closed contribution: absent members
 // mean unchanged. A present Prompt replaces the complete prompt text (a
-// present-empty Prompt removes the prompt); Messages are complete request-only
-// messages appended to the conversation view; a present ToolNames replaces the
-// visible tool view with those names selected from the captured catalog
-// (present-empty advertises none).
+// present-empty Prompt removes the prompt). Edits replaces the visible
+// message list, Tools replaces the advertisement, and Parameters assigns
+// body fields over the effective values. A present empty list clears that
+// list.
 type RequestConsequence struct {
-	Prompt    *string
-	Messages  []model.Message
-	ToolNames []string
+	Prompt     *string
+	Edits      []RequestMessageEdit
+	Tools      []model.ToolDefinition
+	Parameters model.Extra
+}
+
+// RequestStage supplies the current catalog, initial advertisement and hooks
+// for one request. A nil initial selection advertises the whole catalog.
+type RequestStage struct {
+	Catalog          []model.ToolDefinition
+	InitialToolNames []string
+	Hooks            []RequestHook
+	Error            error
+	Release          func()
+}
+
+type ArgumentStage struct {
+	Hooks   []ToolArgumentsHook
+	Error   error
+	Release func()
+}
+
+type AuthorizationStage struct {
+	Hooks   []AuthorizationHook
+	Error   error
+	Release func()
+}
+
+type ResultStage struct {
+	Hooks   []ToolOutputHook
+	Error   error
+	Release func()
 }
 
 // RequestHook is one selected request-boundary hook: it runs after steering
-// and before any model effect, receives the current effective request view,
+// and before the model effect of its own request, receives the current
+// effective request view with that invocation's purpose and actual model,
 // and contributes an optional complete prompt replacement, request-only
 // messages, and tool visibility. Run receives deep-owned values.
 type RequestHook struct {
@@ -243,12 +298,9 @@ type InvocationRequest struct {
 }
 
 // InvocationExecution is one opened Engine invocation: the physical
-// model-request callback the Harness retries and assembles, the tool effect
-// function, the required pure argument-normalization callback, the selected
-// argument hooks, the selected output-shaping hooks, plus the cleanup of the
-// external resources backing them — the existing callback contracts bound to
-// that invocation. A successful Model, Tool and NormalizeTool must be
-// non-nil, and every ToolHooks and ToolOutputHooks entry requires a
+// model-request callback the Harness retries and assembles, the tool lookup,
+// argument hooks, output-shaping hooks, and cleanup of their resources.
+// Model and LookupTool must be non-nil, and every hook entry requires a
 // non-empty unique ID and a non-nil Run. Close is optional; the opened
 // invocation's resources are released exactly once after its effects settle
 // and their result is consumed, before the owning execution closes.
@@ -256,31 +308,59 @@ type InvocationExecution struct {
 	// Model is the one physical model-request callback. Each invocation of
 	// it makes exactly one physical attempt and returns its accepted stream
 	// or that attempt's failure; retry, assembly and settlement are
-	// Harness-owned.
-	Model func(context.Context, model.Request) (model.Stream, error)
-	Tool  func(context.Context, model.ToolCall) PreparedTool
-	// NormalizeTool is pure, terminating argument validation and defaulting
-	// with no filesystem, service, permission or effect I/O. It receives an
-	// owned call and returns one owned JSON object preserving unrelated
-	// accepted fields; its error is a per-call validation failure.
-	NormalizeTool func(context.Context, model.ToolCall) (json.RawMessage, error)
+	// Harness-owned. It receives independent message, tool and parameter values.
+	Model func(context.Context, model.Request, model.Extra) (model.Stream, error)
+	// ModelParameters are the bound transport's effective configured defaults.
+	ModelParameters model.Extra
+	// RequestStage supplies the declarations before each request. When nil,
+	// the admitted catalog and advertisement are used without hooks.
+	RequestStage func() RequestStage
+	// LookupTool binds one implementation after argument hooks complete.
+	LookupTool func(string) (ToolBinding, bool)
 	// ToolHooks are the selected argument hooks in configured order. Each
 	// runs after the advertisement gate and before concrete preparation; the
 	// first receives the original raw call arguments, every later one the
 	// preceding committed value.
-	ToolHooks []ToolArgumentsHook
+	ToolHooks     []ToolArgumentsHook
+	ArgumentStage func() ArgumentStage
+	// AuthorizationHooks run in order after policy allows the prepared action.
+	AuthorizationHooks []AuthorizationHook
+	AuthorizationStage func() AuthorizationStage
+	// BindLocation binds a location relative to the actual Session Workspace.
+	BindLocation func(string) (canonical string, recheck func() error, err error)
 	// ToolOutputHooks are the selected output-shaping hooks in configured
 	// order. They run over one settled tool outcome before its result
 	// commits: the first receives the producer's original content, every
 	// later one the preceding hook's return. They are pure and can never
 	// change the settled status, evidence, usage or metadata.
 	ToolOutputHooks []ToolOutputHook
-	// RequestHooks are the selected request-boundary hooks in configured
-	// order. They run inside the Operation's request source, after steering
-	// and before the automatic-maintenance orchestration and any model
-	// effect.
-	RequestHooks []RequestHook
-	Close        func() error
+	ResultStage     func() ResultStage
+	Close           func() error
+}
+
+// AuthorizationHook is a pure restriction on a prepared action. Bind returns
+// a canonical location without granting access; the host revalidates it. A
+// nil reason abstains; a nonempty reason denies.
+type AuthorizationHook struct {
+	Run func(context.Context, PreparedAction, func(string) (string, error)) (*string, error)
+}
+
+type locationChecksKey struct{}
+
+// LocationRecheckFromContext returns the call's frozen host location checker,
+// or nil when no locations were bound.
+func LocationRecheckFromContext(ctx context.Context) func() error {
+	check, _ := ctx.Value(locationChecksKey{}).(func() error)
+	return check
+}
+
+// ToolBinding holds one implementation for normalization and preparation.
+// Normalize is pure and returns one JSON object or a per-call error.
+type ToolBinding struct {
+	Identity  ToolImplementation
+	Normalize func(context.Context, model.ToolCall) (json.RawMessage, error)
+	Prepare   func(context.Context, model.ToolCall) PreparedTool
+	Release   func()
 }
 
 // Execution is one opened execution: the required invocation opener the
@@ -306,11 +386,13 @@ type Execution struct {
 	// revision its capture records. Nil selects the included built-in
 	// policy (the zero PermissionPolicy).
 	Permissions PermissionEvaluator
-	// Strategy is the selected context strategy binding of this Operation,
-	// resolved from the same immutable configuration revision its capture
-	// records. Nil selects the included summary policy binding.
-	Strategy *StrategyBinding
-	Close    func() error
+	// ResolveStrategy resolves the captured strategy identity at one
+	// maintenance procedure start from the execution's own retained
+	// configuration and scopes. Nil supplies the included strategy for its own
+	// captured identity; a resolver owns the result the procedure holds through
+	// Plan and Consume.
+	ResolveStrategy func(context.Context, string) (*StrategyBinding, error)
+	Close           func() error
 }
 
 // ToolOutcome is one owned tool plan's complete outcome: the model-visible
@@ -340,7 +422,6 @@ type ToolOutcome struct {
 type PreparedTool struct {
 	Permissions        []PermissionRequest
 	CanonicalWorkspace string
-	CanonicalWriteDir  string
 	Immediate          *ToolOutcome
 	Execute            func(context.Context) ToolOutcome
 }
@@ -348,7 +429,8 @@ type PreparedTool struct {
 // CreateSessionRequest is the input of one root Session creation.
 type CreateSessionRequest struct {
 	Workspace      string
-	AgentSelection AgentSelection
+	Inputs         SessionInputs
+	ExtensionState map[string]SessionStateValue
 }
 
 // SubmitRequest is the input of one public Session message submission.
@@ -386,9 +468,10 @@ type SweepPolicy struct {
 }
 
 // Harness is the public durable state machine over one Storage. It owns
-// Session materialization, reads, root creation, Agent-type change, the shared
-// admission producer, public Submit with its two process-local buffers, the
-// Session lifecycle (reopen, archive, delete, and explicit-time sweep), and
+// Session materialization, reads, root creation, Session extension-state
+// change, the shared admission producer, public Submit with its two
+// process-local buffers, the Session lifecycle (reopen, archive, delete, and
+// explicit-time sweep), and
 // execution; it owns neither storage close nor Runtime shutdown policy.
 type Harness struct {
 	ctx  context.Context
@@ -409,12 +492,16 @@ type Harness struct {
 // pendingMessage is one buffered Submit: a process-local FIFO item that is
 // neither a durable Operation nor a Session entry while it waits, carries no
 // idempotency, and is discarded on Harness-context loss. A delivery's
-// selected head stays buffered until its one attempt resolves.
+// selected head stays buffered until its one attempt resolves. A buffered
+// background completion also carries a copy of its related member kind and ID,
+// never the original live member, so a refused admission can still record the
+// signal the closed path would.
 type pendingMessage struct {
 	operationID string
 	origin      InputOrigin
 	extensionID string
 	content     []model.ContentPart
+	completion  *relatedMember // nil for ordinary input
 }
 
 // activeExecution is the one in-flight execution of a coordinator: installed
@@ -460,8 +547,8 @@ type coordinator struct {
 	run      *activeExecution  // non-nil while one execution is in flight
 
 	group             *backgroundGroup // nil until the first member
-	bgState           bgState          // starts as bgOpen at every construction site; the zero value is never observed
 	stop              *stopInterval
+	memberStop        *backgroundMember
 	pendingCompletion *launchInfo
 	interruptOp       string
 
@@ -494,8 +581,8 @@ func (h *Harness) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := validateWorkspace(req.Workspace); err != nil {
 		return SessionRecord{}, invalidInput("workspace: %v", err)
 	}
-	if err := validateAgentSelection(req.AgentSelection); err != nil {
-		return SessionRecord{}, invalidInput("agent selection: %v", err)
+	if _, err := req.Inputs.normalized(); err != nil {
+		return SessionRecord{}, invalidInput("inputs: %v", err)
 	}
 	sessionID, err := newHexID()
 	if err != nil {
@@ -506,7 +593,8 @@ func (h *Harness) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Identity: SessionIdentity{SessionID: sessionID, Workspace: req.Workspace, CreatedAt: now},
 		State: SessionState{
 			Lifecycle:      LifecycleOpen,
-			AgentSelection: ownAgentSelection(req.AgentSelection),
+			Inputs:         req.Inputs.Owned(),
+			ExtensionState: ownSessionStateValues(req.ExtensionState),
 			Usage:          UsageTotals{},
 			LastActivity:   now,
 		},
@@ -527,7 +615,7 @@ func (h *Harness) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 	// The committed creation installs the stable cell with its committed graph
 	// and a call-owned pin; the release clears the graph and retains the cell.
-	created := &coordinator{sessionID: sessionID, graph: &sessionGraph{Session: record}, bgState: bgOpen}
+	created := &coordinator{sessionID: sessionID, graph: &sessionGraph{Session: record}}
 	created.identity = record.Identity
 	created.everLoaded = true
 	created.uses = 1
@@ -562,16 +650,25 @@ func (h *Harness) ReadOperation(ctx context.Context, sessionID, operationID stri
 	return record, nil
 }
 
-// ChangeAgentType changes the current Agent type of an open Session. It
-// preserves identity, usage, history, and last activity, and never alters an
-// active Operation's admission capture.
-func (h *Harness) ChangeAgentType(ctx context.Context, sessionID string, selection AgentSelection) (SessionRecord, error) {
-	if err := validateAgentSelection(selection); err != nil {
-		return SessionRecord{}, invalidInput("agent selection: %v", err)
+// SessionExtensionStates returns owned state values for scoped extension calls.
+func (h *Harness) SessionExtensionStates(ctx context.Context, sessionID string) (map[string]SessionStateValue, error) {
+	var states map[string]SessionStateValue
+	err := h.withSessionRead(ctx, sessionID, func(c *coordinator) error {
+		states = ownSessionStateValues(c.graph.Session.State.ExtensionState)
+		return nil
+	})
+	return states, err
+}
+
+// SetSessionInputs replaces the choices for subsequent admissions.
+func (h *Harness) SetSessionInputs(ctx context.Context, sessionID string, inputs SessionInputs) (SessionRecord, error) {
+	inputs, err := inputs.normalized()
+	if err != nil {
+		return SessionRecord{}, invalidInput("inputs: %v", err)
 	}
-	selection = ownAgentSelection(selection)
-	return h.changeSelection(ctx, sessionID, func(AgentSelection) (AgentSelection, error) {
-		return selection, nil
+	return h.updateOpenSession(ctx, sessionID, "inputs", func(state *SessionState) (bool, error) {
+		state.Inputs = inputs.Owned()
+		return true, nil
 	})
 }
 
@@ -580,107 +677,55 @@ func (h *Harness) SetSessionModel(ctx context.Context, sessionID string, ref mod
 	if (ref.Provider == "") != (ref.Model == "") {
 		return SessionRecord{}, invalidInput("model must be wholly empty or complete")
 	}
-	return h.changeSelection(ctx, sessionID, func(current AgentSelection) (AgentSelection, error) {
-		if current.Inputs == nil {
-			return AgentSelection{}, fmt.Errorf("selection is not resolved: %w", ErrConflict)
+	return h.updateOpenSession(ctx, sessionID, "model", func(state *SessionState) (bool, error) {
+		state.Inputs = state.Inputs.Owned()
+		state.Inputs.Model = nil
+		if ref.Provider != "" {
+			state.Inputs.Model = &ref
 		}
-		current = ownAgentSelection(current)
-		current.Inputs.Model = ref
-		return current, nil
+		return true, nil
+	})
+}
+
+// SetSessionExtensionState replaces one extension's state on an open Session.
+func (h *Harness) SetSessionExtensionState(ctx context.Context, sessionID, extensionID string, value SessionStateValue) (SessionRecord, error) {
+	if extensionID == "" {
+		return SessionRecord{}, invalidInput("extension ID must not be empty")
+	}
+	if _, err := value.MarshalJSON(); err != nil {
+		return SessionRecord{}, invalidInput("extension state: %v", err)
+	}
+	value = slices.Clone(value)
+	return h.updateOpenSession(ctx, sessionID, "extension state", func(state *SessionState) (bool, error) {
+		state.ExtensionState = ownSessionStateValues(state.ExtensionState)
+		if state.ExtensionState == nil {
+			state.ExtensionState = make(map[string]SessionStateValue)
+		}
+		state.ExtensionState[extensionID] = slices.Clone(value)
+		return true, nil
 	})
 }
 
 // ClaimExternalData durably records one installed extension as an owner of
 // external data for one open Session before that data is created. It follows
-// the Agent-type mutation rule: any open Session qualifies, including one with
-// an active Operation, and a repeated claim is a no-op that writes nothing. A
+// the ordinary open-Session mutation rule, and a repeated claim is a no-op
+// that writes nothing. A
 // refused claim leaves the register unchanged.
 func (h *Harness) ClaimExternalData(ctx context.Context, sessionID, extensionID string) error {
 	if extensionID == "" {
 		return invalidInput("external data owner must be a nonempty extension ID")
 	}
-	c, release, err := h.acquireCoordinator(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	defer release()
-	for {
-		if err := c.waitIdle(ctx); err != nil {
-			return err
+	_, err := h.updateOpenSession(ctx, sessionID, "an external data claim", func(state *SessionState) (bool, error) {
+		if slices.Contains(state.ExternalDataOwners, extensionID) {
+			return false, nil
 		}
-		c.mu.Lock()
-		if c.reserved != nil { // a reservation was taken between the wait and the lock
-			c.mu.Unlock()
-			continue
-		}
-		if c.gone { // a deletion committed while this call waited or relocked
-			c.mu.Unlock()
-			return notFoundSession(sessionID)
-		}
-		if c.graph.Session.State.Lifecycle != LifecycleOpen {
-			c.mu.Unlock()
-			return invalidInput("session %q is archived; an external data claim requires an open Session", sessionID)
-		}
-		expected := c.graph.Session.Revision
-		var (
-			updated SessionRecord
-			changed bool
-		)
-		err := h.deps.Storage.Transact(ctx, func(tx Transaction) error {
-			key := RegisterKey{SessionID: sessionID, Kind: RegisterSession}
-			reg, err := tx.ReadRegister(key)
-			if err != nil {
-				return err
-			}
-			current, err := decodeSessionRegister(reg)
-			if err != nil {
-				return corruptSession(sessionID, "session register: %v", err)
-			}
-			if reg.Revision != expected {
-				return fmt.Errorf("%w: session %q revision %d changed concurrently to %d", errRevisionRace, sessionID, expected, reg.Revision)
-			}
-			if slices.Contains(current.State.ExternalDataOwners, extensionID) {
-				updated = current // a repeated claim is a true no-op
-				return nil
-			}
-			state := current.State
-			state.ExternalDataOwners = append(append([]string(nil), state.ExternalDataOwners...), extensionID)
-			changedRecord := SessionRecord{Identity: current.Identity, State: state}
-			payload, err := encodeSessionRegister(changedRecord)
-			if err != nil {
-				return err
-			}
-			replaced, err := tx.ReplaceRegister(key, reg.Revision, payload)
-			if err != nil {
-				return err
-			}
-			changedRecord.Revision = replaced.Revision
-			updated = changedRecord
-			changed = true
-			return nil
-		})
-		if err != nil {
-			h.markCorrupt(sessionID, err)
-			c.mu.Unlock()
-			if errors.Is(err, errRevisionRace) { // a foreign writer changed the durable state under the resident view
-				if rerr := h.rematerialize(ctx, c, sessionID); rerr != nil {
-					return rerr
-				}
-			}
-			return err
-		}
-		if changed {
-			c.graph.Session = updated
-		}
-		c.mu.Unlock()
-		if changed {
-			h.observeInvalidation(c) // the durable external-data claim
-		}
-		return nil
-	}
+		state.ExternalDataOwners = append(slices.Clone(state.ExternalDataOwners), extensionID)
+		return true, nil
+	})
+	return err
 }
 
-func (h *Harness) changeSelection(ctx context.Context, sessionID string, update func(AgentSelection) (AgentSelection, error)) (SessionRecord, error) {
+func (h *Harness) updateOpenSession(ctx context.Context, sessionID, operation string, update func(*SessionState) (bool, error)) (SessionRecord, error) {
 	c, release, err := h.acquireCoordinator(ctx, sessionID)
 	if err != nil {
 		return SessionRecord{}, err
@@ -701,10 +746,13 @@ func (h *Harness) changeSelection(ctx context.Context, sessionID string, update 
 		}
 		if c.graph.Session.State.Lifecycle != LifecycleOpen {
 			c.mu.Unlock()
-			return SessionRecord{}, invalidInput("session %q is archived; the Agent type requires an open Session", sessionID)
+			return SessionRecord{}, invalidInput("session %q is archived; %s requires an open Session", sessionID, operation)
 		}
 		expected := c.graph.Session.Revision
-		var updated SessionRecord
+		var (
+			updated SessionRecord
+			changed bool
+		)
 		err := h.deps.Storage.Transact(ctx, func(tx Transaction) error {
 			key := RegisterKey{SessionID: sessionID, Kind: RegisterSession}
 			reg, err := tx.ReadRegister(key)
@@ -719,12 +767,16 @@ func (h *Harness) changeSelection(ctx context.Context, sessionID string, update 
 				return fmt.Errorf("%w: session %q revision %d changed concurrently to %d", errRevisionRace, sessionID, expected, reg.Revision)
 			}
 			state := current.State
-			state.AgentSelection, err = update(state.AgentSelection)
+			changed, err = update(&state)
 			if err != nil {
 				return err
 			}
-			changed := SessionRecord{Identity: current.Identity, State: state}
-			payload, err := encodeSessionRegister(changed)
+			if !changed {
+				updated = current
+				return nil
+			}
+			changedRecord := SessionRecord{Identity: current.Identity, State: state}
+			payload, err := encodeSessionRegister(changedRecord)
 			if err != nil {
 				return err
 			}
@@ -732,24 +784,28 @@ func (h *Harness) changeSelection(ctx context.Context, sessionID string, update 
 			if err != nil {
 				return err
 			}
-			changed.Revision = replaced.Revision
-			updated = changed
+			changedRecord.Revision = replaced.Revision
+			updated = changedRecord
 			return nil
 		})
 		if err != nil {
 			h.markCorrupt(sessionID, err)
 			c.mu.Unlock()
 			if errors.Is(err, errRevisionRace) { // a foreign writer changed the durable state under the resident view
-				if rerr := h.rematerialize(ctx, c, sessionID); rerr != nil { // a discovered corruption or storage failure is the current truth
+				if rerr := h.rematerialize(ctx, c, sessionID); rerr != nil {
 					return SessionRecord{}, rerr
 				}
 			}
 			return SessionRecord{}, err
 		}
-		c.graph.Session = updated
+		if changed {
+			c.graph.Session = updated
+		}
 		result := ownSessionRecord(updated)
 		c.mu.Unlock()
-		h.observeInvalidation(c) // the durable Agent-type advance
+		if changed {
+			h.observeInvalidation(c)
+		}
 		return result, nil
 	}
 }
@@ -805,7 +861,7 @@ func (h *Harness) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, 
 		c.mu.Unlock()
 		return SubmitResult{}, invalidInput("session %q is archived; admission requires an open Session", req.SessionID)
 	}
-	if c.bgState == bgClosed { // a permanently closed background group rejects agent work beside the lifecycle gate
+	if memberStopping(c) {
 		c.mu.Unlock()
 		return SubmitResult{}, invalidInput("session is closed to agent work")
 	}
@@ -1318,6 +1374,13 @@ func (c *coordinator) discardBuffers() bool {
 	return changed
 }
 
+// holdsBufferedLocked reports whether one selected item is still the head of
+// whichever process-local buffer holds it. The caller holds the coordinator
+// mutex.
+func (c *coordinator) holdsBufferedLocked(item *pendingMessage) bool {
+	return (len(c.steering) > 0 && c.steering[0] == item) || (len(c.queued) > 0 && c.queued[0] == item)
+}
+
 // dropBufferedLocked removes one delivery's previously selected pending item
 // from the head of whichever buffer still holds it, reporting whether it
 // removed anything. The caller holds the coordinator mutex. Only the exact
@@ -1416,7 +1479,7 @@ func (h *Harness) claimCell(sessionID string) *coordinator {
 	defer h.mu.Unlock()
 	c := h.sessions[sessionID]
 	if c == nil {
-		c = &coordinator{sessionID: sessionID, bgState: bgOpen}
+		c = &coordinator{sessionID: sessionID}
 		h.sessions[sessionID] = c
 	}
 	c.uses++
@@ -1584,10 +1647,49 @@ type admissionRequest struct {
 // same-Session Operation has been read; it never escapes the reserved admission body.
 var errAdmissionExisting = errors.New("harness: operation already admitted in this session")
 
-// errRevisionRace marks the revision-guard conflict of an admission,
-// agent-type, or effect transaction: durable state changed under the
+// errRevisionRace marks the revision-guard conflict of a Session mutation,
+// admission, or effect transaction: durable state changed under the
 // coordinator's validated view. It keeps the landed conflict class reachable.
 var errRevisionRace = fmt.Errorf("harness: session changed concurrently: %w", ErrConflict)
+
+// isPreparationRefusal reports whether one preparation failure is the
+// completion admission's known non-admission: an ordinary producer failure
+// before any publication, typed or not. Storage, corruption, cancellation and
+// absent-owner outcomes keep their own class.
+func isPreparationRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, ErrStorage) && !errors.Is(err, ErrNotFound) && !isCorruption(err) &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+// admissionRefusal is the one private semantic-refusal wrapper: the admission
+// decision rejected otherwise valid input because of the Session's own
+// readable and writable state — archived, stopping, or already running an
+// Operation — or because preparation refused the admission before publication.
+// A background completion answers a refusal with its operationless signal;
+// storage, corruption, owner loss, conflict, identity misuse and producer
+// failures are never refusals and keep their own propagation and latch.
+type admissionRefusal struct{ cause error }
+
+func (e *admissionRefusal) Error() string { return e.cause.Error() }
+func (e *admissionRefusal) Unwrap() error { return e.cause }
+
+// refuseAdmission marks one admission decision's semantic refusal.
+func refuseAdmission(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &admissionRefusal{cause: cause}
+}
+
+// isAdmissionRefusal reports whether one error is the admission decision's own
+// semantic refusal.
+func isAdmissionRefusal(err error) bool {
+	var refusal *admissionRefusal
+	return errors.As(err, &refusal)
+}
 
 // validateSubmitInput validates one submitted message's identity, origin,
 // provenance, and content, returning the owned content copy every downstream
@@ -1649,25 +1751,29 @@ func (h *Harness) admitReserved(ctx context.Context, c *coordinator, req admissi
 	}
 	if c.graph.Session.State.Lifecycle != LifecycleOpen {
 		c.mu.Unlock()
-		return OperationRecord{}, nil, "", invalidInput("session %q is archived; admission requires an open Session", req.SessionID)
+		return OperationRecord{}, nil, "", refuseAdmission(invalidInput("session %q is archived; admission requires an open Session", req.SessionID))
 	}
-	if c.bgState == bgClosed { // a permanently closed background group rejects agent work beside the lifecycle gate
+	if memberStopping(c) {
 		c.mu.Unlock()
-		return OperationRecord{}, nil, "", invalidInput("session is closed to agent work")
+		return OperationRecord{}, nil, "", refuseAdmission(invalidInput("session is closed to agent work"))
 	}
 	if c.graph.Session.State.CurrentOperationID != "" {
 		running := c.graph.Session.State.CurrentOperationID
 		c.mu.Unlock()
-		return OperationRecord{}, nil, "", invalidInput("session %q already runs operation %q; admission requires an idle Session", req.SessionID, running)
+		return OperationRecord{}, nil, "", refuseAdmission(invalidInput("session %q already runs operation %q; admission requires an idle Session", req.SessionID, running))
 	}
 	view := c.graph.Session // the state the reservation resolved on
 	c.mu.Unlock()
 
 	prepared, capture, prepCtx, cleanup, err := h.prepareExecution(ctx, PreparationSession{
 		Identity:       view.Identity,
-		AgentSelection: view.State.AgentSelection,
-	}, req.Kind)
+		Inputs:         view.State.Inputs,
+		ExtensionState: view.State.ExtensionState,
+	}, req.Kind, req.Content)
 	if err != nil {
+		if isPreparationRefusal(err) { // known non-admission before publication, typed or not: nothing was written
+			return OperationRecord{}, nil, "", refuseAdmission(err)
+		}
 		return OperationRecord{}, nil, "", err
 	}
 	defer cleanup() // the combined context stays live until publication returns
@@ -1699,7 +1805,7 @@ func (h *Harness) admitReserved(ctx context.Context, c *coordinator, req admissi
 // cancellation observed after preparation — so only an adopted prepared
 // execution ever carries one. Caller or Harness cancellation before or after
 // preparation publishes nothing.
-func (h *Harness) prepareExecution(ctx context.Context, session PreparationSession, kind RequestKind) (PreparedExecution, ExecutionCapture, context.Context, context.CancelFunc, error) {
+func (h *Harness) prepareExecution(ctx context.Context, session PreparationSession, kind RequestKind, content []model.ContentPart) (PreparedExecution, ExecutionCapture, context.Context, context.CancelFunc, error) {
 	prepCtx, cancel := context.WithCancel(h.ctx)
 	stop := context.AfterFunc(ctx, cancel)
 	cleanup := func() {
@@ -1714,10 +1820,12 @@ func (h *Harness) prepareExecution(ctx context.Context, session PreparationSessi
 		cleanup()
 		return PreparedExecution{}, ExecutionCapture{}, nil, nil, h.ctx.Err()
 	}
-	session.AgentSelection = ownAgentSelection(session.AgentSelection)
+	session.Inputs = session.Inputs.Owned()
+	session.ExtensionState = ownSessionStateValues(session.ExtensionState)
 	prepared, prepErr := h.deps.Prepare(prepCtx, PreparationRequest{
 		Session:     session,
 		RequestKind: kind,
+		Content:     ownContentParts(content),
 	})
 	if prepErr != nil {
 		cleanup()
@@ -1816,10 +1924,10 @@ func (h *Harness) publishAdmission(ctx context.Context, c *coordinator, view Ses
 			}
 			// a violated semantic precondition outranks the conflict class
 			if current.State.Lifecycle != LifecycleOpen {
-				return invalidInput("session %q is archived; admission requires an open Session", req.SessionID)
+				return refuseAdmission(invalidInput("session %q is archived; admission requires an open Session", req.SessionID))
 			}
 			if current.State.CurrentOperationID != "" {
-				return invalidInput("session %q already runs operation %q; admission requires an idle Session", req.SessionID, current.State.CurrentOperationID)
+				return refuseAdmission(invalidInput("session %q already runs operation %q; admission requires an idle Session", req.SessionID, current.State.CurrentOperationID))
 			}
 			return fmt.Errorf("%w: session %q revision %d changed concurrently to %d", errRevisionRace, req.SessionID, view.Revision, reg.Revision)
 		}
@@ -1872,6 +1980,7 @@ func (h *Harness) publishAdmission(ctx context.Context, c *coordinator, view Ses
 	c.dropBufferedLocked(req.buffered)
 	c.mu.Unlock()
 	h.observeInvalidation(c) // the durable admission advance
+	h.observeOperationAdmitted(published.Admission.SessionID, published.Admission.OperationID)
 	return published, false, nil
 }
 
@@ -1890,12 +1999,12 @@ func produceAdmission(tx Transaction, session SessionRecord, capture ExecutionCa
 		now := time.Now().UTC()
 		record := OperationRecord{
 			Admission: OperationAdmission{
-				SessionID:      req.SessionID,
-				OperationID:    req.OperationID,
-				RequestKind:    req.Kind,
-				AgentSelection: ownAgentSelection(session.State.AgentSelection),
-				Execution:      capture,
-				AdmittedAt:     now,
+				SessionID:   req.SessionID,
+				OperationID: req.OperationID,
+				RequestKind: req.Kind,
+				Inputs:      session.State.Inputs.Owned(),
+				Execution:   capture,
+				AdmittedAt:  now,
 			},
 			State: OperationCurrentState{
 				Status:           OperationRunning,
@@ -1959,13 +2068,13 @@ func produceAdmission(tx Transaction, session SessionRecord, capture ExecutionCa
 	}
 	record := OperationRecord{
 		Admission: OperationAdmission{
-			SessionID:      req.SessionID,
-			OperationID:    req.OperationID,
-			RequestKind:    req.Kind,
-			AdmittedEntry:  EntryRef{SessionID: req.SessionID, EntryID: entryID},
-			AgentSelection: ownAgentSelection(session.State.AgentSelection),
-			Execution:      capture,
-			AdmittedAt:     inserted.CommittedAt,
+			SessionID:     req.SessionID,
+			OperationID:   req.OperationID,
+			RequestKind:   req.Kind,
+			AdmittedEntry: EntryRef{SessionID: req.SessionID, EntryID: entryID},
+			Inputs:        session.State.Inputs.Owned(),
+			Execution:     capture,
+			AdmittedAt:    inserted.CommittedAt,
 		},
 		State: OperationCurrentState{
 			Status:           OperationRunning,
@@ -2086,6 +2195,11 @@ func (h *Harness) drainBuffers(c *coordinator, run *activeExecution) {
 			buffered:    item,
 		})
 		if err != nil || disposition != DispositionAdmitted || prepared == nil {
+			if item.completion != nil && err != nil { // an already admitted completion is success
+				if rerr := h.resolveCompletionFailure(c, item.completion, item.content[0].Text, item, err); rerr != nil {
+					h.recordStorageFailure(rerr)
+				}
+			}
 			// one failed delivery attempt is final for the item: the selected
 			// head leaves its buffer as the attempt's final outcome; an
 			// admission that does not adopt its prepared execution already
@@ -2280,12 +2394,8 @@ func ownCapture(c ExecutionCapture) ExecutionCapture {
 		for i, implementation := range c.Implementations {
 			out.Implementations[i] = implementation
 			out.Implementations[i].Settings = model.CloneRaw(implementation.Settings)
+			out.Implementations[i].State = slices.Clone(implementation.State)
 		}
-	}
-	if len(c.Capabilities) == 0 {
-		out.Capabilities = nil
-	} else {
-		out.Capabilities = append([]string(nil), c.Capabilities...)
 	}
 	out.Pricing = c.Pricing.Clone()
 	out.Compact.Pricing = c.Compact.Pricing.Clone()
@@ -2306,7 +2416,8 @@ func ownUsageTotals(t UsageTotals) UsageTotals {
 // ownSessionRecord returns an independent owned copy of one Session record.
 func ownSessionRecord(rec SessionRecord) SessionRecord {
 	out := rec
-	out.State.AgentSelection = ownAgentSelection(rec.State.AgentSelection)
+	out.State.Inputs = rec.State.Inputs.Owned()
+	out.State.ExtensionState = ownSessionStateValues(rec.State.ExtensionState)
 	if rec.State.ArchivedAt != nil {
 		stamped := *rec.State.ArchivedAt
 		out.State.ArchivedAt = &stamped
@@ -2316,10 +2427,21 @@ func ownSessionRecord(rec SessionRecord) SessionRecord {
 	return out
 }
 
+func ownSessionStateValues(values map[string]SessionStateValue) map[string]SessionStateValue {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]SessionStateValue, len(values))
+	for id, value := range values {
+		out[id] = slices.Clone(value)
+	}
+	return out
+}
+
 // ownOperationRecord returns an independent owned copy of one Operation record.
 func ownOperationRecord(rec OperationRecord) OperationRecord {
 	out := rec
-	out.Admission.AgentSelection = ownAgentSelection(rec.Admission.AgentSelection)
+	out.Admission.Inputs = rec.Admission.Inputs.Owned()
 	out.Admission.Execution = ownCapture(rec.Admission.Execution)
 	out.State.Usage = ownUsageTotals(rec.State.Usage)
 	out.State.PendingToolCalls = make([]PendingToolCall, len(rec.State.PendingToolCalls))
@@ -2350,6 +2472,10 @@ func ownOperationRecord(rec OperationRecord) OperationRecord {
 // are deep-copied so a public read can never alias the coordinator's state.
 func ownActiveEffect(effect *ActiveEffect) *ActiveEffect {
 	out := *effect
+	if effect.Implementation != nil {
+		identity := *effect.Implementation
+		out.Implementation = &identity
+	}
 	if effect.Model != nil {
 		modelRef := *effect.Model
 		out.Model = &modelRef

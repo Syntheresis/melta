@@ -36,18 +36,18 @@ type heldCredentialTool struct {
 	values map[string]string
 }
 
-func (t *heldCredentialTool) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (t *heldCredentialTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
 	return call.Arguments, nil
 }
 
-func (t *heldCredentialTool) Prepare(_ context.Context, _ extension.ToolContext, call model.ToolCall) extension.ToolPlan {
+func (t *heldCredentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "held"}}, Data: []byte(call.ID)}
 }
 
-func (t *heldCredentialTool) Execute(ctx context.Context, tc extension.ToolContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t *heldCredentialTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
 	callID := string(plan.Data)
 	for _, field := range t.fields {
-		result, err := tc.Calls.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"`+field+`"}`))
+		result, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"`+field+`"}`))
 		if err != nil {
 			return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
 		}
@@ -78,31 +78,16 @@ func (t *heldCredentialTool) value(field string) string {
 	return t.values[field]
 }
 
-func heldCredentialNative(t *testing.T, id string, secrets []extension.SecretRef, toolID string, tool *heldCredentialTool) extension.Native {
+func heldCredentialNative(t *testing.T, id string, secrets []extension.SecretRef, toolID string, tool *heldCredentialTool) extension.Extension {
 	t.Helper()
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	return extension.Native{
-		Declaration: extension.Declaration{
-			ID:           id,
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"},"operation":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      secrets,
-			Components: []extension.Component{{
-				ID:       id + "-c",
-				Lifetime: extension.LifetimeHarness,
-				Provides: []string{toolID},
-				Requires: []extension.Binding{{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}},
-			}},
-			Capabilities: []extension.Capability{extension.ToolCapability(toolID)},
-		},
-		Describe: map[string]extension.ToolDescribe{toolID: func(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-			return extension.ToolDescription{Definition: model.ToolDefinition{Name: toolID, Parameters: json.RawMessage(`{"type":"object"}`)}, Available: true}, nil
-		}},
-		Open: func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{Capabilities: map[string]extension.Implementation{toolID: {Tool: tool}}}, nil
-		},
-	}
+	manifest := registrarManifest(id)
+	manifest.SettingsSchema = json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"},"operation":{"type":"string"}},"required":["enabled"]}`)
+	manifest.Secrets = secrets
+	manifest.Services = []string{extension.ContractCredentials}
+	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterTool(model.ToolDefinition{Name: toolID, Parameters: json.RawMessage(`{"type":"object"}`)}, tool, nil)
+		return nil, err
+	}}
 }
 
 func heldCredentialConfig(endpoint string, extensions string) string {
@@ -119,9 +104,9 @@ func createHeldSession(t *testing.T, r *Melta, workspace string, tools []string)
 	var session harness.SessionRecord
 	err := r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
 		var createErr error
-		session, createErr = r.createSessionRecord(ctx, h, workspace, harness.AgentSelection{Inputs: &harness.AgentInputs{
-			Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "simple", Tools: tools,
-		}})
+		session, createErr = r.createSessionRecord(ctx, h, workspace, harness.SessionInputs{
+			Model: &model.ModelRef{Provider: "prov", Model: "m"}, Tools: tools,
+		}, nil)
 		return createErr
 	})
 	testassert.NoError(t, err)
@@ -231,7 +216,7 @@ func TestBlockedCleanupDoesNotHoldProviderNames(t *testing.T) {
 	release := make(chan struct{})
 	once := sync.OnceFunc(func() { close(release) })
 	defer once()
-	probe := newDataProbe("probe_park", func(context.Context, extension.CallContext) error {
+	probe := newDataProbe("probe_park", func(context.Context, extension.AuthorContext) error {
 		select {
 		case arrived <- struct{}{}:
 		default:
@@ -323,47 +308,38 @@ func TestCandidateResourceHoldsNamesBeforeOpen(t *testing.T) {
 		releaseOpen()
 		releaseCleanup()
 	})
-	host, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "the credentials host contract is not defined")
-	native := extension.Native{
-		Declaration: extension.Declaration{
-			ID:           "credlife",
-			Version:      "1",
-			ConfigSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"}},"required":["enabled"]}`),
-			Secrets:      []extension.SecretRef{{Field: "/activation", Lifetime: extension.SecretActivation}},
-			Components: []extension.Component{
-				{ID: "cred-open", Lifetime: extension.LifetimeHarness, Requires: []extension.Binding{{Name: "credentials", Provider: extension.HostProvider, CapabilityID: extension.ContractCredentials, Definition: host}}},
-				{ID: "cred-fail", Lifetime: extension.LifetimeHarness},
-			},
-		},
-		Open: func(ctx context.Context, info extension.InstanceContext) (extension.Instance, error) {
-			switch info.ComponentID {
-			case "cred-open":
-				if parkOpen.Load() {
-					result, err := info.Call(ctx, "credentials", "get", json.RawMessage(`{"field":"/activation"}`))
-					if err != nil {
-						return extension.Instance{}, err
-					}
-					parkedValue = credentialString(result)
-					close(openEntered)
-					<-openRelease
-				}
-				return extension.Instance{Close: func(context.Context, extension.CallContext) error {
-					if parkCleanup.Load() {
-						close(cleanupEntered)
-						<-cleanupRelease
-					}
-					return nil
-				}}, nil
-			case "cred-fail":
-				if failSibling.Load() {
-					return extension.Instance{}, errors.New("candidate sibling open failure")
-				}
-			}
-			return extension.Instance{}, nil
-		},
+	manifest := extension.Manifest{
+		ID:             "credlife",
+		Version:        "1",
+		APIVersion:     extension.APIVersion,
+		SettingsSchema: json.RawMessage(`{"type":"object","properties":{"enabled":{"type":"boolean"},"activation":{"type":"string"}},"required":["enabled"]}`),
+		Secrets:        []extension.SecretRef{{Field: "/activation", Lifetime: extension.SecretActivation}},
+		Services:       []string{extension.ContractCredentials},
 	}
-	svc := h.preparedService(context.Background(), native)
+	author := extension.Extension{Manifest: manifest, Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+		if parkOpen.Load() {
+			result, err := api.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
+			if err != nil {
+				return nil, err
+			}
+			parkedValue = credentialString(result)
+			close(openEntered)
+			<-openRelease
+		}
+		var closeFn func(context.Context) error
+		if parkCleanup.Load() {
+			closeFn = func(context.Context) error {
+				close(cleanupEntered)
+				<-cleanupRelease
+				return nil
+			}
+		}
+		if failSibling.Load() {
+			return closeFn, errors.New("candidate sibling open failure")
+		}
+		return closeFn, nil
+	}}
+	svc := h.preparedService(context.Background(), author)
 	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credlife":{"enabled":true}}`))
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
@@ -373,10 +349,14 @@ func TestCandidateResourceHoldsNamesBeforeOpen(t *testing.T) {
 	parkOpen.Store(true)
 	failSibling.Store(true)
 	parkCleanup.Store(true)
-	buildDone := make(chan error, 1)
+	type buildResult struct {
+		snapshot *configuration
+		err      error
+	}
+	buildDone := make(chan buildResult, 1)
 	go func() {
-		_, buildErr := svc.buildCaptured(context.Background(), 2, []byte(credentialServiceConfig(`{"credlife":{"enabled":true,"activation":"`+name+`"}}`)), nil, nil)
-		buildDone <- buildErr
+		built, buildErr := svc.buildCaptured(context.Background(), 2, []byte(credentialServiceConfig(`{"credlife":{"enabled":true,"activation":"`+name+`"}}`)), nil, nil)
+		buildDone <- buildResult{built, buildErr}
 	}()
 	select {
 	case <-openEntered:
@@ -394,7 +374,10 @@ func TestCandidateResourceHoldsNamesBeforeOpen(t *testing.T) {
 	testassert.Require(t, !slices.Contains(subprocessEnvForTest(t, svc), name+"=candidate-open-value"), "name was not held during candidate prefix cleanup")
 	releaseCleanup()
 	parkCleanup.Store(false)
-	testassert.Require(t, <-buildDone != nil, "candidate with a failing sibling succeeded")
+	built := <-buildDone
+	testassert.Require(t, built.err == nil && built.snapshot != nil && built.snapshot.native.inactive["credlife"] != nil, "candidate with a failing activation = (%v, %+v), want the extension left out with a reason", built.err, built.snapshot)
+	testassert.Require(t, built.snapshot.native.release() == nil, "releasing the unpublished candidate")
+	testassert.Require(t, built.snapshot.resources.release() == nil, "releasing the unpublished candidate resources")
 	testassert.Require(t, slices.Contains(subprocessEnvForTest(t, svc), name+"=candidate-open-value"), "name stayed held after an unpublished candidate unwound")
 }
 

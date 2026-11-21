@@ -393,10 +393,17 @@ func TestCoordinatedHostsNativeWorkDepartureAndOwnerRepair(t *testing.T) {
 	info, err := host.Open()
 	testassert.NoError(t, err)
 	oldInstance := info.InstanceID
-	created, err := host.Call(info.Generation, "CreateSession", fmt.Sprintf(`{"body":{"workspace":%q,"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"}}}}`, workspace))
-	testassert.Require(t, err == nil && created.Status == http.StatusCreated, "create root: %+v, %v", created, err)
-	var root protocol.Session
-	testassert.NoError(t, json.Unmarshal([]byte(created.Body), &root))
+	discovery, err := host.Call(info.Generation, "ListExtensions", `{}`)
+	testassert.Require(t, err == nil && discovery.Status == http.StatusOK && strings.Contains(discovery.Body, `"name":"create"`), "discovery: %+v, %v", discovery, err)
+	created, err := host.Call(info.Generation, "InvokeExtension", fmt.Sprintf(`{"body":{"extension_id":"agents","operation":"create","target":{"kind":"workspace","workspace":%q},"arguments":{},"request_id":"coordinated-create"}}`, workspace))
+	testassert.Require(t, err == nil && created.Status == http.StatusOK, "create root: %+v, %v", created, err)
+	var receipt struct {
+		Result struct {
+			SessionID string `json:"session_id"`
+		} `json:"result"`
+	}
+	testassert.NoError(t, json.Unmarshal([]byte(created.Body), &receipt))
+	root := protocol.Session{SessionId: receipt.Result.SessionID, Workspace: workspace}
 	// Drain the actual native event pull, retaining deliveries and terminal loss.
 	events := make(chan string, 256)
 	lost := make(chan error, 1)
@@ -418,7 +425,7 @@ func TestCoordinatedHostsNativeWorkDepartureAndOwnerRepair(t *testing.T) {
 	testassert.Require(t, initialized.Runtime.InstanceId == oldInstance, "ACP attached another owner")
 	terminal := startPipeTerminal(t, opts, workspace)
 	terminal.await(t, 0, func(text string) bool {
-		return strings.Contains(text, "Authoritative refreshed range — "+root.SessionId) && strings.Contains(text, "Future: primary / prov/root")
+		return strings.Contains(text, "Authoritative refreshed range — "+root.SessionId) && strings.Contains(text, "Model choice: none")
 	})
 	rootRead := func() protocol.Hydration { return desktopHydrate(t, host, info, root.SessionId) }
 	var queuedID, childID, rootOperation string
@@ -436,7 +443,7 @@ func TestCoordinatedHostsNativeWorkDepartureAndOwnerRepair(t *testing.T) {
 		childID = ""
 		jobID := ""
 		for _, member := range h.Background {
-			if member.Kind == protocol.BackgroundMemberKindChild {
+			if member.Kind == protocol.BackgroundMemberKindSession {
 				childID = member.Id
 			}
 			if member.Kind == protocol.BackgroundMemberKindJob {
@@ -445,7 +452,7 @@ func TestCoordinatedHostsNativeWorkDepartureAndOwnerRepair(t *testing.T) {
 		}
 		testassert.Require(t, childID != "" && jobID != "", "native members: %+v", h.Background)
 		child := desktopHydrate(t, host, info, childID)
-		testassert.Require(t, child.ActiveOperation != nil && child.Session.ParentSessionId != nil && *child.Session.ParentSessionId == root.SessionId, "native child not active or not owned by root")
+		testassert.Require(t, child.ActiveOperation != nil && child.Session.OwnerSessionId != nil && *child.Session.OwnerSessionId == root.SessionId, "native child not active or not owned by root")
 		testassert.Require(t, reflect.DeepEqual(h, acp.hydrate(t, root.SessionId)) && reflect.DeepEqual(child, acp.hydrate(t, childID)), "desktop/ACP gated native facts differ")
 		return fifo, h, child
 	}

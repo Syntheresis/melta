@@ -18,7 +18,6 @@
     composePluginsPatch,
     composeSessionsPatch,
     extractSettingsText,
-    parseExactJSON,
     parseSettingsObject,
     replaceObjectMembers,
   } from './exactjson';
@@ -28,8 +27,7 @@
   const dispatch = createEventDispatcher();
 
   // Top-level baseline controls: exact JSON members of the tools, jobs and
-  // compaction objects. Every other plugin entry stays raw
-  // inspect/edit/remove; tasks remains an optional plugin control.
+  // compaction objects. Extension entries remain opaque documents.
   const BASELINE_FIELDS = {
     tools: ['max_output_bytes', 'read_max_lines', 'read_line_max_chars', 'command_timeout'],
     jobs: ['max_background_processes', 'max_output_bytes', 'read_line_max_chars'],
@@ -41,9 +39,6 @@
   // a raw-JSON token control.
   const BASELINE_STRING_FIELDS = {
     compaction: ['model', 'prompt'],
-  };
-  const PLUGIN_FIELDS = {
-    agents: ['max_concurrent', 'max_output_bytes'],
   };
   const SESSION_FIELDS = ['archive_after_days', 'delete_after_archive_days'];
 
@@ -75,7 +70,6 @@
   $: sessions = parsed && parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {};
   $: plugins = parsed && parsed.extensions && typeof parsed.extensions === 'object' ? parsed.extensions : {};
   $: authoredIDs = Object.keys(plugins);
-  $: otherAuthoredIDs = authoredIDs.filter((id) => !Object.hasOwn(PLUGIN_FIELDS, id));
 
   function safeParse(text) {
     try {
@@ -148,19 +142,6 @@
     replaceBaselineSection(section, '{}');
   }
 
-  // A plugin edit patches the member, then places the document back into `plugins`.
-  function patchPlugin(pluginID, member, valueText) {
-    applyEdit((current) => {
-      const pluginsNow = parseSettingsObject(current).extensions || {};
-      const document = typeof pluginsNow[pluginID] === 'string' ? pluginsNow[pluginID] : '{}';
-      const section = parseSettingsObject(document);
-      const task = section.task == null ? '{}' : JSON.stringify(section.task);
-      const nextTask = replaceObjectMembers(task, composeMemberPatch(member, valueText));
-      const nextDocument = replaceObjectMembers(document, composeMemberPatch('task', nextTask));
-      return replaceObjectMembers(current, composeMemberPatch('extensions', composePluginsPatch(pluginsNow, pluginID, nextDocument)));
-    });
-  }
-
   // Raw authoring/edit/remove for any plugin entry; the server decides validity.
   function editDocument(pluginID, document) {
     applyEdit((current) => {
@@ -207,23 +188,6 @@
   function documentText(pluginID) {
     const document = plugins[pluginID];
     return typeof document === 'string' ? document : null;
-  }
-
-  function documentValues(pluginID) {
-    const document = documentText(pluginID);
-    if (document === null) return {};
-    try {
-      const value = parseExactJSON(document);
-      if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
-      return value.task !== null && typeof value.task === 'object' && !Array.isArray(value.task) ? value.task : {};
-    } catch {
-      return {};
-    }
-  }
-
-  function memberValue(pluginID, member) {
-    const values = documentValues(pluginID);
-    return member in values ? JSON.stringify(values[member]) : '';
   }
 
   function baselineValues(section) {
@@ -285,7 +249,7 @@
          this settings surface; these are that surface's own nav entries, not a
          toolbar strip. -->
     <div class="nav">
-      {#if hasAgents}<button class="navitem" on:click={() => dispatch('agent')} aria-label="Agent type">Agent type</button>{/if}
+      {#if hasAgents}<button class="navitem" on:click={() => dispatch('agent')} aria-label="Agents">Agents</button>{/if}
       <button class="navitem" on:click={() => dispatch('providers')} aria-label="Providers">Providers</button>
       <button class="navitem" on:click={() => dispatch('snapshots')} aria-label="Snapshots">Snapshots</button>
       <button class="navitem" on:click={() => dispatch('viewer')} aria-label="File viewer">File viewer</button>
@@ -344,31 +308,9 @@
           </div>
         {/each}
 
-        {#each Object.keys(PLUGIN_FIELDS) as pluginID (pluginID)}
-          <div class="sec">{pluginID} plugin</div>
-          {#if documentText(pluginID) === null}
-            <div class="hint">Uses plugin defaults</div>
-          {/if}
-          {#each PLUGIN_FIELDS[pluginID] as member (member)}
-            <label class="row"><span class="label">{member}</span>
-              <input class="num" type="text" value={memberValue(pluginID, member)} aria-label={`${pluginID} ${member}`} disabled={busy}
-                on:change={(e) => patchPlugin(pluginID, member, e.target.value)} />
-            </label>
-          {/each}
-          {#if documentText(pluginID) !== null}
-            <label class="row raw"><span class="label">Raw document</span>
-              <textarea class="doc" rows="3" value={documentText(pluginID)} aria-label={`${pluginID} raw document`} disabled={busy}
-                on:change={(e) => editDocument(pluginID, e.target.value)}></textarea>
-            </label>
-            <div class="row"><span class="label"></span>
-              <button class="ghost" disabled={busy} on:click={() => editDocument(pluginID, null)} aria-label={`Remove ${pluginID} document`}>Remove authored document</button>
-            </div>
-          {/if}
-        {/each}
-
-        {#if otherAuthoredIDs.length > 0}
-          <div class="sec">Other plugin documents</div>
-          {#each otherAuthoredIDs as pluginID (pluginID)}
+        {#if authoredIDs.length > 0}
+          <div class="sec">Extension documents</div>
+          {#each authoredIDs as pluginID (pluginID)}
             <label class="row raw"><span class="label">{pluginID}</span>
               <textarea class="doc" rows="3" value={documentText(pluginID)} aria-label={`${pluginID} raw document`} disabled={busy}
                 on:change={(e) => editDocument(pluginID, e.target.value)}></textarea>

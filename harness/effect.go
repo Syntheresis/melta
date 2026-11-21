@@ -11,6 +11,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Syntheresis/melta/agent"
@@ -60,12 +61,10 @@ func buildToolResultContent(evidence ExecutionEvidence, hookUnknown bool, base s
 	}
 }
 
-// normalizationFailureContent renders the bounded stored diagnostic of one
-// advertised call's failed original normalization: the fixed internal-
-// validation content for a malformed callback outcome or an empty
-// diagnostic, otherwise the bounded useful diagnostic. The stored value is
-// exactly the content later dispatch settles with, without another
-// NormalizeTool invocation.
+// normalizationFailureContent renders the bounded diagnostic of a failed
+// bound-tool normalization: fixed internal-validation content for a
+// malformed callback outcome or empty diagnostic, otherwise the bounded
+// diagnostic.
 func normalizationFailureContent(cause error) string {
 	if errors.Is(cause, errMalformedNormalization) {
 		return invalidToolResultContent
@@ -156,7 +155,7 @@ type modelEffectIntent struct {
 	resultID   string
 	compaction bool // true for the compact effect's intent: its usage is summary usage
 	requestID  string
-	evidence   *RequestEvidence // the adopted evidence the committed intent carries (conversation effects)
+	evidence   *RequestEvidence // the adopted evidence the committed intent carries
 }
 
 // hookEffectBinding is one settled hook execution's binding: its extension
@@ -170,21 +169,23 @@ type hookEffectBinding struct {
 
 // pendingCallIntent carries one pending-call effect's intent input: a hook
 // effect its extension identity and consumed input bytes, a tool effect its
-// accepted normalized selection and contributing hook provenance.
+// bound implementation, normalized selection and contributing hook provenance.
 type pendingCallIntent struct {
 	hookID               string
 	extensionID          string
 	inputArgumentsBase64 string
 	finalArguments       json.RawMessage
 	contributionIDs      []HookIdentity
+	implementation       *ToolImplementation
 }
 
 // toolSelection is the final effective argument value a settled tool call
 // consumed and the ordered hook provenance that produced it. Results that
 // never accepted a value carry neither.
 type toolSelection struct {
-	arguments json.RawMessage
-	hooks     []HookIdentity
+	arguments      json.RawMessage
+	hooks          []HookIdentity
+	implementation *ToolImplementation
 }
 
 // modelResult is the settlement content of one logical model effect: the
@@ -222,10 +223,9 @@ type modelResult struct {
 // output, validates it, and commits the result and complete next Operation
 // state before returning the committed settlement. The automatic maintenance
 // orchestration and the request contributions belong to the request source;
-// this effect consumes the round they built. Before the assistant entry
-// commits, every advertised completed call is normalized through the
-// invocation's pure callback outside storage transactions and owning locks.
-// The retry classifier belongs to the enclosing Execution.
+// this effect consumes the round they built. The assistant entry retains raw
+// calls; normalization belongs to dispatch. The retry classifier belongs to
+// the enclosing Execution.
 func (d *executionDriver) modelEffect() agent.ModelEffect {
 	h := d.harness
 	inv := d.conversation
@@ -272,11 +272,6 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 			}
 			return agent.ModelSettlement{}, cause
 		}
-		// Derive the advertisement from the same request the Engine accepted.
-		dispatchNames := make([]string, len(req.Tools))
-		for i, tool := range req.Tools {
-			dispatchNames[i] = tool.Name
-		}
 		// The physical attempt receives the producing conversation invocation
 		// and this logical effect's own reserved result identity; retries
 		// share that logical effect.
@@ -285,7 +280,7 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 		// the cancellation checks, and an accepted stream never re-enters
 		// retry — assembly owns it, including closure.
 		var output model.Output
-		switch res := runModelAttempts(ctx, req, attempt, d.execution.Retry); res.kind {
+		switch res := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, d.execution.Retry); res.kind {
 		case attemptAccepted:
 			out, attemptErr := assemble(intent.expected, h.observeStream(intent.sessionID, d.operationID, res.stream)) // exactly one assembly after acceptance
 			if attemptErr != nil {
@@ -322,7 +317,7 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 				}
 			}
 		}
-		assistant, reported, err := newAssistantEntry(ctx, intent.sessionID, d.operationID, intent.resultID, owned.Output, inv.callbacks.NormalizeTool, dispatchNames, intent.requestID, intent.evidence)
+		assistant, reported, err := newAssistantEntry(intent.sessionID, d.operationID, intent.resultID, owned.Output, intent.requestID, intent.evidence)
 		if err != nil {
 			return agent.ModelSettlement{}, err
 		}
@@ -438,11 +433,10 @@ func publishedCallIDs(c *coordinator, operationID string) map[string]bool {
 // beginModelEffect commits the one active-effect intent of a logical model
 // effect: it reserves the effect's result entry identity, records the request
 // identity, actual model, purpose, and (for a conversation effect) the
-// effective input evidence it consumes, and publishes or preserves the
-// suspended conversation request state in the same transaction — a
-// conversation effect publishes its round's state when none is published, and
-// a maintenance effect publishes the supplied suspended conversation state
-// under the conversation identity, never replacing it with its own producer
+// effective input evidence it consumes, and publishes or preserves the one
+// suspended request state in the same transaction — a conversation effect
+// publishes its round's state when none is published, and a maintenance effect
+// publishes the supplied summary request state under its own producer
 // identity. The reserved identity stays free until the model result or the
 // consuming settlement commits under it. The caller continues on the
 // codec-adopted record the transaction wrote.
@@ -455,7 +449,7 @@ func publishedCallIDs(c *coordinator, operationID string) map[string]bool {
 // failure at the intent boundary: it propagates with the durable state
 // retained for recovery and is never followed by a guessed compensating
 // terminal write.
-func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operationID string, requestID string, purpose InvocationPurpose, mdl model.ModelRef, evidence *RequestEvidence, suspended *RunningRequest) (modelEffectIntent, error) {
+func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operationID string, requestID string, purpose InvocationPurpose, mdl model.ModelRef, evidence *RequestEvidence, requestState *RunningRequest) (modelEffectIntent, error) {
 	c.mu.Lock()
 	op, ok := c.graph.Operation(operationID)
 	if !ok {
@@ -525,6 +519,7 @@ func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operatio
 				if next.State.Request == nil {
 					next.State.Request = &RunningRequest{
 						RequestID:         requestID,
+						Purpose:           InvocationPurposeConversation,
 						CheckpointEntryID: evidence.CheckpointEntryID,
 						BoundaryEntryID:   evidence.BoundaryEntryID,
 					}
@@ -540,8 +535,8 @@ func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operatio
 				}
 			}
 		case InvocationPurposeMaintenance:
-			if next.State.Request == nil && suspended != nil {
-				published := *suspended
+			if next.State.Request == nil && requestState != nil {
+				published := *requestState
 				next.State.Request = &published
 			}
 		}
@@ -596,8 +591,9 @@ func (h *Harness) beginModelEffect(ctx context.Context, c *coordinator, operatio
 // the semantic result entries, usage, the complete next Operation state, and
 // the required Session state. A running result clears the active effect and
 // records the completed calls' reservations; the suspended running request
-// state survives a result that produced a pending batch and a maintenance
-// result unchanged, and clears at a conversation result with no batch. A
+// state survives a result that produced a pending batch and clears at every
+// request's result with no batch — including the completed summary request
+// before the strategy folds its output. A
 // terminal result runs the common terminal helper — preserving any produced
 // assistant payload, interrupting every call that will not execute, appending
 // exactly one interruption signal, appending the settlement entry, writing the
@@ -613,7 +609,7 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 	operationID := d.operationID
 	c.mu.Lock()
 	if res.successContext != nil { // the shared success guard: one hold with the publication, before the transaction
-		if res.successContext.Err() != nil || c.interruptOp == operationID || c.bgState == bgClosed {
+		if res.successContext.Err() != nil || c.interruptOp == operationID || memberStopping(c) {
 			// Interrupt winning this hold cannot be missed; a foreign
 			// marker or a root stop's stopping state never converts the
 			// success, and an Interrupt after the committed success cannot
@@ -756,8 +752,12 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 		next.State.Usage = opUsage
 		next.State.Status = OperationRunning
 		next.State.PendingToolCalls = append(next.State.PendingToolCalls, pending...)
-		if (intent == nil || !intent.compaction) && len(next.State.PendingToolCalls) == 0 {
-			next.State.Request = nil // the conversation result closed its request with no batch to suspend
+		if len(next.State.PendingToolCalls) == 0 {
+			// A request with no surviving batch is complete: the conversation
+			// result clears its own request, and a completed maintenance model
+			// clears the one summary request it was shaping before the pure
+			// folding stage consumes its output.
+			next.State.Request = nil
 		}
 		if intent != nil && intent.compaction {
 			// The completed maintenance model intent's empty running result leaves its
@@ -813,6 +813,9 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 	c.mu.Unlock()
 	h.observeInvalidation(c) // every result/terminal Session register replacement advances
 	h.emitToolResultFacts(newEntries, sessionID, operationID)
+	if res.terminal != "" {
+		h.observeOperationSettled(sessionID, operationID, res.terminal)
+	}
 	return committedOp, nil
 }
 
@@ -912,6 +915,7 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 			ExtensionID:          intent.ExtensionID,
 			ToolCallID:           intent.ToolCallID,
 			RequestID:            intent.RequestID,
+			Purpose:              intent.Purpose,
 			Status:               hookInterrupted,
 			Evidence:             ExecutionUnknown,
 			Error:                recoveryInterruptedDetail,
@@ -996,6 +1000,7 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 		}
 		if currentOp.State.ActiveEffect != nil && currentOp.State.ActiveEffect.Kind == EffectTool &&
 			currentOp.State.ActiveEffect.ToolCallID == call.CallID {
+			result.Implementation = currentOp.State.ActiveEffect.Implementation
 			if len(currentOp.State.ActiveEffect.FinalArguments) > 0 {
 				result.NormalizedArguments = model.CloneRaw(currentOp.State.ActiveEffect.FinalArguments)
 			}
@@ -1054,33 +1059,24 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 		Detail:          detail,
 		CompactionUsage: compactionUsage,
 	}
-	// The settlement's request witness: a maintenance-family settlement
-	// names its own producer identity (never a replacement of the suspended
-	// conversation state, which lives on the register state until this
-	// terminal clears it), recovery-included: an active maintenance intent no
-	// retained Fact witnesses still names that producer; otherwise the
-	// published running request; otherwise a live model intent's identity.
-	// Ordinary accumulated maintenance facts can ride any terminal kind
-	// without owning the settlement's own witness.
+	// Summary settlements name their producer. Other terminals witness the
+	// running request or active model intent, if any.
 	switch {
 	case compactionUsage && facts != nil && (facts.hasInput() || facts.hasConsumed()):
-		settlement.RequestID = maintenanceID
-		settlement.ConsumedRequestID = facts.sourceRequestID
+		settlement.RequestID = maintenanceID // a real maintenance request identity, empty when none opened
 	case assistant == nil && activeEffect != nil && activeEffect.Kind == EffectModel &&
-		activeEffect.Purpose == InvocationPurposeMaintenance && activeEffect.RequestID != "":
-		// Recovery retains no process-local Facts: the live maintenance
-		// intent's own identity is the maintenance producer witness.
+		activeEffect.Purpose == InvocationPurposeMaintenance:
 		settlement.RequestID = activeEffect.RequestID
 	case currentOp.State.Request != nil:
 		settlement.RequestID = currentOp.State.Request.RequestID
-	case assistant == nil && activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.RequestID != "":
+	case assistant == nil && activeEffect != nil && activeEffect.Kind == EffectModel:
 		settlement.RequestID = activeEffect.RequestID
 	}
 	if assistant == nil {
-		if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Evidence != nil {
+		if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Purpose == InvocationPurposeConversation {
 			evidence := *activeEffect.Evidence
 			settlement.Evidence = &evidence
-		} else if compactionUsage && facts != nil && facts.hasConsumed() {
+		} else if compactionUsage && facts != nil && facts.hasConsumed() && settlement.RequestID != "" {
 			consumed := facts.consumed
 			settlement.Evidence = &consumed
 		}
@@ -1090,21 +1086,16 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 		// exactly once beside any ordinary usage; their own reported usage
 		// never becomes the settlement's carried conversation usage.
 		settlement.Facts = cloneMaintenanceFacts(facts.facts)
+	} else if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Purpose == InvocationPurposeMaintenance {
+		settlement.Facts = []maintenanceFact{summaryFact(activeEffect.RequestID, *activeEffect.Model, activeEffect.Evidence)}
 	}
 	if assistant == nil {
 		if usage != nil { // terminal no-output model usage rides the settlement entry
 			modelRef := usageModel
 			settlement.Model = &modelRef
 			settlement.Usage = usage
-		} else if activeEffect != nil && activeEffect.Kind == EffectModel &&
-			activeEffect.Model != nil && !facts.witnessesRequest(activeEffect.RequestID) {
-			// A terminal model producer with no usage report still names its
-			// live model intent unless a retained maintenance fact already
-			// witnesses that request: a conversation intent directly, and a
-			// maintenance intent whose Facts process loss dropped — the
-			// absent report stays unknown instead of becoming a missing
-			// producer, and a fact-witnessed producer never repeats its
-			// model beside its Facts.
+		} else if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Purpose == InvocationPurposeConversation {
+			// Summary producers are witnessed by their facts instead.
 			modelRef := *activeEffect.Model
 			settlement.Model = &modelRef
 		}
@@ -1215,7 +1206,7 @@ func newSignalEntry(tx Transaction, sessionID, operationID string, kind SignalKi
 	return &adopted, nil
 }
 
-// normalizeCallArguments runs one NormalizeTool invocation at the Harness
+// normalizeCallArguments runs one bound normalizer invocation at the Harness
 // boundary: the callback receives an owned copy of the completed call and must
 // return exactly one complete JSON object, whose bytes the Harness returns as a
 // fresh owned copy. A callback error or a malformed result is a per-call
@@ -1235,7 +1226,7 @@ func normalizeCallArguments(ctx context.Context, normalize func(context.Context,
 	return model.CloneRaw(raw), nil
 }
 
-// errMalformedNormalization marks a NormalizeTool result whose shape is not
+// errMalformedNormalization marks a normalizer result whose shape is not
 // one complete JSON object: the existing internal-validation tool error
 // class, not a plugin-defined status or a cancellation instruction.
 var errMalformedNormalization = errors.New("malformed normalization")
@@ -1244,16 +1235,9 @@ var errMalformedNormalization = errors.New("malformed normalization")
 // output under the given entry identity, reserving one result identity per
 // completed call and recording the producing request identity and the request
 // evidence the model effect consumed. An output without an eligible model-visible
-// payload writes no assistant entry and returns its reported usage for the consuming settlement
-// entry instead. Before the entry commits, every completed call whose name is
-// in the producing request's ordered advertised names is normalized through
-// the execution's pure callback exactly once: its successful owned object
-// populates the nested call's normalized_arguments member, and a failed or
-// malformed normalization stores its bounded failure content in the nested
-// call's normalization_failure member instead. Every unknown or unadvertised
-// name stores neither and runs no callback; the original raw argument bytes
-// are always retained.
-func newAssistantEntry(ctx context.Context, sessionID, operationID, entryID string, out *model.Output, normalize func(context.Context, model.ToolCall) (json.RawMessage, error), advertised []string, requestID string, evidence *RequestEvidence) (*assistantEntry, *UsageCount, error) {
+// payload writes no assistant entry and returns its usage for the consuming
+// settlement instead. Call arguments remain raw.
+func newAssistantEntry(sessionID, operationID, entryID string, out *model.Output, requestID string, evidence *RequestEvidence) (*assistantEntry, *UsageCount, error) {
 	if out == nil {
 		return nil, nil, nil
 	}
@@ -1268,10 +1252,6 @@ func newAssistantEntry(ctx context.Context, sessionID, operationID, entryID stri
 	if evidence != nil {
 		owned := copyRequestEvidence(*evidence)
 		entry.Evidence = &owned
-	}
-	advertisedNames := make(map[string]bool, len(advertised))
-	for _, name := range advertised {
-		advertisedNames[name] = true
 	}
 	var usage *UsageCount
 	if out.Usage != nil {
@@ -1292,17 +1272,6 @@ func newAssistantEntry(ctx context.Context, sessionID, operationID, entryID stri
 				Name:            call.Name,
 				ArgumentsBase64: base64.StdEncoding.EncodeToString(call.Arguments),
 				Extra:           call.Extra,
-			}
-			if advertisedNames[call.Name] {
-				// The original normalization is pure preprocessing of this
-				// producing request's advertised call: it carries the request
-				// and call identity and no effect identity.
-				callCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: requestID, ToolCallID: call.ID})
-				if normalized, err := normalizeCallArguments(callCtx, normalize, call); err == nil {
-					record.NormalizedArguments = normalized
-				} else {
-					record.NormalizationFailure = normalizationFailureContent(err)
-				}
 			}
 			entry.ToolCalls = append(entry.ToolCalls, record)
 		}
@@ -1326,11 +1295,16 @@ func newAssistantEntry(ctx context.Context, sessionID, operationID, entryID stri
 // nested parts and extras, and the name and provenance lists.
 func copyRequestEvidence(v RequestEvidence) RequestEvidence {
 	out := v
-	out.Messages = cloneRequestMessages(v.Messages)
-	if v.ToolNames != nil {
-		names := make([]string, len(v.ToolNames))
-		copy(names, v.ToolNames)
-		out.ToolNames = names
+	out.Edits = cloneRequestEdits(v.Edits)
+	if v.Tools != nil {
+		out.Tools = append([]model.ToolDefinition{}, cloneToolDefinitions(v.Tools)...)
+	}
+	out.Parameters = v.Parameters.Clone()
+	if v.SummaryBase != nil {
+		out.SummaryBase = append([]model.Message{}, cloneRequestMessages(v.SummaryBase)...)
+	}
+	if v.SummaryInput != nil {
+		out.SummaryInput = append([]model.Message{}, cloneRequestMessages(v.SummaryInput)...)
 	}
 	if v.HookIDs != nil {
 		out.HookIDs = append([]HookIdentity(nil), v.HookIDs...)
@@ -1390,29 +1364,23 @@ func authorizationRequired(p PreparedTool) bool {
 // boundary: every declared pair must be a nonempty permission/target pair;
 // file.read/file.write targets must be canonical and their prepared canonical
 // Workspace root must be a required canonical that is nonempty, absolute and
-// lexically clean; a readonly Agent with no configured write_dir denies every
-// file.write pair; any configured write_dir confines every file.write pair to
-// the prepared canonical write directory through Rel containment
-// independently of permission allow, requiring its canonical root as a second
-// required canonical. Constraints and target preparation are never
-// delegated. Only then does the evaluator decide the complete prepared
+// lexically clean. Target preparation is never delegated. Only then does the
+// evaluator decide the complete prepared
 // action, and the plan is allowed exactly when it returns allow without
 // error: a deny, a decision outside the closed set, or an error denies the
 // call alike. A nil evaluator selects the included built-in policy.
-func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, capture ExecutionCapture, plan PreparedTool) bool {
+func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, plan PreparedTool, name string, args json.RawMessage) bool {
 	if len(plan.Permissions) == 0 {
 		return false
 	}
-	var hasFile, hasWrite bool
+	var hasFile bool
 	for _, req := range plan.Permissions {
 		if req.Permission == "" || req.Target == "" {
 			return false
 		}
 		switch req.Permission {
-		case PermissionFileRead:
+		case PermissionFileRead, PermissionFileWrite:
 			hasFile = true
-		case PermissionFileWrite:
-			hasFile, hasWrite = true, true
 		}
 		if (req.Permission == PermissionFileRead || req.Permission == PermissionFileWrite) && !canonicalPathValue(req.Target) {
 			return false
@@ -1421,30 +1389,105 @@ func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, capture
 	if hasFile && !canonicalPathValue(plan.CanonicalWorkspace) {
 		return false
 	}
-	if hasWrite {
-		if capture.Readonly && capture.WriteDir == "" {
-			return false
-		}
-		if capture.WriteDir != "" {
-			if !canonicalPathValue(plan.CanonicalWriteDir) {
-				return false
-			}
-			for _, req := range plan.Permissions {
-				if req.Permission == PermissionFileWrite && !containsPath(plan.CanonicalWriteDir, req.Target) {
-					return false
-				}
-			}
-		}
-	}
 	if evaluator == nil {
 		evaluator = PermissionPolicy{}
 	}
 	decision, err := evaluator.Evaluate(ctx, PreparedAction{
+		ToolName:           name,
+		Arguments:          append(json.RawMessage(nil), args...),
 		CanonicalWorkspace: plan.CanonicalWorkspace,
-		CanonicalWriteDir:  plan.CanonicalWriteDir,
 		Permissions:        append([]PermissionRequest(nil), plan.Permissions...),
 	})
 	return err == nil && decision == PermissionAllow
+}
+
+func authorizationFailure(ctx context.Context, callID string, err error) model.ToolResult {
+	var declared *EffectError
+	if EffectInterrupted(err) || (!errors.As(err, &declared) && ctx.Err() != nil && isExecutionCancellation(err)) {
+		return interruptedToolResult(callID)
+	}
+	return validationToolResult(callID, err)
+}
+
+// authorizeHooks runs pure restrictions after policy, retaining only locations
+// explicitly bound by the hooks, not the Workspace fact itself.
+func authorizeHooks(ctx context.Context, inv InvocationExecution, callID, name string, args json.RawMessage, plan PreparedTool) (func() error, *model.ToolResult) {
+	if len(inv.AuthorizationHooks) == 0 {
+		return nil, nil
+	}
+	fail := func(err error) (func() error, *model.ToolResult) {
+		result := authorizationFailure(ctx, callID, err)
+		return nil, &result
+	}
+	if ctx.Err() != nil {
+		return fail(ctx.Err())
+	}
+	if inv.BindLocation == nil {
+		return fail(fmt.Errorf("location binding unavailable"))
+	}
+	root, rootCheck, err := inv.BindLocation(".")
+	if err != nil {
+		return fail(err)
+	}
+	if !canonicalPathValue(root) || rootCheck == nil {
+		return fail(fmt.Errorf("invalid location binding"))
+	}
+	var checks []func() error
+	for _, hook := range inv.AuthorizationHooks {
+		if ctx.Err() != nil {
+			return fail(ctx.Err())
+		}
+		var mu sync.Mutex
+		open := true
+		bind := func(path string) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if !open {
+				return "", fmt.Errorf("authorization callback has ended")
+			}
+			canonical, check, err := inv.BindLocation(path)
+			if err != nil {
+				return "", err
+			}
+			if !canonicalPathValue(canonical) || check == nil {
+				return "", fmt.Errorf("invalid location binding")
+			}
+			checks = append(checks, check)
+			return canonical, nil
+		}
+		action := PreparedAction{ToolName: name, Arguments: append(json.RawMessage(nil), args...), CanonicalWorkspace: root, Permissions: append([]PermissionRequest(nil), plan.Permissions...)}
+		reason, err := hook.Run(ctx, action, bind)
+		mu.Lock()
+		open = false
+		mu.Unlock()
+		if err != nil {
+			return fail(err)
+		}
+		if reason != nil {
+			if *reason == "" {
+				result := invalidToolResult(callID)
+				return nil, &result
+			}
+			content := refusalDiagnostic(*reason)
+			result := model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: content}
+			return nil, &result
+		}
+	}
+	if ctx.Err() != nil {
+		return fail(ctx.Err())
+	}
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	frozen := append([]func() error(nil), checks...)
+	return func() error {
+		for _, check := range frozen {
+			if err := check(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil
 }
 
 // canonicalPathValue reports whether one prepared canonical target or root is
@@ -1521,6 +1564,21 @@ func permissionDeniedToolResult(callID string) model.ToolResult {
 	return model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: PermissionDeniedContent}
 }
 
+// refusedToolResult is the deliberate before-tool refusal result: the settled
+// call is denied with the refusal produced by the same denied-content rule as
+// an authorization-hook denial, and no effect began.
+func refusedToolResult(callID, reason string) model.ToolResult {
+	return model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: refusalDiagnostic(reason)}
+}
+
+// refusalDiagnostic renders one before-tool refusal as the denied content an
+// authorization-hook denial produces: invalid UTF-8 is repaired and the text
+// is bounded to the durable diagnostic limit. An empty reason is invalid and
+// is rejected before this producer.
+func refusalDiagnostic(reason string) string {
+	return boundedToolDiagnostic(errors.New(strings.ToValidUTF8(reason, "\uFFFD")))
+}
+
 // validationToolResult is the immediate validation-error result for an invalid
 // model argument: status error carrying the callback's own bounded useful
 // diagnostic. An empty diagnostic still carries the internal-validation text.
@@ -1544,46 +1602,14 @@ func boundedToolDiagnostic(cause error) string {
 	return strings.ToValidUTF8(msg, "")
 }
 
-// toolEffect encloses one concrete tool execution in the shared Harness tool
-// boundary. In order: it resolves the call's pending reservation and committed
-// assistant record, and pre-start cancellation wins before anything else; the
-// advertisement gate rejects names outside the engine-supplied advertisement of
-// the producing request — the per-call owned copy the Engine derived from the
-// validated request before its model effect — with the ordinary
-// unavailable-tool error before any hook or preparer runs, while the canonical
-// pending-call record stays the authority for the call's own data; the
-// selected argument hooks then run in configured order — a pure hook validates
-// and normalizes its changed bytes once in memory with no effect transaction,
-// an effectful hook runs as its own settled effect retaining the input it
-// actually consumed — and a settled hook chain hands the final committed value
-// on. A pure-only chain can repair an invalid original without inventing a
-// durable hook effect, and later dispatch never normalizes the repaired value
-// again. Without hooks (or for an unhooked call) the original assistant's
-// committed normalized arguments are the selected input, and an invalid
-// unhooked original settles with the failure diagnostic its one producer
-// normalization stored, without another NormalizeTool invocation. It then
-// prepares the plan outside locks, rejects invalid plan
-// shapes with the existing internal-validation error, and evaluates every
-// declaration through the fixed boundary — including immediate-success plans —
-// before beginPendingCallEffect. A denial settles only that original call with
-// status denied and no metadata, no concrete effect and no tool active intent;
-// later calls still run. An allowed executor commits intent carrying the
-// accepted selection and provenance, executes once behind the
-// cancellation-before-start gate, and commits one validated outcome — a
-// returned real outcome wins a cancellation race. Every settled call's result
-// carries the final effective arguments and contributing hook provenance
-// actually consumed. A tool-produced outcome — an immediate or executor
-// result, its invalid replacement included — passes the invocation's ordered
-// pure output-shaping chain before its final commit; the harness-synthetic
-// refusals settle unshaped. The preparation and normalization callbacks come
-// from the opened conversation invocation; the permission policy from the
-// enclosing Execution.
+// toolEffect gates the advertised call, runs argument hooks over raw bytes,
+// binds and normalizes one implementation, and prepares and authorizes its
+// plan. The executor intent freezes the binding and effective arguments before
+// I/O; settlement preserves them and the execution evidence.
 func (d *executionDriver) toolEffect() agent.ToolEffect {
 	h := d.harness
 	c := d.coordinator
 	inv := d.conversation
-	prepare := inv.callbacks.Tool
-	capture := d.capture
 	return func(ctx context.Context, call model.ToolCall, names []string) (model.ToolResult, error) {
 		resolved, err := pendingToolCallRecord(c, d.operationID, call.ID)
 		if err != nil {
@@ -1612,16 +1638,29 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		if !advertised[record.Name] { // the one advertisement gate, ahead of every hook and preparer: the engine-supplied per-call advertisement of the producing request is the authority
 			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: unavailableToolResult(call.ID, record.Name), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
 		}
-		// The selected normalized value feeding preparation: the final
-		// committed hook chain value when hooks ran, otherwise the original
-		// assistant's committed successful result. Both were already validated
-		// and owned; neither is ever re-normalized. An unhooked invalid
-		// original consumes the diagnostic its one producer normalization
-		// stored and settles without another NormalizeTool invocation or
-		// preparation.
-		selection := toolSelection{arguments: record.NormalizedArguments}
-		if len(inv.callbacks.ToolHooks) > 0 {
-			chain, settled, herr := d.runArgumentHooks(ctx, settleCtx, resolved, inv.callbacks.ToolHooks)
+		raw, err := base64.StdEncoding.Strict().DecodeString(record.ArgumentsBase64)
+		if err != nil {
+			return model.ToolResult{}, err
+		}
+		selection := toolSelection{arguments: raw}
+		hooks := inv.callbacks.ToolHooks
+		if inv.callbacks.ArgumentStage != nil {
+			stage := inv.callbacks.ArgumentStage()
+			if stage.Release != nil {
+				defer stage.Release()
+			}
+			if stage.Error != nil {
+				return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: validationToolResult(call.ID, stage.Error), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+			}
+			check := inv.callbacks
+			check.ToolHooks = stage.Hooks
+			if err := validateOpenedInvocation(check); err != nil {
+				return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: validationToolResult(call.ID, err), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+			}
+			hooks = stage.Hooks
+		}
+		if len(hooks) > 0 {
+			chain, settled, herr := d.runArgumentHooks(ctx, settleCtx, resolved, hooks, raw)
 			if herr != nil {
 				return model.ToolResult{}, herr
 			}
@@ -1629,14 +1668,35 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 				return *settled, nil
 			}
 			selection = chain
-		} else if len(selection.arguments) == 0 {
-			result := invalidToolResult(call.ID) // neither member present: only reachable for gated or unadvertised names, which settle earlier
-			if record.NormalizationFailure != "" {
-				result = model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: record.NormalizationFailure}
-			}
-			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: result, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
 		}
 		if ctx.Err() != nil { // finish the accepted chain, but start no subsequent preparation
+			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: interruptedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+		}
+		binding, ok := inv.callbacks.LookupTool(record.Name)
+		if !ok {
+			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: unavailableToolResult(call.ID, record.Name), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+		}
+		if binding.Release != nil {
+			defer binding.Release()
+		}
+		if binding.Identity.ID == "" || binding.Normalize == nil || binding.Prepare == nil {
+			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: invalidToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+		}
+		selection.implementation = &binding.Identity
+		prepareCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: call.ID})
+		normalized, nerr := normalizeCallArguments(prepareCtx, binding.Normalize, model.ToolCall{ID: record.ID, Name: record.Name, Arguments: selection.arguments, Extra: record.Extra})
+		if nerr != nil {
+			selection.arguments, selection.hooks = nil, nil
+			var result model.ToolResult
+			if EffectInterrupted(nerr) || (ctx.Err() != nil && isExecutionCancellation(nerr)) {
+				result = interruptedToolResult(call.ID)
+			} else {
+				result = model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: normalizationFailureContent(nerr)}
+			}
+			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: result, Evidence: ExecutionNotStarted}, nil, false, selection, false)
+		}
+		selection.arguments = normalized
+		if ctx.Err() != nil {
 			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: interruptedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
 		}
 		// The preparer receives the bound callback context carrying its actual
@@ -1646,18 +1706,44 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		if err != nil {
 			return h.commitToolResult(settleCtx, c, d.operationID, pending, ToolOutcome{Result: invalidToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
 		}
-		prepareCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: call.ID})
-		plan := ownPreparedTool(prepare(prepareCtx, normalizedCall))
+		plan := ownPreparedTool(binding.Prepare(prepareCtx, normalizedCall))
 		settle := func(outcome ToolOutcome, shaping *toolShaping, fromIntent bool, selection toolSelection, hookUnknown bool) (model.ToolResult, error) {
 			return h.commitToolResult(settleCtx, c, d.operationID, pending, outcome, shaping, fromIntent, selection, hookUnknown)
 		}
 		if !validToolPlan(plan) {
 			return settle(ToolOutcome{Result: invalidToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
 		}
-		if authorizationRequired(plan) && !toolCallAllowed(ctx, d.execution.Permissions, capture, plan) {
-			return settle(ToolOutcome{Result: permissionDeniedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+		var recheck func() error
+		if authorizationRequired(plan) {
+			if !toolCallAllowed(ctx, d.execution.Permissions, plan, record.Name, selection.arguments) {
+				return settle(ToolOutcome{Result: permissionDeniedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+			}
+			callbacks := inv.callbacks
+			if callbacks.AuthorizationStage != nil {
+				stage := callbacks.AuthorizationStage()
+				if stage.Release != nil {
+					defer stage.Release()
+				}
+				if stage.Error != nil {
+					return settle(ToolOutcome{Result: authorizationFailure(ctx, call.ID, stage.Error), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+				}
+				callbacks.AuthorizationHooks = stage.Hooks
+				if err := validateOpenedInvocation(callbacks); err != nil {
+					return settle(ToolOutcome{Result: authorizationFailure(ctx, call.ID, err), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+				}
+			}
+			var result *model.ToolResult
+			recheck, result = authorizeHooks(prepareCtx, callbacks, call.ID, record.Name, selection.arguments, plan)
+			if result != nil {
+				return settle(ToolOutcome{Result: *result, Evidence: ExecutionNotStarted}, nil, false, selection, false)
+			}
 		}
 		if plan.Immediate != nil {
+			if recheck != nil {
+				if err := recheck(); err != nil {
+					return settle(ToolOutcome{Result: authorizationFailure(ctx, call.ID, err), Evidence: ExecutionNotStarted}, nil, false, selection, false)
+				}
+			}
 			outcome := acceptedImmediateOutcome(call.ID, *plan.Immediate)
 			// Pure output shaping over the tool-produced outcome (the
 			// invalid-replacement content included), before the final commit.
@@ -1667,6 +1753,7 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		if _, err := h.beginPendingCallEffect(ctx, c, d.operationID, call.ID, EffectTool, pendingCallIntent{
 			finalArguments:  selection.arguments,
 			contributionIDs: selection.hooks,
+			implementation:  selection.implementation,
 		}); err != nil {
 			// A marked publication failure propagates before any cancellation
 			// rule, regardless of a concurrent cancellation. Only an unmarked
@@ -1681,10 +1768,21 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		if ctx.Err() != nil { // cancellation before start commits interrupted-before-execution carrying the intent's accepted selection
 			return settle(ToolOutcome{Result: interruptedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, true, toolSelection{}, false)
 		}
+		if recheck != nil {
+			if err := recheck(); err != nil {
+				return settle(ToolOutcome{Result: authorizationFailure(ctx, call.ID, err), Evidence: ExecutionNotStarted}, nil, true, toolSelection{}, false)
+			}
+			if ctx.Err() != nil {
+				return settle(ToolOutcome{Result: interruptedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, true, toolSelection{}, false)
+			}
+		}
 		// Execute receives the committed concrete-tool reservation's context;
 		// this is the only callback with action authority, and the reserved
 		// result identity is carried immutably for the native adapter.
 		executeCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: call.ID, EffectID: pending.ResultEntryID})
+		if recheck != nil {
+			executeCtx = context.WithValue(executeCtx, locationChecksKey{}, recheck)
+		}
 		outcome := ownToolOutcome(plan.Execute(executeCtx))
 		if outcome.Evidence == "" { // a valid returned result is itself the observation
 			outcome.Evidence = ExecutionObserved
@@ -1726,10 +1824,10 @@ func acceptedImmediateOutcome(callID string, outcome ToolOutcome) ToolOutcome {
 // beginPendingCallEffect commits the one active-effect intent of a
 // pending-call effect: the intent addresses the first pending call and
 // reserves its result identity — the call's reserved identity for a tool
-// effect, a fresh allocation for a hook — recording the effect kind, the tool
-// selection and provenance for a tool effect, or the hook identity, extension
-// identity, and consumed input bytes before I/O for a hook effect. Effects
-// never nest, so any committed intent of another effect rejects.
+// effect, a fresh allocation for a hook — recording the effect kind, bound
+// tool identity, selection and provenance for a tool effect, or the hook
+// identity, extension identity, and consumed input bytes before I/O for a hook
+// effect. Effects never nest, so any committed intent of another effect rejects.
 // The intent owner follows beginModelEffect's origin rule: a cancellation
 // observed before the intent transaction is ever invoked returns unwrapped
 // and may use the caller's ordinary interruption settlement. Once the
@@ -1812,6 +1910,7 @@ func (h *Harness) beginPendingCallEffect(ctx context.Context, c *coordinator, op
 			InputArgumentsBase64: input.inputArgumentsBase64,
 			FinalArguments:       input.finalArguments,
 			ContributionIDs:      input.contributionIDs,
+			Implementation:       input.implementation,
 		}
 		payload, err := encodeOperationRegister(next)
 		if err != nil {
@@ -1846,16 +1945,16 @@ func (h *Harness) beginPendingCallEffect(ctx context.Context, c *coordinator, op
 // beginRequestHookEffect commits the one active-effect intent of a
 // request-bound hook effect: it reserves a fresh result identity, records the
 // hook identity, extension identity, and the consumed effective-view evidence
-// before any callback runs, and publishes the suspended conversation request
-// state inside this same existing effect transition when none is published
-// yet — the request state is never written by a pure-only transaction.
+// before any callback runs, and publishes the one suspended request state
+// inside this same existing effect transition when none is published yet —
+// the request state is never written by a pure-only transaction.
 // The intent owner follows beginModelEffect's origin rule: a cancellation
 // observed before the intent transaction is ever invoked returns unwrapped;
 // once the transaction is invoked it runs on a cancellation-free copy of the
 // execution context, so every error from it is a real store failure marked
 // publication-origin and propagates with the durable state retained for
 // recovery.
-func (h *Harness) beginRequestHookEffect(ctx context.Context, c *coordinator, operationID, requestID, hookID, extensionID string, consumed RequestEvidence) (string, error) {
+func (h *Harness) beginRequestHookEffect(ctx context.Context, c *coordinator, operationID, requestID string, purpose InvocationPurpose, hookID, extensionID string, consumed RequestEvidence) (string, error) {
 	c.mu.Lock()
 	op, ok := c.graph.Operation(operationID)
 	if !ok {
@@ -1908,6 +2007,7 @@ func (h *Harness) beginRequestHookEffect(ctx context.Context, c *coordinator, op
 			Kind:          EffectHook,
 			ResultEntryID: resultID,
 			RequestID:     requestID,
+			Purpose:       purpose,
 			HookID:        hookID,
 			ExtensionID:   extensionID,
 			Evidence:      &consumedCopy,
@@ -1915,6 +2015,7 @@ func (h *Harness) beginRequestHookEffect(ctx context.Context, c *coordinator, op
 		if next.State.Request == nil {
 			next.State.Request = &RunningRequest{
 				RequestID:         requestID,
+				Purpose:           purpose,
 				CheckpointEntryID: consumed.CheckpointEntryID,
 				BoundaryEntryID:   consumed.BoundaryEntryID,
 			}
@@ -1968,6 +2069,21 @@ type toolShaping struct {
 // Shaping is text only and never changes status, evidence, usage or metadata.
 func (d *executionDriver) shapeToolOutput(ctx context.Context, inv *openedInvocation, outcome ToolOutcome, callID, effectID string) *toolShaping {
 	hooks := inv.callbacks.ToolOutputHooks
+	if inv.callbacks.ResultStage != nil {
+		stage := inv.callbacks.ResultStage()
+		if stage.Release != nil {
+			defer stage.Release()
+		}
+		if stage.Error != nil {
+			return &toolShaping{base: outcome.Result.Content, failure: shapingFailureDiagnostic(stage.Error)}
+		}
+		check := inv.callbacks
+		check.ToolOutputHooks = stage.Hooks
+		if err := validateOpenedInvocation(check); err != nil {
+			return &toolShaping{base: outcome.Result.Content, failure: shapingFailureDiagnostic(err)}
+		}
+		hooks = stage.Hooks
+	}
 	if len(hooks) == 0 {
 		return nil
 	}
@@ -2057,8 +2173,9 @@ func (h *Harness) commitToolResult(ctx context.Context, c *coordinator, operatio
 				return invalidInput("operation %q carries no committed tool effect intent for call %q", operationID, pending.CallID)
 			}
 			selection = toolSelection{
-				arguments: currentOp.State.ActiveEffect.FinalArguments,
-				hooks:     currentOp.State.ActiveEffect.ContributionIDs,
+				arguments:      currentOp.State.ActiveEffect.FinalArguments,
+				hooks:          currentOp.State.ActiveEffect.ContributionIDs,
+				implementation: currentOp.State.ActiveEffect.Implementation,
 			}
 		} else if currentOp.State.ActiveEffect != nil {
 			return invalidInput("operation %q carries an active effect; an immediate result requires a quiet Operation", operationID)
@@ -2094,6 +2211,7 @@ func (h *Harness) commitToolResult(ctx context.Context, c *coordinator, operatio
 			Metadata:            ownedToolMetadata(outcome.Metadata),
 			NormalizedArguments: model.CloneRaw(selection.arguments),
 			HookIDs:             append([]HookIdentity(nil), selection.hooks...),
+			Implementation:      selection.implementation,
 		}
 		payload, err := encodeToolResultEntry(entry)
 		if err != nil {
@@ -2162,146 +2280,108 @@ func (h *Harness) commitToolResult(ctx context.Context, c *coordinator, operatio
 	return settled, nil
 }
 
-// runArgumentHooks settles one call's selected argument-hook chain before
-// concrete preparation, applying the same pure-versus-effectful rule as the
-// request boundary. Each hook runs in configured order: the first receives
-// the original raw call arguments and every later one the preceding committed
-// value. A pure hook validates and normalizes its changed bytes exactly once
-// in memory with no intent or result transaction; an effectful hook runs as
-// its own settled effect whose intent retains the input it actually consumed.
-// Execution cancellation gates each next hook, pure or effectful: the call
-// then settles interrupted carrying the prior accepted normalized value and
-// contributing provenance. A failed or interrupted effectful hook settles the
-// tool call itself (remaining hooks are skipped, later calls continue). It
-// returns the final accepted selection, or the committed tool result when the
-// chain settled the call, or the error a failed intent or result transaction
-// leaves for normal recovery.
-func (d *executionDriver) runArgumentHooks(ctx, settleCtx context.Context, resolved pendingToolCall, hooks []ToolArgumentsHook) (toolSelection, *model.ToolResult, error) {
-	inv := d.conversation
-	normalize := inv.callbacks.NormalizeTool
-	record := resolved.record
+// runArgumentHooks passes raw or replaced bytes through the ordered chain. A
+// deliberate refusal stops this call's chain and settles the call denied with
+// the refusal text; later calls in the batch stay eligible. Effectful hooks
+// retain their consumed input and consequence before dispatch.
+func (d *executionDriver) runArgumentHooks(ctx, settleCtx context.Context, resolved pendingToolCall, hooks []ToolArgumentsHook, raw []byte) (toolSelection, *model.ToolResult, error) {
 	pending := resolved.pending
-	raw, err := base64.StdEncoding.DecodeString(record.ArgumentsBase64)
-	if err != nil { // a non-canonical durable record is corruption, not empty arguments
-		settled, serr := d.harness.settleHooklessInvalid(settleCtx, d.coordinator, d.operationID, pending)
-		return toolSelection{}, settled, serr
-	}
 	current := raw
-	accepted := model.CloneRaw(record.NormalizedArguments)
-	acceptedFailure := record.NormalizationFailure
 	var contributions []HookIdentity
 	accept := func(value json.RawMessage, hook ToolArgumentsHook) {
 		contributions = append(contributions, HookIdentity{ExtensionID: hook.ExtensionID, HookID: hook.ID})
-		current, accepted = value, value
-		acceptedFailure = ""
-	}
-	// chainSelection renders what the chain has accepted so far: a hook
-	// boundary settles carrying the last accepted value and every accepted
-	// identity in configured order — pure or effectful, no-op, changed or
-	// restored alike. The consumed intermediate value stays retained in the
-	// effectful hook's own consumed input.
-	chainSelection := func() toolSelection {
-		return toolSelection{
-			arguments: model.CloneRaw(accepted),
-			hooks:     append([]HookIdentity(nil), contributions...),
-		}
+		current = value
 	}
 	for _, hook := range hooks {
-		if ctx.Err() != nil { // cancellation stops the next hook: the call settles interrupted carrying what the chain already accepted
+		if ctx.Err() != nil { // cancellation stops the next hook before binding
 			result := interruptedToolResult(pending.CallID)
-			settled, terr := d.harness.commitToolResult(settleCtx, d.coordinator, d.operationID, pending, ToolOutcome{Result: result, Evidence: ExecutionNotStarted}, nil, false, chainSelection(), false)
+			settled, terr := d.harness.commitToolResult(settleCtx, d.coordinator, d.operationID, pending, ToolOutcome{Result: result, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
 			if terr != nil {
 				return toolSelection{}, nil, terr
 			}
 			return toolSelection{}, &settled, nil
 		}
 		if hook.Mode == HookModePure {
-			// The pure callback and its replacement normalization both carry the
-			// producing request and pending call identity; a pure hook reserves
-			// no effect, so no effect identity is available.
+			// A pure hook reserves no effect identity.
 			hookCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: pending.CallID})
-			changed, failure, _ := d.evaluateArgumentHook(hookCtx, resolved, hook, normalize, current, accepted, acceptedFailure)
+			consequence, failure, _ := d.evaluateArgumentHook(hookCtx, resolved, hook, current)
 			if failure != nil { // a pure callback cannot create external-effect uncertainty
-				settled, cerr := d.harness.commitToolResult(settleCtx, d.coordinator, d.operationID, pending, ToolOutcome{Result: *failure, Evidence: ExecutionNotStarted}, nil, false, chainSelection(), false)
+				settled, cerr := d.harness.commitToolResult(settleCtx, d.coordinator, d.operationID, pending, ToolOutcome{Result: *failure, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
 				if cerr != nil {
 					return toolSelection{}, nil, cerr
 				}
 				return toolSelection{}, &settled, nil
 			}
-			accept(changed, hook)
+			if consequence.Refusal != nil {
+				settled, cerr := d.harness.commitToolResult(settleCtx, d.coordinator, d.operationID, pending, ToolOutcome{Result: refusedToolResult(pending.CallID, *consequence.Refusal), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+				if cerr != nil {
+					return toolSelection{}, nil, cerr
+				}
+				return toolSelection{}, &settled, nil
+			}
+			accept(consequence.Arguments, hook)
 			continue
 		}
-		committed, settled, hookErr := d.runOneHook(ctx, settleCtx, resolved, hook, normalize, current, accepted, acceptedFailure, chainSelection())
+		committed, settled, hookErr := d.runOneHook(ctx, settleCtx, resolved, hook, current)
 		if hookErr != nil || settled != nil {
 			return toolSelection{}, settled, hookErr
 		}
 		accept(committed.Arguments, hook)
 	}
-	return chainSelection(), nil, nil
+	return toolSelection{arguments: current, hooks: contributions}, nil, nil
 }
 
-// evaluateArgumentHook owns and evaluates one callback's input and replacement.
-// Its caller retains the pure or effectful settlement boundary; normalization
-// failures are observed because the callback already produced its result.
-// Before parsing or normalizing a replacement it compares the returned bytes
-// with the input the hook received: an unchanged return consumes the chain's
-// current accepted normalization outcome (accepted, or its stored failure
-// diagnostic acceptedFailure when the predecessor normalization failed)
-// instead of re-running the normalizer. A changed replacement keeps the
-// existing shape validation and exactly one separate normalization.
-func (d *executionDriver) evaluateArgumentHook(ctx context.Context, resolved pendingToolCall, hook ToolArgumentsHook, normalize func(context.Context, model.ToolCall) (json.RawMessage, error), current, accepted json.RawMessage, acceptedFailure string) (json.RawMessage, *model.ToolResult, ExecutionEvidence) {
+// evaluateArgumentHook accepts unchanged bytes verbatim and a refusal as the
+// deliberate denial of this call; a changed value must be a JSON object. A
+// refusal without text is not a valid denial under the model result contract
+// and stays a processing failure. The bound tool normalizes after the entire
+// chain.
+func (d *executionDriver) evaluateArgumentHook(ctx context.Context, resolved pendingToolCall, hook ToolArgumentsHook, current json.RawMessage) (ToolArgumentsResult, *model.ToolResult, ExecutionEvidence) {
 	record := resolved.record
 	owned, err := model.NewToolCall(model.ToolCall{ID: record.ID, Name: record.Name, Arguments: current, Extra: record.Extra})
 	if err != nil { // the committed record's identity fields are validated; never reachable for a valid graph
 		failure := invalidToolResult(record.ID)
-		return nil, &failure, ExecutionNotStarted
+		return ToolArgumentsResult{}, &failure, ExecutionNotStarted
 	}
 	if ctx.Err() != nil {
 		failure := interruptedToolResult(record.ID)
-		return nil, &failure, ExecutionNotStarted
+		return ToolArgumentsResult{}, &failure, ExecutionNotStarted
 	}
-	replacement, runErr := hook.Run(ctx, owned)
+	consequence, runErr := hook.Run(ctx, owned)
 	if runErr != nil {
 		failure := validationToolResult(record.ID, runErr)
 		if EffectInterrupted(runErr) {
 			failure = interruptedToolResult(record.ID)
 		}
-		return nil, &failure, DeclaredExecutionKnowledge(runErr)
+		return ToolArgumentsResult{}, &failure, DeclaredExecutionKnowledge(runErr)
 	}
-	if bytes.Equal(replacement, current) && (acceptedFailure != "" || len(accepted) > 0) { // an unchanged return consumes the current accepted outcome: its normalized
-		// bytes, or — when the predecessor normalization failed — the stored failure diagnostic,
-		// never generic object-parse text and never another NormalizeTool invocation.
-		if acceptedFailure != "" {
-			failure := model.ToolResult{CallID: record.ID, Status: model.ResultError, Content: acceptedFailure}
-			return nil, &failure, ExecutionObserved
-		}
-		return accepted, nil, ExecutionObserved
-	}
-	if _, err := decodePayloadObject(replacement); err != nil { // an invalid returned value is the malformed-class validation failure
-		failure := invalidToolResult(record.ID)
-		return nil, &failure, ExecutionObserved
-	}
-	normalized, nerr := normalizeCallArguments(ctx, normalize, model.ToolCall{ID: record.ID, Name: record.Name, Arguments: replacement, Extra: record.Extra})
-	if nerr != nil {
-		if errors.Is(nerr, errMalformedNormalization) {
+	if consequence.Refusal != nil {
+		if *consequence.Refusal == "" {
 			failure := invalidToolResult(record.ID)
-			return nil, &failure, ExecutionObserved
+			return ToolArgumentsResult{}, &failure, ExecutionObserved
 		}
-		failure := validationToolResult(record.ID, nerr)
-		return nil, &failure, ExecutionObserved
+		return ToolArgumentsResult{Refusal: consequence.Refusal}, nil, ExecutionObserved
 	}
-	return normalized, nil, ExecutionObserved
+	if bytes.Equal(consequence.Arguments, current) {
+		return ToolArgumentsResult{Arguments: model.CloneRaw(consequence.Arguments)}, nil, ExecutionObserved
+	}
+	if _, err := decodePayloadObject(consequence.Arguments); err != nil { // an invalid returned value is the malformed-class validation failure
+		failure := invalidToolResult(record.ID)
+		return ToolArgumentsResult{}, &failure, ExecutionObserved
+	}
+	return ToolArgumentsResult{Arguments: model.CloneRaw(consequence.Arguments)}, nil, ExecutionObserved
 }
 
 // runOneHook settles one effectful argument hook as its own Operation effect:
 // it commits the hook active-effect intent carrying the extension identity and
 // the consumed input bytes before I/O with a fresh reserved result identity,
 // runs the hook outside locks and transactions, and commits the validated
-// consequence — a successful normalized replacement (a real result even when
+// consequence — a successful replacement or refusal (a real result even when
 // cancellation arrives before its commit), a hook error, or an interruption
-// under the classification fixed for every hook. The continuation consumes
-// the codec-adopted committed consequence.
-func (d *executionDriver) runOneHook(ctx, settleCtx context.Context, resolved pendingToolCall, hook ToolArgumentsHook, normalize func(context.Context, model.ToolCall) (json.RawMessage, error), current, accepted json.RawMessage, acceptedFailure string, chain toolSelection) (hookResultEntry, *model.ToolResult, error) {
+// under the classification fixed for every hook. A refusal settles the call
+// itself as denied with the refusal text; later calls in the batch stay
+// eligible. The continuation consumes the codec-adopted committed consequence.
+func (d *executionDriver) runOneHook(ctx, settleCtx context.Context, resolved pendingToolCall, hook ToolArgumentsHook, current json.RawMessage) (hookResultEntry, *model.ToolResult, error) {
 	h := d.harness
 	c := d.coordinator
 	operationID := d.operationID
@@ -2315,11 +2395,10 @@ func (d *executionDriver) runOneHook(ctx, settleCtx context.Context, resolved pe
 		// A marked publication failure propagates before any cancellation
 		// rule. Only an unmarked cancellation observed before the intent
 		// transaction was ever attempted applies the ordinary interrupted-
-		// before-execution settlement through the no-intent transition,
-		// preserving the chain's accepted selection and preventing later starts.
+		// before-execution settlement and prevents later starts.
 		if !isPublicationFailure(err) && isExecutionCancellation(err) && ctx.Err() != nil {
 			outcome := ToolOutcome{Result: interruptedToolResult(pending.CallID), Evidence: ExecutionNotStarted}
-			settled, terr := h.commitToolResult(settleCtx, c, operationID, pending, outcome, nil, false, chain, false)
+			settled, terr := h.commitToolResult(settleCtx, c, operationID, pending, outcome, nil, false, toolSelection{}, false)
 			if terr != nil {
 				return hookResultEntry{}, nil, terr
 			}
@@ -2328,27 +2407,42 @@ func (d *executionDriver) runOneHook(ctx, settleCtx context.Context, resolved pe
 		return hookResultEntry{}, nil, err
 	}
 	if ctx.Err() != nil { // cancellation between the committed intent and Run: the hook provably never ran
-		settled, serr := h.settleHookInterruption(settleCtx, c, operationID, pending, hook, resultID, ExecutionNotStarted, chain)
+		settled, serr := h.settleHookInterruption(settleCtx, c, operationID, pending, hook, resultID, ExecutionNotStarted)
 		return hookResultEntry{}, settled, serr
 	}
 	// The effectful hook receives its actual pending call, producing request
 	// attribution, and the reserved result identity of its own effect.
 	hookCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: resolved.record.ID, EffectID: resultID})
-	normalized, failure, knowledge := d.evaluateArgumentHook(hookCtx, resolved, hook, normalize, current, accepted, acceptedFailure)
+	consequence, failure, knowledge := d.evaluateArgumentHook(hookCtx, resolved, hook, current)
 	if failure != nil {
 		if failure.Status == model.ResultInterrupted {
-			settled, serr := h.settleHookInterruption(settleCtx, c, operationID, pending, hook, resultID, knowledge, chain)
+			settled, serr := h.settleHookInterruption(settleCtx, c, operationID, pending, hook, resultID, knowledge)
 			return hookResultEntry{}, settled, serr
 		}
-		settled, serr := h.settleHookError(settleCtx, c, operationID, pending, hook, resultID, *failure, knowledge, chain)
+		settled, serr := h.settleHookError(settleCtx, c, operationID, pending, hook, resultID, *failure, knowledge)
 		return hookResultEntry{}, settled, serr
 	}
-	// The successful normalized output is a real result even if cancellation
+	// The successful output is a real result even if cancellation
 	// arrives before its commit: the settlement transaction runs without
-	// cancellation.
-	committed, cerr := h.commitHookResult(settleCtx, c, operationID, hookEffectBinding{hookID: hook.ID, callID: pending.CallID}, resultID, hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Arguments: normalized})
+	// cancellation. A refusal carries the same bounded denied content in the
+	// hook result and in the settled call.
+	result := hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Arguments: consequence.Arguments}
+	var refusal *model.ToolResult
+	if consequence.Refusal != nil {
+		settledRefusal := refusedToolResult(pending.CallID, *consequence.Refusal)
+		refusal = &settledRefusal
+		result = hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Refusal: settledRefusal.Content}
+	}
+	committed, cerr := h.commitHookResult(settleCtx, c, operationID, hookEffectBinding{hookID: hook.ID, callID: pending.CallID}, resultID, result)
 	if cerr != nil {
 		return hookResultEntry{}, nil, cerr
+	}
+	if refusal != nil {
+		settled, serr := h.commitToolResult(settleCtx, c, operationID, pending, ToolOutcome{Result: *refusal, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+		if serr != nil {
+			return hookResultEntry{}, nil, serr
+		}
+		return hookResultEntry{}, &settled, nil
 	}
 	return committed, nil, nil
 }
@@ -2373,17 +2467,6 @@ func isExecutionCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// settleHooklessInvalid settles the call's fixed internal-validation result
-// through the ordinary no-intent transition, for shapes that never ran a hook.
-func (h *Harness) settleHooklessInvalid(ctx context.Context, c *coordinator, operationID string, pending PendingToolCall) (*model.ToolResult, error) {
-	result := invalidToolResult(pending.CallID)
-	settled, err := h.commitToolResult(ctx, c, operationID, pending, ToolOutcome{Result: result, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
-	if err != nil {
-		return nil, err
-	}
-	return &settled, nil
-}
-
 // settleHookInterruption commits the interrupted hook_result under the
 // effect's reserved identity with the intent-retained consumed input and the
 // declared knowledge (not_started for a proven pre-Run interruption, observed
@@ -2392,14 +2475,14 @@ func (h *Harness) settleHooklessInvalid(ctx context.Context, c *coordinator, ope
 // terminal interruption settles through the ordinary run settlement. A hook
 // that declared unknown knowledge leaves the concrete call's proven-unstarted
 // result uncertain. No hook or tool replays.
-func (h *Harness) settleHookInterruption(ctx context.Context, c *coordinator, operationID string, pending PendingToolCall, hook ToolArgumentsHook, resultID string, knowledge ExecutionEvidence, chain toolSelection) (*model.ToolResult, error) {
+func (h *Harness) settleHookInterruption(ctx context.Context, c *coordinator, operationID string, pending PendingToolCall, hook ToolArgumentsHook, resultID string, knowledge ExecutionEvidence) (*model.ToolResult, error) {
 	if _, err := h.commitHookResult(ctx, c, operationID, hookEffectBinding{hookID: hook.ID, callID: pending.CallID}, resultID, hookResultEntry{
 		Status: hookInterrupted, Evidence: knowledge, Error: executionInterruptedDetail,
 	}); err != nil {
 		return nil, err
 	}
 	result := interruptedToolResult(pending.CallID)
-	settled, err := h.commitToolResult(ctx, c, operationID, pending, ToolOutcome{Result: result, Evidence: ExecutionNotStarted}, nil, false, chain, knowledge == ExecutionUnknown)
+	settled, err := h.commitToolResult(ctx, c, operationID, pending, ToolOutcome{Result: result, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, knowledge == ExecutionUnknown)
 	if err != nil {
 		return nil, err
 	}
@@ -2412,13 +2495,13 @@ func (h *Harness) settleHookInterruption(ctx context.Context, c *coordinator, op
 // carry the result's already-bounded, nonempty diagnostic; a hook that
 // declared unknown knowledge leaves the concrete call's proven-unstarted
 // result uncertain.
-func (h *Harness) settleHookError(ctx context.Context, c *coordinator, operationID string, pending PendingToolCall, hook ToolArgumentsHook, resultID string, outcome model.ToolResult, knowledge ExecutionEvidence, chain toolSelection) (*model.ToolResult, error) {
+func (h *Harness) settleHookError(ctx context.Context, c *coordinator, operationID string, pending PendingToolCall, hook ToolArgumentsHook, resultID string, outcome model.ToolResult, knowledge ExecutionEvidence) (*model.ToolResult, error) {
 	if _, err := h.commitHookResult(ctx, c, operationID, hookEffectBinding{hookID: hook.ID, callID: pending.CallID}, resultID, hookResultEntry{
 		Status: hookFailed, Evidence: knowledge, Error: outcome.Content,
 	}); err != nil {
 		return nil, err
 	}
-	settled, err := h.commitToolResult(ctx, c, operationID, pending, ToolOutcome{Result: outcome, Evidence: ExecutionNotStarted}, nil, false, chain, knowledge == ExecutionUnknown)
+	settled, err := h.commitToolResult(ctx, c, operationID, pending, ToolOutcome{Result: outcome, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, knowledge == ExecutionUnknown)
 	if err != nil {
 		return nil, err
 	}
@@ -2497,6 +2580,7 @@ func (h *Harness) commitHookResult(ctx context.Context, c *coordinator, operatio
 			res.InputArgumentsBase64 = intent.InputArgumentsBase64
 		} else {
 			res.RequestID = binding.requestID
+			res.Purpose = intent.Purpose
 			if intent.Evidence != nil {
 				consumed := *intent.Evidence
 				res.InputEvidence = &consumed
@@ -2568,7 +2652,7 @@ func (h *Harness) commitHookResult(ctx context.Context, c *coordinator, operatio
 	return committed, nil
 }
 
-// runRequestHooks runs the opened invocation's selected request hooks in
+// runRequestHooks runs the request stage's selected hooks in
 // configured order over the live effective view: every accepted consequence
 // is validated before another hook consumes it. A pure consequence validates
 // and coalesces in memory with no effect transaction. An effectful hook runs
@@ -2579,21 +2663,20 @@ func (h *Harness) commitHookResult(ctx context.Context, c *coordinator, operatio
 // hook stops this boundary before its next external effect: the request is
 // never dispatched, the failure returns for the ordinary terminal settlement,
 // and an effectful failure durably settles its error hook_result.
-func (d *executionDriver) runRequestHooks(ctx context.Context, requestID string, view *requestView) error {
-	inv := d.conversation
-	for _, hook := range inv.callbacks.RequestHooks {
+func (d *executionDriver) runRequestHooks(ctx context.Context, inv *openedInvocation, requestID string, view *requestView) error {
+	for _, hook := range view.hooks {
 		if ctx.Err() != nil { // cancellation stops the next hook before anything commits
 			return errExecutionInterrupted
 		}
 		if hook.Mode == HookModePure {
-			consequence, err := d.runOneRequestHookPure(ctx, requestID, view, hook)
+			consequence, err := d.runOneRequestHookPure(ctx, inv, requestID, view, hook)
 			if err != nil {
 				return err
 			}
 			view.recordAccepted(HookIdentity{ExtensionID: hook.ExtensionID, HookID: hook.ID}, consequence)
 			continue
 		}
-		if err := d.runRequestHookEffect(ctx, hook, requestID, view); err != nil {
+		if err := d.runRequestHookEffect(ctx, inv, hook, requestID, view); err != nil {
 			return err
 		}
 	}
@@ -2603,19 +2686,10 @@ func (d *executionDriver) runRequestHooks(ctx context.Context, requestID string,
 // runOneRequestHookPure validates one pure consequence against the captured
 // catalog and shared message rule and returns it owned; nothing durable is
 // written for a pure change. The hook input carries the bound request
-// identity and the frozen canonical references with deep-owned views.
-func (d *executionDriver) runOneRequestHookPure(ctx context.Context, requestID string, view *requestView, hook RequestHook) (RequestConsequence, error) {
-	input := RequestHookInput{
-		RequestID:         requestID,
-		CanonicalMessages: cloneRequestMessages(view.canonical),
-		Messages:          cloneRequestMessages(view.currentCanonical()),
-		CheckpointEntryID: view.checkpoint,
-		BoundaryEntryID:   view.boundary,
-		CapturedPrompt:    view.capture.SystemPrompt,
-		Prompt:            view.prompt,
-		Catalog:           cloneToolDefinitions(view.capture.Tools),
-		Tools:             view.effectiveTools(),
-	}
+// identity, purpose and actual model, and the frozen canonical references
+// with deep-owned views.
+func (d *executionDriver) runOneRequestHookPure(ctx context.Context, inv *openedInvocation, requestID string, view *requestView, hook RequestHook) (RequestConsequence, error) {
+	input := view.hookInput(inv.request, requestID)
 	consequence, err := hook.Run(WithCallbackIdentity(ctx, CallbackIdentity{RequestID: requestID}), input)
 	if err != nil {
 		if EffectInterrupted(err) {
@@ -2630,12 +2704,12 @@ func (d *executionDriver) runOneRequestHookPure(ctx context.Context, requestID s
 		}
 		return RequestConsequence{}, err
 	}
-	return validateRequestConsequence(view.capture, consequence)
+	return view.acceptConsequence(consequence)
 }
 
 // runRequestHookEffect settles one effectful request hook as its own
 // Operation effect.
-func (d *executionDriver) runRequestHookEffect(ctx context.Context, hook RequestHook, requestID string, view *requestView) error {
+func (d *executionDriver) runRequestHookEffect(ctx context.Context, inv *openedInvocation, hook RequestHook, requestID string, view *requestView) error {
 	h := d.harness
 	c := d.coordinator
 	operationID := d.operationID
@@ -2645,7 +2719,7 @@ func (d *executionDriver) runRequestHookEffect(ctx context.Context, hook Request
 	if err != nil {
 		return err
 	}
-	resultID, err := h.beginRequestHookEffect(ctx, c, operationID, requestID, hook.ID, hook.ExtensionID, consumed)
+	resultID, err := h.beginRequestHookEffect(ctx, c, operationID, requestID, inv.request.Purpose, hook.ID, hook.ExtensionID, consumed)
 	if err != nil {
 		return err
 	}
@@ -2659,18 +2733,9 @@ func (d *executionDriver) runRequestHookEffect(ctx context.Context, hook Request
 		return errExecutionInterrupted
 	}
 	// The callback consumes the accepted view also published in the intent.
-	view.prompt, view.additions, view.names = consumed.Prompt, consumed.Messages, consumed.ToolNames
-	input := RequestHookInput{
-		RequestID:         requestID,
-		CanonicalMessages: cloneRequestMessages(view.canonical),
-		Messages:          cloneRequestMessages(view.currentCanonical()),
-		CheckpointEntryID: consumed.CheckpointEntryID,
-		BoundaryEntryID:   consumed.BoundaryEntryID,
-		CapturedPrompt:    view.capture.SystemPrompt,
-		Prompt:            view.prompt,
-		Catalog:           cloneToolDefinitions(view.capture.Tools),
-		Tools:             view.effectiveTools(),
-	}
+	view.prompt = consumed.Prompt
+	view.edits, view.tools, view.parameters = consumed.Edits, consumed.Tools, consumed.Parameters
+	input := view.hookInput(inv.request, requestID)
 	consequence, runErr := hook.Run(WithCallbackIdentity(ctx, CallbackIdentity{RequestID: requestID, EffectID: resultID}), input)
 	settleCtx := context.WithoutCancel(h.ctx)
 	if runErr != nil {
@@ -2690,7 +2755,7 @@ func (d *executionDriver) runRequestHookEffect(ctx context.Context, hook Request
 		}
 		return runErr
 	}
-	accepted, verr := validateRequestConsequence(view.capture, consequence)
+	accepted, verr := view.acceptConsequence(consequence)
 	if verr != nil { // an invalid consequence settles the hook effect as its error before any view advances
 		if _, cerr := h.commitHookResult(settleCtx, c, operationID,
 			hookEffectBinding{hookID: hook.ID, requestID: requestID}, resultID, hookResultEntry{
@@ -2737,11 +2802,10 @@ func executionCancellationResult(execCtx context.Context, err error) *agent.Term
 // modes, callbacks, or their configured order. A shallow element copy is
 // sufficient — every hook entry is a value.
 func ownOpenedInvocationDeclarations(inv *InvocationExecution) {
+	inv.ModelParameters = inv.ModelParameters.Clone()
+	inv.AuthorizationHooks = append([]AuthorizationHook(nil), inv.AuthorizationHooks...)
 	if inv.ToolHooks != nil {
 		inv.ToolHooks = append(inv.ToolHooks[:0:0], inv.ToolHooks...)
-	}
-	if inv.RequestHooks != nil {
-		inv.RequestHooks = append(inv.RequestHooks[:0:0], inv.RequestHooks...)
 	}
 	if inv.ToolOutputHooks != nil {
 		inv.ToolOutputHooks = append(inv.ToolOutputHooks[:0:0], inv.ToolOutputHooks...)
@@ -2749,16 +2813,21 @@ func ownOpenedInvocationDeclarations(inv *InvocationExecution) {
 }
 
 // validateOpenedInvocation is the opened invocation's contract: a successful
-// Model, Tool and NormalizeTool must be non-nil, every argument and
-// request hook requires a non-empty unique ID, a non-empty extension
+// Model and LookupTool must be non-nil, every argument
+// hook requires a non-empty unique ID, a non-empty extension
 // identity, a valid mode, and a non-nil Run, while every output hook — pure
 // by contract — requires the same identities and Run without a mode. The
 // selected strategy binding is accepted once at the maintenance entry, never
 // re-gated per invocation. An invalid invocation closes its own opened
 // resources before the rejection returns.
 func validateOpenedInvocation(inv InvocationExecution) error {
-	if inv.Model == nil || inv.Tool == nil || inv.NormalizeTool == nil {
-		return invalidInput("opened invocation requires non-nil model, tool and normalization functions")
+	if inv.Model == nil || inv.LookupTool == nil {
+		return invalidInput("opened invocation requires non-nil model and tool lookup functions")
+	}
+	for _, hook := range inv.AuthorizationHooks {
+		if hook.Run == nil {
+			return invalidInput("opened invocation requires a non-nil run function for every authorization hook")
+		}
 	}
 	seenHooks := make(map[string]bool, len(inv.ToolHooks))
 	for _, hook := range inv.ToolHooks {
@@ -2774,10 +2843,14 @@ func validateOpenedInvocation(inv InvocationExecution) error {
 		}
 		seenOutputHooks[hook.ID] = true
 	}
-	seenRequestHooks := make(map[string]bool, len(inv.RequestHooks))
-	for _, hook := range inv.RequestHooks {
+	return nil
+}
+
+func validateRequestHooks(hooks []RequestHook) error {
+	seenRequestHooks := make(map[string]bool, len(hooks))
+	for _, hook := range hooks {
 		if hook.ID == "" || hook.Run == nil || hook.ExtensionID == "" || !validHookMode(hook.Mode) || seenRequestHooks[hook.ID] {
-			return invalidInput("opened invocation requires a non-empty unique ID, a non-empty extension identity, a valid mode, and a non-nil run function for every request hook")
+			return invalidInput("request stage requires a non-empty unique ID, a non-empty extension identity, a valid mode, and a non-nil run function for every request hook")
 		}
 		seenRequestHooks[hook.ID] = true
 	}

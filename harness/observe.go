@@ -3,8 +3,8 @@ package harness
 import "github.com/Syntheresis/melta/model"
 
 // HarnessFactKind is the closed kind of one passive HarnessFact. It is exactly
-// the set of SSE-originating progress and invalidation facts; no other kind is
-// added by a plugin, an adapter, or a caller.
+// the set of progress, invalidation and committed Operation facts; no other
+// kind is added by a plugin, an adapter, or a caller.
 type HarnessFactKind string
 
 const (
@@ -30,6 +30,16 @@ const (
 	// synthetic interrupted result a terminal settlement writes for a call
 	// that was never dispatched.
 	FactToolFinished HarnessFactKind = "tool_finished"
+	// FactOperationAdmitted reports one committed Operation admission after its
+	// transaction commits. It carries the Session and Operation identities
+	// only; no input content, execution choice, or authority rides.
+	FactOperationAdmitted HarnessFactKind = "operation_admitted"
+	// FactOperationSettled reports one committed terminal settlement after its
+	// transaction commits. It carries the Session and Operation identities and
+	// the closed terminal OperationState; it is emitted once per Operation.
+	// Recovery settles before any Harness observer exists and therefore emits
+	// no settled fact.
+	FactOperationSettled HarnessFactKind = "operation_settled"
 )
 
 // SessionRevision is the value identity of one Session's revision pair: the
@@ -49,23 +59,26 @@ type SessionRevision struct {
 // nonempty Content and no Position; a tool start carries SessionID,
 // OperationID, CallID, Ordinal, and Name; a tool finish carries SessionID,
 // OperationID, CallID, the closed Status, and the committed execution
-// Evidence. Every field a kind does not require stays zero. A fact grants no
-// authority: it can never alter an admission, an effect, a settlement, or a
-// lifecycle transition. A fact carries no revision pair: no producer sample
-// can become notification authority; passive publishers read the current pair
-// at publication time.
+// Evidence; an admitted Operation carries SessionID and OperationID; a settled
+// Operation carries SessionID, OperationID and the closed terminal
+// OperationStatus. Every field a kind does not require stays zero. A fact
+// grants no authority: it can never alter an admission, an effect, a
+// settlement, or a lifecycle transition. A fact carries no revision pair: no
+// producer sample can become notification authority; passive publishers read
+// the current pair at publication time.
 type HarnessFact struct {
-	Kind        HarnessFactKind
-	SessionID   string
-	OperationID string
-	JobID       string
-	Position    int
-	Content     string
-	CallID      string
-	Ordinal     int64
-	Name        string
-	Status      model.ToolResultStatus
-	Evidence    ExecutionEvidence
+	Kind            HarnessFactKind
+	SessionID       string
+	OperationID     string
+	JobID           string
+	Position        int
+	Content         string
+	CallID          string
+	Ordinal         int64
+	Name            string
+	Status          model.ToolResultStatus
+	Evidence        ExecutionEvidence
+	OperationStatus OperationState
 }
 
 // emitFact delivers one passive fact to the optional observer. A nil observer
@@ -157,6 +170,20 @@ func (h *Harness) observeMemberInvalidation(c *coordinator, jobID string) {
 		return
 	}
 	h.emitFact(HarnessFact{Kind: FactInvalidation, SessionID: identity.SessionID, JobID: jobID})
+}
+
+// observeOperationAdmitted emits the one committed admission fact for one
+// newly published Operation. Idempotent existing resolutions publish no new
+// Operation and call no such emission.
+func (h *Harness) observeOperationAdmitted(sessionID, operationID string) {
+	h.emitFact(HarnessFact{Kind: FactOperationAdmitted, SessionID: sessionID, OperationID: operationID})
+}
+
+// observeOperationSettled emits the one committed terminal fact for one
+// settled Operation. Recovery settles before any Harness observer exists, so
+// only the live settlement and compaction producers reach this emission.
+func (h *Harness) observeOperationSettled(sessionID, operationID string, status OperationState) {
+	h.emitFact(HarnessFact{Kind: FactOperationSettled, SessionID: sessionID, OperationID: operationID, OperationStatus: status})
 }
 
 // emitToolResultFacts delivers one finished fact per committed tool-result

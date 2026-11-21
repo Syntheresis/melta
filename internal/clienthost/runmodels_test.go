@@ -37,11 +37,11 @@ func modelsEndpoint(t *testing.T, status int, body []byte) clienthost.Options {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/health":
-			_ = json.NewEncoder(w).Encode(map[string]string{"instance_id": instance, "protocol_version": string(protocol.N16)})
+			_ = json.NewEncoder(w).Encode(map[string]string{"instance_id": instance, "protocol_version": string(protocol.N19)})
 		case "/v1/configuration":
 			w.WriteHeader(status)
 			_, _ = w.Write(body)
-			body = []byte(`{"agents":[],"providers":[],"configuration_revision":{"instance_id":"` + instance + `","generation":"18446744073709551615"},"settings":{}}`)
+			body = []byte(`{"providers":[],"configuration_revision":{"instance_id":"` + instance + `","generation":"18446744073709551615"},"settings":{}}`)
 		default:
 			t.Errorf("unexpected utility request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -55,7 +55,7 @@ func modelsEndpoint(t *testing.T, status int, body []byte) clienthost.Options {
 		testassert.Check(t, reflect.DeepEqual(requests, want), "requests = %v, want exactly %v", requests, want)
 	})
 	dir := t.TempDir()
-	record, err := json.Marshal(map[string]string{"endpoint": server.URL, "instance_id": instance, "protocol_version": string(protocol.N16), "credential": credential})
+	record, err := json.Marshal(map[string]string{"endpoint": server.URL, "instance_id": instance, "protocol_version": string(protocol.N19), "credential": credential})
 	testassert.NoError(t, err)
 	testassert.NoError(t, os.WriteFile(filepath.Join(dir, "runtime.json"), record, 0o600))
 	return clienthost.Options{DataDir: dir, Executable: filepath.Join(dir, "must-not-launch")}
@@ -68,26 +68,11 @@ func modelsConfiguration(t *testing.T, view protocol.ConfigurationView) clientho
 	return modelsEndpoint(t, http.StatusOK, body)
 }
 
-func suppliedPrimaryAgent(modelRef string) protocol.Agent {
-	return protocol.Agent{
-		Name:       "primary",
-		Definition: protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "primary"},
-		Model:      modelRef,
-	}
-}
-
-func foreignPrimaryAgent(modelRef string) protocol.Agent {
-	return protocol.Agent{
-		Name:       "primary",
-		Definition: protocol.DefinitionRef{ExtensionId: "guest", CapabilityId: "guest.definitions", DefinitionId: "primary"},
-		Model:      modelRef,
-	}
-}
-
 func retainedModelsView() protocol.ConfigurationView {
+	ref := protocol.ModelRef("modeltest/vis")
 	return protocol.ConfigurationView{
 		ConfigurationRevision: protocol.ConfigurationRevision{InstanceId: strings.Repeat("a", 32), Generation: "9007199254740993"},
-		Agents:                []protocol.Agent{suppliedPrimaryAgent("modeltest/vis")},
+		Settings:              protocol.Settings{Model: &ref},
 		Providers: []protocol.Provider{
 			{Id: "modeltest", Connected: true, Models: []protocol.ModelView{
 				{Id: "vis", ContextWindow: 8192, MaxOutputTokens: 1024, Source: "user"},
@@ -103,7 +88,7 @@ func retainedModelsView() protocol.ConfigurationView {
 func TestRunModelsRetainedOutput(t *testing.T) {
 	base := retainedModelsView()
 	noPrimary := retainedModelsView()
-	noPrimary.Agents = []protocol.Agent{{Name: "secondary", Definition: protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "secondary"}, Model: "modeltest/vis"}}
+	noPrimary.Settings.Model = nil
 	other := protocol.Provider{Id: "other", Connected: true, Models: []protocol.ModelView{{Id: "m", ContextWindow: 4096}}}
 	noPrimary.Providers = append(noPrimary.Providers, other)
 	hiddenOnly := protocol.ConfigurationView{Providers: []protocol.Provider{{Id: "hiddenonly", Connected: true, Models: []protocol.ModelView{
@@ -153,8 +138,9 @@ func TestRunModelsRetainedOutput(t *testing.T) {
 
 func TestRunModelsConfigurationFields(t *testing.T) {
 	zero, input, output, cacheWrite := 0.0, 1.25, 2.5, 4.75
+	ref := protocol.ModelRef("hidden/org/m")
 	view := protocol.ConfigurationView{
-		Agents: []protocol.Agent{suppliedPrimaryAgent("hidden/org/m")},
+		Settings: protocol.Settings{Model: &ref},
 		Providers: []protocol.Provider{
 			{Id: "hidden", Name: "Hidden Provider", Connected: true, Hidden: true, Models: []protocol.ModelView{
 				{Id: "org/m", Name: "Named Model", ContextWindow: 9007199254740993, MaxOutputTokens: 0, Source: "discovery",
@@ -186,14 +172,6 @@ func TestRunModelsConfigurationFields(t *testing.T) {
 	if allOut.String() != "hidden/org/m\t9007199254740993\t0\tdefault,hidden,incomplete\n" {
 		t.Fatalf("combined markers = %q", allOut.String())
 	}
-	for _, agents := range [][]protocol.Agent{nil, {{Name: "primary"}}, {{Name: "secondary", Definition: protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "secondary"}, Model: "fallback/z/slash"}}} {
-		view.Agents = agents
-		var out bytes.Buffer
-		testassert.NoError(t, clienthost.RunModels(context.Background(), modelsConfiguration(t, view), "", false, false, &out, io.Discard))
-		if out.String() != "fallback/z/slash\t100\t0\t-\n" {
-			t.Fatalf("unset primary output = %q", out.String())
-		}
-	}
 }
 
 // TestRunModelsOpaqueOverflowFieldsRenders proves unused opaque extra_body
@@ -203,7 +181,7 @@ func TestRunModelsConfigurationFields(t *testing.T) {
 func TestRunModelsOpaqueOverflowFieldsRenders(t *testing.T) {
 	// Raw JSON supplies the overflow lexemes exactly; a generated struct
 	// cannot carry them.
-	raw := `{"configuration_revision":{"instance_id":"` + strings.Repeat("a", 32) + `","generation":"1"},"settings":{},"agents":[{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"model":"prov/m"}],"providers":[{"id":"prov","connected":true,"extra_body":{"n":9007199254740993,"big":1e400},"models":[{"id":"m","name":"M","context_window":4096,"source":"user","extra_body":{"n":9007199254740993,"big":1e400}}]}]}`
+	raw := `{"configuration_revision":{"instance_id":"` + strings.Repeat("a", 32) + `","generation":"1"},"settings":{"model":"prov/m"},"providers":[{"id":"prov","connected":true,"extra_body":{"n":9007199254740993,"big":1e400},"models":[{"id":"m","name":"M","context_window":4096,"source":"user","extra_body":{"n":9007199254740993,"big":1e400}}]}]}`
 	opts := modelsEndpoint(t, http.StatusOK, []byte(raw))
 	var out, diagnostics bytes.Buffer
 	testassert.NoError(t, clienthost.RunModels(context.Background(), opts, "", false, false, &out, &diagnostics))
@@ -214,30 +192,6 @@ func TestRunModelsOpaqueOverflowFieldsRenders(t *testing.T) {
 	testassert.NoError(t, clienthost.RunModels(context.Background(), modelsEndpoint(t, http.StatusOK, []byte(raw)), "", false, true, &jsonOut, io.Discard))
 	if jsonOut.String() != `[{"ref":"prov/m","provider":"prov","providerName":"prov","model":"m","displayName":"M","contextWindow":4096,"maxOutputTokens":0,"hidden":false,"providerHidden":false,"incomplete":false,"default":true,"source":"user"}]`+"\n" {
 		t.Fatalf("json stdout=%q", jsonOut.String())
-	}
-}
-
-func TestRunModelsDefaultMarkerUsesSuppliedPrimaryOnly(t *testing.T) {
-	foreignOnly := retainedModelsView()
-	foreignOnly.Agents = []protocol.Agent{foreignPrimaryAgent("modeltest/vis")}
-	foreignFirst := retainedModelsView()
-	foreignFirst.Agents = []protocol.Agent{foreignPrimaryAgent("modeltest/vis"), suppliedPrimaryAgent("modeltest/inc")}
-	for _, tc := range []struct {
-		name string
-		view protocol.ConfigurationView
-		all  bool
-		want string
-	}{
-		{"foreign-only primary never marks", foreignOnly, false, "modeltest/vis\t8192\t1024\t-\n"},
-		{"foreign-first supplied primary marks its own model", foreignFirst, true, "modeltest/hid\t16384\t0\thidden\nmodeltest/inc\t0\t0\tdefault,incomplete\nmodeltest/vis\t8192\t1024\t-\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var out, diagnostics bytes.Buffer
-			testassert.NoError(t, clienthost.RunModels(context.Background(), modelsConfiguration(t, tc.view), "", tc.all, false, &out, &diagnostics))
-			if out.String() != tc.want || diagnostics.Len() != 0 {
-				t.Fatalf("stdout=%q diagnostics=%q, want %q", out.String(), diagnostics.String(), tc.want)
-			}
-		})
 	}
 }
 

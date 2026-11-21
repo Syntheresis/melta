@@ -61,7 +61,7 @@ func runColdChild(t *testing.T) {
 	store := emptyStore(t)
 	started := make(chan struct{})
 	var requests atomic.Int64
-	modelFn := func(ctx context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		if requests.Add(1) == 1 {
 			return completedTurnStream(), nil
 		}

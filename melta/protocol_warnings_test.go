@@ -147,10 +147,12 @@ func TestWarningsPromptReplaceClearAndFailedPreparationNoChange(t *testing.T) {
 		_, err = r.Reload(ctx, testCaller(r))
 		testassert.NoError(t, err)
 
-		// A failed hook (invalid consequence rejected before publication)
-		// changes nothing.
-		hook.set(nil, func(extension.PreparationInput) extension.PreparationConsequence {
-			return extension.PreparationConsequence{ToolNames: []string{"outside_catalog"}}
+		// A failed hook (unknown tool in the returned candidate is rejected
+		// before publication) changes nothing.
+		hook.setAdmission(nil, func(in extension.AdmissionInput) (extension.AdmissionResult, error) {
+			candidate := in.Candidate
+			candidate.Tools = append(append([]model.ToolDefinition(nil), candidate.Tools...), model.ToolDefinition{Name: "outside_catalog", Parameters: json.RawMessage(`{"type":"object"}`)})
+			return extension.AdmissionResult{Candidate: &candidate}, nil
 		})
 		hookSession, err := r.createSession(ctx, e.workspace("prompt-ws-4"), "worker")
 		testassert.NoError(t, err)
@@ -158,7 +160,7 @@ func TestWarningsPromptReplaceClearAndFailedPreparationNoChange(t *testing.T) {
 			err := submitExpectFailure(r, hookSession.Identity.SessionID, "op-hooked", "hello")
 			testassert.Require(t, err != nil, "the rejected-hook submit succeeded, want the failed preparation")
 		}
-		hook.set(nil, nil)
+		hook.setAdmission(nil, nil)
 
 		after, err := r.GetWarnings(ctx, testCaller(r))
 		testassert.NoError(t, err)
@@ -446,12 +448,12 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 		enableFixturePlugin(t, sh.configPath, "compacttools")
 		owner, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		comp := mustComposition(t, compactToolsPlugin(), fixtureAgentPlugin(compactToolsPlugin()))
-		svc := newConfigurationService(owner, comp, sh.loader,
+		svc := newConfigurationService(owner, newComposition(), sh.loader,
 			NewFileConfigurationSource(sh.configPath),
 			NewEnvironmentCredentialSource(filepath.Join(sh.home, ".melta", ".env")),
 			sh.locations(), harness.IncludedStrategyBinding(), r.obs)
-		svc.composition, svc.dataDir = comp, sh.dataDir
+		svc.dataDir = sh.dataDir
+		svc.authors = []nativeActivationSpec{{extension: compactToolsPlugin()}, {extension: fixtureAgentPlugin()}}
 		svc.attachWarnings(r.warnings)
 		{
 			_, err := svc.publish(context.Background())
@@ -502,14 +504,14 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 				ToolCalls: []model.ToolCall{{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{}`)}}},
 		}}
 		{
-			_, err := inv.Model(context.Background(), diagnostic)
+			_, err := inv.Model(context.Background(), diagnostic, nil)
 			testassert.Require(t, err != nil, "compact transport request over the failing endpoint succeeded, want the transport failure")
 		}
 		revision, storeWarnings := r.warnings.hydrate(sessionID)
 		testassert.Require(t, warningOf(storeWarnings, "runtime:protocol", "protocol_must_preserve_missing", sessionID) != nil, "the compact closure dropped its post-encode diagnostics: %+v", storeWarnings)
 
 		// An identical attempt replaces with the same list: no advance.
-		_, _ = inv.Model(context.Background(), diagnostic)
+		_, _ = inv.Model(context.Background(), diagnostic, nil)
 		deduped, dedupedWarnings := r.warnings.hydrate(sessionID)
 		testassert.Require(t, deduped == revision && slices.Equal(warningBodies(dedupedWarnings), warningBodies(storeWarnings)), "an identical attempt advanced the store: revision %d → %d", revision, deduped)
 
@@ -519,7 +521,7 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 			{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "summarize"}}},
 		}}
 		{
-			_, err := inv.Model(context.Background(), clean)
+			_, err := inv.Model(context.Background(), clean, nil)
 			testassert.Require(t, err != nil, "diagnostic-free compact request over the failing endpoint succeeded, want the transport failure")
 		}
 		cleared, clearedWarnings := r.warnings.hydrate(sessionID)
@@ -537,14 +539,14 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		beforeLate, _ := r.warnings.snapshot()
-		_, _ = inv.Model(context.Background(), diagnostic)
+		_, _ = inv.Model(context.Background(), diagnostic, nil)
 		afterLate, lateWarnings := r.warnings.snapshot()
 		testassert.Equal(t, afterLate, beforeLate)
 		testassert.Require(t, warningOf(lateWarnings, "runtime:protocol", "protocol_must_preserve_missing", sessionID) == nil, "a late attempt resurrected the deleted subject's diagnostics: %+v", lateWarnings)
 
 		// Reports after the owner's warning-store closure are ignored.
 		r.warnings.close()
-		_, _ = inv.Model(context.Background(), diagnostic)
+		_, _ = inv.Model(context.Background(), diagnostic, nil)
 		closed, closedWarnings := r.warnings.snapshot()
 		testassert.Require(t, closed == afterLate && slices.Equal(warningBodies(closedWarnings), warningBodies(lateWarnings)), "a report after closure changed the store")
 	})

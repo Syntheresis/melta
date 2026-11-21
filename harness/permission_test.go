@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -268,7 +269,7 @@ func TestBuiltInAllowsChildLaunchAndProcessOwn(t *testing.T) {
 		permission string
 		target     string
 	}{
-		{PermissionChildLaunch, "0123456789abcdef0123456789abcdef"},
+		{PermissionSessionOwn, "0123456789abcdef0123456789abcdef"},
 		{PermissionProcessOwn, "a1b2c3d4"},
 	}
 	for _, req := range concrete {
@@ -277,7 +278,7 @@ func TestBuiltInAllowsChildLaunchAndProcessOwn(t *testing.T) {
 		})
 	}
 	denied := ResolvePermissionPolicy(nil, json.RawMessage(levelJSON(rulesJSON(
-		ruleJSON(PermissionChildLaunch, "*", permissionAccessDeny),
+		ruleJSON(PermissionSessionOwn, "*", permissionAccessDeny),
 		ruleJSON(PermissionProcessOwn, "*", permissionAccessDeny),
 	))))
 	for _, req := range concrete {
@@ -287,19 +288,19 @@ func TestBuiltInAllowsChildLaunchAndProcessOwn(t *testing.T) {
 	}
 }
 
-// TestChildLaunchCanonicalTargetPolicyKeepsOpaqueReferencesDistinct proves
-// user policy matches the shared complete-reference target, not one opaque
-// definition component: two same-ID references from different providers stay
+// TestSessionOwnTargetPolicyKeepsEscapedComponentsDistinct proves user policy
+// matches the complete owned-start target, its provider and resource name
+// escaped separately: two same-named targets from different extensions stay
 // distinct through delimiter and percent bytes, and an unescaped join matches
 // no exact rule.
-func TestChildLaunchCanonicalTargetPolicyKeepsOpaqueReferencesDistinct(t *testing.T) {
-	definitionID := "shared/with%2Fbytes"
-	own := DefinitionRef{ExtensionID: "agents", CapabilityID: "agents.definitions", DefinitionID: definitionID}
-	foreign := DefinitionRef{ExtensionID: "guestdefs", CapabilityID: "guestdefs.definitions", DefinitionID: definitionID}
+func TestSessionOwnTargetPolicyKeepsEscapedComponentsDistinct(t *testing.T) {
+	target := "shared/with%2Fbytes"
+	own := url.PathEscape("agents") + "/" + url.PathEscape(target)
+	foreign := url.PathEscape("guest/defs") + "/" + url.PathEscape(target)
 	policy := ResolvePermissionPolicy(json.RawMessage(levelJSON(
 		rulesJSON(
-			ruleJSON(PermissionChildLaunch, foreign.PermissionTarget(), permissionAccessDeny),
-			ruleJSON(PermissionChildLaunch, own.PermissionTarget(), permissionAccessAllow),
+			ruleJSON(PermissionSessionOwn, foreign, permissionAccessDeny),
+			ruleJSON(PermissionSessionOwn, own, permissionAccessAllow),
 		),
 		`"default":"deny"`,
 	)), nil)
@@ -308,13 +309,13 @@ func TestChildLaunchCanonicalTargetPolicyKeepsOpaqueReferencesDistinct(t *testin
 		target string
 		want   bool
 	}{
-		{"own canonical target", own.PermissionTarget(), true},
-		{"foreign canonical target", foreign.PermissionTarget(), false},
-		{"unescaped join", own.ExtensionID + "/" + own.CapabilityID + "/" + own.DefinitionID, false},
+		{"own canonical target", own, true},
+		{"foreign canonical target", foreign, false},
+		{"unescaped join", "agents/" + target, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := policy.evaluate("/w", PermissionRequest{PermissionChildLaunch, tc.target})
-			testassert.Check(t, got == tc.want, "child.launch target %q = %v, want %v", tc.target, got, tc.want)
+			got := policy.evaluate("/w", PermissionRequest{PermissionSessionOwn, tc.target})
+			testassert.Check(t, got == tc.want, "session.own target %q = %v, want %v", tc.target, got, tc.want)
 		})
 	}
 }
@@ -561,12 +562,12 @@ func TestPermissionLevelDecideSemantics(t *testing.T) {
 // boundary as literals, so the constants may never drift from them.
 func TestPermissionNamesKeepPublishedLiterals(t *testing.T) {
 	want := map[string]string{
-		PermissionFileRead:    "file.read",
-		PermissionFileWrite:   "file.write",
-		PermissionCommandRun:  "command.run",
-		PermissionSleep:       "sleep",
-		PermissionChildLaunch: "child.launch",
-		PermissionProcessOwn:  "process.own",
+		PermissionFileRead:   "file.read",
+		PermissionFileWrite:  "file.write",
+		PermissionCommandRun: "command.run",
+		PermissionSleep:      "sleep",
+		PermissionSessionOwn: "session.own",
+		PermissionProcessOwn: "process.own",
 	}
 	// distinct literals: a duplicated value would collapse the map.
 	testassert.Equal(t, len(want), 6)

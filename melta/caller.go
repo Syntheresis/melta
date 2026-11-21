@@ -127,42 +127,90 @@ func (r *Melta) authorize(c Caller, ctx context.Context, h *harness.Harness, tar
 // authoritative read. Everything else is denied before the producer reads or
 // transitions.
 func (c Caller) authorize(ctx context.Context, h *harness.Harness, target CallerScope) error {
+	return authorizeScope(ctx, h, c.scope, target)
+}
+
+// authorizeScope resolves a Workspace grant's Session target through the one
+// authoritative Workspace read, then applies the shared containment rule.
+func authorizeScope(ctx context.Context, h *harness.Harness, grant, target CallerScope) error {
+	if grant.Kind == CallerScopeWorkspace && target.Kind == CallerScopeSession {
+		workspace, err := resolveSessionWorkspace(ctx, h, target)
+		if err != nil {
+			return err
+		}
+		return authorizeResolvedScope(grant, target, workspace)
+	}
+	return authorizeResolvedScope(grant, target, "")
+}
+
+// resolveSessionWorkspace reads one Session target's immutable Workspace for a
+// Workspace grant, before any owner-wide lock is taken.
+func resolveSessionWorkspace(ctx context.Context, h *harness.Harness, target CallerScope) (string, error) {
+	if h == nil {
+		return "", fmt.Errorf("session target requires an owner read: %w", ErrDenied)
+	}
+	header, err := h.ReadSessionHeader(ctx, target.SessionID)
+	if err != nil {
+		return "", err
+	}
+	return header.Identity.Workspace, nil
+}
+
+// authorizeResolvedScope is the one containment rule: harness scope reaches
+// every target, a Workspace grant reaches that Workspace and its Sessions
+// (whose immutable Workspace the caller resolved), and a Session grant reaches
+// only itself. Everything else is denied.
+func authorizeResolvedScope(grant, target CallerScope, sessionWorkspace string) error {
 	switch target.Kind {
 	case CallerScopeHarness:
-		if c.scope.Kind == CallerScopeHarness {
+		if grant.Kind == CallerScopeHarness {
 			return nil
 		}
 	case CallerScopeWorkspace:
-		switch c.scope.Kind {
+		switch grant.Kind {
 		case CallerScopeHarness:
 			return nil
 		case CallerScopeWorkspace:
-			if c.scope.Workspace == target.Workspace {
+			if grant.Workspace == target.Workspace {
 				return nil
 			}
 		}
 	case CallerScopeSession:
-		switch c.scope.Kind {
+		switch grant.Kind {
 		case CallerScopeHarness:
 			return nil
 		case CallerScopeSession:
-			if c.scope.SessionID == target.SessionID {
+			if grant.SessionID == target.SessionID {
 				return nil
 			}
 		case CallerScopeWorkspace:
-			if h == nil {
-				return fmt.Errorf("session target requires an owner read: %w", ErrDenied)
-			}
-			header, err := h.ReadSessionHeader(ctx, target.SessionID)
-			if err != nil {
-				return err
-			}
-			if header.Identity.Workspace == c.scope.Workspace {
+			if sessionWorkspace != "" && grant.Workspace == sessionWorkspace {
 				return nil
 			}
 		}
 	}
 	return fmt.Errorf("%s target is outside the Caller scope: %w", target.Kind, ErrDenied)
+}
+
+// scopeContainsSession reports whether one granted scope reaches the named
+// Session: the whole-owner grant reaches every Session, a Session grant only
+// itself, and a Workspace grant its Workspace's Sessions through the passive
+// retained identity. It is the delivery-time scope filter and grants no
+// producer authority.
+func scopeContainsSession(scope CallerScope, sessionID string, h *harness.Harness) bool {
+	switch scope.Kind {
+	case CallerScopeHarness:
+		return true
+	case CallerScopeSession:
+		return scope.SessionID == sessionID
+	case CallerScopeWorkspace:
+		if h == nil {
+			return false
+		}
+		identity, _, ok := h.ReadObservation(sessionID)
+		return ok && identity.Workspace == scope.Workspace
+	}
+	return false
 }
 
 // canonicalSessionID reports whether value is exactly 32 lowercase hex

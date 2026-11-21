@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -157,8 +158,17 @@ func (c *CLI) navigationReport(s stamp, text string) {
 // root reader and an empty child inspector. Adoption is a second navigation
 // step: every task, menu and Fork begun against the retained source during
 // resolution is superseded before the destination publishes, and a superseded
-// resolution never adopts.
+// resolution never adopts. The destination's selected Agent is read from the
+// advertised Agents current operation before adoption; an absent extension or
+// selection shows nothing.
 func (c *CLI) adoptRoot(s stamp, workspace, id string) {
+	c.mu.Lock()
+	current := c.currentLocked(s)
+	c.mu.Unlock()
+	if !current {
+		return
+	}
+	agent := c.rootAgent(s, id)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.currentLocked(s) {
@@ -171,9 +181,33 @@ func (c *CLI) adoptRoot(s stamp, workspace, id string) {
 	}
 	c.rootID = id
 	c.childID = ""
+	c.agentCurrent, c.agentSession = agent, id
 	c.root = c.newReaderLocked(id)
 	c.kickReaderLocked(c.root)
 	c.notifyLocked()
+}
+
+// rootAgent reads one root's selected Agent from the advertised Agents current
+// operation. Every failure, absence and empty selection shows nothing.
+func (c *CLI) rootAgent(s stamp, id string) string {
+	if id == "" {
+		return ""
+	}
+	found, err := clientops.HasExtensionOperation(s.ctx, s.conn, "agents", "current", protocol.RegisteredExtensionOperationTargetSession)
+	if err != nil || !found {
+		return ""
+	}
+	raw, err := clientops.InvokeExtension(s.ctx, s.conn, "agents", "current", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindSession, SessionId: &id}, json.RawMessage(`{}`))
+	if err != nil {
+		return ""
+	}
+	var selected struct {
+		Agent string `json:"agent"`
+	}
+	if json.Unmarshal(raw, &selected) != nil {
+		return ""
+	}
+	return selected.Agent
 }
 
 // selectRoot begins one named root navigation.
@@ -197,10 +231,6 @@ func (c *CLI) selectRootWith(s stamp, id string) {
 	}
 	if hydration.Session.SessionId != id {
 		c.navigationReport(s, terminal.RenderErrorMsg("Session read answered for a different Session"))
-		return
-	}
-	if hydration.Session.ParentSessionId != nil {
-		c.navigationReport(s, terminal.RenderErrorMsg("Select a root Session; children are inspection-only"))
 		return
 	}
 	if hydration.Session.Lifecycle == protocol.Archived {
@@ -231,12 +261,12 @@ func (c *CLI) resumeNewest(s stamp) {
 		c.navigationReport(s, terminal.RenderErrorMsg(err.Error()))
 		return
 	}
-	roots := rootSessions(list)
-	if len(roots) == 0 {
+	root := firstRoot(sortedSessions(list))
+	if root == nil {
 		c.navigationReport(s, terminal.RenderErrorMsg("no active sessions"))
 		return
 	}
-	c.adoptRoot(s, roots[0].Workspace, roots[0].SessionId)
+	c.adoptRoot(s, root.Workspace, root.SessionId)
 }
 func (c *CLI) inspectChild(id string) {
 	c.mu.Lock()
@@ -274,21 +304,26 @@ func (c *CLI) selectWorkspace(workspace string) {
 	c.task(func() { c.compose(s) })
 }
 
-func rootSessions(list []protocol.Session) []protocol.Session {
-	filtered := make([]protocol.Session, 0, len(list))
-	for _, session := range list {
-		if session.ParentSessionId == nil {
-			filtered = append(filtered, session)
+func sortedSessions(list []protocol.Session) []protocol.Session {
+	sorted := slices.Clone(list)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].LastActivity.Equal(sorted[j].LastActivity) {
+			return sorted[i].SessionId < sorted[j].SessionId
+		}
+		return sorted[i].LastActivity.After(sorted[j].LastActivity)
+	})
+	return sorted
+}
+
+func firstRoot(list []protocol.Session) *protocol.Session {
+	for i := range list {
+		if list[i].OwnerSessionId == nil {
+			return &list[i]
 		}
 	}
-	sort.Slice(filtered, func(i, j int) bool {
-		if filtered[i].LastActivity.Equal(filtered[j].LastActivity) {
-			return filtered[i].SessionId < filtered[j].SessionId
-		}
-		return filtered[i].LastActivity.After(filtered[j].LastActivity)
-	})
-	return filtered
+	return nil
 }
+
 func (c *CLI) compose(s stamp) {
 	c.mu.Lock()
 	if !c.currentLocked(s) {
@@ -310,10 +345,10 @@ func (c *CLI) compose(s stamp) {
 		c.report(s, terminal.RenderErrorMsg(err.Error()), false)
 		return
 	}
-	list = rootSessions(list)
+	list = sortedSessions(list)
 	c.sessions = list
-	if len(list) != 0 {
-		c.rootID = list[0].SessionId
+	if candidate := firstRoot(list); candidate != nil {
+		c.rootID = candidate.SessionId
 		c.root = c.newReaderLocked(c.rootID)
 		c.kickReaderLocked(c.root)
 		c.notifyLocked()
@@ -323,45 +358,23 @@ func (c *CLI) compose(s stamp) {
 	c.mu.Unlock()
 	c.create(s)
 }
-func selectionName(selection protocol.AgentSelection) string {
-	if selection.Definition != nil {
-		return selection.Definition.DefinitionId
+func selectionName(inputs protocol.SessionInputs) string {
+	if inputs.Model != nil {
+		return string(*inputs.Model)
 	}
 	return ""
 }
 
 func (c *CLI) create(s stamp) {
-	rawRoster, err := call(s, "GetConfiguration", "", nil, nil, nil)
-	if err != nil {
-		c.navigationReport(s, terminal.RenderErrorMsg(err.Error()))
-		return
-	}
-	agents, err := clientops.AgentRoster(rawRoster)
-	if err != nil {
-		c.navigationReport(s, terminal.RenderErrorMsg(err.Error()))
-		return
-	}
-	var selection *protocol.AgentSelection
-	// Root creation selects only the supplied application definition; a
-	// foreign-only roster or a roster without it creates a resolved Session.
-	suppliedPrimary := protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "primary"}
-	for _, agent := range agents {
-		if agent.Definition == suppliedPrimary {
-			ref := agent.Definition
-			selection = &protocol.AgentSelection{Definition: &ref}
-			break
-		}
-	}
-	var session protocol.Session
-	raw, err := call(s, "CreateSession", "", protocol.CreateSessionRequest{AgentSelection: selection, Workspace: s.workspace}, nil, &session)
+	sessionID, err := clientops.CreateDefaultSession(s.ctx, s.conn, s.workspace)
 	if err == nil {
-		c.adoptRoot(s, session.Workspace, session.SessionId)
-		c.report(s, resultText(raw, err), true)
+		c.adoptRoot(s, s.workspace, sessionID)
+		c.report(s, sessionID, true)
 		return
 	}
 	// A current failure keeps the accepted source live and visible; a
 	// superseded one neither adopts nor publishes.
-	c.navigationReport(s, resultText(raw, err))
+	c.navigationReport(s, resultText(nil, err))
 }
 
 func (c *CLI) refreshList(s stamp, lifecycle string, show bool) {
@@ -384,12 +397,12 @@ func (c *CLI) refreshList(s stamp, lifecycle string, show bool) {
 		c.taskLocked(func() { c.reportList(s, generation, terminal.RenderErrorMsg(err.Error())) })
 		return
 	}
-	list = rootSessions(list)
+	list = sortedSessions(list)
 	c.sessions = list
 	if show {
 		items := make([]terminal.MenuItem, 0, len(list)+1)
 		for _, session := range list {
-			items = append(items, terminal.MenuItem{Label: session.SessionId, Detail: selectionName(session.AgentSelection), Selectable: true, Current: session.SessionId == c.rootID, Extra: session})
+			items = append(items, terminal.MenuItem{Label: session.SessionId, Detail: selectionName(session.Inputs), Selectable: true, Current: session.SessionId == c.rootID, Extra: session})
 		}
 		outstanding := false
 		for _, a := range c.attempts {
@@ -462,7 +475,7 @@ func operationID() string {
 }
 
 func (c *CLI) formAttemptLocked(operation, id string) (*attempt, error) {
-	if c.conn == nil || c.rootID == "" || c.childID != "" || c.root == nil || c.root.hydration == nil || c.root.hydration.Session.ParentSessionId != nil {
+	if c.conn == nil || c.rootID == "" || c.childID != "" || c.root == nil || c.root.hydration == nil {
 		return nil, errors.New("Return to a selected root Session to send work")
 	}
 	a := &attempt{id: id, operation: operation, session: c.rootID, content: textParts(c.draft.String()), mode: protocol.SubmitRequestModeRegular, draftRevision: c.draftRevision, stamp: c.stampLocked(), inflight: true}

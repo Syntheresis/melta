@@ -58,7 +58,7 @@ func (e *composeEnv) locations() Locations {
 	}
 }
 
-func (e *composeEnv) options(plugins ...extension.Native) Options {
+func (e *composeEnv) options(plugins ...extension.Extension) Options {
 	return Options{
 		DataDir:       e.dataDir,
 		Configuration: NewFileConfigurationSource(e.configPath),
@@ -314,7 +314,7 @@ func seedRunningOperationCounted(t *testing.T, store harness.Storage, workspace 
 					Strategy: harness.StrategyCapture{ID: harness.IncludedStrategyID, RequiresContextWindow: true},
 				},
 				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-					modelFn := func(context.Context, model.Request) (model.Stream, error) {
+					modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						executions.Add(1)
 						select {
 						case arrived <- struct{}{}:
@@ -325,17 +325,16 @@ func seedRunningOperationCounted(t *testing.T, store harness.Storage, workspace 
 					}
 					return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 						return harness.InvocationExecution{
-							NormalizeTool: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+							Model: modelFn,
+							LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) harness.PreparedTool {
+								return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "seeded"}}}
+							}, func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 								var obj map[string]json.RawMessage
 								if err := json.Unmarshal(call.Arguments, &obj); err != nil || obj == nil {
 									return nil, errors.New("arguments must be one non-null JSON object")
 								}
 								return json.Marshal(obj)
-							},
-							Model: modelFn,
-							Tool: func(_ context.Context, call model.ToolCall) harness.PreparedTool {
-								return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "seeded"}}}
-							},
+							}),
 						}, nil
 					}}, nil
 				},
@@ -343,7 +342,7 @@ func seedRunningOperationCounted(t *testing.T, store harness.Storage, workspace 
 		},
 	})
 	testassert.NoError(t, err)
-	rec, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: workspace, AgentSelection: suppliedDefinition("seeded")})
+	rec, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: workspace, ExtensionState: agentState("seeded")})
 	testassert.NoError(t, err)
 	{
 		_, err := h.Submit(context.Background(), harness.SubmitRequest{

@@ -9,7 +9,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/protocol"
@@ -183,9 +182,13 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 		return configurationCapture{}, err
 	}
 	fresh := s.freshResources(candidate)
+	discardNative := candidate.native
 	defer func() {
 		if fresh != nil {
 			_ = fresh.release()
+		}
+		if discardNative != nil {
+			_ = discardNative.release()
 		}
 	}()
 	// The edit's pure edited-subject check runs once over the built
@@ -220,6 +223,7 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 			return configurationCapture{}, err
 		}
 		fresh = nil
+		discardNative = nil
 		return s.commit(candidate), nil
 	}
 	if err := s.configuration.Write(writeCtx, complete); err != nil {
@@ -241,9 +245,11 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 			return configurationCapture{}, configurationFailure(errors.Join(fmt.Errorf("persist API key %s: %w", conn.keyEnv, err), restoreErr))
 		}
 		fresh = nil
+		discardNative = nil
 		return s.commit(candidate), nil
 	}
 	fresh = nil
+	discardNative = nil
 	return s.commit(candidate), nil
 }
 
@@ -258,12 +264,6 @@ func (s *configurationService) mutationCapture(ctx context.Context, configData [
 	if err != nil {
 		return configurationCapture{}, configurationFailure(err)
 	}
-	var active []extension.Native
-	for _, native := range s.natives {
-		if sectionEnabled(doc.Extensions[native.Declaration.ID]) {
-			active = append(active, native)
-		}
-	}
 	built, err := s.loader.AssembleCaptured(ctx, doc.Providers)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -271,7 +271,7 @@ func (s *configurationService) mutationCapture(ctx context.Context, configData [
 		}
 		return configurationCapture{}, configurationFailure(err)
 	}
-	secrets := resolveDeclaredSecrets(active, doc.Extensions)
+	secrets := resolveAuthorSecrets(s.authors, doc.Extensions)
 	credentials, credentialNames, err := s.captureCredentials(ctx, capturedCredentialNames(built.Catalog, secrets), nil)
 	if err != nil {
 		return configurationCapture{}, configurationFailure(err)
@@ -331,16 +331,9 @@ func (s *configurationService) applyConnectionEffects(ctx context.Context, conn 
 	return nil
 }
 
-// editSettings builds the settings edit: the whole sessions member, the
-// top-level baseline tools, jobs and compaction sections, and the whole
-// extensions member are written as the generated target shape — each baseline
-// section as its exact JSON object bytes and each extension ID's opaque document
-// string becomes its raw section, and an ID absent from the
-// target removes any newer section, exactly one object per document — and
-// every other top-level root member is unowned and kept untouched. Never
-// merged per field. The selected declaration's validator, not this edit,
-// interprets each active document; candidate construction validates the
-// baseline sections with their owning services' validators.
+// editSettings replaces the file model, sessions, tools, jobs, compaction and
+// extension sections. An omitted model or extension is removed; other roots
+// remain untouched. Section owners validate the resulting candidate.
 func editSettings(settings protocol.Settings) configurationEdit {
 	return configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
 		sessions, err := json.Marshal(settings.Sessions)
@@ -356,6 +349,15 @@ func editSettings(settings protocol.Settings) configurationEdit {
 			return 0, configurationFailure(fmt.Errorf("encode plugins documents: %w", err))
 		}
 		roots.config["sessions"] = sessions
+		if settings.Model == nil || *settings.Model == "" {
+			delete(roots.config, "model")
+		} else {
+			raw, err := json.Marshal(*settings.Model)
+			if err != nil {
+				return 0, err
+			}
+			roots.config["model"] = raw
+		}
 		roots.config["extensions"] = pluginsRaw
 		roots.config["tools"] = settingsSection(settings.Tools)
 		roots.config["jobs"] = settingsSection(settings.Jobs)
@@ -374,73 +376,25 @@ func settingsSection(raw json.RawMessage) json.RawMessage {
 	return append(json.RawMessage(nil), raw...)
 }
 
-// editExtension invokes one installed active extension's declared pure
-// configuration edit over the latest raw owning section and replaces only
-// that extension's member. The top-level call retains one short resource
-// reservation; the provider call reuses the prepared Harness instance through
-// the one guarded provider path. The writer's build serialization stays held,
-// no publication lock is held during the callback, and every other
-// extension document keeps its exact bytes.
-func (s *configurationService) editExtension(ctx context.Context, extensionID, editID string, arguments json.RawMessage) configurationEdit {
-	return configurationEdit{apply: func(roots rawRoots, seed configurationCapture) (editedFile, error) {
-		if len(roots.config["extensions"]) == 0 {
-			return 0, fmt.Errorf("extension %q is unavailable: %w", extensionID, harness.ErrInvalid)
-		}
-		extensions, err := decodeRoot(roots.config["extensions"])
-		if err != nil {
-			return 0, configurationFailure(err)
-		}
-		if !s.nativeIDs[extensionID] || !sectionEnabled(extensions[extensionID]) {
-			return 0, fmt.Errorf("extension %q is unavailable: %w", extensionID, harness.ErrInvalid)
-		}
-		if seed.snapshot == nil || seed.snapshot.composition == nil || seed.snapshot.resources == nil || seed.snapshot.resources.runtime == nil {
-			return 0, fmt.Errorf("extension %q is unavailable: %w", extensionID, harness.ErrInvalid)
-		}
-		declaration, ok := seed.snapshot.composition.compiled.Declaration(extensionID)
-		if !ok {
-			return 0, fmt.Errorf("extension %q is unavailable: %w", extensionID, harness.ErrInvalid)
-		}
-		var edit *extension.ConfigurationEdit
-		for i := range declaration.Declaration.Edits {
-			if declaration.Declaration.Edits[i].ID == editID {
-				edit = &declaration.Declaration.Edits[i]
-				break
-			}
-		}
-		if edit == nil {
-			return 0, fmt.Errorf("extension %q does not declare configuration edit %q: %w", extensionID, editID, harness.ErrInvalid)
-		}
-		capability, ok := declaration.Capabilities[edit.Method.CapabilityID]
-		if !ok {
-			return 0, fmt.Errorf("extension %q edit %q: capability %q is unavailable: %w", extensionID, editID, edit.Method.CapabilityID, harness.ErrInvalid)
-		}
-		value, ok := seed.snapshot.resources.runtime.capabilities[edit.Method.CapabilityID]
-		if !ok {
-			return 0, fmt.Errorf("extension %q edit %q: provider is unavailable: %w", extensionID, editID, ErrClosed)
-		}
-		seed.snapshot.resources.retain()
-		defer func() { _ = seed.snapshot.resources.release() }()
-		identity := callIdentity{revision: seed.snapshot.resources.revisionString(), grant: nativeGrant{pure: true}}
-		result, err := seed.snapshot.composition.invokeProvider(ctx, value, capability.Methods, edit.Method.Method, arguments, extensions[extensionID], identity, false)
-		if err != nil {
-			// The host-initiated call's argument document is Caller input;
-			// its compiled-schema refusal is an invalid request, not an
-			// internal composition failure.
-			if errors.Is(err, ErrComposition) {
-				return 0, fmt.Errorf("%w: %w", err, harness.ErrInvalid)
-			}
-			return 0, err
-		}
-		if result.Failure != nil {
-			return 0, fmt.Errorf("%s: %s", result.Failure.Code, result.Failure.Message)
-		}
-		extensions[extensionID] = append(json.RawMessage(nil), result.Value...)
-		roots.config["extensions"], err = marshalRawObject(extensions, true)
-		if err != nil {
-			return 0, err
-		}
-		return editMainConfig, nil
-	}}
+func extensionSections(roots rawRoots, id string) (map[string]json.RawMessage, error) {
+	if len(roots.config["extensions"]) == 0 {
+		return nil, fmt.Errorf("extension %q is unavailable: %w", id, harness.ErrInvalid)
+	}
+	sections, err := decodeRoot(roots.config["extensions"])
+	if err != nil {
+		return nil, configurationFailure(err)
+	}
+	return sections, nil
+}
+
+func writeExtensionSection(roots rawRoots, sections map[string]json.RawMessage, id string, value json.RawMessage) (editedFile, error) {
+	sections[id] = bytes.Clone(value)
+	raw, err := marshalRawObject(sections, true)
+	if err != nil {
+		return 0, err
+	}
+	roots.config["extensions"] = raw
+	return editMainConfig, nil
 }
 
 // decodeRoot decodes one input document into its root object with every

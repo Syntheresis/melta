@@ -38,7 +38,7 @@ type attemptTableFixture struct {
 	h *harness.Harness
 }
 
-func newAttemptTableFixture(t *testing.T, store harness.Storage, conversationFn, compactFn func(context.Context, model.Request) (model.Stream, error), retry harness.RetryPolicy) *attemptTableFixture {
+func newAttemptTableFixture(t *testing.T, store harness.Storage, conversationFn, compactFn func(context.Context, model.Request, model.Extra) (model.Stream, error), retry harness.RetryPolicy) *attemptTableFixture {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	h, err := harness.New(ctx, harness.Dependencies{Storage: store, Prepare: func(context.Context, harness.PreparationRequest) (harness.PreparedExecution, error) {
@@ -68,11 +68,11 @@ func newAttemptTableFixture(t *testing.T, store harness.Storage, conversationFn,
 // attemptTableCallbacks pairs one row's physical callbacks for the effect
 // under test and the idle conversation callback the compact rows seed their
 // history with.
-func attemptTablePair(fn func(context.Context, model.Request) (model.Stream, error), conversation bool) (conversationFn, compactFn func(context.Context, model.Request) (model.Stream, error)) {
+func attemptTablePair(fn func(context.Context, model.Request, model.Extra) (model.Stream, error), conversation bool) (conversationFn, compactFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) {
 	if conversation {
 		return fn, fn
 	}
-	return func(context.Context, model.Request) (model.Stream, error) {
+	return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return attemptTableTurnStream(), nil
 	}, fn
 }
@@ -142,11 +142,11 @@ func attemptTableStatusServer(t *testing.T, status int) (*httptest.Server, *atom
 
 // attemptTableTransport binds the fixed model.Transport with the given
 // credential to the physical-request shape.
-func attemptTableTransport(t *testing.T, srv *httptest.Server, apiKey string) func(context.Context, model.Request) (model.Stream, error) {
+func attemptTableTransport(t *testing.T, srv *httptest.Server, apiKey string) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 	t.Helper()
 	tr, err := model.NewTransport(model.ResolvedTransport{Model: publicModelRef, BaseURL: srv.URL, APIKey: apiKey})
 	testassert.NoError(t, err)
-	return func(ctx context.Context, req model.Request) (model.Stream, error) {
+	return func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		stream, _, err := tr.Stream(ctx, req, nil)
 		return stream, err
 	}
@@ -340,7 +340,7 @@ var publicAttemptTableRows = []struct {
 		name: "custom retry exhaustion settles the committed failure",
 		run: func(t *testing.T, store harness.Storage, conversation bool) {
 			var requests, policyCalls atomic.Int64
-			fn := func(context.Context, model.Request) (model.Stream, error) {
+			fn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				requests.Add(1)
 				return nil, errors.New("provider dropped")
 			}
@@ -372,7 +372,7 @@ var publicAttemptTableRows = []struct {
 		name: "negative delay stops without retry",
 		run: func(t *testing.T, store harness.Storage, conversation bool) {
 			var requests, policyCalls atomic.Int64
-			fn := func(context.Context, model.Request) (model.Stream, error) {
+			fn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				requests.Add(1)
 				return nil, errors.New("provider dropped")
 			}
@@ -402,7 +402,7 @@ var publicAttemptTableRows = []struct {
 		name: "failure under cancellation settles the interruption",
 		run: func(t *testing.T, store harness.Storage, conversation bool) {
 			park, arrived := parkedAttempt()
-			fn := func(ctx context.Context, _ model.Request) (model.Stream, error) {
+			fn := func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 				park(ctx)
 				return nil, errors.New("provider dropped")
 			}
@@ -430,7 +430,7 @@ var publicAttemptTableRows = []struct {
 		run: func(t *testing.T, store harness.Storage, conversation bool) {
 			park, arrived := parkedAttempt()
 			stream := &attemptTableStream{}
-			fn := func(ctx context.Context, _ model.Request) (model.Stream, error) {
+			fn := func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 				park(ctx)
 				return stream, errors.New("ambiguous outcome")
 			}
@@ -461,7 +461,7 @@ var publicAttemptTableRows = []struct {
 		name: "invalid neither-outcome under cancellation settles the boundary failure",
 		run: func(t *testing.T, store harness.Storage, conversation bool) {
 			park, arrived := parkedAttempt()
-			fn := func(ctx context.Context, _ model.Request) (model.Stream, error) {
+			fn := func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 				park(ctx)
 				return nil, nil
 			}
@@ -493,7 +493,7 @@ var publicAttemptTableRows = []struct {
 			var fh *harness.Harness
 			var fsession, foperation string
 			stream := attemptTableTurnStream()
-			fn := func(context.Context, model.Request) (model.Stream, error) {
+			fn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				requests.Add(1)
 				rec, err := fh.ReadOperation(context.Background(), fsession, foperation)
 				if err != nil {

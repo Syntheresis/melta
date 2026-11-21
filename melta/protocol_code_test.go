@@ -22,6 +22,7 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/snapshot"
 	"github.com/Syntheresis/melta/internal/testassert"
+	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 	"golang.org/x/sys/unix"
 )
@@ -898,15 +899,16 @@ func TestCodeRestoreIntervalKeepsMetadataTransitionsAvailable(t *testing.T) {
 
 		defer park.flush()
 
-		changed, err := r.SetSessionAgentType(context.Background(), testCaller(r), session, protocol.SetSessionAgentTypeRequest{AgentSelection: *wireSelection("worker")})
+		instructions := "worker"
+		changed, err := r.SetSessionInputs(context.Background(), testCaller(r), session, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Instructions: &instructions}})
 		testassert.NoError(t, err)
-		testassert.Equal(t, changed.AgentSelection.Definition.DefinitionId, "worker")
+		testassert.Require(t, changed.Inputs.Instructions != nil && *changed.Inputs.Instructions == instructions, "changed inputs = %+v", changed.Inputs)
 		archived, err := r.ArchiveSession(context.Background(), testCaller(r), session)
 		testassert.NoError(t, err)
 		testassert.Equal(t, archived.Lifecycle, protocol.Archived)
 		reopened, err := r.ReopenSession(context.Background(), testCaller(r), session)
 		testassert.NoError(t, err)
-		testassert.Require(t, reopened.Lifecycle == protocol.Open && reopened.AgentSelection.Definition.DefinitionId == "worker", "reopened header = %+v, want open with the changed selection", reopened)
+		testassert.Require(t, reopened.Lifecycle == protocol.Open && reopened.Inputs.Instructions != nil && *reopened.Inputs.Instructions == instructions, "reopened header = %+v, want open with the changed inputs", reopened)
 
 		park.release("restored")
 		var out restoreOutcome
@@ -1520,15 +1522,17 @@ func TestBackgroundWakeOpenerWaitsForRestoreInterval(t *testing.T) {
 // TestExecutionOpenerFailureReleasesInterval proves the opening-failure row:
 // a failed opener releases the Session's artifact token before returning, so
 // the registry is reclaimed and the next execution runs normally.
-// failingAgentFactoryPlugin is one Agent-scoped plugin whose factory fails
-// while armed: the concrete opening-failure row.
-func failingAgentFactoryPlugin(fail *atomic.Bool) extension.Native {
-	capability := testServiceCapability("failing.agent.cap")
-	return testNative("failing-agent", extension.LifetimeInvocation, []extension.Capability{capability}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		if fail.Load() {
-			return extension.Instance{}, errors.New("boom")
-		}
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"failing.agent.cap": testServiceImplementation()}}, nil
+// failingAgentFactoryPlugin is one plugin whose registered request hook
+// fails while armed: a concrete execution failure.
+func failingAgentFactoryPlugin(fail *atomic.Bool) extension.Extension {
+	return testNative("failing-agent", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			if fail.Load() {
+				return harness.RequestConsequence{}, errors.New("boom")
+			}
+			return harness.RequestConsequence{}, nil
+		}, nil)
+		return nil, err
 	})
 }
 
@@ -1566,30 +1570,53 @@ func TestExecutionOpenerFailureReleasesInterval(t *testing.T) {
 // still held — a restore conflicts — and only after the cleanup and the
 // scoped closes complete is the registry reclaimed and the same restore
 // admitted.
-// parkingAgentClosePlugin is one Agent-scoped plugin whose Instance.Close
-// signals its start and then parks on the release gate: the held
-// execution-cleanup row.
-func parkingAgentClosePlugin(started chan struct{}, gate chan struct{}) extension.Native {
-	capability := testServiceCapability("parking.agent.cap")
-	return testNative("parking-agent", extension.LifetimeInvocation, []extension.Capability{capability}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"parking.agent.cap": testServiceImplementation()}, Close: func(context.Context, extension.CallContext) error {
-			select {
-			case started <- struct{}{}:
-			default:
-			}
-			<-gate
-			return nil
-		}}, nil
+// parkingAgentClosePlugin is one plugin whose registered tool parks its
+// executor on the release gate: an execution cleanup held open.
+func parkingAgentClosePlugin(started chan struct{}, gate chan struct{}) extension.Extension {
+	return testNative("parking-agent", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "park_tool", Description: "parks", Parameters: json.RawMessage(`{"type":"object"}`)}, parkingTool{started: started, gate: gate}, nil)
+		return nil, err
 	})
+}
+
+type parkingTool struct {
+	started chan struct{}
+	gate    chan struct{}
+}
+
+func (parkingTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
+	return call.Arguments, nil
+}
+
+func (parkingTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}, Data: []byte(call.ID)}
+}
+
+func (t parkingTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+	select {
+	case t.started <- struct{}{}:
+	default:
+	}
+	<-t.gate
+	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: "parked"}}
 }
 
 func TestExecutionCleanupReleasesIntervalLast(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
 		e := newOwnerEnv(t)
+		// The solo definition selects the fixture tool; every registered tool
+		// outside the definition's explicit selection is not advertised.
+		writeAgentDefinitions(t, e.configPath, `{"solo":{"model":"prov/m","system_prompt":"simple","tools":["park_tool"]}}`)
 		enableFixturePlugin(t, e.configPath, "parking-agent")
 		closeGate := make(chan struct{})
 		closeStarted := make(chan struct{}, 1)
 		e.fixtureStore(store)
+		e.server.setScript(func(_ context.Context, body string) []string {
+			if lastMessageRole(body) == "tool" {
+				return textTurnEvents("done")
+			}
+			return toolCallTurnEvents("call-park", "park_tool", `{}`)
+		})
 		r, err := e.open(context.Background(), parkingAgentClosePlugin(closeStarted, closeGate))
 		testassert.NoError(t, err)
 		defer closeProjectionRuntime(r)
@@ -1599,9 +1626,9 @@ func TestExecutionCleanupReleasesIntervalLast(t *testing.T) {
 
 		var gateOnce sync.Once
 		releaseCleanup := func() { gateOnce.Do(func() { close(closeGate) }) }
-		defer releaseCleanup() // a failing assertion must not leak a held execution Close
+		defer releaseCleanup() // a failing assertion must not leak a held executor
 		submitThroughRuntime(t, r, session, "op-1", "run")
-		select { // the execution's scoped cleanup started and blocked
+		select { // the execution's parked tool holds the lease
 		case <-closeStarted:
 		case <-time.After(10 * time.Second):
 			t.Fatal("the execution cleanup never started")

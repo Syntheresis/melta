@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Syntheresis/melta/extension"
+	"github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/testassert"
@@ -28,8 +29,8 @@ import (
 
 // Production composition suite: the concrete preparation through public Open
 // over both stores, with isolated HOME and a test model server as the
-// configured provider endpoint. The composition's concrete tools are local
-// declared capabilities performing real file effects — the shipped
+// composition's concrete tools are locally registered tools performing real
+// file effects — the shipped
 // registration set itself composes in the external package suite. No test
 // touches the user's HOME, .env, cache, or database.
 
@@ -66,10 +67,10 @@ func productionConfigDocument(endpoint, tag string) string {
 // preparation contribution, "nomodel" has no model at all, and "absent" selects
 // a catalog-missing model — the discriminating sibling of the empty identity.
 const productionAgentsDocument = `{
-  "worker": {"model": "prov/m", "system_prompt": "simple", "tools": ["prod_write", "prod_read"], "capabilities": ["hook.first", "park.second"]},
-  "duper": {"model": "prov/m", "system_prompt": "simple", "tools": ["prod_read", "prod_write", "prod_read"], "capabilities": []},
+  "worker": {"model": "prov/m", "system_prompt": "simple", "tools": ["prod_write", "prod_read"]},
+  "duper": {"model": "prov/m", "system_prompt": "simple", "tools": ["prod_read", "prod_write", "prod_read"]},
   "ro": {"model": "prov/m", "system_prompt": "simple", "tools": ["prod_write", "prod_read"], "readonly": true},
-  "runner": {"model": "prov/m", "system_prompt": "simple", "tools": ["run_command"], "capabilities": []},
+  "runner": {"model": "prov/m", "system_prompt": "simple", "tools": ["run_command"]},
   "keyless": {"model": "open/km", "system_prompt": "simple", "tools": ["prod_write"]},
   "nomodel": {"system_prompt": "simple"},
   "absent": {"model": "prov/absent", "system_prompt": "simple"}
@@ -89,41 +90,29 @@ func useFixtureStore(t *testing.T, store harness.Storage) {
 	t.Cleanup(func() { openStore = previous })
 }
 
-func hookPlugin(hook *recordHook) extension.Native {
-	capability := extension.HookCapability("hook.first", extension.SingleHook(extension.BoundaryPrepare, extension.HookModePure))
-	return testNative("hooks", extension.LifetimeHarness, []extension.Capability{capability}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"hook.first": {Preparation: hook.Prepare}}}, nil
-	})
+func hookPlugin(hook *recordHook) extension.Extension {
+	return extension.Extension{Manifest: registrarManifest("hooks"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.AttachAdmission(hook.Admit, nil)
+		return nil, err
+	}}
 }
 
 // parkPlugin declares the suite's parking preparation contribution.
-func parkPlugin(park *parkingHook) extension.Native {
-	capability := extension.HookCapability("park.second", extension.SingleHook(extension.BoundaryPrepare, extension.HookModePure))
-	return testNative("park", extension.LifetimeHarness, []extension.Capability{capability}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"park.second": {Preparation: park.Prepare}}}, nil
-	})
+func parkPlugin(park *parkingHook) extension.Extension {
+	return extension.Extension{Manifest: registrarManifest("park"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.AttachAdmission(park.Prepare, nil)
+		return nil, err
+	}}
 }
 
 // fileWriteTool is the concrete mutation tool of the production suite.
 type fileWriteTool struct{}
 
-func (t fileWriteTool) describe(_ context.Context, input extension.DescribeInput) (extension.ToolDescription, error) {
-	definition, err := model.NewToolDefinition(model.ToolDefinition{
-		Name:        "prod_write",
-		Description: "writes one file in the workspace",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`),
-	})
-	if err != nil {
-		return extension.ToolDescription{}, err
-	}
-	return extension.ToolDescription{Definition: definition, Available: !input.Constraints.Readonly || input.Constraints.WriteDir != ""}, nil
-}
-
-func (t fileWriteTool) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (t fileWriteTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
 	return runtimeNormalize(call)
 }
 
-func (t fileWriteTool) Prepare(_ context.Context, tc extension.ToolContext, call model.ToolCall) extension.ToolPlan {
+func (t fileWriteTool) Prepare(_ context.Context, tc extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	var args struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -131,12 +120,12 @@ func (t fileWriteTool) Prepare(_ context.Context, tc extension.ToolContext, call
 	if err := json.Unmarshal(call.Arguments, &args); err != nil || args.Path == "" || args.Content == "" {
 		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "prod_write requires path and content"}}}
 	}
-	target := filepath.Clean(filepath.Join(tc.Workspace, args.Path))
+	target := filepath.Clean(filepath.Join(tc.Session.Workspace, args.Path))
 	data, _ := json.Marshal(args)
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "file.write", Target: target}}, CanonicalWorkspace: filepath.Clean(tc.Workspace), Data: data}
+	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "file.write", Target: target}}, CanonicalWorkspace: filepath.Clean(tc.Session.Workspace), Data: data}
 }
 
-func (t fileWriteTool) Execute(ctx context.Context, tc extension.ToolContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t fileWriteTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
 	var args struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -144,7 +133,7 @@ func (t fileWriteTool) Execute(ctx context.Context, tc extension.ToolContext, pl
 	if err := json.Unmarshal(plan.Data, &args); err != nil {
 		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
 	}
-	target := filepath.Clean(filepath.Join(tc.Workspace, args.Path))
+	target := filepath.Clean(filepath.Join(tc.Session.Workspace, args.Path))
 	if err := ctx.Err(); err != nil {
 		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "interrupted"}}
 	}
@@ -160,38 +149,30 @@ func (t fileWriteTool) Execute(ctx context.Context, tc extension.ToolContext, pl
 // fileReadTool is the concrete read-only sibling.
 type fileReadTool struct{}
 
-func (t fileReadTool) describe(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-	definition, err := model.NewToolDefinition(model.ToolDefinition{Name: "prod_read", Description: "reads one file in the workspace", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)})
-	if err != nil {
-		return extension.ToolDescription{}, err
-	}
-	return extension.ToolDescription{Definition: definition, Available: true}, nil
-}
-
-func (t fileReadTool) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (t fileReadTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
 	return runtimeNormalize(call)
 }
 
-func (t fileReadTool) Prepare(_ context.Context, tc extension.ToolContext, call model.ToolCall) extension.ToolPlan {
+func (t fileReadTool) Prepare(_ context.Context, tc extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	var args struct {
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(call.Arguments, &args); err != nil || args.Path == "" {
 		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "prod_read requires path"}}}
 	}
-	target := filepath.Clean(filepath.Join(tc.Workspace, args.Path))
+	target := filepath.Clean(filepath.Join(tc.Session.Workspace, args.Path))
 	data, _ := json.Marshal(args)
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "file.read", Target: target}}, CanonicalWorkspace: filepath.Clean(tc.Workspace), Data: data}
+	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "file.read", Target: target}}, CanonicalWorkspace: filepath.Clean(tc.Session.Workspace), Data: data}
 }
 
-func (t fileReadTool) Execute(ctx context.Context, tc extension.ToolContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t fileReadTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
 	var args struct {
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(plan.Data, &args); err != nil {
 		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
 	}
-	target := filepath.Clean(filepath.Join(tc.Workspace, args.Path))
+	target := filepath.Clean(filepath.Join(tc.Session.Workspace, args.Path))
 	if err := ctx.Err(); err != nil {
 		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "interrupted"}}
 	}
@@ -202,36 +183,20 @@ func (t fileReadTool) Execute(ctx context.Context, tc extension.ToolContext, pla
 	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: string(data)}}
 }
 
-// productionToolsPlugin declares the suite's concrete tools.
-func productionToolsPlugin() extension.Native {
-	native := testNative("prodtools", extension.LifetimeHarness,
-		[]extension.Capability{extension.ToolCapability("prod_write"), extension.ToolCapability("prod_read")}, nil,
-		func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{Capabilities: map[string]extension.Implementation{
-				"prod_write": {Tool: fileWriteTool{}},
-				"prod_read":  {Tool: fileReadTool{}},
-			}}, nil
-		})
-	native.Describe = map[string]extension.ToolDescribe{
-		"prod_write": fileWriteTool{}.describe,
-		"prod_read":  fileReadTool{}.describe,
+// productionToolsPlugin registers the suite's concrete tools.
+func productionToolsPlugin() extension.Extension {
+	return extension.Extension{
+		Manifest: registrarManifest("prodtools"),
+		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			write := model.ToolDefinition{Name: "prod_write", Description: "writes one file in the workspace", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)}
+			if _, err := api.RegisterTool(write, fileWriteTool{}, nil); err != nil {
+				return nil, err
+			}
+			read := model.ToolDefinition{Name: "prod_read", Description: "reads one file in the workspace", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)}
+			_, err := api.RegisterTool(read, fileReadTool{}, nil)
+			return nil, err
+		},
 	}
-	return native
-}
-
-// testAdaptation is the custom test preparation contribution.
-type testAdaptation struct{}
-
-func (testAdaptation) Prepare(_ context.Context, _ extension.CallContext, input extension.PreparationInput) (extension.PreparationConsequence, error) {
-	prompt := input.Prompt + "\n\n  PROD-ADAPTATION-BLOCK\n"
-	return extension.PreparationConsequence{Prompt: &prompt, ToolNames: []string{"prod_write"}}, nil
-}
-
-func prodAdaptationPlugin() extension.Native {
-	capability := extension.HookCapability("model_adaptation", extension.SingleHook(extension.BoundaryPrepare, extension.HookModePure))
-	return testNative("adapt", extension.LifetimeHarness, []extension.Capability{capability}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"model_adaptation": {Preparation: testAdaptation{}.Prepare}}}, nil
-	})
 }
 
 // eachProductionStore runs one production composition fixture against the
@@ -280,7 +245,7 @@ func (e *productionEnv) locations() Locations {
 	}
 }
 
-func (e *productionEnv) options(plugins []extension.Native) Options {
+func (e *productionEnv) options(plugins []extension.Extension) Options {
 	return Options{
 		DataDir:       e.dataDir,
 		Configuration: NewFileConfigurationSource(e.configPath),
@@ -297,7 +262,7 @@ func (e *productionEnv) open(ctx context.Context, hook *recordHook, park *parkin
 
 // openPlugins opens the fixture's exact plugin list over its data and config
 // roots, with the owner's store construction pointed at the fixture's store.
-func (e *productionEnv) openPlugins(ctx context.Context, natives ...extension.Native) (*Melta, error) {
+func (e *productionEnv) openPlugins(ctx context.Context, natives ...extension.Extension) (*Melta, error) {
 	e.t.Helper()
 	useFixtureStore(e.t, e.store)
 	data, err := os.ReadFile(e.configPath)
@@ -310,30 +275,42 @@ func (e *productionEnv) openPlugins(ctx context.Context, natives ...extension.Na
 	}
 	hasAgents := false
 	for _, native := range natives {
-		id := native.Declaration.ID
+		id := native.Manifest.ID
 		hasAgents = hasAgents || id == "agents"
 		if _, exists := doc.Extensions[id]; !exists {
 			enableFixturePlugin(e.t, e.configPath, id)
 		}
 	}
 	if !hasAgents && sectionEnabled(doc.Extensions["agents"]) {
-		natives = append(natives, fixtureAgentPlugin(natives...))
+		natives = append([]extension.Extension{agents.Author()}, natives...)
 	}
 	return Open(ctx, e.options(natives))
 }
 
 // openWithPlugins composes the suite's base plugin set plus extras — the
 // adaptation row adds its custom preparation contribution this way.
-func (e *productionEnv) openWithPlugins(ctx context.Context, hook *recordHook, park *parkingHook, extra ...extension.Native) (*Melta, error) {
+func (e *productionEnv) openWithPlugins(ctx context.Context, hook *recordHook, park *parkingHook, extra ...extension.Extension) (*Melta, error) {
 	e.t.Helper()
-	plugins := []extension.Native{productionToolsPlugin(), hookPlugin(hook), parkPlugin(park)}
+	plugins := []extension.Extension{productionToolsPlugin(), hookPlugin(hook), parkPlugin(park)}
 	return e.openPlugins(ctx, append(plugins, extra...)...)
 }
 
 func (e *productionEnv) hookedHook() *recordHook {
-	return &recordHook{name: "hook.first", events: &traceLog{}, mutate: func(in extension.PreparationInput) extension.PreparationConsequence {
-		prompt := in.Prompt + "|hooked"
-		return extension.PreparationConsequence{Prompt: &prompt}
+	return &recordHook{name: "hook.first", events: &traceLog{}, admissionMutate: func(in extension.AdmissionInput) (extension.AdmissionResult, error) {
+		var prompt string
+		var err error
+		if in.Candidate.Prompt != nil {
+			prompt = *in.Candidate.Prompt
+		} else {
+			prompt, err = in.Prompt.Default()
+			if err != nil {
+				return extension.AdmissionResult{}, err
+			}
+		}
+		prompt += "|hooked"
+		candidate := in.Candidate
+		candidate.Prompt = &prompt
+		return extension.AdmissionResult{Candidate: &candidate}, nil
 	}}
 }
 
@@ -594,8 +571,8 @@ func TestProductionAdmittedOperation(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(workspace, "out.txt"))
 		testassert.Require(t, err == nil && string(data) == "written by production", "prod_write effect = (%q, %v), want the written content", data, err)
 		testassert.Equal(t, rec.Admission.Execution.ConfigurationRevision, "1")
-		if !slices.Equal(toolNames(rec.Admission.Execution.Tools), []string{"prod_write", "prod_read"}) {
-			t.Fatalf("advertisement = %v, want the agent's composed tools", toolNames(rec.Admission.Execution.Tools))
+		if !slices.Equal(rec.Admission.Execution.InitialToolNames, []string{"prod_write", "prod_read"}) {
+			t.Fatalf("advertisement = %v, want the agent's composed tools", rec.Admission.Execution.InitialToolNames)
 		}
 		testassert.Require(t, strings.HasSuffix(rec.Admission.Execution.SystemPrompt, "|hooked"), "capture prompt = %q, want the hooked composed prompt", rec.Admission.Execution.SystemPrompt)
 
@@ -745,7 +722,6 @@ func TestProductionAdmissionUsesReadyRevisionDuringParkedBuild(t *testing.T) {
 		arrived := make(chan struct{}, 1)
 		ungate := make(chan struct{})
 		releaseGate := sync.OnceFunc(func() { close(ungate) })
-		var opens atomic.Int64
 		candidateBarrier = func() {
 			if !armed.Load() {
 				return
@@ -757,9 +733,8 @@ func TestProductionAdmissionUsesReadyRevisionDuringParkedBuild(t *testing.T) {
 			<-ungate
 		}
 		t.Cleanup(func() { candidateBarrier = nil })
-		gate := servicePlugin("gate", &opens, acceptValidator)
 		ctx := context.Background()
-		r, err := e.openWithPlugins(ctx, e.hookedHook(), &parkingHook{}, gate)
+		r, err := e.openWithPlugins(ctx, e.hookedHook(), &parkingHook{})
 		testassert.NoError(t, err)
 		// Teardown order: the ctx-blind validator gate is released first, so
 		// the buffered Reload and Submit result sends complete before the
@@ -944,45 +919,45 @@ func TestProductionHookCapture(t *testing.T) {
 		testassert.NoError(t, err)
 		// The hook's narrowed description survives into the committed
 		// capture.
-		hook.set(nil, func(extension.PreparationInput) extension.PreparationConsequence {
-			return extension.PreparationConsequence{Descriptions: map[string]string{"prod_write": "narrowed by the hook"}}
+		hook.setAdmission(nil, func(in extension.AdmissionInput) (extension.AdmissionResult, error) {
+			candidate := in.Candidate
+			candidate.Tools = slices.Clone(candidate.Tools)
+			for i := range candidate.Tools {
+				if candidate.Tools[i].Name == "prod_write" {
+					candidate.Tools[i].Description = "narrowed by the hook"
+				}
+			}
+			return extension.AdmissionResult{Candidate: &candidate}, nil
 		})
 		submitThroughRuntime(t, r, session.Identity.SessionID, "op-narrow", "hello")
 		rec := awaitOperation(t, r, session.Identity.SessionID, "op-narrow", harness.OperationSuccess)
-		testassert.Equal(t, rec.Admission.Execution.Tools[0].Description, "narrowed by the hook")
+		narrowed, ok := capturedTool(rec.Admission.Execution.Tools, "prod_write")
+		testassert.Require(t, ok && narrowed.Description == "narrowed by the hook", "captured prod_write = %+v, want the hook's narrowed description", narrowed)
 
-		// Input identity and constraint mutation stays a non-effect: the
-		// committed capture keeps the definition's values and the admission
-		// succeeds. Every row runs on its own fresh Session, so no
-		// post-terminal drain can race the submit into a steering buffer.
+		// Mutating the callback input without returning it has no effect on
+		// the committed model.
 		for _, row := range []struct {
 			name   string
-			mutate func(in extension.PreparationInput) extension.PreparationConsequence
+			mutate func(in extension.AdmissionInput) (extension.AdmissionResult, error)
 		}{
-			{"model", func(in extension.PreparationInput) extension.PreparationConsequence {
-				in.Model = model.ModelRef{Provider: "prov", Model: "other"}
-				return extension.PreparationConsequence{}
-			}},
-			{"constraints", func(in extension.PreparationInput) extension.PreparationConsequence {
-				in.Constraints = ToolConstraints{Readonly: true, WriteDir: "/somewhere-else"}
-				return extension.PreparationConsequence{}
+			{"model", func(in extension.AdmissionInput) (extension.AdmissionResult, error) {
+				in.Candidate.Model = model.ModelRef{Provider: "prov", Model: "other"}
+				return extension.AdmissionResult{}, nil
 			}},
 		} {
-			hook.set(nil, row.mutate)
+			hook.setAdmission(nil, row.mutate)
 			rowSession, err := r.createSession(ctx, e.workspace("hook-"+row.name+"-ws"), "worker")
 			testassert.Require(t, err == nil, "createSession(%s): %v", row.name, err)
 			submitThroughRuntime(t, r, rowSession.Identity.SessionID, "op-"+row.name, "hello")
 			rowRec := awaitOperation(t, r, rowSession.Identity.SessionID, "op-"+row.name, harness.OperationSuccess)
-			testassert.Require(t, rowRec.Admission.Execution.Model == prepModelRef && !rowRec.Admission.Execution.Readonly && rowRec.Admission.Execution.WriteDir == "", "%s capture = (%s, %v, %q), want the definition's untouched identity and constraints", row.name, rowRec.Admission.Execution.Model.String(), rowRec.Admission.Execution.Readonly, rowRec.Admission.Execution.WriteDir)
+			testassert.Require(t, rowRec.Admission.Execution.Model == prepModelRef, "%s capture = %s, want the definition's untouched model", row.name, rowRec.Admission.Execution.Model.String())
 		}
-		hook.set(nil, nil)
+		hook.setAdmission(nil, nil)
 	})
 }
 
-// TestProductionHostDefaultCapabilitiesSelectContribution proves the
-// application-supplied default capability selection travels through the
-// Agents constructor: a definition with no explicit selection inherits the
-// host's default and its ordinary preparation contribution runs.
+// TestProductionHostDefaultCapabilitiesSelectContribution proves an enabled
+// registered hook participates without a per-Session capability selection.
 func TestProductionHostDefaultCapabilitiesSelectContribution(t *testing.T) {
 	eachProductionStore(t, func(t *testing.T, e *productionEnv) {
 		ctx := context.Background()
@@ -991,22 +966,19 @@ func TestProductionHostDefaultCapabilitiesSelectContribution(t *testing.T) {
 		useFixtureStore(t, e.store)
 		tools := productionToolsPlugin()
 		hooks := hookPlugin(e.hookedHook())
-		r, err := Open(ctx, e.options([]extension.Native{tools, hooks, agentsTestNativeWithDefaults([]string{"hook.first"}, tools, hooks)}))
+		r, err := Open(ctx, e.options([]extension.Extension{agents.Author(), tools, hooks}))
 		testassert.NoError(t, err)
 		defer r.Close(ctx)
 		session, err := r.createSession(ctx, e.workspace("default-cap-ws"), "defaulted")
 		testassert.NoError(t, err)
 		submitThroughRuntime(t, r, session.Identity.SessionID, "op-1", "hello")
 		rec := awaitOperation(t, r, session.Identity.SessionID, "op-1", harness.OperationSuccess)
-		testassert.Require(t, slices.Equal(rec.Admission.Execution.Capabilities, []string{"hook.first"}), "defaulted capabilities = %v, want the host-selected default", rec.Admission.Execution.Capabilities)
-		testassert.Require(t, strings.HasSuffix(rec.Admission.Execution.SystemPrompt, "|hooked"), "defaulted prompt = %.120s, want the selected contribution applied", rec.Admission.Execution.SystemPrompt)
+		testassert.Require(t, strings.HasSuffix(rec.Admission.Execution.SystemPrompt, "|hooked"), "defaulted prompt = %.120s, want the enabled contribution applied", rec.Admission.Execution.SystemPrompt)
 	})
 }
 
-// TestProductionDefaultCapabilityForDisabledContributionFailsAdmission proves
-// the constructor default is an unchecked selection: naming a registered but
-// inactive capability opens the Melta normally and rejects the later
-// admission with no Operation published.
+// TestProductionDefaultCapabilityForDisabledContribution proves an inactive
+// extension does not prevent admission or contribute its registered hook.
 func TestProductionDefaultCapabilityForDisabledContribution(t *testing.T) {
 	eachProductionStore(t, func(t *testing.T, e *productionEnv) {
 		ctx := context.Background()
@@ -1015,26 +987,24 @@ func TestProductionDefaultCapabilityForDisabledContribution(t *testing.T) {
 		useFixtureStore(t, e.store)
 		tools := productionToolsPlugin()
 		hooks := hookPlugin(e.hookedHook())
-		park := parkPlugin(&parkingHook{})
+		parked := &parkingHook{}
+		arrived := make(chan struct{}, 1)
+		release := make(chan struct{})
+		defer close(release)
+		parked.arm(release, arrived)
+		park := parkPlugin(parked)
 		// The fixture enables hooks only; park stays installed but inactive.
-		r, err := Open(ctx, e.options([]extension.Native{tools, hooks, park, agentsTestNativeWithDefaults([]string{"park.second"}, tools, hooks, park)}))
+		r, err := Open(ctx, e.options([]extension.Extension{agents.Author(), tools, hooks, park}))
 		testassert.NoError(t, err)
 		defer r.Close(ctx)
 		session, err := r.createSession(ctx, e.workspace("disabled-default-ws"), "defaulted")
 		testassert.NoError(t, err)
-		_, err = submitRawThroughRuntime(ctx, r, session.Identity.SessionID, "op-disabled", "hello", harness.MessageModeRegular)
-		testassert.Require(t, errors.Is(err, harness.ErrInvalid), "disabled default submit = %v, want harness.ErrInvalid", err)
-		testassert.Require(t, errors.Is(readOperationError(ctx, r, session.Identity.SessionID, "op-disabled"), harness.ErrNotFound), "disabled default published an operation")
-	})
-}
-
-// countingWorkspacePlugin is one real Workspace-scoped declaration whose
-// factory counts construction, so a preparation test can observe whether
-// admission reached Workspace construction.
-func countingWorkspacePlugin(opens *atomic.Int64) extension.Native {
-	capability := testServiceCapability("ws.probe")
-	return testNative("wsprobe", extension.LifetimeWorkspace, []extension.Capability{capability}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		opens.Add(1)
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"ws.probe": testServiceImplementation()}}, nil
+		submitThroughRuntime(t, r, session.Identity.SessionID, "op-disabled", "hello")
+		awaitOperation(t, r, session.Identity.SessionID, "op-disabled", harness.OperationSuccess)
+		select {
+		case <-arrived:
+			t.Fatal("disabled hook ran")
+		default:
+		}
 	})
 }

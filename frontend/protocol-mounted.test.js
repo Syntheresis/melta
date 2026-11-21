@@ -20,11 +20,12 @@ import {
   getSessionHydration,
   getWarnings,
   interruptSession,
+  invokeExtension,
+  listExtensions,
   listProviderModels,
   listSessions,
   resetProviderField,
   resetProviderModelField,
-  setAgentTypeModel,
   stopSession,
   updateConfigurationSettings,
   updateProviderDetail,
@@ -42,7 +43,7 @@ mounted('generated SDK round-trips special identity query values over the mounte
   // 0600 mode; these are the record-shape checks it does not duplicate.
   expect(discovery.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
   expect(discovery.instance_id).toMatch(/^[0-9a-f]{32}$/);
-  expect(discovery.protocol_version).toBe('16');
+  expect(discovery.protocol_version).toBe('19');
   // The credential is validated without an assertion diff: a mismatch must
   // never print the value this check exists to protect.
   if (typeof discovery.credential !== 'string' || !/^[0-9a-f]{64}$/.test(discovery.credential)) {
@@ -52,7 +53,7 @@ mounted('generated SDK round-trips special identity query values over the mounte
   const client = createClient({ baseUrl: discovery.endpoint, auth: discovery.credential });
   const health = await getHealth({ client });
   expect(health.error).toBeUndefined();
-  expect(health.data).toEqual({ instance_id: discovery.instance_id, protocol_version: '16' });
+  expect(health.data).toEqual({ instance_id: discovery.instance_id, protocol_version: '19' });
 
   // The open warning source crosses the generated TypeScript boundary: the
   // mounted owner's real Runtime-scoped reporter plugin attributes its report
@@ -219,27 +220,27 @@ mounted('generated SDK round-trips special identity query values over the mounte
   const refusedDetail = await getProviderDetail({ client, query: { provider_id: 'externalk' } });
   expect(refusedDetail.error?.code).toBe('not_found');
 
-  // The directory-like Agent definition name is addressable through the
-  // supplied extension's declared model edit, and the roster projection
-  // carries the edited model.
-  const agentEdit = await updateConfigurationSettings({
-    client,
-    body: { extension_edit: { extension_id: 'agents', edit_id: 'set_model', arguments: JSON.stringify({ definition_id: '..', model: 'prov/m' }) } },
-  });
+  // The directory-like Agent name is addressed through the registered operation.
+  const advertised = await listExtensions({ client });
+  expect(advertised.data?.find((entry) => entry.extension_id === 'agents')?.operations.some((entry) => entry.method.name === 'set_model')).toBe(true);
+  const agentEdit = await invokeExtension({ client, body: {
+    extension_id: 'agents', operation: 'set_model', target: { kind: 'harness' },
+    arguments: { definition_id: '..', model: 'prov/m' }, request_id: 'mounted-model-edit',
+  } });
   expect(agentEdit.error).toBeUndefined();
-  const editedConfiguration = await getConfiguration({ client });
-  const editedAgent = editedConfiguration.data?.agents.find((agent) => agent.definition.definition_id === '..');
+  const listedAgents = await invokeExtension({ client, body: {
+    extension_id: 'agents', operation: 'list', target: { kind: 'harness' }, arguments: {}, request_id: 'mounted-agent-list',
+  } });
+  const editedAgent = listedAgents.data?.result.find((agent) => agent.name === '..');
   expect(editedAgent?.model).toBe('prov/m');
 
-  // The Session hydration carries the required nullable next-admission
-  // selection: a resolved Agent type names its configured model, and an
-  // unresolvable type is null over the generated TypeScript boundary.
-  const configured = await createSession({ client, body: { workspace: '/tmp/mounted-ts', agent_selection: { definition: { extension_id: 'agents', capability_id: 'agents.definitions', definition_id: 'solo' } } } });
+  // Hydration reports stored model choices, not the private Agents selection.
+  const configured = await createSession({ client, body: { workspace: '/tmp/mounted-ts', inputs: { model: 'prov/m' } } });
   expect(configured.error).toBeUndefined();
   const configuredHydration = await getSessionHydration({ client, path: { id: configured.data.session_id } });
   expect(configuredHydration.error).toBeUndefined();
   expect(configuredHydration.data?.selected_model).toBe('prov/m');
-  const unresolved = await createSession({ client, body: { workspace: '/tmp/mounted-ts', agent_selection: { definition: { extension_id: 'agents', capability_id: 'agents.definitions', definition_id: 'ghost' } } } });
+  const unresolved = await createSession({ client, body: { workspace: '/tmp/mounted-ts' } });
   expect(unresolved.error).toBeUndefined();
   const unresolvedHydration = await getSessionHydration({ client, path: { id: unresolved.data.session_id } });
   expect(unresolvedHydration.error).toBeUndefined();

@@ -14,32 +14,10 @@ type Config struct {
 	warnings []Warning
 }
 
-// ParseWithCapabilities loads the agent definitions. Capability names are
-// validated against the supplied compiled capability declarations, with
-// missing inheritance, empty-list clearing, and the same invalid-custom
-// warning/drop behavior for unknown, duplicate, or empty IDs; built-ins keep
-// their locked fields and an empty default. Configured tool names are
-// validated against the supplied compiled tool declarations: an unknown
-// explicit custom tool name drops that definition with the retained warning,
-// duplicates remain valid input, and default and inherited tool lists are
-// intersected with the compiled universe. defaultCapabilityIDs is the default
-// capability selection seam: a non-empty list is installed as the built-in
-// primary definition's capabilities before user overlays and inheritance, so
-// ordinary inheritance propagates it and explicit selections override or
-// clear it; a nil or empty list leaves the built-ins with an empty default.
-func ParseWithCapabilities(data []byte, capabilityIDs, toolIDs, defaultCapabilityIDs []string) (*Config, error) {
-	declared := make(map[string]struct{}, len(capabilityIDs))
-	for _, id := range capabilityIDs {
-		declared[id] = struct{}{}
-	}
-	tools := make(map[string]struct{}, len(toolIDs))
-	for _, id := range toolIDs {
-		tools[id] = struct{}{}
-	}
-	return parse(data, declared, tools, defaultCapabilityIDs)
-}
-
-func parse(data []byte, declaredCapabilities, declaredTools map[string]struct{}, defaultCapabilityIDs []string) (*Config, error) {
+// parse loads the agent definitions: built-ins with their locked fields,
+// configured overlays and custom definitions, with the retained
+// invalid-custom warning/drop behavior.
+func parse(data []byte) (*Config, error) {
 	var user map[string]json.RawMessage
 	if err := json.Unmarshal(data, &user); err != nil {
 		return nil, err
@@ -49,11 +27,6 @@ func parse(data []byte, declaredCapabilities, declaredTools map[string]struct{},
 	}
 
 	cfg := &Config{defs: copyBuiltins()}
-	if len(defaultCapabilityIDs) > 0 {
-		primary := cfg.defs["primary"]
-		primary.Capabilities = toolsPtr(append([]string(nil), defaultCapabilityIDs...))
-		cfg.defs["primary"] = primary
-	}
 	names := make([]string, 0, len(user))
 	for name := range user {
 		names = append(names, name)
@@ -83,7 +56,7 @@ func parse(data []byte, declaredCapabilities, declaredTools map[string]struct{},
 			})
 			continue
 		}
-		if err := validateCustom(name, def, declaredCapabilities, declaredTools); err != nil {
+		if err := validateCustom(name, def); err != nil {
 			cfg.warnings = append(cfg.warnings, Warning{
 				Kind:    "invalid_agent_type",
 				Name:    name,
@@ -93,27 +66,7 @@ func parse(data []byte, declaredCapabilities, declaredTools map[string]struct{},
 		}
 		cfg.defs[name] = copyDefinition(def)
 	}
-	for name, def := range cfg.defs {
-		def.Tools = intersectCompiledTools(def.Tools, declaredTools)
-		cfg.defs[name] = def
-	}
 	return cfg, nil
-}
-
-// intersectCompiledTools intersects one owned tool list with the compiled
-// tool universe, preserving order and duplicates. An omitted list stays
-// omitted.
-func intersectCompiledTools(tools *[]string, declared map[string]struct{}) *[]string {
-	if tools == nil {
-		return tools
-	}
-	kept := make([]string, 0, len(*tools))
-	for _, name := range *tools {
-		if _, ok := declared[name]; ok {
-			kept = append(kept, name)
-		}
-	}
-	return &kept
 }
 
 // decodeDefinition decodes one custom definition entry: the entry must be an
@@ -246,7 +199,7 @@ func applyDefinition(out *Resolved, def Definition) {
 		out.Prompt = *def.Prompt
 	}
 	if def.Tools != nil {
-		out.Tools = append([]string(nil), (*def.Tools)...)
+		out.Tools = append([]string{}, (*def.Tools)...)
 	}
 	if def.Capabilities != nil {
 		if len(*def.Capabilities) == 0 {
@@ -269,7 +222,7 @@ func applyDefinition(out *Resolved, def Definition) {
 	}
 }
 
-func validateCustom(name string, def Definition, declaredCapabilities, declaredTools map[string]struct{}) error {
+func validateCustom(name string, def Definition) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("name is empty")
 	}
@@ -290,17 +243,11 @@ func validateCustom(name string, def Definition, declaredCapabilities, declaredT
 			if name == "" {
 				return fmt.Errorf("tool name is empty")
 			}
-			if _, ok := declaredTools[name]; !ok {
-				return fmt.Errorf("unknown tool %q", name)
-			}
 		}
 	}
 	if def.Capabilities != nil {
 		seen := make(map[string]bool, len(*def.Capabilities))
 		for _, id := range *def.Capabilities {
-			if _, ok := declaredCapabilities[id]; !ok {
-				return fmt.Errorf("unknown capability %q", id)
-			}
 			if seen[id] {
 				return fmt.Errorf("duplicate capability %q", id)
 			}

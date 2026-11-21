@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 
@@ -15,16 +17,16 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/atomicfs"
 	"github.com/Syntheresis/melta/internal/testassert"
-	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
 
-func openPackageOwner(t *testing.T, dataDir, configPath string) *Melta {
+func openPackageOwner(t *testing.T, dataDir, configPath string, authors ...extension.Extension) *Melta {
 	t.Helper()
 	owner, err := open(context.Background(), options{
 		DataDir:       dataDir,
 		Configuration: NewFileConfigurationSource(configPath),
 		Credentials:   NewEnvironmentCredentialSource(filepath.Join(dataDir, ".env")),
+		Extensions:    authors,
 	})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -65,6 +67,45 @@ func packageRow(t *testing.T, owner *Melta, caller Caller, extensionID string) p
 	return protocol.ExtensionPackage{}
 }
 
+func packageTestManifest() extension.Manifest {
+	return extension.Manifest{ID: "peer", Version: "1.0.0", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+// shAuthorFixtureSource builds the real author worker fixture into one
+// self-contained package source directory with the given manifest version.
+func shAuthorFixtureSource(t *testing.T, version string) (string, extension.Manifest) {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "worker")
+	cmd := exec.Command("go", "build", "-o", binary, "./testdata/author")
+	cmd.Dir = filepath.Join("..", "extension", "worker")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build author fixture: %v: %s", err, output)
+	}
+	manifest := extension.Manifest{ID: "author-fixture", Version: version, APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`), Services: []string{extension.ContractCommands}}
+	source := t.TempDir()
+	data, err := os.ReadFile(binary)
+	testassert.NoError(t, err)
+	testassert.NoError(t, os.WriteFile(filepath.Join(source, "worker"), data, 0o700))
+	manifestBytes, err := worker.EncodeManifest(manifest, "worker")
+	testassert.NoError(t, err)
+	testassert.NoError(t, os.WriteFile(filepath.Join(source, "manifest.json"), manifestBytes, 0o600))
+	return source, manifest
+}
+
+// shHostServicePlugin registers the host-service companion the author
+// fixture calls during its activation.
+func shHostServicePlugin() extension.Extension {
+	return testNative("host-fixture", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterService(extension.Service{Name: "host-service", Methods: []extension.RegisteredMethod{{
+			Method: extension.Method{Name: "echo", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+				return extension.Result{Value: append(json.RawMessage(nil), args...)}, nil
+			},
+		}}}, nil)
+		return nil, err
+	})
+}
+
 // TestPackageInstallRejectsEscapingAndSymlinkedEntryPoints proves installation
 // reads only a contained regular executable entry point and never writes the
 // selected record for an escaping, absolute or symlinked source leaf.
@@ -72,7 +113,7 @@ func TestPackageInstallRejectsEscapingAndSymlinkedEntryPoints(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("package paths use the Linux protected filesystem traversal")
 	}
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	writeSource := func(t *testing.T, entryPoint string) string {
 		t.Helper()
 		source := t.TempDir()
@@ -156,13 +197,9 @@ func TestPackageInstallRejectsEscapingAndSymlinkedEntryPoints(t *testing.T) {
 }
 
 // manifestWithEntry encodes one deliberately explicit entry point.
-func manifestWithEntry(t *testing.T, declaration extension.Declaration, entryPoint string) []byte {
+func manifestWithEntry(t *testing.T, manifest extension.Manifest, entryPoint string) []byte {
 	t.Helper()
-	encoded, err := json.Marshal(worker.Manifest{
-		ContractVersion: extension.ContractVersion,
-		EntryPoint:      entryPoint,
-		Declaration:     worker.NewDeclaration(declaration),
-	})
+	encoded, err := worker.EncodeManifest(manifest, entryPoint)
 	if err != nil {
 		t.Fatalf("encode manifest: %v", err)
 	}
@@ -173,7 +210,7 @@ func manifestWithEntry(t *testing.T, declaration extension.Declaration, entryPoi
 // source root is opened once as a root, so a symlinked path to the package
 // directory is accepted while the two consumed files stay root-confined.
 func TestPackageInstallAcceptsSymlinkedSourceAncestor(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	realRoot := t.TempDir()
 	source := filepath.Join(realRoot, "package")
 	if err := os.MkdirAll(source, 0o700); err != nil {
@@ -198,7 +235,7 @@ func TestPackageInstallAcceptsSymlinkedSourceAncestor(t *testing.T) {
 // entry point is not given a second refusal rule beyond the root's path
 // containment.
 func TestPackageInstallAcceptsHardlinkedEntryPoint(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	outside := filepath.Join(t.TempDir(), "outside-worker")
 	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("outside executable: %v", err)
@@ -220,7 +257,7 @@ func TestPackageInstallAcceptsHardlinkedEntryPoint(t *testing.T) {
 // TestPackageInstallAcceptsEntrySymlinkInsideSource proves a source entry
 // symlink that resolves inside the opened root is accepted.
 func TestPackageInstallAcceptsEntrySymlinkInsideSource(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	source := t.TempDir()
 	if err := os.WriteFile(filepath.Join(source, "manifest.json"), manifestWithEntry(t, declaration, "worker"), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
@@ -241,37 +278,36 @@ func TestPackageInstallAcceptsEntrySymlinkInsideSource(t *testing.T) {
 // TestPackageInstallRejectsBindingSchemaExternalReference proves installation
 // compiles every binding-definition schema, so a non-local $ref is refused
 // before any selection exists.
-func TestPackageInstallRejectsBindingSchemaExternalReference(t *testing.T) {
-	credentials, ok := extension.HostCapability(extension.ContractCredentials)
-	testassert.Require(t, ok, "credentials host capability is missing")
-	credentials.Methods[0].Input = json.RawMessage(`{"$ref":"https://example.invalid/schema.json"}`)
-	declaration := extension.Declaration{
-		ID:           "bindingref",
-		Version:      "1.0.0",
-		ConfigSchema: json.RawMessage(`{"type":"object"}`),
-		Components: []extension.Component{{
-			ID:       "bindingref.component",
-			Lifetime: extension.LifetimeHarness,
-			Requires: []extension.Binding{{
-				Name:         "credentials",
-				Provider:     extension.HostProvider,
-				CapabilityID: extension.ContractCredentials,
-				Definition:   credentials,
-			}},
-		}},
-	}
+func TestPackageInstallRejectsSettingsSchemaExternalReference(t *testing.T) {
+	declaration := packageTestManifest()
+	declaration.ID = "bindingref"
+	declaration.SettingsSchema = json.RawMessage(`{"$ref":"https://example.invalid/schema.json"}`)
 	dataDir := t.TempDir()
-	source := executablePackageSource(t, executableExtension{Declaration: declaration, EntryPoint: "worker"})
+	source := t.TempDir()
+	testassert.NoError(t, writePackageSourceFiles(t, source, declaration, declaration.Version, "worker"))
 	_, err := newPackageManager(dataDir).install(source)
-	testassert.Require(t, errors.Is(err, harness.ErrInvalid), "install binding schema external reference = %v, want invalid", err)
-	mustNotExist(t, filepath.Join(dataDir, "extensions", extensionDataHash(declaration.ID), "selected"), "a binding schema external reference created a selection")
+	testassert.Require(t, errors.Is(err, harness.ErrInvalid), "install settings schema external reference = %v, want invalid", err)
+	mustNotExist(t, filepath.Join(dataDir, "extensions", extensionDataHash(declaration.ID), "selected"), "a settings schema external reference created a selection")
+}
+
+func TestPackageInstallAcceptsRequestedServiceWithoutProvider(t *testing.T) {
+	declaration := packageTestManifest()
+	declaration.ID = "consumer"
+	declaration.Services = []string{"remote"}
+	dataDir := t.TempDir()
+	source := t.TempDir()
+	testassert.NoError(t, writePackageSourceFiles(t, source, declaration, declaration.Version, "worker"))
+	if _, err := newPackageManager(dataDir).install(source); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	testassert.Equal(t, readSelectedRecord(t, dataDir, declaration.ID).Version, "1.0.0")
 }
 
 // TestPackageSelectedDeclarationFailureIsUnusable proves a selected copy
 // whose declaration fails compilation at load is recorded unusable: an
 // enabled section rejects the build and a disabled one is ignored.
 func TestPackageSelectedDeclarationFailureIsUnusable(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	dataDir := t.TempDir()
 	configPath := filepath.Join(dataDir, "config.json")
 	source := t.TempDir()
@@ -291,7 +327,7 @@ func TestPackageSelectedDeclarationFailureIsUnusable(t *testing.T) {
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatalf("decode installed manifest: %v", err)
 	}
-	manifest.Declaration.ConfigSchema = worker.JSONBytes("not-json")
+	manifest.Manifest.SettingsSchema = json.RawMessage(`"invalid"`)
 	corrupt, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatalf("encode corrupt manifest: %v", err)
@@ -301,19 +337,24 @@ func TestPackageSelectedDeclarationFailureIsUnusable(t *testing.T) {
 	}
 
 	writeServiceFile(t, configPath, `{"extensions":{"peer":{"enabled":true}}}`)
-	_, err = open(context.Background(), options{
-		DataDir:       dataDir,
-		Configuration: NewFileConfigurationSource(configPath),
-		Credentials:   NewEnvironmentCredentialSource(filepath.Join(dataDir, ".env")),
-	})
-	testassert.Require(t, errors.Is(err, ErrConfiguration), "open with an enabled uncompilable package = %v, want configuration failure", err)
-
-	writeServiceFile(t, configPath, `{"extensions":{"peer":{"enabled":false}}}`)
 	owner := openPackageOwner(t, dataDir, configPath)
 	caller := packageCaller(t, owner)
+	catalog, err := owner.ListExtensions(context.Background(), caller)
+	testassert.NoError(t, err)
+	testassert.Require(t, len(catalog) == 1 && catalog[0].ExtensionId == declaration.ID && catalog[0].InactiveReason != nil, "enabled invalid package = %+v, want inactive reason", catalog)
+	_, err = owner.Health(context.Background(), caller)
+	testassert.NoError(t, err)
+	testassert.NoError(t, owner.Close(context.Background()))
+
+	writeServiceFile(t, configPath, `{"extensions":{"peer":{"enabled":false}}}`)
+	owner = openPackageOwner(t, dataDir, configPath)
+	caller = packageCaller(t, owner)
 	row := packageRow(t, owner, caller, declaration.ID)
 	testassert.Equal(t, row.LoadedVersion, "")
 	testassert.Equal(t, row.SelectedVersion, "1.0.0")
+	catalog, err = owner.ListExtensions(context.Background(), caller)
+	testassert.NoError(t, err)
+	testassert.Require(t, len(catalog) == 0, "disabled invalid package = %+v, want no active or inactive entry", catalog)
 	testassert.NoError(t, owner.Close(context.Background()))
 }
 
@@ -323,7 +364,7 @@ func TestPackageInstallRejectsPlantedDestinationSymlink(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("package paths use the Linux protected filesystem traversal")
 	}
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	dataDir := t.TempDir()
 	source := t.TempDir()
 	if err := os.WriteFile(filepath.Join(source, "manifest.json"), manifestWithEntry(t, declaration, "worker"), 0o600); err != nil {
@@ -353,7 +394,7 @@ func TestPackageInstallRejectsPlantedDestinationSymlink(t *testing.T) {
 // selected-record publication leaves the previous selection intact and removes
 // the partial copy.
 func TestPackageInstallPublicationFailureKeepsPreviousSelection(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	dataDir := t.TempDir()
 	v1 := t.TempDir()
 	if err := writePackageSourceFiles(t, v1, declaration, "1.0.0", "v1-worker"); err != nil {
@@ -399,7 +440,7 @@ func TestPackageInstallPublicationFailureKeepsPreviousSelection(t *testing.T) {
 // TestPackageInstallCreatesDistinctCopies proves install, update and
 // reinstall each write their own copy and select the latest one.
 func TestPackageInstallCreatesDistinctCopies(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	dataDir := t.TempDir()
 	v1 := t.TempDir()
 	if err := writePackageSourceFiles(t, v1, declaration, "1.0.0", "v1-worker"); err != nil {
@@ -439,7 +480,7 @@ func TestPackageInstallCreatesDistinctCopies(t *testing.T) {
 // point's created directories and its copy directory are each synced before
 // the parent chain and the selection write.
 func TestPackageInstallSyncsCopyDirectoriesAndParentChain(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	dataDir := t.TempDir()
 	source := t.TempDir()
 	if err := writePackageSourceFiles(t, source, declaration, "1.0.0", filepath.Join("bin", "nested", "worker")); err != nil {
@@ -496,7 +537,7 @@ func TestPackageInstallSyncsCopyDirectoriesAndParentChain(t *testing.T) {
 // TestPackageRemoveSyncsExtensionDirectory proves a successful selection
 // unlink is followed by the extension directory sync.
 func TestPackageRemoveSyncsExtensionDirectory(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	dataDir := t.TempDir()
 	source := t.TempDir()
 	if err := writePackageSourceFiles(t, source, declaration, "1.0.0", "worker"); err != nil {
@@ -528,148 +569,90 @@ func TestPackageRemoveSyncsExtensionDirectory(t *testing.T) {
 // without replay, and Session-data cleanup that preserves the extension cache
 // and configuration bytes.
 func TestInstalledWorkerPublicExtensionAcceptance(t *testing.T) {
-	binary := buildExecutableFixture(t)
-	declaration := fixtureExecutableDeclaration(t, binary)
+	source, manifest := shAuthorFixtureSource(t, "1")
 	eachProductionStore(t, func(t *testing.T, e *productionEnv) {
 		ctx := context.Background()
-		enableFixturePlugin(t, e.configPath, "fixture")
-		e.server.setScript(func(_ context.Context, body string) []string {
-			if lastUserText(body) == "worker work" {
-				return textTurnEvents("worker done")
-			}
-			return textTurnEvents("done")
-		})
-		owner, err := e.openExecutablesWith(ctx, []executableExtension{{Declaration: declaration, EntryPoint: binary}})
+		if _, err := newPackageManager(e.dataDir).install(source); err != nil {
+			t.Fatalf("install author fixture package: %v", err)
+		}
+		// Seed retained history while the installed author stays disabled: the
+		// author fixture refuses every admission while active.
+		seed, err := e.openPlugins(ctx, shHostServicePlugin())
 		if err != nil {
-			t.Fatalf("open installed fixture: %v", err)
+			t.Fatalf("open seeded owner: %v", err)
+		}
+		seedCaller := testCaller(seed)
+		ref := protocol.ModelRef("prov/m")
+		prompt := "author public extension"
+		tools := []string{}
+		inputs := &protocol.SessionInputs{Model: &ref, Prompt: &prompt, Tools: &tools}
+		session, err := seed.CreateSession(ctx, seedCaller, e.workspace("author-public"), inputs)
+		testassert.NoError(t, err)
+		e.server.setScript(func(context.Context, string) []string { return textTurnEvents("author done") })
+		_, err = seed.SubmitSession(ctx, seedCaller, session.SessionId, commandSubmitRequest(t, "op-author-public", "author work"))
+		testassert.NoError(t, err)
+		awaitOperation(t, seed, session.SessionId, "op-author-public", harness.OperationSuccess)
+		testassert.NoError(t, seed.Close(ctx))
+
+		enableFixturePlugin(t, e.configPath, manifest.ID)
+		owner, err := e.openPlugins(ctx, shHostServicePlugin())
+		if err != nil {
+			t.Fatalf("open installed author: %v", err)
 		}
 		defer func() { _ = owner.Close(ctx) }()
 		caller := testCaller(owner)
 
-		catalog, err := owner.ListExtensionCapabilities(ctx, caller)
+		catalog, err := owner.ListExtensions(ctx, caller)
 		testassert.NoError(t, err)
-		var entry *protocol.ExtensionCapabilityCatalog
+		var entry *protocol.RegisteredExtension
 		for i := range catalog {
-			if catalog[i].ExtensionId == "fixture" {
+			if catalog[i].ExtensionId == manifest.ID {
 				entry = &catalog[i]
-				break
 			}
 		}
-		testassert.Require(t, entry != nil, "catalog omitted the installed worker: %+v", catalog)
-		var discoveredCommands, discoveredService bool
-		for _, capability := range entry.Capabilities {
-			switch capability.CapabilityId {
-			case "fixture.commands":
-				discoveredCommands = capability.ContractId == "fixture.commands/v1" && capability.ContractVersion == extension.ContractVersion && capability.Kind == protocol.ExtensionCapabilityKindService
-			case "fixture.service":
-				discoveredService = capability.ContractId == "fixture.service/v1" && capability.ContractVersion == extension.ContractVersion && capability.Kind == protocol.ExtensionCapabilityKindService
-			}
+		testassert.Require(t, entry != nil && entry.InactiveReason == nil && entry.Version == "1", "catalog omitted the installed author: %+v", catalog)
+		var sawOperation bool
+		for _, exposed := range entry.Operations {
+			sawOperation = sawOperation || (exposed.Method.Name == "operation" && exposed.Target == protocol.RegisteredExtensionOperationTargetHarness)
 		}
-		testassert.Require(t, discoveredCommands && discoveredService, "catalog capabilities = %+v", entry.Capabilities)
-		var sawCommand, sawNamespaces, sawFailure, sawRaw bool
-		for _, exposed := range entry.Exposed {
-			switch exposed.Method {
-			case "command":
-				sawCommand = exposed.CapabilityId == "fixture.commands" && exposed.Kind == protocol.SessionWork && exposed.Target == protocol.ExtensionExposureTargetSession
-			case "namespaces":
-				sawNamespaces = exposed.CapabilityId == "fixture.commands" && exposed.Kind == protocol.Query && exposed.Target == protocol.ExtensionExposureTargetSession
-			case "fail":
-				sawFailure = exposed.CapabilityId == "fixture.service" && exposed.Kind == protocol.Query && exposed.Target == protocol.ExtensionExposureTargetHarness
-			case "raw":
-				sawRaw = exposed.CapabilityId == "fixture.service" && exposed.Kind == protocol.Query && exposed.Target == protocol.ExtensionExposureTargetHarness
-			}
-		}
-		testassert.Require(t, sawCommand && sawNamespaces && sawFailure && sawRaw, "catalog exposures = %+v", entry.Exposed)
+		testassert.Require(t, sawOperation && slices.Contains(entry.Tools, "worker-tool"), "catalog = operations %+v tools %v, want the registered operation and tool projected", entry.Operations, entry.Tools)
 
 		rawValue := "{\n  \"big\": 9007199254740993,\n  \"escaped\": \"line\\n\\t\\\"quote\\\" \\\\ slash\"\n}"
-		raw, err := owner.InvokeExtension(ctx, caller, fixtureRequest("fixture", "fixture.service", "fixture.service/v1", "raw", harnessTarget(), rawValue, "req-worker-raw"))
+		raw, err := owner.InvokeExtension(ctx, caller, fixtureRequest(manifest.ID, "operation", harnessTarget(), rawValue, "req-author-raw"))
 		testassert.NoError(t, err)
-		testassert.Require(t, raw.Failure == nil && string(raw.Value) == rawValue, "raw worker result = %+v, want the exact raw bytes", raw)
-
-		failure, err := owner.InvokeExtension(ctx, caller, fixtureRequest("fixture", "fixture.service", "fixture.service/v1", "fail", harnessTarget(), `{}`, "req-worker-fail"))
-		testassert.NoError(t, err)
-		wantData := "{\n  \"big\": 9007199254740993\n}"
-		wantPartial := `["partial", null, 1]`
-		testassert.Require(t, failure.Failure != nil && failure.Failure.Code == "guest_code" && failure.Failure.Message == "guest message" && string(failure.Failure.Data) == wantData && string(failure.Failure.Partial) == wantPartial && failure.Value == nil, "declared worker failure = %+v, want exact data/partial", failure.Failure)
-
-		selection := &protocol.AgentSelection{Inputs: &protocol.AgentInputs{
-			Model:        "prov/m",
-			Instructions: "worker public extension",
-			AssemblyMode: protocol.AgentAssemblyNone,
-			Tools:        []string{},
-			Capabilities: []string{},
-			Constraints:  protocol.ToolConstraints{},
-			Strategy:     protocol.StrategySelection{Id: "", Settings: "{}"},
-		}}
-		session, err := owner.CreateSession(ctx, caller, e.workspace("worker-public"), selection)
-		testassert.NoError(t, err)
-		sessionCaller, err := owner.Caller(CallerContext{
-			Origin: harness.InputOriginUser,
-			Scope:  CallerScope{Kind: CallerScopeSession, SessionID: session.SessionId},
-		})
-		testassert.NoError(t, err)
-
-		namespaces, err := owner.InvokeExtension(ctx, sessionCaller, fixtureRequest("fixture", "fixture.commands", "fixture.commands/v1", "namespaces", sessionTarget(session.SessionId), `{}`, "req-worker-namespaces"))
-		testassert.NoError(t, err)
-		testassert.Require(t, namespaces.Failure == nil, "namespaces failure = %+v", namespaces.Failure)
-		var directories struct {
-			SessionDirectory string `json:"session_directory"`
-			CacheDirectory   string `json:"cache_directory"`
-		}
-		testassert.NoError(t, json.Unmarshal(namespaces.Value, &directories))
-		testassert.Require(t, directories.SessionDirectory != "" && directories.CacheDirectory != "", "namespaces = %s", namespaces.Value)
-		testassert.NoError(t, os.WriteFile(filepath.Join(directories.SessionDirectory, "session.sentinel"), []byte("session"), 0o600))
-		testassert.NoError(t, os.WriteFile(filepath.Join(directories.CacheDirectory, "cache.sentinel"), []byte("cache"), 0o600))
-
-		submitted, err := owner.InvokeExtension(ctx, sessionCaller, fixtureRequest("fixture", "fixture.commands", "fixture.commands/v1", "command", sessionTarget(session.SessionId), `{"method":"submit","arguments":{"operation_id":"op-worker-extension","mode":"regular","content":[{"kind":"text","text":"worker work"}]}}`, "req-worker-submit"))
-		testassert.NoError(t, err)
-		testassert.Require(t, submitted.Failure == nil, "submit failure = %+v", submitted.Failure)
-		awaitOperation(t, owner, session.SessionId, "op-worker-extension", harness.OperationSuccess)
-
-		page, err := owner.GetHistory(ctx, caller, session.SessionId, nil)
-		testassert.NoError(t, err)
-		input, ok := workerExtensionInput(page, "op-worker-extension")
-		testassert.Require(t, ok && input.Origin == protocol.InputOriginPlugin && input.ExtensionId != nil && *input.ExtensionId == "fixture", "admitted input attribution = %+v", input)
+		testassert.Require(t, raw.Failure == nil && string(raw.Value) == rawValue, "raw author result = %+v, want the exact raw bytes", raw)
 
 		configBefore, err := os.ReadFile(e.configPath)
 		testassert.NoError(t, err)
-		testassert.NoError(t, owner.RemoveExtensionPackage(ctx, caller, "fixture"))
+		testassert.NoError(t, owner.RemoveExtensionPackage(ctx, caller, manifest.ID))
 		configAfterRemoval, err := os.ReadFile(e.configPath)
 		testassert.NoError(t, err)
 		testassert.Require(t, string(configAfterRemoval) == string(configBefore), "package removal rewrote the configuration")
 		testassert.NoError(t, owner.Close(ctx))
 
-		restarted, err := e.openExecutablesWith(ctx, nil)
+		restarted, err := e.openPlugins(ctx, shHostServicePlugin())
 		if err != nil {
 			t.Fatalf("reopen after package removal: %v", err)
 		}
 		defer func() { _ = restarted.Close(ctx) }()
 		restartedCaller := testCaller(restarted)
-		catalog, err = restarted.ListExtensionCapabilities(ctx, restartedCaller)
+		catalog, err = restarted.ListExtensions(ctx, restartedCaller)
 		testassert.NoError(t, err)
 		for _, candidate := range catalog {
-			testassert.Require(t, candidate.ExtensionId != "fixture", "removed worker is still cataloged: %+v", candidate)
+			testassert.Require(t, candidate.ExtensionId != manifest.ID, "removed author is still cataloged: %+v", candidate)
 		}
-		_, err = restarted.InvokeExtension(ctx, restartedCaller, fixtureRequest("fixture", "fixture.commands", "fixture.commands/v1", "namespaces", sessionTarget(session.SessionId), `{}`, "req-worker-removed"))
+		_, err = restarted.InvokeExtension(ctx, restartedCaller, fixtureRequest(manifest.ID, "operation", sessionTarget(session.SessionId), `{}`, "req-author-removed"))
 		testassert.Require(t, errors.Is(err, harness.ErrNotFound), "invocation after package removal = %v, want not-found", err)
 
-		page, err = restarted.GetHistory(ctx, restartedCaller, session.SessionId, nil)
+		page, err := restarted.GetHistory(ctx, restartedCaller, session.SessionId, nil)
 		testassert.NoError(t, err)
-		input, ok = workerExtensionInput(page, "op-worker-extension")
-		testassert.Require(t, ok && input.ExtensionId != nil && *input.ExtensionId == "fixture", "reopened history = %+v, want the retained extension attribution", input)
-		if data, err := os.ReadFile(filepath.Join(directories.SessionDirectory, "session.sentinel")); err != nil || string(data) != "session" {
-			t.Fatalf("Session sentinel after removal = (%q, %v), want preserved", data, err)
-		}
-
+		testassert.Require(t, len(page.Items) != 0, "reopened history is empty")
 		_, err = restarted.ArchiveSession(ctx, restartedCaller, session.SessionId)
 		testassert.NoError(t, err)
 		deletion, err := restarted.DeleteSession(ctx, restartedCaller, session.SessionId)
 		testassert.NoError(t, err)
 		testassert.Require(t, len(deletion.CleanupFailures) == 0, "deletion cleanup failures = %+v", deletion.CleanupFailures)
 		mustNotExist(t, filepath.Join(e.dataDir, "code", session.SessionId), "the deleted Session tree")
-		if data, err := os.ReadFile(filepath.Join(directories.CacheDirectory, "cache.sentinel")); err != nil || string(data) != "cache" {
-			t.Fatalf("cache after Session deletion = (%q, %v), want preserved", data, err)
-		}
 		configAfter, err := os.ReadFile(e.configPath)
 		testassert.NoError(t, err)
 		testassert.Require(t, string(configAfter) == string(configBefore), "Session deletion or restart rewrote the configuration")
@@ -694,7 +677,7 @@ func workerExtensionInput(page protocol.HistoryPage, operationID string) (protoc
 
 // writePackageSourceFiles writes one self-contained source package with a
 // distinct declaration version and an executable placeholder entry point.
-func writePackageSourceFiles(t *testing.T, dir string, declaration extension.Declaration, version, entry string) error {
+func writePackageSourceFiles(t *testing.T, dir string, declaration extension.Manifest, version, entry string) error {
 	t.Helper()
 	versioned := declaration
 	versioned.Version = version
@@ -715,7 +698,7 @@ func writePackageSourceFiles(t *testing.T, dir string, declaration extension.Dec
 // TestPackageInstallRemoveReinstallPreservesConfiguration proves package
 // lifecycle operations never rewrite the configuration document.
 func TestPackageInstallRemoveReinstallPreservesConfiguration(t *testing.T) {
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	dataDir := t.TempDir()
 	configPath := filepath.Join(dataDir, "config.json")
 	writeServiceFile(t, configPath, `{"extensions":{"peer":{"enabled":false},"uninstalled":{"enabled":true,"unknown":9007199254740993}}}`)
@@ -759,10 +742,12 @@ func TestPackageLoadedSelectedVersionsAcrossRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	configPath := filepath.Join(dataDir, "config.json")
 	writeServiceFile(t, configPath, `{"extensions":{"fixture":{"enabled":false}}}`)
-	v1 := buildExecutableFixtureVersion(t, "1.0.0")
-	v2 := buildExecutableFixtureVersion(t, "2.0.0")
-	declaration := fixtureExecutableDeclaration(t, v1)
-	if _, err := newPackageManager(dataDir).install(executablePackageSource(t, executableExtension{Declaration: declaration, EntryPoint: v1})); err != nil {
+	declaration := extension.Manifest{ID: "fixture", Version: "1.0.0", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	v1 := t.TempDir()
+	if err := writePackageSourceFiles(t, v1, declaration, "1.0.0", "v1-worker"); err != nil {
+		t.Fatalf("write v1 source: %v", err)
+	}
+	if _, err := newPackageManager(dataDir).install(v1); err != nil {
 		t.Fatalf("install v1: %v", err)
 	}
 	owner := openPackageOwner(t, dataDir, configPath)
@@ -770,7 +755,11 @@ func TestPackageLoadedSelectedVersionsAcrossRestart(t *testing.T) {
 	row := packageRow(t, owner, caller, "fixture")
 	testassert.Equal(t, row.LoadedVersion, "1.0.0")
 	testassert.Equal(t, row.SelectedVersion, "1.0.0")
-	installed, err := owner.InstallExtensionPackage(context.Background(), caller, executablePackageSource(t, executableExtension{Declaration: fixtureExecutableDeclaration(t, v2), EntryPoint: v2}))
+	v2 := t.TempDir()
+	if err := writePackageSourceFiles(t, v2, declaration, "2.0.0", "v2-worker"); err != nil {
+		t.Fatalf("write v2 source: %v", err)
+	}
+	installed, err := owner.InstallExtensionPackage(context.Background(), caller, v2)
 	if err != nil {
 		t.Fatalf("install v2: %v", err)
 	}
@@ -803,8 +792,14 @@ func TestPackageLifecycleUsesCanonicalDataRoot(t *testing.T) {
 	replacement := t.TempDir()
 	configPath := filepath.Join(realRoot, "config.json")
 	writeServiceFile(t, configPath, `{"extensions":{"fixture":{"enabled":false}}}`)
-	v1 := buildExecutableFixtureVersion(t, "1.0.0")
-	installExecutablePackage(t, realRoot, executableExtension{Declaration: fixtureExecutableDeclaration(t, v1), EntryPoint: v1})
+	declaration := extension.Manifest{ID: "fixture", Version: "1.0.0", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	v1 := t.TempDir()
+	if err := writePackageSourceFiles(t, v1, declaration, "1.0.0", "v1-worker"); err != nil {
+		t.Fatalf("write v1 source: %v", err)
+	}
+	if _, err := newPackageManager(realRoot).install(v1); err != nil {
+		t.Fatalf("install v1: %v", err)
+	}
 
 	owner := openPackageOwner(t, alias, configPath)
 	want := canonicalFixturePath(t, realRoot)
@@ -827,8 +822,11 @@ func TestPackageLifecycleUsesCanonicalDataRoot(t *testing.T) {
 	// Repointing the operator's alias cannot redirect the open owner's writes.
 	testassert.NoError(t, os.Remove(alias))
 	testassert.NoError(t, os.Symlink(replacement, alias))
-	v2 := buildExecutableFixtureVersion(t, "2.0.0")
-	installed, err := owner.InstallExtensionPackage(context.Background(), caller, executablePackageSource(t, executableExtension{Declaration: fixtureExecutableDeclaration(t, v2), EntryPoint: v2}))
+	v2 := t.TempDir()
+	if err := writePackageSourceFiles(t, v2, declaration, "2.0.0", "v2-worker"); err != nil {
+		t.Fatalf("write v2 source: %v", err)
+	}
+	installed, err := owner.InstallExtensionPackage(context.Background(), caller, v2)
 	testassert.NoError(t, err)
 	testassert.Equal(t, installed.LoadedVersion, "1.0.0")
 	testassert.Equal(t, installed.SelectedVersion, "2.0.0")
@@ -861,37 +859,44 @@ func TestPackageLifecycleUsesCanonicalDataRoot(t *testing.T) {
 func TestPackageDisabledLoadedUpdateThenReloadUsesLoadedCopy(t *testing.T) {
 	dataDir := t.TempDir()
 	configPath := filepath.Join(dataDir, "config.json")
-	writeServiceFile(t, configPath, `{"extensions":{"fixture":{"enabled":false}}}`)
-	v1 := buildExecutableFixtureVersion(t, "1.0.0")
-	v2 := buildExecutableFixtureVersion(t, "2.0.0")
-	declaration := fixtureExecutableDeclaration(t, v1)
-	if _, err := newPackageManager(dataDir).install(executablePackageSource(t, executableExtension{Declaration: declaration, EntryPoint: v1})); err != nil {
+	writeServiceFile(t, configPath, `{"extensions":{"author-fixture":{"enabled":false},"host-fixture":{"enabled":true}}}`)
+	v1Source, manifest := shAuthorFixtureSource(t, "1")
+	if _, err := newPackageManager(dataDir).install(v1Source); err != nil {
 		t.Fatalf("install v1: %v", err)
 	}
-	owner := openPackageOwner(t, dataDir, configPath)
+	owner := openPackageOwner(t, dataDir, configPath, shHostServicePlugin())
 	caller := packageCaller(t, owner)
-	if _, err := owner.InstallExtensionPackage(context.Background(), caller, executablePackageSource(t, executableExtension{Declaration: fixtureExecutableDeclaration(t, v2), EntryPoint: v2})); err != nil {
+	v2Source := t.TempDir()
+	if err := writePackageSourceFiles(t, v2Source, extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}, "2.0.0", "v2-worker"); err != nil {
+		t.Fatalf("write v2 source: %v", err)
+	}
+	if _, err := owner.InstallExtensionPackage(context.Background(), caller, v2Source); err != nil {
 		t.Fatalf("install v2: %v", err)
 	}
-	writeServiceFile(t, configPath, `{"extensions":{"fixture":{"enabled":true}}}`)
+	writeServiceFile(t, configPath, `{"extensions":{"author-fixture":{"enabled":true},"host-fixture":{"enabled":true}}}`)
 	if _, err := owner.Reload(context.Background(), caller); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	row := packageRow(t, owner, caller, "fixture")
-	testassert.Equal(t, row.LoadedVersion, "1.0.0")
+	row := packageRow(t, owner, caller, manifest.ID)
+	testassert.Equal(t, row.LoadedVersion, "1")
 	testassert.Equal(t, row.SelectedVersion, "2.0.0")
 	snapshot := owner.config.current()
-	compiled, ok := snapshot.composition.compiled.Declaration("fixture")
-	testassert.Require(t, ok, "reload did not compose the loaded fixture")
-	testassert.Equal(t, compiled.Declaration.Version, "1.0.0")
-	spec, ok := snapshot.composition.toolSpec("fixture.tool")
-	testassert.Require(t, ok, "loaded fixture tool is not composed")
-	reference := model.ModelRef{Provider: "provider", Model: "model"}
-	description, err := spec.describe(context.Background(), Invocation{snapshot: snapshot}, reference, harness.ToolConstraints{}, harness.SessionIdentity{SessionID: "session-1", Workspace: "/workspace"}, harness.AgentInputs{Model: reference})
-	if err != nil {
-		t.Fatalf("describe loaded fixture: %v", err)
+	var activated *nativeActivation
+	for _, activation := range snapshot.native.activations {
+		if activation != nil && activation.id == manifest.ID {
+			activated = activation
+		}
 	}
-	testassert.Equal(t, description.Definition.Name, "fixture.tool")
+	testassert.Require(t, activated != nil && activated.version == "1", "reload activated %+v, want the loaded copy version 1; inactive=%+v", activated, snapshot.native.inactive)
+	catalog, err := owner.ListExtensions(context.Background(), caller)
+	testassert.NoError(t, err)
+	var entry *protocol.RegisteredExtension
+	for i := range catalog {
+		if catalog[i].ExtensionId == manifest.ID {
+			entry = &catalog[i]
+		}
+	}
+	testassert.Require(t, entry != nil && entry.InactiveReason == nil && slices.Contains(entry.Tools, "worker-tool"), "reload catalog = %+v, want the loaded copy active with its registered tool", entry)
 	testassert.NoError(t, owner.Close(context.Background()))
 }
 
@@ -900,7 +905,7 @@ func TestPackageDisabledLoadedUpdateThenReloadUsesLoadedCopy(t *testing.T) {
 func TestPackageUnusableSelectionRejectsEnabledBuild(t *testing.T) {
 	dataDir := t.TempDir()
 	configPath := filepath.Join(dataDir, "config.json")
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	source := t.TempDir()
 	if err := writePackageSourceFiles(t, source, declaration, "1.0.0", "worker"); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -915,19 +920,28 @@ func TestPackageUnusableSelectionRejectsEnabledBuild(t *testing.T) {
 	}
 
 	writeServiceFile(t, configPath, `{"extensions":{"peer":{"enabled":true}}}`)
-	_, err := open(context.Background(), options{
-		DataDir:       dataDir,
-		Configuration: NewFileConfigurationSource(configPath),
-		Credentials:   NewEnvironmentCredentialSource(filepath.Join(dataDir, ".env")),
-	})
-	testassert.Require(t, errors.Is(err, ErrConfiguration), "open with an unusable enabled package = %v, want configuration failure", err)
-
-	writeServiceFile(t, configPath, `{"extensions":{"peer":{"enabled":false}}}`)
 	owner := openPackageOwner(t, dataDir, configPath)
 	caller := packageCaller(t, owner)
+	catalog, err := owner.ListExtensions(context.Background(), caller)
+	testassert.NoError(t, err)
+	testassert.Require(t, len(catalog) == 1 && catalog[0].ExtensionId == declaration.ID && catalog[0].InactiveReason != nil && *catalog[0].InactiveReason != "", "enabled missing executable = %+v, want inactive reason", catalog)
+	testassert.Equal(t, catalog[0].Version, selected.Version)
+	testassert.Require(t, catalog[0].ConfigurationSchema == nil, "inactive entry fabricated a configuration schema: %v", catalog[0].ConfigurationSchema)
+	_, err = owner.Health(context.Background(), caller)
+	testassert.NoError(t, err)
+	session, err := owner.CreateSession(context.Background(), caller, dataDir, nil)
+	testassert.Require(t, err == nil && session.SessionId != "", "the inactive package broke the baseline owner: %v", err)
+	testassert.NoError(t, owner.Close(context.Background()))
+
+	writeServiceFile(t, configPath, `{"extensions":{"peer":{"enabled":false}}}`)
+	owner = openPackageOwner(t, dataDir, configPath)
+	caller = packageCaller(t, owner)
 	row := packageRow(t, owner, caller, declaration.ID)
 	testassert.Equal(t, row.LoadedVersion, "")
 	testassert.Equal(t, row.SelectedVersion, "1.0.0")
+	catalog, err = owner.ListExtensions(context.Background(), caller)
+	testassert.NoError(t, err)
+	testassert.Require(t, len(catalog) == 0, "disabled missing executable = %+v, want no inactive entry", catalog)
 	testassert.NoError(t, owner.Close(context.Background()))
 }
 
@@ -935,7 +949,7 @@ func TestPackageUnusableSelectionRejectsEnabledBuild(t *testing.T) {
 // ordinary not-selected state; another read failure is an error.
 func TestPackageListReadFailureIsError(t *testing.T) {
 	dataDir := t.TempDir()
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	source := t.TempDir()
 	if err := writePackageSourceFiles(t, source, declaration, "1.0.0", "worker"); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -956,7 +970,7 @@ func TestPackageListReadFailureIsError(t *testing.T) {
 // extension directory or another package's selection.
 func TestPackageRemovePathShapedIDHasNoDeletionAuthority(t *testing.T) {
 	dataDir := t.TempDir()
-	declaration := toolOnlyDeclaration()
+	declaration := packageTestManifest()
 	source := t.TempDir()
 	if err := writePackageSourceFiles(t, source, declaration, "1.0.0", "worker"); err != nil {
 		t.Fatalf("write source: %v", err)

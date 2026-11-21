@@ -4,11 +4,32 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
+
+// fixedStrategyResolver yields one fixed strategy binding for any captured
+// identity; the Harness checks the returned identity and window once.
+func fixedStrategyResolver(binding *StrategyBinding) func(context.Context, string) (*StrategyBinding, error) {
+	return func(context.Context, string) (*StrategyBinding, error) {
+		return binding, nil
+	}
+}
+
+func fixtureToolLookup(prepare func(context.Context, model.ToolCall) PreparedTool, normalize func(context.Context, model.ToolCall) (json.RawMessage, error)) func(string) (ToolBinding, bool) {
+	if prepare == nil {
+		prepare = func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
+	}
+	if normalize == nil {
+		normalize = objectNormalize
+	}
+	return func(name string) (ToolBinding, bool) {
+		return ToolBinding{Identity: ToolImplementation{ID: name}, Normalize: normalize, Prepare: prepare}, true
+	}
+}
 
 // executeDirect drives one already-admitted Operation's real execution and
 // complete retirement with real owned control and graph use, without
@@ -34,15 +55,12 @@ func preparedExecutionFor(capture ExecutionCapture, open func(context.Context, O
 // normalizer. Deliberately malformed opener values are never defaulted.
 func defaultInvocation(inv InvocationExecution) InvocationExecution {
 	if inv.Model == nil {
-		inv.Model = func(context.Context, model.Request) (model.Stream, error) {
+		inv.Model = func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(), nil
 		}
 	}
-	if inv.Tool == nil {
-		inv.Tool = func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
-	}
-	if inv.NormalizeTool == nil {
-		inv.NormalizeTool = objectNormalize
+	if inv.LookupTool == nil {
+		inv.LookupTool = fixtureToolLookup(nil, nil)
 	}
 	return inv
 }
@@ -81,15 +99,15 @@ func toolCallResults(t *testing.T, store *graphStorage, sessionID string, calls 
 // first-response input: the first conversation request answers with the given
 // calls, and the supplied continuation handles every later request. A nil
 // continuation completes later turns without calls.
-func firstResponseModel(continuation func(context.Context, model.Request) (model.Stream, error), calls []model.ToolCall) func(context.Context, model.Request) (model.Stream, error) {
+func firstResponseModel(continuation func(context.Context, model.Request, model.Extra) (model.Stream, error), calls []model.ToolCall) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 	first := true
-	return func(ctx context.Context, req model.Request) (model.Stream, error) {
+	return func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 		if first {
 			first = false
 			return completedTurnStream(calls...), nil
 		}
 		if continuation != nil {
-			return continuation(ctx, req)
+			return continuation(ctx, req, parameters)
 		}
 		return completedTurnStream(), nil
 	}
@@ -127,7 +145,7 @@ func runToolCalls(t *testing.T, h *Harness, c *coordinator, store *graphStorage,
 func settleAdmitted(t *testing.T, h *Harness, c *coordinator, operationID string) {
 	t.Helper()
 	prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+		return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(), nil
 		}, nil), nil
 	})
@@ -224,11 +242,11 @@ func runAdmittedExecution(t *testing.T, h *Harness, c *coordinator, execCtx cont
 		}
 		if request.Purpose == InvocationPurposeConversation {
 			inner := inv.Model
-			inv.Model = func(ctx context.Context, req model.Request) (model.Stream, error) {
+			inv.Model = func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 				if sent.Messages == nil {
 					sent = req
 				}
-				return inner(ctx, req)
+				return inner(ctx, req, parameters)
 			}
 		}
 		return inv, nil
@@ -300,4 +318,38 @@ func compactPrepared(capture ExecutionCapture, exec Execution) PreparedExecution
 	return PreparedExecution{Capture: capture, Open: func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	}}
+}
+
+func fixtureRequestStage(hooks ...RequestHook) func() RequestStage {
+	return func() RequestStage { return RequestStage{Catalog: testCapture().Tools, Hooks: hooks} }
+}
+
+func fixtureDefinitions(names ...string) []model.ToolDefinition {
+	defs := make([]model.ToolDefinition, 0, len(names))
+	for _, name := range names {
+		def := testToolDefinition()
+		def.Name = name
+		defs = append(defs, def)
+	}
+	return defs
+}
+
+func fixtureDefinitionNames(tools []model.ToolDefinition) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+func appendRequestFixture(in RequestHookInput, addition model.Message) []RequestMessageEdit {
+	edits := make([]RequestMessageEdit, 0, len(in.Messages)+1)
+	for i, p := range in.MessagePositions {
+		edit := RequestMessageEdit{Position: p}
+		if p == nil {
+			edit.Message = &in.Messages[i]
+		}
+		edits = append(edits, edit)
+	}
+	return append(edits, RequestMessageEdit{Message: &addition})
 }

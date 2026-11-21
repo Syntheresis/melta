@@ -87,11 +87,11 @@ func TestModelEffectCompactTriggerReportedUsageCompacts(t *testing.T) {
 	compactCalls := 0
 	conversationCalls := 0
 	exec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			conversationCalls++
 			return completedTurnStream(), nil
 		},
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			compactCalls++
 			return summaryStream("summary one", model.Usage{InputTokens: 10, OutputTokens: 5}), nil
 		},
@@ -115,11 +115,11 @@ func TestModelEffectCompactTriggerNoReportNeverCompacts(t *testing.T) {
 	compactCalls := 0
 	conversationCalls := 0
 	exec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			conversationCalls++
 			return completedTurnStream(), nil
 		},
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			compactCalls++
 			return summaryStream("summary one", model.Usage{}), nil
 		},
@@ -152,7 +152,7 @@ func TestModelEffectCompactTriggerFittingRequestUntouched(t *testing.T) {
 			h, store, c, sessionID := seededTriggerHarness(t, capture, &seed)
 			var sent []model.Request
 			exec := purposeExecution(
-				func(ctx context.Context, r model.Request) (model.Stream, error) {
+				func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 					sent = append(sent, r)
 					return completedTurnStream(), nil
 				},
@@ -185,11 +185,11 @@ func TestModelEffectCompactTriggerPresentZeroWithReserveOverWindowCompacts(t *te
 	compactCalls := 0
 	conversationCalls := 0
 	exec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			conversationCalls++
 			return completedTurnStream(), nil
 		},
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			compactCalls++
 			return summaryStream("summary one", model.Usage{}), nil
 		},
@@ -210,10 +210,10 @@ func TestModelEffectCompactTriggerWideUsageSumCompacts(t *testing.T) {
 	h, store, c, sessionID := seededTriggerHarness(t, capture, &seed)
 	compactCalls := 0
 	exec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(), nil
 		},
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			compactCalls++
 			return summaryStream("summary one", model.Usage{}), nil
 		},
@@ -278,7 +278,7 @@ func TestModelEffectCompactTriggerOverflowCompactsFirst(t *testing.T) {
 	gated := &triggerCompactCommitStore{Storage: store, started: make(chan struct{}, 1), release: make(chan struct{})}
 	h.deps.Storage = gated
 	exec := purposeExecution(
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			conversationCalls.Add(1)
 			// The compaction committed before the request was sent.
 			reg, err := store.ReadRegister(context.Background(), RegisterKey{SessionID: sessionID, Kind: RegisterSession})
@@ -295,7 +295,7 @@ func TestModelEffectCompactTriggerOverflowCompactsFirst(t *testing.T) {
 			sent = append(sent, r)
 			return completedTurnStream(), nil
 		},
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			compactCalls++
 			// Derived before the commit: the last durable entry at this
 			// instant is the boundary the commit must name.
@@ -447,10 +447,10 @@ func TestModelEffectCompactTriggerCheckpointFailureUnsent(t *testing.T) {
 	priorUsage := UsageCount{InputTokens: 7, OutputTokens: 3}
 	priorCapture := testCapture()
 	priorExec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return streamOf(turnDelta("stop", "prior answer"), usageDelta(model.Usage{})), nil
 		},
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return summaryStream("prior summary", model.Usage{InputTokens: 7, OutputTokens: 3}), nil
 		},
 	)
@@ -475,11 +475,11 @@ func TestModelEffectCompactTriggerCheckpointFailureUnsent(t *testing.T) {
 	summaryCalls := 0
 	conversationCalls := 0
 	exec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			conversationCalls++
 			return nil, errors.New("failed checkpoint sent its conversation request")
 		},
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			summaryCalls++
 			if !strings.Contains(r.Messages[len(r.Messages)-1].TextContent(), "prior summary") {
 				return nil, errors.New("later checkpoint omitted the committed prior summary")
@@ -555,7 +555,7 @@ func TestModelEffectCompactTriggerSteeringStaysBuffered(t *testing.T) {
 	capture := triggerUsageCapture(4)
 	seed := UsageCount{InputTokens: 13}
 	h, store, c, sessionID := seededTriggerHarness(t, capture, &seed)
-	successor := preparedExecuting(effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+	successor := preparedExecuting(effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return completedTurnStream(), nil
 	}, nil))
 	h.deps.Prepare = func(context.Context, PreparationRequest) (PreparedExecution, error) {
@@ -563,11 +563,11 @@ func TestModelEffectCompactTriggerSteeringStaysBuffered(t *testing.T) {
 	}
 	var sent []model.Request
 	exec := purposeExecution(
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			sent = append(sent, r)
 			return completedTurnStream(), nil
 		},
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			if _, err := h.Submit(context.Background(), SubmitRequest{
 				SessionID:   sessionID,
 				OperationID: "op-2",
@@ -631,7 +631,7 @@ func TestModelEffectCompactTriggerSecondOverflowSameOperation(t *testing.T) {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 	}
 	exec := purposeExecution(
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			texts := make([]string, 0, len(r.Messages))
 			for _, msg := range r.Messages {
 				texts = append(texts, msg.TextContent())
@@ -643,7 +643,7 @@ func TestModelEffectCompactTriggerSecondOverflowSameOperation(t *testing.T) {
 			}
 			return completedTurnStream(), nil
 		},
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			compactCalls++
 			if compactCalls <= len(summaries) {
 				return summaryStream(summaries[compactCalls-1], model.Usage{InputTokens: 1, OutputTokens: 1}), nil
@@ -658,7 +658,7 @@ func TestModelEffectCompactTriggerSecondOverflowSameOperation(t *testing.T) {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeConversation {
-			inv.Tool = tool
+			inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
 		}
 		return inv, nil
 	}
@@ -702,7 +702,7 @@ func TestModelEffectCompactTriggerSummaryUsageStaysTotalsOnly(t *testing.T) {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 	}
 	exec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			conversationCalls++
 			rounds++
 			if rounds == 1 {
@@ -710,7 +710,7 @@ func TestModelEffectCompactTriggerSummaryUsageStaysTotalsOnly(t *testing.T) {
 			}
 			return completedTurnStream(), nil
 		},
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			compactCalls++
 			return summaryStream("summary one", model.Usage{InputTokens: 1000, CachedInputTokens: 1000, OutputTokens: 1000}), nil
 		},
@@ -722,7 +722,7 @@ func TestModelEffectCompactTriggerSummaryUsageStaysTotalsOnly(t *testing.T) {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeConversation {
-			inv.Tool = tool
+			inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
 		}
 		return inv, nil
 	}
@@ -749,11 +749,11 @@ func TestModelEffectCompactRequestNeverTriggers(t *testing.T) {
 	compactCalls := 0
 	conversationCalls := 0
 	exec := purposeExecution(
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			conversationCalls++ // the post-compaction request alone reaches the conversation transport
 			return completedTurnStream(), nil
 		},
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			compactCalls++
 			return summaryStream("summary one", model.Usage{}), nil
 		},
@@ -780,7 +780,7 @@ func TestModelEffectCompactTriggerStorageFailurePropagatesUnsettled(t *testing.T
 	injected := fmt.Errorf("summary result commit storage failure: %w", ErrStorage)
 	exec := purposeExecution(
 		forbiddenConversationModel(t),
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			reg, err := store.ReadRegister(context.Background(), RegisterKey{SessionID: sessionID, Kind: RegisterOperation, OperationID: testOpID})
 			if err != nil {
 				return nil, err
@@ -836,10 +836,10 @@ func TestCompactTriggerUnsettledStorageFailureReachesWait(t *testing.T) {
 	injected := fmt.Errorf("summary result commit storage failure: %w", ErrStorage)
 	fired := make(chan struct{}, 1)
 	exec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return streamOf(turnDelta("stop", "seeded turn"), usageDelta(model.Usage{InputTokens: 3000})), nil
 		},
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			// The intent's operation-register write has already committed when
 			// the transport runs; the next Operation-register write is the
 			// summary result commit that clears the maintenance intent.
@@ -899,10 +899,10 @@ func TestCompactTriggerQuietSettlementStorageFailureReachesWait(t *testing.T) {
 	refusal := turnDelta("stop", "")
 	refusal.RefusalFragment = "no"
 	exec := purposeExecution(
-		func(context.Context, model.Request) (model.Stream, error) {
+		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return streamOf(turnDelta("stop", "seeded turn"), usageDelta(model.Usage{InputTokens: 3000})), nil
 		},
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			// The summary's ready settlement only replaces registers; the
 			// direct empty-summary settlement's own entry insert is the named
 			// failing write.
@@ -975,11 +975,11 @@ func TestModelEffectCompactBoundaryExcludesPostFreezeAppends(t *testing.T) {
 	release := make(chan struct{})
 	var sent []model.Request
 	exec := purposeExecution(
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			sent = append(sent, r)
 			return completedTurnStream(), nil
 		},
-		func(ctx context.Context, r model.Request) (model.Stream, error) {
+		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 			arrived <- struct{}{}
 			<-release // the park: the freeze is past, the commit has not run
 			return summaryStream("summary one", model.Usage{}), nil
@@ -993,16 +993,16 @@ func TestModelEffectCompactBoundaryExcludesPostFreezeAppends(t *testing.T) {
 	// The controlled stimulus: the admitted fixture member's canonical
 	// background_completion signal is injected through the closed-delivery
 	// producer while the summary is parked, then the member finishes.
-	member, err := admitLocked(h, c, memberChild, completionChildID, 0)
+	member, err := admitLocked(h, c, memberSession, completionChildID)
 	testassert.NoError(t, err)
 	{
-		err := h.deliverClosedCompletion(c, member, "Task completed.")
+		err := h.deliverClosedCompletion(c, completionMember(member), "Task completed.", nil)
 		testassert.NoError(t, err)
 		h.finishBackgroundMember(c, member)
 	}
 	signals := storedSignals(t, store, sessionID)
 	testassert.Equal(t, len(signals), 1)
-	testassert.Require(t, signals[0].OperationID == "" && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "child" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "Task completed.", "committed signal = %+v, want the operationless child-member completion", signals[0])
+	testassert.Require(t, signals[0].OperationID == "" && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "Task completed.", "committed signal = %+v, want the operationless child-member completion", signals[0])
 	close(release)
 	testassert.NoError(t, <-done)
 	graph, err := validateFixture(t, store, sessionID)
@@ -1045,7 +1045,7 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 	rounds := 0
 	conversation := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
-			Model: func(context.Context, model.Request) (model.Stream, error) {
+			Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				rounds++
 				switch rounds {
 				case 1:
@@ -1057,15 +1057,14 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 				refusal.RefusalFragment = "cannot do that"
 				return streamOf(refusal), nil
 			},
-			Tool: func(ctx context.Context, call model.ToolCall) PreparedTool {
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
 				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
-			},
-			NormalizeTool: objectNormalize,
+			}, objectNormalize),
 		}, nil
 	}}
 	compactRef := testCompactCapture().Model
 	var requests []model.Request
-	compact := compactionExecution(t, func(ctx context.Context, r model.Request) (model.Stream, error) {
+	compact := compactionExecution(t, func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
 		requests = append(requests, r)
 		return summaryStream("full summary", model.Usage{InputTokens: 5, OutputTokens: 3}), nil
 	}, nil)
@@ -1083,7 +1082,7 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 		queue = queue[1:]
 		return next, nil
 	})
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	sessionID := session.Identity.SessionID
 	c := leaseCoordinator(t, h, sessionID)

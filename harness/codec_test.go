@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -68,10 +69,10 @@ func validSessionRecord() SessionRecord {
 		Revision: 1,
 		Identity: SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime},
 		State: SessionState{
-			Lifecycle:      LifecycleOpen,
-			AgentSelection: testSelection("coder"),
-			Usage:          UsageTotals{},
-			LastActivity:   testTime,
+			Lifecycle:    LifecycleOpen,
+			Inputs:       testInputs("coder"),
+			Usage:        UsageTotals{},
+			LastActivity: testTime,
 		},
 	}
 }
@@ -80,13 +81,13 @@ func validOperationRecord() OperationRecord {
 	return OperationRecord{
 		Revision: 1,
 		Admission: OperationAdmission{
-			SessionID:      testSessionID,
-			OperationID:    testOpID,
-			RequestKind:    RequestKindMessage,
-			AdmittedEntry:  EntryRef{SessionID: testSessionID, EntryID: hexID(1)},
-			AgentSelection: testSelection("coder"),
-			Execution:      testCapture(),
-			AdmittedAt:     testTime,
+			SessionID:     testSessionID,
+			OperationID:   testOpID,
+			RequestKind:   RequestKindMessage,
+			AdmittedEntry: EntryRef{SessionID: testSessionID, EntryID: hexID(1)},
+			Inputs:        testInputs("coder"),
+			Execution:     testCapture(),
+			AdmittedAt:    testTime,
 		},
 		State: OperationCurrentState{
 			Status:           OperationRunning,
@@ -133,14 +134,16 @@ func validAssistantEntry(operationID string) assistantEntry {
 
 func validToolResultEntry(operationID string) toolResultEntry {
 	return toolResultEntry{
-		SessionID:      testSessionID,
-		EntryID:        testEntryID,
-		OperationID:    operationID,
-		AssistantEntry: EntryRef{SessionID: testSessionID, EntryID: hexID(2)},
-		ToolCallID:     "call-1",
-		Status:         model.ResultSuccess,
-		Content:        "done",
-		Evidence:       ExecutionObserved,
+		SessionID:           testSessionID,
+		EntryID:             testEntryID,
+		OperationID:         operationID,
+		AssistantEntry:      EntryRef{SessionID: testSessionID, EntryID: hexID(2)},
+		ToolCallID:          "call-1",
+		Status:              model.ResultSuccess,
+		Content:             "done",
+		Evidence:            ExecutionObserved,
+		Implementation:      &ToolImplementation{ID: "echo"},
+		NormalizedArguments: json.RawMessage(`{}`),
 	}
 }
 
@@ -162,7 +165,7 @@ func validBackgroundCompletionEntry() signalEntry {
 		SessionID:     testSessionID,
 		EntryID:       testEntryID,
 		Signal:        SignalBackgroundCompletion,
-		RelatedMember: &relatedMember{Kind: "child", ID: otherSession()},
+		RelatedMember: &relatedMember{Kind: "session", ID: otherSession()},
 		Content:       "Task completed.",
 	}
 }
@@ -195,8 +198,7 @@ func validCompactionEntry(operationID string) contextCheckpointEntry {
 				{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "transcript"}}},
 			},
 		}},
-		ConsumedRequestID: "request-two",
-		Evidence:          &RequestEvidence{BoundaryEntryID: hexID(1)},
+		Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)},
 	}
 }
 
@@ -232,6 +234,7 @@ func validRequestBoundHookResult(status hookResultStatus) hookResultEntry {
 		HookID:        "cap.hook.one",
 		ExtensionID:   "ext.one",
 		RequestID:     "request-one",
+		Purpose:       InvocationPurposeConversation,
 		Status:        status,
 		Evidence:      ExecutionObserved,
 		InputEvidence: &RequestEvidence{BoundaryEntryID: hexID(1)},
@@ -244,6 +247,54 @@ func validRequestBoundHookResult(status hookResultStatus) hookResultEntry {
 		v.Error = "hook broke"
 	}
 	return v
+}
+
+func TestHookConsequenceFrameCanonical(t *testing.T) {
+	for _, value := range [][]byte{nil, []byte("not json"), {0xff, 0xfe}, []byte(`{"x":1}`)} {
+		v := validHookResultEntry(hookSucceeded)
+		v.InputArgumentsBase64 = base64.StdEncoding.EncodeToString(value)
+		v.Arguments = value
+		raw, err := encodeHookResultEntry(v)
+		testassert.NoError(t, err)
+		env := Entry{SessionID: v.SessionID, ID: v.EntryID, OperationID: v.OperationID, Kind: EntryHookResult, Payload: raw}
+		got, err := decodeHookResultEntry(env)
+		testassert.NoError(t, err)
+		testassert.Require(t, bytes.Equal(got.Arguments, value), "decoded %q, want %q", got.Arguments, value)
+	}
+
+	v := validHookResultEntry(hookSucceeded)
+	raw, err := encodeHookResultEntry(v)
+	testassert.NoError(t, err)
+	env := Entry{SessionID: v.SessionID, ID: v.EntryID, OperationID: v.OperationID, Kind: EntryHookResult, Payload: raw}
+	without := wireObject(t, raw)
+	delete(without, "arguments_base64")
+	missing, err := json.Marshal(without)
+	testassert.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		wire json.RawMessage
+	}{
+		{"missing", missing},
+		{"null", setKey(raw, "arguments_base64", json.RawMessage(`null`))},
+		{"non-string", setKey(raw, "arguments_base64", json.RawMessage(`42`))},
+		{"invalid", setKey(raw, "arguments_base64", json.RawMessage(`"!"`))},
+		{"newline", setKey(raw, "arguments_base64", mustMarshal("eyJ4\nIjoxfQ=="))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env.Payload = tc.wire
+			if _, err := decodeHookResultEntry(env); err == nil {
+				t.Fatalf("accepted consequence %s", tc.wire)
+			}
+		})
+	}
+	for _, sibling := range []hookResultEntry{validHookResultEntry(hookFailed), validRequestBoundHookResult(hookSucceeded)} {
+		wire, err := encodeHookResultEntry(sibling)
+		testassert.NoError(t, err)
+		env.Payload = setKey(wire, "arguments_base64", json.RawMessage(`""`))
+		if _, err := decodeHookResultEntry(env); err == nil {
+			t.Fatal("accepted argument consequence for forbidden hook binding or status")
+		}
+	}
 }
 
 // --- wire mutation helpers --------------------------------------------------
@@ -707,15 +758,51 @@ func TestHookActiveEffectCodecRules(t *testing.T) {
 			}
 		})
 	}
+	t.Run("tool implementation belongs only to tool intents", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			effect  ActiveEffect
+			wantErr string
+		}{
+			{"tool requires implementation", ActiveEffect{Kind: EffectTool, ResultEntryID: testResultID, ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`), Implementation: &ToolImplementation{ID: "echo"}}, "tool active effect requires its implementation"},
+			{"model forbids implementation", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "request-one", Model: &model.ModelRef{Provider: "prov", Model: "m"}, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}, "model active effect carries no tool implementation"},
+			{"hook forbids implementation", *valid.State.ActiveEffect, "hook active effect carries no tool implementation"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				record := validOperationRecord()
+				if tc.effect.Kind != EffectModel {
+					record = op
+				} else {
+					record.State.Request = &RunningRequest{RequestID: tc.effect.RequestID, Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1)}
+				}
+				record.State.ActiveEffect = &tc.effect
+				raw, err := encodeOperationRegister(record)
+				testassert.NoError(t, err)
+				reg := Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterOperation, OperationID: testOpID}, Payload: raw}
+				_, err = decodeOperationRegister(reg)
+				testassert.NoError(t, err)
+				state := mustState(t, raw)
+				obj := wireObject(t, wireObject(t, state)["active_effect"])
+				if tc.effect.Kind == EffectTool {
+					delete(obj, "implementation")
+				} else {
+					obj["implementation"] = json.RawMessage(`{"id":"echo"}`)
+				}
+				reg.Payload = setKey(raw, "state", setKey(state, "active_effect", mustMarshal(obj)))
+				_, err = decodeOperationRegister(reg)
+				testassert.Require(t, err != nil && strings.Contains(err.Error(), tc.wantErr), "mutated intent decode = %v, want %q", err, tc.wantErr)
+			})
+		}
+	})
 	t.Run("non-tool bindings forbid the input_arguments_base64 member outright", func(t *testing.T) {
 		effects := []struct {
 			name   string
 			effect ActiveEffect
 		}{
-			{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
+			{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", Purpose: InvocationPurposeConversation, HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
 			{"conversation model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "request-one", Model: &model.ModelRef{Provider: "prov", Model: "m"}, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
-			{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance}},
-			{"concrete tool intent", ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`)}},
+			{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance, Evidence: &RequestEvidence{SummaryInput: []model.Message{}}}},
+			{"concrete tool intent", ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`), Implementation: &ToolImplementation{ID: "echo"}}},
 		}
 		for _, tc := range effects {
 			raw, err := encodeActiveEffect(tc.effect)
@@ -767,7 +854,7 @@ func TestRegisterPayloadRoundTrip(t *testing.T) {
 	sessionReg := Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterSession}, Revision: 7, Payload: sessionRaw}
 	decoded, err := decodeSessionRegister(sessionReg)
 	testassert.NoError(t, err)
-	testassert.Require(t, decoded.Revision == 7 && decoded.Identity == session.Identity && (decoded.State.Lifecycle == session.State.Lifecycle && reflect.DeepEqual(decoded.State.AgentSelection, session.State.AgentSelection) && decoded.State.CurrentOperationID == session.State.CurrentOperationID && decoded.State.ArchivedAt == nil && decoded.State.LastActivity.Equal(session.State.LastActivity) && usageTotalsEqual(decoded.State.Usage, session.State.Usage)), "decoded session register %+v does not round-trip; decoded session state %+v does not round-trip", decoded, decoded.State)
+	testassert.Require(t, decoded.Revision == 7 && decoded.Identity == session.Identity && (decoded.State.Lifecycle == session.State.Lifecycle && reflect.DeepEqual(decoded.State.Inputs, session.State.Inputs) && decoded.State.CurrentOperationID == session.State.CurrentOperationID && decoded.State.ArchivedAt == nil && decoded.State.LastActivity.Equal(session.State.LastActivity) && usageTotalsEqual(decoded.State.Usage, session.State.Usage)), "decoded session register %+v does not round-trip; decoded session state %+v does not round-trip", decoded, decoded.State)
 	testassert.Require(t, !strings.Contains(string(sessionRaw), `"revision"`), "revision leaked into the session payload: %s", sessionRaw)
 
 	operation := validOperationRecord()
@@ -776,7 +863,7 @@ func TestRegisterPayloadRoundTrip(t *testing.T) {
 	opReg := Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterOperation, OperationID: testOpID}, Revision: 3, Payload: opRaw}
 	decodedOp, err := decodeOperationRegister(opReg)
 	testassert.NoError(t, err)
-	testassert.Require(t, decodedOp.Revision == 3 && decodedOp.Admission.SessionID == operation.Admission.SessionID && decodedOp.Admission.OperationID == operation.Admission.OperationID && reflect.DeepEqual(decodedOp.Admission.AgentSelection, operation.Admission.AgentSelection) && decodedOp.Admission.AdmittedAt.Equal(operation.Admission.AdmittedAt) && decodedOp.State.Status == operation.State.Status && len(decodedOp.State.PendingToolCalls) == len(operation.State.PendingToolCalls), "decoded operation register does not round-trip: %+v", decodedOp)
+	testassert.Require(t, decodedOp.Revision == 3 && decodedOp.Admission.SessionID == operation.Admission.SessionID && decodedOp.Admission.OperationID == operation.Admission.OperationID && reflect.DeepEqual(decodedOp.Admission.Inputs, operation.Admission.Inputs) && decodedOp.Admission.AdmittedAt.Equal(operation.Admission.AdmittedAt) && decodedOp.State.Status == operation.State.Status && len(decodedOp.State.PendingToolCalls) == len(operation.State.PendingToolCalls), "decoded operation register does not round-trip: %+v", decodedOp)
 	testassert.Require(t, !strings.Contains(string(opRaw), `"revision"`), "revision leaked into the operation payload: %s", opRaw)
 }
 
@@ -790,13 +877,16 @@ func TestAgentInputsCanonicalModelInRegisters(t *testing.T) {
 		{"absent", model.ModelRef{}, ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			selection := AgentSelection{Inputs: &AgentInputs{Model: row.ref, AssemblyMode: "full"}}
+			selection := SessionInputs{}
+			if !row.ref.IsZero() {
+				selection.Model = modelChoice(row.ref)
+			}
 			session := validSessionRecord()
-			session.State.AgentSelection = selection
+			session.State.Inputs = selection
 			sessionRaw, err := encodeSessionRegister(session)
 			testassert.NoError(t, err)
 			operation := validOperationRecord()
-			operation.Admission.AgentSelection = selection
+			operation.Admission.Inputs = selection
 			opRaw, err := encodeOperationRegister(operation)
 			testassert.NoError(t, err)
 			for name, raw := range map[string]json.RawMessage{"session": sessionRaw, "operation": opRaw} {
@@ -807,9 +897,7 @@ func TestAgentInputsCanonicalModelInRegisters(t *testing.T) {
 				}
 				parent, err := objectMember(obj, owner, true)
 				testassert.NoError(t, err)
-				selected, err := objectMember(parent, "agent_selection", true)
-				testassert.NoError(t, err)
-				inputs, err := objectMember(selected, "inputs", true)
+				inputs, err := objectMember(parent, "inputs", true)
 				testassert.NoError(t, err)
 				modelRaw, exists := inputs["model"]
 				if row.modelJSON == "" && exists {
@@ -821,13 +909,13 @@ func TestAgentInputsCanonicalModelInRegisters(t *testing.T) {
 			}
 			decoded, err := decodeSessionRegister(Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterSession}, Revision: 1, Payload: sessionRaw})
 			testassert.NoError(t, err)
-			if decoded.State.AgentSelection.Inputs.Model != row.ref {
-				t.Errorf("session model = %#v", decoded.State.AgentSelection.Inputs.Model)
+			if modelChoiceValue(decoded.State.Inputs.Model) != row.ref {
+				t.Errorf("session model = %#v", decoded.State.Inputs.Model)
 			}
 			decodedOp, err := decodeOperationRegister(Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterOperation, OperationID: testOpID}, Revision: 1, Payload: opRaw})
 			testassert.NoError(t, err)
-			if decodedOp.Admission.AgentSelection.Inputs.Model != row.ref {
-				t.Errorf("operation model = %#v", decodedOp.Admission.AgentSelection.Inputs.Model)
+			if modelChoiceValue(decodedOp.Admission.Inputs.Model) != row.ref {
+				t.Errorf("operation model = %#v", decodedOp.Admission.Inputs.Model)
 			}
 		})
 	}
@@ -841,17 +929,18 @@ func TestAgentInputsCanonicalModelRejectsMalformed(t *testing.T) {
 		"miscased": `{"Provider":"a","model":"b"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			selection := json.RawMessage(`{"inputs":{"model":` + raw + `,"instructions":"","assembly_mode":"full","tools":[],"capabilities":[],"constraints":{"readonly":false,"write_dir":""},"strategy":{"id":""}}}`)
-			if _, err := decodeAgentSelection(selection); err == nil {
+			selection := json.RawMessage(`{"model":` + raw + `}`)
+			var invalid SessionInputs
+			if err := json.Unmarshal(selection, &invalid); err == nil {
 				t.Fatalf("accepted model %s", raw)
 			}
-			validSelection := AgentSelection{Inputs: &AgentInputs{AssemblyMode: "full"}}
+			validSelection := SessionInputs{Tools: []string{}}
 			session := validSessionRecord()
-			session.State.AgentSelection = validSelection
+			session.State.Inputs = validSelection
 			sessionRaw, err := encodeSessionRegister(session)
 			testassert.NoError(t, err)
 			operation := validOperationRecord()
-			operation.Admission.AgentSelection = validSelection
+			operation.Admission.Inputs = validSelection
 			opRaw, err := encodeOperationRegister(operation)
 			testassert.NoError(t, err)
 			validRaw, err := json.Marshal(validSelection)
@@ -906,7 +995,7 @@ func TestOperationStateEncodingShape(t *testing.T) {
 	effect := validOperationRecord()
 	mdl := testModelRef()
 	effect.State.ActiveEffect = &ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(3), RequestID: "request-one", Model: &mdl, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}} // model effect: no tool call id
-	effect.State.Request = &RunningRequest{RequestID: "request-one", BoundaryEntryID: hexID(1)}
+	effect.State.Request = &RunningRequest{RequestID: "request-one", Purpose: InvocationPurposeConversation, BoundaryEntryID: hexID(1)}
 	raw, err = encodeOperationRegister(effect)
 	testassert.NoError(t, err)
 	stateObj, err = objectMember(wireObject(t, raw), "state", true)
@@ -954,7 +1043,7 @@ func TestRegisterPayloadRejectsInvalidWire(t *testing.T) {
 		{"miscased key", renameKey(opRaw, "admission", "Admission")},
 		{"null admission", setKey(opRaw, "admission", json.RawMessage(`null`))},
 		{"wrong state container", setKey(opRaw, "state", json.RawMessage(`[]`))},
-		{"operation mismatch", setKey(opRaw, "admission", json.RawMessage(`{"session_id":"`+testSessionID+`","operation_id":"ghost","request_kind":"message","admitted_entry":{"session_id":"`+testSessionID+`","entry_id":"`+hexID(1)+`"},"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},"execution":{"configuration_revision":"rev-1","model":{"provider":"prov","model":"gpt-x"},"context_window":4096,"output_reserve":2048,"system_prompt":"system","tools":[],"initial_tool_names":[],"readonly":false,"write_dir":"","compact":{"model":{"provider":"cprov","model":"compact-x"},"system_prompt":"summarize"}},"admitted_at":"2026-01-02T03:04:05.123456789Z"}`))},
+		{"operation mismatch", setKey(opRaw, "admission", json.RawMessage(`{"session_id":"`+testSessionID+`","operation_id":"ghost","request_kind":"message","admitted_entry":{"session_id":"`+testSessionID+`","entry_id":"`+hexID(1)+`"},"inputs":{"instructions":"coder"},"execution":{"configuration_revision":"rev-1","model":{"provider":"prov","model":"gpt-x"},"context_window":4096,"output_reserve":2048,"system_prompt":"system","tools":[],"initial_tool_names":[],"compact":{"model":{"provider":"cprov","model":"compact-x"},"system_prompt":"summarize"}},"admitted_at":"2026-01-02T03:04:05.123456789Z"}`))},
 	}
 	for _, m := range opMutations {
 		t.Run("operation/"+m.name, func(t *testing.T) {
@@ -1091,80 +1180,13 @@ func TestUsageAccounting(t *testing.T) {
 	}
 }
 
-// TestToolCallNormalizedArgumentsNullRejected proves the null-literal rule
-// for raw JSON members is shared by both codec sides: decode rejects the null
-// literal through the codec-wide member rule, so encode must reject it too,
-// while a non-null JSON value round-trips verbatim.
-func TestToolCallNormalizedArgumentsNullRejected(t *testing.T) {
-	entry := validAssistantEntry(testOpID)
-	entry.Evidence.ToolNames = []string{"echo"}
+func TestToolCallRejectsSpeculativeNormalization(t *testing.T) {
 	call := validToolCallRecord()
-	call.NormalizedArguments = json.RawMessage("null")
-	entry.ToolCalls = []toolCallRecord{call}
-	if _, err := encodeAssistantEntry(entry); err == nil {
-		t.Fatalf("encoding normalized_arguments null must fail")
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Fatalf("rejection = %v, want the ErrInvalid class", err)
-	}
-
-	call.NormalizedArguments = json.RawMessage(`{"x":1}`)
-	entry.ToolCalls = []toolCallRecord{call}
-	raw, err := encodeAssistantEntry(entry)
+	raw, err := encodeToolCallRecord(call)
 	testassert.NoError(t, err)
-	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Payload: raw}
-	decoded, err := decodeAssistantEntry(env)
-	testassert.NoError(t, err)
-	testassert.Require(t, string(decoded.ToolCalls[0].NormalizedArguments) == `{"x":1}`, "normalized_arguments round-tripped as %s", decoded.ToolCalls[0].NormalizedArguments)
-}
-
-// TestToolCallNormalizedArgumentsObjectOnly proves the normalized_arguments
-// member is one complete JSON object on both codec sides: a persisted
-// non-object member (an array representative — every wrong kind fails the
-// same object check) is rejected by decode, so it surfaces as Session
-// corruption and never reaches the tool boundary as executable input, and
-// rejected by encode with the invalid-input class. The explicit null case is
-// shared with TestToolCallNormalizedArgumentsNullRejected.
-func TestToolCallNormalizedArgumentsObjectOnly(t *testing.T) {
-	const wrong = `[1,2]`
-	entry := validAssistantEntry(testOpID)
-	entry.Evidence.ToolNames = []string{"echo"}
-	call := validToolCallRecord()
-	call.NormalizedArguments = json.RawMessage(wrong)
-	entry.ToolCalls = []toolCallRecord{call}
-	{
-		_, err := encodeAssistantEntry(entry)
-		testassert.Require(t, errors.Is(err, ErrInvalid), "encode normalized_arguments %s = %v, want the ErrInvalid class", wrong, err)
-	}
-
-	// decode side: rewrite one valid encoded payload's member to the wrong
-	// kind and prove decode rejects it.
-	valid := validAssistantEntry(testOpID)
-	valid.Evidence.ToolNames = []string{"echo"}
-	vcall := validToolCallRecord()
-	vcall.NormalizedArguments = json.RawMessage(`{"x":1}`)
-	valid.ToolCalls = []toolCallRecord{vcall}
-	raw, err := encodeAssistantEntry(valid)
-	testassert.NoError(t, err)
-	obj := map[string]json.RawMessage{}
-	{
-		err := json.Unmarshal(raw, &obj)
-		testassert.NoError(t, err)
-	}
-	items := []map[string]json.RawMessage{}
-	{
-		err := json.Unmarshal(obj["tool_calls"], &items)
-		testassert.Require(t, err == nil && len(items) == 1, "encoded tool_calls = %s (%v)", obj["tool_calls"], err)
-	}
-	items[0]["normalized_arguments_base64"] = frame([]byte(wrong))
-	edited, err := json.Marshal(items)
-	testassert.NoError(t, err)
-	obj["tool_calls"] = edited
-	out, err := json.Marshal(obj)
-	testassert.NoError(t, err)
-	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Payload: out}
-	{
-		_, err := decodeAssistantEntry(env)
-		testassert.Require(t, err != nil, "decode normalized_arguments %s must fail", wrong)
+	for _, key := range []string{"normalized_arguments_base64", "normalization_failure"} {
+		_, err := decodeToolCallRecord(setKey(raw, key, json.RawMessage(`"e30="`)))
+		testassert.Require(t, err != nil, "obsolete %s accepted", key)
 	}
 }
 
@@ -1316,139 +1338,6 @@ func TestToolResultShapingMembers(t *testing.T) {
 			testassert.Require(t, err != nil, "decode oversized persisted failure must fail")
 		}
 	}
-}
-
-// TestToolCallNormalizationFailureRules proves the nested normalization-
-// failure member: its bounded valid-UTF-8 diagnostic round-trips verbatim,
-// absence encodes by omission, and it is mutually exclusive with
-// normalized_arguments on both codec sides. The closed assistant-level rule
-// over the advertised names accepts exactly one of the two members for an
-// advertised call and neither for an unadvertised one, in every combination.
-func TestToolCallNormalizationFailureRules(t *testing.T) {
-	const diag = "arguments must be one non-null JSON object"
-	encodeAssistant := func(t *testing.T, v assistantEntry) (json.RawMessage, map[string]json.RawMessage) {
-		t.Helper()
-		raw, err := encodeAssistantEntry(v)
-		testassert.NoError(t, err)
-		obj := wireObject(t, raw)
-		items := []map[string]json.RawMessage{}
-		testassert.NoError(t, json.Unmarshal(obj["tool_calls"], &items))
-		testassert.Require(t, len(items) == 1, "encoded tool_calls = %s", obj["tool_calls"])
-		return raw, items[0]
-	}
-
-	// One bounded diagnostic round-trips verbatim and encodes by omission
-	// when absent.
-	advertised := validAssistantEntry(testOpID)
-	advertised.Evidence.ToolNames = []string{"echo"}
-	failed := validToolCallRecord()
-	failed.NormalizationFailure = diag
-	advertised.ToolCalls = []toolCallRecord{failed}
-	raw, member := encodeAssistant(t, advertised)
-	{
-		_, present := member["normalization_failure"]
-		testassert.Require(t, present, "encoded call %s carries no normalization_failure member", member)
-		_, present = member["normalized_arguments_base64"]
-		testassert.Require(t, !present, "encoded call %s carries both normalization members", member)
-	}
-	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Payload: raw}
-	decoded, err := decodeAssistantEntry(env)
-	testassert.NoError(t, err)
-	testassert.Equal(t, decoded.ToolCalls[0].NormalizationFailure, diag)
-	normalized := validToolCallRecord()
-	normalized.NormalizedArguments = json.RawMessage(`{"x":1}`)
-	advertised.ToolCalls = []toolCallRecord{normalized}
-	_, member = encodeAssistant(t, advertised)
-	{
-		_, present := member["normalization_failure"]
-		testassert.Require(t, !present, "encoded normalized call %s carries the failure member", member)
-	}
-
-	// The exactly-one/neither rule over the advertised names: every other
-	// combination is rejected before encoding.
-	for _, tc := range []struct {
-		name       string
-		advertised []string
-		call       toolCallRecord
-	}{
-		{"advertised call with neither member", []string{"echo"}, validToolCallRecord()},
-		{"advertised call with both members", []string{"echo"}, func() toolCallRecord {
-			c := validToolCallRecord()
-			c.NormalizedArguments = json.RawMessage(`{"x":1}`)
-			c.NormalizationFailure = diag
-			return c
-		}()},
-		{"unadvertised call with a failure member", []string{"ghost"}, failed},
-		{"unadvertised call with a normalized member", []string{"ghost"}, normalized},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			v := validAssistantEntry(testOpID)
-			v.Evidence.ToolNames = tc.advertised
-			v.ToolCalls = []toolCallRecord{tc.call}
-			{
-				_, err := encodeAssistantEntry(v)
-				testassert.Require(t, errors.Is(err, ErrInvalid), "encode = %v, want the ErrInvalid class", err)
-			}
-		})
-	}
-
-	// The bounded rule: empty, oversized and invalid-UTF-8 diagnostics are
-	// rejected by both codec sides; the exact bound decodes.
-	t.Run("bounded diagnostic", func(t *testing.T) {
-		v := validAssistantEntry(testOpID)
-		v.Evidence.ToolNames = []string{"echo"}
-		call := validToolCallRecord()
-		call.NormalizationFailure = strings.Repeat("x", maxToolDiagnosticBytes+1)
-		v.ToolCalls = []toolCallRecord{call}
-		{
-			_, err := encodeAssistantEntry(v)
-			testassert.Require(t, errors.Is(err, ErrInvalid), "encode oversized diagnostic = %v, want the ErrInvalid class", err)
-		}
-		call.NormalizationFailure = string([]byte{0xff, 0xfe})
-		v.ToolCalls = []toolCallRecord{call}
-		{
-			_, err := encodeAssistantEntry(v)
-			testassert.Require(t, errors.Is(err, ErrInvalid), "encode invalid-UTF-8 diagnostic = %v, want the ErrInvalid class", err)
-		}
-		call.NormalizationFailure = strings.Repeat("x", maxToolDiagnosticBytes)
-		v.ToolCalls = []toolCallRecord{call}
-		raw, err := encodeAssistantEntry(v)
-		testassert.NoError(t, err)
-		env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Payload: raw}
-		decoded, err := decodeAssistantEntry(env)
-		testassert.NoError(t, err)
-		testassert.Equal(t, decoded.ToolCalls[0].NormalizationFailure, call.NormalizationFailure)
-
-		// The persisted member rejects an empty string and an oversized value.
-		obj := map[string]json.RawMessage{}
-		testassert.NoError(t, json.Unmarshal(raw, &obj))
-		items := []map[string]json.RawMessage{}
-		testassert.NoError(t, json.Unmarshal(obj["tool_calls"], &items))
-		for _, tc := range []struct {
-			name   string
-			member json.RawMessage
-		}{
-			{"empty present member", json.RawMessage(`""`)},
-			{"oversized member", json.RawMessage(`"` + strings.Repeat("x", maxToolDiagnosticBytes+1) + `"`)},
-			{"both members", json.RawMessage(`"diag"`)},
-		} {
-			items[0]["normalization_failure"] = tc.member
-			if tc.name == "both members" {
-				items[0]["normalized_arguments_base64"] = frame([]byte(`{"x":1}`))
-			}
-			edited, err := json.Marshal(items)
-			testassert.NoError(t, err)
-			obj["tool_calls"] = edited
-			out, err := json.Marshal(obj)
-			testassert.NoError(t, err)
-			env.Payload = out
-			{
-				_, err := decodeAssistantEntry(env)
-				testassert.Require(t, err != nil, "decode %s must fail", tc.name)
-			}
-			delete(items[0], "normalized_arguments_base64")
-		}
-	})
 }
 
 // TestToolResultMetadataRules proves the durable metadata member of one
@@ -1663,9 +1552,9 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			_, err := encodeSessionRegister(v)
 			return err
 		}},
-		{"session empty agent type", func() error {
+		{"session invalid tool name", func() error {
 			v := validSessionRecord()
-			v.State.AgentSelection = AgentSelection{}
+			v.State.Inputs = SessionInputs{Tools: []string{""}}
 			_, err := encodeSessionRegister(v)
 			return err
 		}},
@@ -1734,21 +1623,9 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			_, err := encodeExecutionCapture(v)
 			return err
 		}},
-		{"capture duplicate capability name", func() error {
-			v := testCapture()
-			v.Capabilities = []string{"cap-a", "cap-b", "cap-a"}
-			_, err := encodeExecutionCapture(v)
-			return err
-		}},
-		{"capture empty capability name", func() error {
-			v := testCapture()
-			v.Capabilities = []string{""}
-			_, err := encodeExecutionCapture(v)
-			return err
-		}},
 		{"tool active effect with mismatched reservation", func() error {
 			v := validOperationRecord()
-			v.State.ActiveEffect = &ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{"x":1}`)}
+			v.State.ActiveEffect = &ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(3), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{"x":1}`), Implementation: &ToolImplementation{ID: "echo"}}
 			v.State.PendingToolCalls = []PendingToolCall{{
 				AssistantEntry: EntryRef{SessionID: testSessionID, EntryID: hexID(2)},
 				CallID:         "call-1",
@@ -1828,11 +1705,10 @@ func TestCodecOwnedValues(t *testing.T) {
 // bytes as independent of them.
 func TestAdoptedFormsAcrossInsertAndFork(t *testing.T) {
 	const (
-		verbatimExtra   = ` { "path" : "<a/b>", "list" : [1, 2] } `
-		nestedExtra     = ` { "deep" : {"a":[{"b":1},[[2],"<c>"]]},"keep":true} `
-		lexemeExtra     = ` {"n": [1, 1.0, 1e0, 9007199254740993, -0]} `
-		nestedArguments = ` {"deep": {"a":[{"b":1},[[2],"<c>"]]}, "n": [1,1.0,1e0,9007199254740993]} `
-		nestedMetadata  = ` {"marker": [{"tool":{"nested":[1,{"x":[2,3]}]}}], "s":"<"} `
+		verbatimExtra  = ` { "path" : "<a/b>", "list" : [1, 2] } `
+		nestedExtra    = ` { "deep" : {"a":[{"b":1},[[2],"<c>"]]},"keep":true} `
+		lexemeExtra    = ` {"n": [1, 1.0, 1e0, 9007199254740993, -0]} `
+		nestedMetadata = ` {"marker": [{"tool":{"nested":[1,{"x":[2,3]}]}}], "s":"<"} `
 	)
 	// wantReplacedText pins one U+FFFD per invalid byte with the ordinary
 	// multi-byte text around it untouched.
@@ -1853,15 +1729,13 @@ func TestAdoptedFormsAcrossInsertAndFork(t *testing.T) {
 		call := validToolCallRecord()
 		call.ResultEntryID = resultID
 		call.Extra = model.Extra{"nested": freshRaw(nestedExtra), "lexemes": freshRaw(lexemeExtra)}
-		call.NormalizedArguments = freshRaw(nestedArguments)
 		failed := validToolCallRecord()
 		failed.ID = "call-2"
 		failed.Ordinal = 1
 		failed.ResultEntryID = hexID(5)
-		failed.NormalizationFailure = "arguments must be one non-null JSON object"
 		v := validAssistantEntry(testOpID)
 		v.EntryID = entryID
-		v.Evidence.ToolNames = []string{"echo"}
+		v.Evidence.Tools = fixtureDefinitions("echo")
 		v.Content = []model.ContentPart{
 			{Kind: model.PartText, Text: invalidText(), Extra: model.Extra{"raw": freshRaw(verbatimExtra), "utf8": invalidRawString()}},
 			{Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"nested": freshRaw(nestedExtra), "lexemes": freshRaw(lexemeExtra)}},
@@ -1889,7 +1763,7 @@ func TestAdoptedFormsAcrossInsertAndFork(t *testing.T) {
 		}
 	}
 	clobberAssistant := func(v assistantEntry) {
-		clobber(v.Content[0].Extra["raw"], v.Content[0].Extra["utf8"], v.Content[1].Extra["nested"], v.Content[1].Extra["lexemes"], v.Extra["msg"], v.ToolCalls[0].Extra["nested"], v.ToolCalls[0].NormalizedArguments)
+		clobber(v.Content[0].Extra["raw"], v.Content[0].Extra["utf8"], v.Content[1].Extra["nested"], v.Content[1].Extra["lexemes"], v.Extra["msg"], v.ToolCalls[0].Extra["nested"])
 	}
 	assertAssistantAdopted := func(t *testing.T, got *assistantEntry) {
 		t.Helper()
@@ -1902,8 +1776,6 @@ func TestAdoptedFormsAcrossInsertAndFork(t *testing.T) {
 		testassert.Require(t, string(got.Extra["msg"]) == nestedExtra, "adopted message extra = %q, want the nested form unchanged", got.Extra["msg"])
 		testassert.Require(t, string(got.Extra[""]) == `true` && string(got.Extra[string([]byte{0xff})]) == `"invalid key"`, "adopted opaque keys = %+v", got.Extra)
 		testassert.Require(t, string(got.ToolCalls[0].Extra["nested"]) == nestedExtra, "adopted call extra = %q, want the nested form unchanged", got.ToolCalls[0].Extra["nested"])
-		testassert.Require(t, string(got.ToolCalls[0].NormalizedArguments) == nestedArguments, "adopted normalized arguments = %q, want the nested form with exact lexemes unchanged", got.ToolCalls[0].NormalizedArguments)
-		testassert.Require(t, got.ToolCalls[1].NormalizationFailure == "arguments must be one non-null JSON object", "adopted normalization failure = %q, want the stored diagnostic verbatim", got.ToolCalls[1].NormalizationFailure)
 	}
 	assertResultAdopted := func(t *testing.T, got *toolResultEntry) {
 		t.Helper()
@@ -2044,131 +1916,6 @@ func TestIDShapes(t *testing.T) {
 	}
 }
 
-// TestExecutionCaptureCapabilities pins the durable capability selection: an
-// empty selection encodes by omission; omission and the empty array both
-// decode to none while null is invalid; present names must be nonempty and
-// unique and keep the selected order; and a historical capture carrying
-// plugin-defined names decodes without any plugin definition.
-func TestExecutionCaptureCapabilities(t *testing.T) {
-	encode := func(t *testing.T, capabilities []string) json.RawMessage {
-		t.Helper()
-		v := testCapture()
-		v.Capabilities = capabilities
-		raw, err := encodeExecutionCapture(v)
-		testassert.NoError(t, err)
-		return raw
-	}
-
-	for _, empty := range [][]string{nil, {}} {
-		obj, err := decodePayloadObject(encode(t, empty))
-		testassert.NoError(t, err)
-		{
-			_, present := obj["capabilities"]
-			testassert.Require(t, !present, "empty capability selection %#v leaked the capabilities member", empty)
-		}
-	}
-
-	ordered := []string{"retired-plugin.capability", "cap-mid", "cap-last"}
-	obj, err := decodePayloadObject(encode(t, ordered))
-	testassert.NoError(t, err)
-	{
-		got := string(obj["capabilities"])
-		testassert.Equal(t, got, `["retired-plugin.capability","cap-mid","cap-last"]`)
-	}
-	decoded, err := decodeExecutionCapture(obj)
-	testassert.NoError(t, err)
-	testassert.Require(t, len(decoded.Capabilities) == 3 && decoded.Capabilities[0] == "retired-plugin.capability" && decoded.Capabilities[1] == "cap-mid" && decoded.Capabilities[2] == "cap-last", "decoded capabilities = %q, want the selected order", decoded.Capabilities)
-	decoded.Capabilities[0] = "tampered"
-	again, err := decodeExecutionCapture(obj)
-	testassert.Require(t, err == nil && again.Capabilities[0] == "retired-plugin.capability", "decoded capabilities alias the payload bytes: %q, %v", again.Capabilities, err)
-
-	captureWith := func(capabilities string) map[string]json.RawMessage {
-		members, err := decodePayloadObject(encode(t, nil))
-		testassert.NoError(t, err)
-		if capabilities != "" {
-			members["capabilities"] = json.RawMessage(capabilities)
-		}
-		return members
-	}
-	{
-		got, err := decodeExecutionCapture(captureWith(""))
-		testassert.Require(t, err == nil && got.Capabilities == nil, "omitted capabilities = %q, %v, want none", got.Capabilities, err)
-	}
-	{
-		got, err := decodeExecutionCapture(captureWith("[]"))
-		testassert.Require(t, err == nil && got.Capabilities == nil, "empty-array capabilities = %q, %v, want none", got.Capabilities, err)
-	}
-	for _, bad := range []string{"null", `["cap-a","cap-a"]`, `[""]`, `[5]`, `"cap-a"`, `["cap-a",null]`} {
-		{
-			got, err := decodeExecutionCapture(captureWith(bad))
-			testassert.Require(t, err != nil, "capabilities %s decoded to %q, want rejection", bad, got.Capabilities)
-		}
-	}
-}
-
-// TestExecutionCapturePermissionMembers pins the durable permission capability
-// members: readonly and write_dir are required members encoded always,
-// including their false and empty values, they round-trip unchanged, and a
-// capture missing either member, carrying null, or with a wrong-typed member
-// is invalid.
-func TestExecutionCapturePermissionMembers(t *testing.T) {
-	encode := func(t *testing.T, v ExecutionCapture) map[string]json.RawMessage {
-		t.Helper()
-		raw, err := encodeExecutionCapture(v)
-		testassert.NoError(t, err)
-		members, err := decodePayloadObject(raw)
-		testassert.NoError(t, err)
-		return members
-	}
-
-	explicit := encode(t, testCapture())
-	{
-		got := string(explicit["readonly"])
-		testassert.Equal(t, got, "false")
-	}
-	{
-		got := string(explicit["write_dir"])
-		testassert.Equal(t, got, `""`)
-	}
-
-	v := testCapture()
-	v.Readonly = true
-	v.WriteDir = "/w/sub"
-	decoded, err := decodeExecutionCapture(encode(t, v))
-	testassert.NoError(t, err)
-	testassert.Require(t, decoded.Readonly == true && decoded.WriteDir == "/w/sub", "round-tripped members = %v %q, want true and %q", decoded.Readonly, decoded.WriteDir, "/w/sub")
-
-	for _, mutation := range []struct {
-		name    string
-		members func(map[string]json.RawMessage)
-	}{
-		{"missing readonly", func(m map[string]json.RawMessage) { delete(m, "readonly") }},
-		{"missing write_dir", func(m map[string]json.RawMessage) { delete(m, "write_dir") }},
-		{"null readonly", func(m map[string]json.RawMessage) { m["readonly"] = json.RawMessage("null") }},
-		{"null write_dir", func(m map[string]json.RawMessage) { m["write_dir"] = json.RawMessage("null") }},
-		{"string readonly", func(m map[string]json.RawMessage) { m["readonly"] = json.RawMessage(`"true"`) }},
-		{"number write_dir", func(m map[string]json.RawMessage) { m["write_dir"] = json.RawMessage(`5`) }},
-	} {
-		t.Run(mutation.name, func(t *testing.T) {
-			members := encode(t, v)
-			mutation.members(members)
-			{
-				got, err := decodeExecutionCapture(members)
-				testassert.Require(t, err != nil, "capture decoded to %+v, want rejection", got)
-			}
-		})
-	}
-}
-
-// TestExecutionCaptureCompactionMembers pins the durable compaction
-// configuration members: context_window, output_reserve and compact are
-// required conversation members encoded always, the nested compact object
-// carries exactly the model and system_prompt keys with the model in the
-// durable two-field form, everything round-trips unchanged, a capture missing
-// a member, carrying a non-positive conversation window or reserve, an
-// incomplete compact model identity, an empty compact prompt, or a compact
-// object carrying a retired budget member is invalid on both the encode and
-// decode paths.
 func TestExecutionCaptureCompactionMembers(t *testing.T) {
 	encode := func(t *testing.T, v ExecutionCapture) map[string]json.RawMessage {
 		t.Helper()
@@ -2377,32 +2124,32 @@ func TestOperationSettlementCompactionUsageMarker(t *testing.T) {
 	}
 }
 
-// TestSessionIdentityParentLineage proves the child lineage member's wire
-// shape: parent_session_id encodes by omission, round-trips on a child, is
+// TestSessionIdentityParentLineage proves the owner lineage member's wire
+// shape: owner_session_id encodes by omission, round-trips on a Session, is
 // absent on a root and on a fork, and every invalid shape is rejected on both
 // the encode and decode paths with the existing classes.
 func TestSessionIdentityParentLineage(t *testing.T) {
 	child := validSessionRecord()
-	child.Identity.ParentSessionID = otherSession()
+	child.Identity.OwnerSessionID = otherSession()
 	childRaw, err := encodeSessionRegister(child)
 	testassert.NoError(t, err)
-	testassert.Require(t, strings.Contains(string(childRaw), `"parent_session_id":"`+otherSession()+`"`), "child identity payload lacks parent_session_id: %s", childRaw)
+	testassert.Require(t, strings.Contains(string(childRaw), `"owner_session_id":"`+otherSession()+`"`), "child identity payload lacks owner_session_id: %s", childRaw)
 	decoded, err := decodeSessionRegister(Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterSession}, Payload: childRaw})
 	testassert.NoError(t, err)
-	if decoded.Identity.ParentSessionID != otherSession() {
-		t.Fatalf("decoded parent session id = %q, want %q", decoded.Identity.ParentSessionID, otherSession())
+	if decoded.Identity.OwnerSessionID != otherSession() {
+		t.Fatalf("decoded owner session id = %q, want %q", decoded.Identity.OwnerSessionID, otherSession())
 	}
 
 	rootRaw, err := encodeSessionRegister(validSessionRecord())
 	testassert.NoError(t, err)
-	testassert.Require(t, !strings.Contains(string(rootRaw), "parent_session_id"), "root identity carries parent_session_id: %s", rootRaw)
+	testassert.Require(t, !strings.Contains(string(rootRaw), "owner_session_id"), "root identity carries owner_session_id: %s", rootRaw)
 
 	fork := validSessionRecord()
 	fork.Identity.SourceSessionID = otherSession()
 	fork.Identity.SourceBoundaryEntryID = otherEntry()
 	forkRaw, err := encodeSessionRegister(fork)
 	testassert.NoError(t, err)
-	testassert.Require(t, !strings.Contains(string(forkRaw), "parent_session_id"), "fork identity carries parent_session_id: %s", forkRaw)
+	testassert.Require(t, !strings.Contains(string(forkRaw), "owner_session_id"), "fork identity carries owner_session_id: %s", forkRaw)
 	{
 		_, err := decodeSessionRegister(Register{Key: RegisterKey{SessionID: testSessionID, Kind: RegisterSession}, Payload: forkRaw})
 		testassert.NoError(t, err)
@@ -2413,10 +2160,10 @@ func TestSessionIdentityParentLineage(t *testing.T) {
 		name  string
 		value SessionIdentity
 	}{
-		{"non-hex parent", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, ParentSessionID: "not-hex"}},
-		{"parent with fork lineage", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, ParentSessionID: otherSession(), SourceSessionID: otherSession(), SourceBoundaryEntryID: otherEntry()}},
-		{"parent with source session only", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, ParentSessionID: otherSession(), SourceSessionID: otherSession()}},
-		{"parent with boundary only", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, ParentSessionID: otherSession(), SourceBoundaryEntryID: otherEntry()}},
+		{"non-hex parent", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, OwnerSessionID: "not-hex"}},
+		{"parent with fork lineage", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, OwnerSessionID: otherSession(), SourceSessionID: otherSession(), SourceBoundaryEntryID: otherEntry()}},
+		{"parent with source session only", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, OwnerSessionID: otherSession(), SourceSessionID: otherSession()}},
+		{"parent with boundary only", SessionIdentity{SessionID: testSessionID, Workspace: "/tmp/works", CreatedAt: testTime, OwnerSessionID: otherSession(), SourceBoundaryEntryID: otherEntry()}},
 	}
 	for _, tc := range encodeRejections {
 		t.Run("encode/"+tc.name, func(t *testing.T) {
@@ -2432,14 +2179,17 @@ func TestSessionIdentityParentLineage(t *testing.T) {
 		name   string
 		mutate func(map[string]json.RawMessage)
 	}{
-		{"empty parent", func(m map[string]json.RawMessage) { m["parent_session_id"] = json.RawMessage(`""`) }},
-		{"null parent", func(m map[string]json.RawMessage) { m["parent_session_id"] = json.RawMessage(`null`) }},
-		{"wrong container parent", func(m map[string]json.RawMessage) { m["parent_session_id"] = json.RawMessage(`5`) }},
+		{"empty parent", func(m map[string]json.RawMessage) { m["owner_session_id"] = json.RawMessage(`""`) }},
+		{"old parent spelling", func(m map[string]json.RawMessage) {
+			m["parent_session_id"] = json.RawMessage(`"` + otherSession() + `"`)
+		}},
+		{"null parent", func(m map[string]json.RawMessage) { m["owner_session_id"] = json.RawMessage(`null`) }},
+		{"wrong container parent", func(m map[string]json.RawMessage) { m["owner_session_id"] = json.RawMessage(`5`) }},
 		{"non-hex parent", func(m map[string]json.RawMessage) {
-			m["parent_session_id"] = json.RawMessage(`"0123456789abcdef0123456789abcdef0"`)
+			m["owner_session_id"] = json.RawMessage(`"0123456789abcdef0123456789abcdef0"`)
 		}},
 		{"uppercase parent", func(m map[string]json.RawMessage) {
-			m["parent_session_id"] = json.RawMessage(`"` + strings.Repeat("F", 32) + `"`)
+			m["owner_session_id"] = json.RawMessage(`"` + strings.Repeat("F", 32) + `"`)
 		}},
 		{"parent with source session", func(m map[string]json.RawMessage) {
 			m["source_session_id"] = json.RawMessage(`"` + otherSession() + `"`)
@@ -2481,7 +2231,7 @@ func TestBackgroundCompletionSignalRules(t *testing.T) {
 	env.Payload = raw
 	decoded, err := decodeSignalEntry(env)
 	testassert.NoError(t, err)
-	testassert.Require(t, decoded.OperationID == "" && decoded.RelatedOperation == nil && (decoded.RelatedMember != nil && decoded.RelatedMember.Kind == "child" && decoded.RelatedMember.ID == childID), "completion signal is not operationless: %+v; decoded related member = %+v, want child %q", decoded, decoded.RelatedMember, childID)
+	testassert.Require(t, decoded.OperationID == "" && decoded.RelatedOperation == nil && (decoded.RelatedMember != nil && decoded.RelatedMember.Kind == "session" && decoded.RelatedMember.ID == childID), "completion signal is not operationless: %+v; decoded related member = %+v, want child %q", decoded, decoded.RelatedMember, childID)
 	{
 		_, present := wireObject(t, raw)["related_operation"]
 		testassert.Require(t, !present, "completion signal carries related_operation: %s", raw)
@@ -2503,7 +2253,7 @@ func TestBackgroundCompletionSignalRules(t *testing.T) {
 	fixedRaw, err := encodeSignalEntry(validSignalEntry(testOpID))
 	testassert.NoError(t, err)
 	fixedEnv := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntrySignal, Sequence: 1, CommittedAt: testTime}
-	fixedEnv.Payload = setKey(fixedRaw, "related_member", json.RawMessage(`{"kind":"child","id":"`+childID+`"}`))
+	fixedEnv.Payload = setKey(fixedRaw, "related_member", json.RawMessage(`{"kind":"session","id":"`+childID+`"}`))
 	{
 		_, err := decodeSignalEntry(fixedEnv)
 		testassert.Require(t, err != nil, "fixed signal with related_member must be rejected")
@@ -2557,12 +2307,13 @@ func TestBackgroundCompletionSignalRules(t *testing.T) {
 		{"null related member", setKey(raw, "related_member", json.RawMessage(`null`))},
 		{"wrong container related member", setKey(raw, "related_member", json.RawMessage(`[]`))},
 		{"wrong kind", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("team", childID)))},
-		{"missing id", setKey(raw, "related_member", json.RawMessage(`{"kind":"child"}`))},
-		{"empty id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("child", "")))},
-		{"non-hex child id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("child", "ghost")))},
-		{"job-length child id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("child", jobID)))},
+		{"old child kind", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("child", childID)))},
+		{"missing id", setKey(raw, "related_member", json.RawMessage(`{"kind":"session"}`))},
+		{"empty id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("session", "")))},
+		{"non-hex child id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("session", "ghost")))},
+		{"job-length child id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("session", jobID)))},
 		{"child-length job id", setKey(raw, "related_member", json.RawMessage(relatedMemberWire("job", childID)))},
-		{"unknown member inside related member", setKey(raw, "related_member", json.RawMessage(`{"kind":"child","id":"`+childID+`","bogus":1}`))},
+		{"unknown member inside related member", setKey(raw, "related_member", json.RawMessage(`{"kind":"session","id":"`+childID+`","bogus":1}`))},
 		{"related operation present", setKey(raw, "related_operation", json.RawMessage(`{"session_id":"`+testSessionID+`","operation_id":"`+testOpID+`"}`))},
 		{"operation owned", setKey(raw, "operation_id", json.RawMessage(`"`+testOpID+`"`))},
 		{"empty content", setKey(raw, "content", json.RawMessage(`""`))},
@@ -2586,7 +2337,7 @@ func TestCompactionEntryPayloadRules(t *testing.T) {
 	t.Run("round trips owned with and without fact usage", func(t *testing.T) {
 		for _, withUsage := range []bool{false, true} {
 			v := validCompactionEntry(testOpID)
-			v.Evidence.ToolNames = []string{}
+			v.Evidence.Tools = fixtureDefinitions()
 			if withUsage {
 				v.Facts[0].Usage = &UsageCount{InputTokens: 11, CachedInputTokens: 4, OutputTokens: 7}
 			}
@@ -2939,7 +2690,7 @@ func TestAssistantEntryRequestEvidenceRequiredMembers(t *testing.T) {
 	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Payload: raw}
 	decoded, err := decodeAssistantEntry(env)
 	testassert.NoError(t, err)
-	testassert.Require(t, decoded.RequestID != "" && decoded.Evidence != nil && decoded.Evidence.ToolNames != nil && len(decoded.Evidence.ToolNames) == 0 &&
+	testassert.Require(t, decoded.RequestID != "" && decoded.Evidence != nil && decoded.Evidence.Tools != nil && len(decoded.Evidence.Tools) == 0 &&
 		decoded.Evidence.BoundaryEntryID == hexID(1), "decoded assistant = %+v, want the request identity, the present-empty view, and the consumed evidence", decoded)
 	for _, name := range []string{"request_id", "evidence"} {
 		{
@@ -2954,13 +2705,13 @@ func TestAssistantEntryRequestEvidenceRequiredMembers(t *testing.T) {
 	// Present-empty prompt contribution survives the wire as present.
 	v := validAssistantEntry(testOpID)
 	v.Evidence.Prompt = ""
-	v.Evidence.ToolNames = []string{}
+	v.Evidence.Tools = fixtureDefinitions()
 	raw, err = encodeAssistantEntry(v)
 	testassert.NoError(t, err)
 	decoded, err = decodeAssistantEntry(Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Payload: raw})
 	testassert.NoError(t, err)
 	testassert.Require(t, decoded.Evidence.Prompt == "", "prompt contribution = %+v, want the empty prompt retained", decoded.Evidence.Prompt)
-	testassert.Require(t, decoded.Evidence.ToolNames != nil && len(decoded.Evidence.ToolNames) == 0, "tool view = %+v, want the present-empty view retained", decoded.Evidence.ToolNames)
+	testassert.Require(t, decoded.Evidence.Tools != nil && len(decoded.Evidence.Tools) == 0, "tool view = %+v, want the present-empty view retained", decoded.Evidence.Tools)
 	// Decoded evidence is deep-owned: mutating it cannot reach a later decode.
 	decoded.Evidence.BoundaryEntryID = hexID(9)
 	if len(decoded.Evidence.HookIDs) > 0 {
@@ -2974,9 +2725,8 @@ func TestAssistantEntryRequestEvidenceRequiredMembers(t *testing.T) {
 func TestAssistantEvidenceIsStoredAdvertisement(t *testing.T) {
 	for _, operationID := range []string{testOpID, ""} {
 		v := validAssistantEntry(operationID)
-		v.Evidence.ToolNames = []string{"echo"}
+		v.Evidence.Tools = fixtureDefinitions("echo")
 		call := validToolCallRecord()
-		call.NormalizedArguments = json.RawMessage(`{"x":1}`)
 		v.ToolCalls = []toolCallRecord{call}
 		raw, err := encodeAssistantEntry(v)
 		testassert.NoError(t, err)
@@ -2989,7 +2739,7 @@ func TestAssistantEvidenceIsStoredAdvertisement(t *testing.T) {
 			t.Errorf("operation %q: valid evidence-only assistant refused: %v", operationID, err)
 			continue
 		}
-		if !reflect.DeepEqual(decoded.Evidence.ToolNames, []string{"echo"}) || string(decoded.ToolCalls[0].NormalizedArguments) != `{"x":1}` {
+		if !reflect.DeepEqual(fixtureDefinitionNames(decoded.Evidence.Tools), []string{"echo"}) {
 			t.Fatalf("decoded = %+v", decoded)
 		}
 		env.Payload = setKey(raw, "advertised_names", json.RawMessage(`["echo"]`))
@@ -3017,15 +2767,15 @@ func TestRequestEvidenceContributionMessageDomain(t *testing.T) {
 	v := RequestEvidence{
 		BoundaryEntryID:   hexID(1),
 		CheckpointEntryID: hexID(2),
-		Messages:          []model.Message{owned},
+		Edits:             []RequestMessageEdit{{Message: &owned}},
 		HookIDs:           []HookIdentity{{ExtensionID: "ext.one", HookID: "hook.one"}},
 	}
 	raw, err := encodeRequestEvidence(v)
 	testassert.NoError(t, err)
 	decoded, err := decodeRequestEvidence(raw)
 	testassert.NoError(t, err)
-	testassert.Require(t, len(decoded.Messages) == 1, "decoded messages = %+v, want the recorded contribution", decoded.Messages)
-	m := decoded.Messages[0]
+	testassert.Require(t, len(decoded.Edits) == 1, "decoded edits = %+v, want the recorded contribution", decoded.Edits)
+	m := *decoded.Edits[0].Message
 	testassert.Require(t, m.Role == model.RoleAssistant && m.TextContent() == "carried" && m.Refusal == "declined part" &&
 		m.Name == "contributor" && m.Source == testModelRef() && string(m.Extra["note"]) == `{"kept":1}`,
 		"decoded contribution = %+v, want every permitted shared field retained", m)
@@ -3037,7 +2787,7 @@ func TestRequestEvidenceContributionMessageDomain(t *testing.T) {
 	})
 	testassert.Require(t, cerr == nil, "constructor: %v", cerr)
 	bad := v
-	bad.Messages = []model.Message{withCalls}
+	bad.Edits = []RequestMessageEdit{{Message: &withCalls}}
 	{
 		_, err := encodeRequestEvidence(bad)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "tool calls"), "encode-side tool-call contribution: %v", err)
@@ -3045,13 +2795,13 @@ func TestRequestEvidenceContributionMessageDomain(t *testing.T) {
 	withCallID, cerr := model.NewMessage(model.Message{Role: model.RoleTool, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}, ToolCallID: "call-1"})
 	testassert.Require(t, cerr == nil, "constructor: %v", cerr)
 	bad2 := v
-	bad2.Messages = []model.Message{withCallID}
+	bad2.Edits = []RequestMessageEdit{{Message: &withCallID}}
 	{
 		_, err := encodeRequestEvidence(bad2)
 		testassert.Require(t, err != nil && strings.Contains(err.Error(), "call id"), "encode-side tool-result call id: %v", err)
 	}
 	{
-		badRaw := setKey(raw, "messages", json.RawMessage(`[{"role":"assistant","source":{"provider":"prov","model":"m"},"content":[{"kind":"text","text":"wire"}],"tool_calls":[{"id":"c","name":"echo","arguments_base64":"e30="}]}]`))
+		badRaw := setKey(raw, "edits", json.RawMessage(`[{"message":{"role":"assistant","source":{"provider":"prov","model":"m"},"content":[{"kind":"text","text":"wire"}],"tool_calls":[{"id":"c","name":"echo","arguments_base64":"e30="}]}}]`))
 		_, err := decodeRequestEvidence(badRaw)
 		testassert.Require(t, err != nil, "decode-side tool-call contribution must reject")
 	}
@@ -3064,13 +2814,13 @@ func TestRequestEvidenceContributionMessageDomain(t *testing.T) {
 func TestRequestConsequencePresenceDomain(t *testing.T) {
 	empty := ""
 	v := validRequestBoundHookResult(hookSucceeded)
-	v.Consequence = &RequestConsequence{Prompt: &empty, ToolNames: []string{}}
+	v.Consequence = &RequestConsequence{Prompt: &empty, Tools: fixtureDefinitions()}
 	raw, err := encodeHookResultEntry(v)
 	testassert.NoError(t, err)
 	decoded, err := decodeHookResultEntry(Entry{SessionID: testSessionID, ID: v.EntryID, OperationID: testOpID, Kind: EntryHookResult, Payload: raw})
 	testassert.NoError(t, err)
 	testassert.Require(t, decoded.Consequence != nil && decoded.Consequence.Prompt != nil && *decoded.Consequence.Prompt == "" &&
-		decoded.Consequence.ToolNames != nil && len(decoded.Consequence.ToolNames) == 0 && decoded.Consequence.Messages == nil,
+		decoded.Consequence.Tools != nil && len(decoded.Consequence.Tools) == 0 && decoded.Consequence.Edits == nil,
 		"decoded consequence = %+v, want present-empty prompt and present-empty selection retained", decoded.Consequence)
 	missing := v
 	missing.Consequence = nil
@@ -3087,79 +2837,31 @@ func TestRequestConsequencePresenceDomain(t *testing.T) {
 	}
 }
 
-// TestMaintenanceConsumedRequestIdentityDomain proves the consumed source's
-// codec domain on both record families: absence is the valid manual shape, a
-// present value must be a non-empty identity (empty and null reject on the
-// wire, and a value set on the Go side encodes), and a present identity
-// round-trips unchanged.
-func TestMaintenanceConsumedRequestIdentityDomain(t *testing.T) {
+// TestMaintenanceRecordsRejectRetiredConsumedRequestIdentity proves the
+// retired conversation-source association on both record families: the
+// maintenance checkpoint and settlement schemas carry no such member, so a
+// stored value rejects through the exact-key rule rather than surviving as a
+// dead reference.
+func TestMaintenanceRecordsRejectRetiredConsumedRequestIdentity(t *testing.T) {
 	t.Run("compaction", func(t *testing.T) {
-		absent := validCompactionEntry(testOpID)
-		absent.ConsumedRequestID = ""
-		raw, err := encodeContextCheckpointEntry(absent)
+		entry := validCompactionEntry(testOpID)
+		raw, err := encodeContextCheckpointEntry(entry)
 		testassert.NoError(t, err)
-		testassert.Require(t, !strings.Contains(string(raw), "consumed_request_id"), "encode-side absence: %s", raw)
-		decoded, err := decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: absent.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: raw})
-		testassert.NoError(t, err)
-		testassert.Equal(t, decoded.ConsumedRequestID, "")
-		source := validCompactionEntry(testOpID)
-		source.ConsumedRequestID = "request-source"
-		raw, err = encodeContextCheckpointEntry(source)
-		testassert.NoError(t, err)
-		decoded, err = decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: source.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: raw})
-		testassert.NoError(t, err)
-		testassert.Equal(t, decoded.ConsumedRequestID, "request-source")
 		{
-			_, derr := decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: source.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`""`))})
-			testassert.Require(t, derr != nil, "a present-empty consumed source must reject")
-		}
-		{
-			_, derr := decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: source.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`null`))})
-			testassert.Require(t, derr != nil, "a null consumed source must reject")
+			_, derr := decodeContextCheckpointEntry(Entry{SessionID: testSessionID, ID: entry.EntryID, OperationID: testOpID, Kind: EntryCompaction, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`"request-source"`))})
+			testassert.Require(t, derr != nil, "a retired consumed source must reject")
 		}
 	})
 	t.Run("settlement", func(t *testing.T) {
 		base := validSettlementEntry()
 		base.RequestID = "request-producer"
-		base.ConsumedRequestID = "request-source"
 		base.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1)}
-		base.CompactionUsage = true // the maintenance provenance the consumed identity belongs to
+		base.CompactionUsage = true
 		raw, err := encodeOperationSettlementEntry(base)
 		testassert.NoError(t, err)
 		{
-			// Forbidden siblings: a consumed source attached to no evidence,
-			// or to an unmarked (non-maintenance) settlement.
-			noEvidence := base
-			noEvidence.Evidence = nil
-			_, cerr := encodeOperationSettlementEntry(noEvidence)
-			testassert.Require(t, cerr != nil && strings.Contains(cerr.Error(), "maintenance evidence provenance"), "encode = %v, want the source-evidence relation to reject", cerr)
-			unmarked := base
-			unmarked.CompactionUsage = false
-			_, cerr = encodeOperationSettlementEntry(unmarked)
-			testassert.Require(t, cerr != nil && strings.Contains(cerr.Error(), "maintenance evidence provenance"), "encode = %v, want the unmarked settlement to reject a consumed source", cerr)
-			valid := base
-			valid.ConsumedRequestID = ""
-			_, verr := encodeOperationSettlementEntry(valid)
-			testassert.NoError(t, verr) // the ordinary evidence-only maintenance settlement stays valid
-		}
-		env := Entry{SessionID: testSessionID, ID: base.EntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: raw}
-		decoded, err := decodeOperationSettlementEntry(env)
-		testassert.NoError(t, err)
-		testassert.Equal(t, decoded.ConsumedRequestID, "request-source")
-		{
-			_, derr := decodeOperationSettlementEntry(Entry{SessionID: testSessionID, ID: base.EntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`""`))})
-			testassert.Require(t, derr != nil, "a present-empty consumed source must reject")
-		}
-		{
-			_, derr := decodeOperationSettlementEntry(Entry{SessionID: testSessionID, ID: base.EntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`null`))})
-			testassert.Require(t, derr != nil, "a null consumed source must reject")
-		}
-		{
-			plain := base
-			plain.ConsumedRequestID = ""
-			plainRaw, err := encodeOperationSettlementEntry(plain)
-			testassert.NoError(t, err)
-			testassert.Require(t, !strings.Contains(string(plainRaw), "consumed_request_id"), "encode-side absence: %s", plainRaw)
+			_, derr := decodeOperationSettlementEntry(Entry{SessionID: testSessionID, ID: base.EntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: setKey(raw, "consumed_request_id", json.RawMessage(`"request-source"`))})
+			testassert.Require(t, derr != nil, "a retired consumed source must reject")
 		}
 	})
 }
@@ -3192,10 +2894,10 @@ func TestForbiddenInputArgumentsMembershipReasonUniformity(t *testing.T) {
 		name   string
 		effect ActiveEffect
 	}{
-		{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
+		{"request-bound hook intent", ActiveEffect{Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "request-one", Purpose: InvocationPurposeConversation, HookID: "cap.hook.one", ExtensionID: "cap-a", Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
 		{"conversation model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "request-one", Model: &model.ModelRef{Provider: "prov", Model: "m"}, Purpose: InvocationPurposeConversation, Evidence: &RequestEvidence{BoundaryEntryID: hexID(1)}}},
-		{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance}},
-		{"concrete tool intent", ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`)}},
+		{"maintenance model intent", ActiveEffect{Kind: EffectModel, ResultEntryID: hexID(9), RequestID: "maintenance-one", Model: &model.ModelRef{Provider: "prov", Model: "compact"}, Purpose: InvocationPurposeMaintenance, Evidence: &RequestEvidence{SummaryInput: []model.Message{}}}},
+		{"concrete tool intent", ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(`{}`), Implementation: &ToolImplementation{ID: "echo"}}},
 	}
 	for _, b := range bases {
 		raw, err := encodeActiveEffect(b.effect)
@@ -3355,14 +3057,14 @@ func TestOpaqueFramesPreserveBytesAndRejectInvalidFrames(t *testing.T) {
 
 func TestRequestEvidenceRequiresConcretePromptAndNames(t *testing.T) {
 	for _, names := range [][]string{nil, {}} {
-		raw, err := encodeRequestEvidence(RequestEvidence{BoundaryEntryID: hexID(1), ToolNames: names})
+		raw, err := encodeRequestEvidence(RequestEvidence{BoundaryEntryID: hexID(1), Tools: fixtureDefinitions(names...)})
 		testassert.NoError(t, err)
 		got, err := decodeRequestEvidence(raw)
 		testassert.NoError(t, err)
-		if got.Prompt != "" || got.ToolNames == nil || len(got.ToolNames) != 0 {
+		if got.Prompt != "" || got.Tools == nil || len(got.Tools) != 0 {
 			t.Fatalf("evidence = %+v", got)
 		}
-		for _, key := range []string{"prompt", "tool_names"} {
+		for _, key := range []string{"prompt", "tools"} {
 			for _, broken := range []json.RawMessage{dropKey(raw, key), setKey(raw, key, json.RawMessage(`null`))} {
 				if _, err := decodeRequestEvidence(broken); err == nil {
 					t.Errorf("accepted malformed %s: %s", key, broken)
@@ -3371,11 +3073,11 @@ func TestRequestEvidenceRequiresConcretePromptAndNames(t *testing.T) {
 		}
 	}
 	assistant := validAssistantEntry(testOpID)
-	assistant.Evidence.ToolNames = []string{"echo"}
+	assistant.Evidence.Tools = fixtureDefinitions("echo")
 	if _, err := encodeAssistantEntry(assistant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := encodeRequestEvidence(RequestEvidence{BoundaryEntryID: hexID(1), ToolNames: []string{"echo", "echo"}}); err == nil {
+	if _, err := encodeRequestEvidence(RequestEvidence{BoundaryEntryID: hexID(1), Tools: fixtureDefinitions("echo", "echo")}); err == nil {
 		t.Fatal("duplicate evidence names accepted")
 	}
 }
@@ -3392,7 +3094,7 @@ func TestArgumentAndMetadataFramesAcrossOwners(t *testing.T) {
 	if string(gotHook.Arguments) != raw {
 		t.Fatalf("hook arguments changed: %s", gotHook.Arguments)
 	}
-	effect := ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(raw)}
+	effect := ActiveEffect{Kind: EffectTool, ResultEntryID: hexID(9), ToolCallID: "call-1", FinalArguments: json.RawMessage(raw), Implementation: &ToolImplementation{ID: "echo"}}
 	effectWire, err := encodeActiveEffect(effect)
 	testassert.NoError(t, err)
 	gotEffect, err := decodeActiveEffect(wireObject(t, effectWire))
@@ -3636,5 +3338,184 @@ func TestImplementationCaptureSettingsUseCanonicalFraming(t *testing.T) {
 		} else {
 			testassert.Require(t, err != nil, "%s framing accepted", mutation.name)
 		}
+	}
+}
+
+// TestFrozenInputEvidenceShape proves checkpoint and maintenance-settlement
+// input evidence carries only canonical references: effective prompt, message,
+// tool-name or hook-identity members are rejected on encoding and cold
+// decoding, and a present maintenance settlement record requires its boundary.
+func TestFrozenInputEvidenceShape(t *testing.T) {
+	t.Run("checkpoint", func(t *testing.T) {
+		for _, row := range []struct {
+			name   string
+			mutate func(*RequestEvidence)
+		}{
+			{"prompt", func(v *RequestEvidence) { v.Prompt = "leaked" }},
+			{"messages", func(v *RequestEvidence) {
+				v.Edits = []RequestMessageEdit{{Message: &model.Message{Role: model.RoleUser, Content: admissionContent("leaked")}}}
+			}},
+			{"tool names", func(v *RequestEvidence) { v.Tools = fixtureDefinitions("echo") }},
+			{"hook ids", func(v *RequestEvidence) { v.HookIDs = []HookIdentity{{ExtensionID: "ext", HookID: "hook"}} }},
+		} {
+			t.Run(row.name+" encode", func(t *testing.T) {
+				entry := validCompactionEntry(testOpID)
+				row.mutate(entry.Evidence)
+				_, err := encodeContextCheckpointEntry(entry)
+				testassert.Require(t, err != nil && strings.Contains(err.Error(), "frozen input evidence"), "encode = %v, want the frozen-input shape rejection", err)
+			})
+		}
+		raw, err := encodeContextCheckpointEntry(validCompactionEntry(testOpID))
+		testassert.NoError(t, err)
+		env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryCompaction, Sequence: 1, CommittedAt: testTime}
+		obj := wireObject(t, raw)
+		evidence := wireObject(t, obj["evidence"])
+		evidence["prompt"] = mustMarshal("leaked")
+		obj["evidence"] = mustMarshal(evidence)
+		env.Payload = mustMarshal(obj)
+		_, err = decodeContextCheckpointEntry(env)
+		testassert.Require(t, err != nil && strings.Contains(err.Error(), "frozen input evidence"), "decode = %v, want the frozen-input shape rejection", err)
+	})
+
+	t.Run("maintenance settlement", func(t *testing.T) {
+		base := validSettlementEntry()
+		base.Status, base.Detail = OperationFailure, "summary failed"
+		base.CompactionUsage = true
+		base.RequestID = "request-one"
+		base.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1)}
+		raw, err := encodeOperationSettlementEntry(base)
+		testassert.NoError(t, err)
+		env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Payload: raw}
+		got, err := decodeOperationSettlementEntry(env)
+		testassert.NoError(t, err)
+		testassert.Require(t, got.CompactionUsage && got.Evidence != nil && got.Evidence.BoundaryEntryID == hexID(1), "round trip = %+v, want the canonical reference only", got)
+
+		for _, row := range []struct {
+			name   string
+			mutate func(*RequestEvidence)
+		}{
+			{"missing boundary", func(v *RequestEvidence) { v.BoundaryEntryID = "" }},
+			{"prompt", func(v *RequestEvidence) { v.Prompt = "leaked" }},
+			{"messages", func(v *RequestEvidence) {
+				v.Edits = []RequestMessageEdit{{Message: &model.Message{Role: model.RoleUser, Content: admissionContent("leaked")}}}
+			}},
+			{"tool names", func(v *RequestEvidence) { v.Tools = fixtureDefinitions("echo") }},
+			{"hook ids", func(v *RequestEvidence) { v.HookIDs = []HookIdentity{{ExtensionID: "ext", HookID: "hook"}} }},
+		} {
+			t.Run(row.name+" encode", func(t *testing.T) {
+				candidate := base
+				evidence := *base.Evidence
+				row.mutate(&evidence)
+				candidate.Evidence = &evidence
+				_, err := encodeOperationSettlementEntry(candidate)
+				testassert.Require(t, err != nil && strings.Contains(err.Error(), "frozen input evidence"), "encode = %v, want the frozen-input shape rejection", err)
+			})
+		}
+		obj := wireObject(t, raw)
+		evidence := wireObject(t, obj["evidence"])
+		evidence["prompt"] = mustMarshal("leaked")
+		obj["evidence"] = mustMarshal(evidence)
+		env.Payload = mustMarshal(obj)
+		_, err = decodeOperationSettlementEntry(env)
+		testassert.Require(t, err != nil && strings.Contains(err.Error(), "frozen input evidence"), "decode = %v, want the frozen-input shape rejection", err)
+	})
+}
+
+// TestRequestBoundHookResultPurposeRequired proves a request-bound hook
+// result without its actual purpose is rejected on cold decoding; the purpose
+// is what makes empty-base summary evidence interpretable without a boundary.
+func TestRequestBoundHookResultPurposeRequired(t *testing.T) {
+	v := validRequestBoundHookResult(hookSucceeded)
+	raw, err := encodeHookResultEntry(v)
+	testassert.NoError(t, err)
+	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryHookResult}
+	for _, payload := range []json.RawMessage{
+		dropKey(raw, "purpose"),
+		setKey(raw, "purpose", json.RawMessage(`""`)),
+		setKey(raw, "purpose", json.RawMessage(`"other"`)),
+	} {
+		env.Payload = payload
+		_, err := decodeHookResultEntry(env)
+		testassert.Require(t, err != nil, "hook result without its actual purpose decoded: %s", payload)
+	}
+}
+
+func TestRequestBoundHookSummaryEvidence(t *testing.T) {
+	evidence := &RequestEvidence{SummaryBase: []model.Message{}}
+	intent, err := encodeActiveEffect(ActiveEffect{
+		Kind: EffectHook, ResultEntryID: hexID(9), RequestID: "summary", Purpose: InvocationPurposeMaintenance,
+		HookID: "request-hook", ExtensionID: "ext", Evidence: evidence,
+	})
+	testassert.NoError(t, err)
+	result := validRequestBoundHookResult(hookSucceeded)
+	result.Purpose, result.InputEvidence = InvocationPurposeMaintenance, evidence
+	resultRaw, err := encodeHookResultEntry(result)
+	testassert.NoError(t, err)
+	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryHookResult}
+	for _, owner := range []struct {
+		key    string
+		raw    json.RawMessage
+		decode func(json.RawMessage) (*RequestEvidence, error)
+	}{
+		{"evidence", intent, func(raw json.RawMessage) (*RequestEvidence, error) {
+			got, err := decodeActiveEffect(wireObject(t, raw))
+			return got.Evidence, err
+		}},
+		{"input_evidence", resultRaw, func(raw json.RawMessage) (*RequestEvidence, error) {
+			entry := env
+			entry.Payload = raw
+			got, err := decodeHookResultEntry(entry)
+			return got.InputEvidence, err
+		}},
+	} {
+		t.Run(owner.key, func(t *testing.T) {
+			got, err := owner.decode(owner.raw)
+			testassert.NoError(t, err)
+			testassert.Require(t, got.SummaryBase != nil && len(got.SummaryBase) == 0, "empty summary base not preserved: %+v", got)
+			raw := wireObject(t, owner.raw)[owner.key]
+			for _, tc := range []struct {
+				name string
+				raw  json.RawMessage
+			}{
+				{"missing base", dropKey(raw, "summary_base")},
+				{"model input instead of base", setKey(dropKey(raw, "summary_base"), "summary_input", json.RawMessage(`[]`))},
+				{"model input alongside base", setKey(raw, "summary_input", json.RawMessage(`[]`))},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if _, err := owner.decode(setKey(owner.raw, owner.key, tc.raw)); err == nil {
+						t.Fatal("accepted invalid summary hook evidence")
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestModelIntentRequiresRunningSlot proves every model intent, including a
+// maintenance summary on an empty base, requires its matching purpose-bound
+// running slot; the empty base permits no canonical boundary, not a missing
+// slot.
+func TestModelIntentRequiresRunningSlot(t *testing.T) {
+	for _, purpose := range []InvocationPurpose{InvocationPurposeConversation, InvocationPurposeMaintenance} {
+		t.Run(string(purpose), func(t *testing.T) {
+			record := validOperationRecord()
+			modelRef := model.ModelRef{Provider: "prov", Model: "m"}
+			record.State.ActiveEffect = &ActiveEffect{
+				Kind:          EffectModel,
+				ResultEntryID: hexID(9),
+				RequestID:     "request-one",
+				Model:         &modelRef,
+				Purpose:       purpose,
+			}
+			if purpose == InvocationPurposeConversation {
+				record.State.ActiveEffect.Evidence = &RequestEvidence{BoundaryEntryID: hexID(1)}
+			} else {
+				record.State.ActiveEffect.Evidence = &RequestEvidence{SummaryInput: []model.Message{}}
+			}
+			record.State.Request = nil
+			_, err := encodeOperationRegister(record)
+			testassert.Require(t, err != nil && strings.Contains(err.Error(), "request-bound active effect requires the published running request state"),
+				"encode = %v, want the missing-slot rejection", err)
+		})
 	}
 }

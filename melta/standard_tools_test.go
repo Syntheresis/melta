@@ -11,7 +11,6 @@ import (
 
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
-	"github.com/Syntheresis/melta/internal/tool"
 	"github.com/Syntheresis/melta/model"
 )
 
@@ -33,14 +32,13 @@ func directTools(dataDir string) map[string]Tool {
 }
 
 // callToolContext is the ToolContext the direct tests prepare with: a real
-// temporary Workspace, a valid-looking admitted-input identity, the zero
-// Invocation (defaults), and the given constraints.
-func callToolContext(workspace string, constraints ToolConstraints) ToolContext {
+// temporary Workspace, a valid-looking admitted-input identity, and the zero
+// Invocation (defaults).
+func callToolContext(workspace string) ToolContext {
 	return ToolContext{
 		Workspace:     workspace,
 		AdmittedEntry: harness.EntryRef{SessionID: testSessionID, EntryID: testEntryID},
 		Invocation:    Invocation{},
-		Constraints:   constraints,
 	}
 }
 
@@ -108,37 +106,17 @@ func TestValidateConfigSettings(t *testing.T) {
 	}
 }
 
-func TestDescribeAvailabilityAndDefinitions(t *testing.T) {
-	// The describe functions are static method values needing no instance;
-	// the composed open contract is asserted in the runtime package's
-	// composed tools suite.
-	describe := map[string]func(Invocation, ToolConstraints, harness.SessionIdentity) (ToolDescription, error){
-		"read_file":   readTool{}.describe,
-		"write_file":  writeTool{}.describe,
-		"edit_file":   editTool{}.describe,
-		"apply_patch": patchTool{}.describe,
-		"run_command": runCommandTool{}.describe,
-		"process":     processTool{}.describe,
-		"sleep":       sleepTool{}.describe,
-	}
-
-	cases := []struct {
-		name        string
-		constraints ToolConstraints
-		available   map[string]bool
-	}{
-		{"unconstrained agent", ToolConstraints{}, map[string]bool{"read_file": true, "write_file": true, "edit_file": true, "apply_patch": true, "run_command": true, "process": true, "sleep": true}},
-		{"readonly without write dir", ToolConstraints{Readonly: true}, map[string]bool{"read_file": true, "write_file": false, "edit_file": false, "apply_patch": false, "run_command": true, "process": true, "sleep": true}},
-		{"readonly with write dir", ToolConstraints{Readonly: true, WriteDir: "/w"}, map[string]bool{"read_file": true, "write_file": true, "edit_file": true, "apply_patch": true, "run_command": true, "process": true, "sleep": true}},
-	}
-	for _, tc := range cases {
-		for name, want := range tc.available {
-			got, err := describe[name](Invocation{}, tc.constraints, harness.SessionIdentity{})
-			testassert.Require(t, err == nil, "%s: describe %s: %v", tc.name, name, err)
-			testassert.Check(t, got.Available == want, "%s: describe %s Available = %v, want %v", tc.name, name, got.Available, want)
-			testassert.Check(t, got.Definition.Name == name, "%s: describe %s declares name %q", tc.name, name, got.Definition.Name)
-			testassert.Check(t, got.Definition.Description != "" && json.Valid(got.Definition.Parameters), "%s: describe %s produced an unusable definition", tc.name, name)
-		}
+// TestStandardToolDeclarations proves the baseline advertisement: the seven
+// standard declarations arrive in order, each with its own name, a nonempty
+// description and a valid parameters schema.
+func TestStandardToolDeclarations(t *testing.T) {
+	want := []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"}
+	declarations := standardToolDeclarations()
+	testassert.Equal(t, len(declarations), len(want))
+	for i, declaration := range declarations {
+		testassert.Check(t, declaration.id == want[i], "declaration %d id = %q, want %q", i, declaration.id, want[i])
+		testassert.Check(t, declaration.definition.Name == want[i], "declaration %d name = %q, want %q", i, declaration.definition.Name, want[i])
+		testassert.Check(t, declaration.definition.Description != "" && json.Valid(declaration.definition.Parameters), "declaration %d produced an unusable definition", i)
 	}
 }
 
@@ -214,38 +192,38 @@ const wantProcessParameters = `{
   "required": ["action"]
 }`
 
-// TestRunCommandDescriptionsAndSchemasMatchRetained pins both run_command
-// surfaces to the retained texts: the ordinary Agent receives the complete
-// description with the background bullets and the readonly Agent receives
-// the retained readonly description; both share the retained schema. The
-// expectations are independent test-local fixtures, not the production
-// constants.
-func TestRunCommandDescriptionsAndSchemasMatchRetained(t *testing.T) {
-	ordinary, err := runCommandTool{}.describe(Invocation{}, ToolConstraints{}, harness.SessionIdentity{})
-	testassert.NoError(t, err)
-	testassert.Check(t, ordinary.Definition.Description == wantRunCommandDescription, "ordinary description = %q, want the retained description %q", ordinary.Definition.Description, wantRunCommandDescription)
-	assertJSONEqual(t, ordinary.Definition.Parameters, json.RawMessage(wantRunCommandParameters))
-
-	readonly, err := runCommandTool{}.describe(Invocation{}, ToolConstraints{Readonly: true}, harness.SessionIdentity{})
-	testassert.NoError(t, err)
-	testassert.Check(t, readonly.Definition.Description == tool.ReadOnlyRunCommandDescription, "readonly description = %q, want the retained readonly description", readonly.Definition.Description)
-	assertJSONEqual(t, readonly.Definition.Parameters, json.RawMessage(wantRunCommandParameters))
-	testassert.Check(t, ordinary.Available && readonly.Available, "availability ordinary/readonly = %v/%v, want both available", ordinary.Available, readonly.Available)
+// TestRunCommandDescriptionAndSchemaMatchRetained pins the ordinary
+// run_command surface to the retained text: the complete description with the
+// background bullets and the retained schema. The expectations are independent
+// test-local fixtures, not the production constants.
+func TestRunCommandDescriptionAndSchemaMatchRetained(t *testing.T) {
+	var ordinary model.ToolDefinition
+	for _, declaration := range standardToolDeclarations() {
+		if declaration.id == "run_command" {
+			ordinary = declaration.definition
+		}
+	}
+	testassert.Check(t, ordinary.Description == wantRunCommandDescription, "ordinary description = %q, want the retained description %q", ordinary.Description, wantRunCommandDescription)
+	assertJSONEqual(t, ordinary.Parameters, json.RawMessage(wantRunCommandParameters))
 }
 
 // TestProcessDescriptionAndSchemaMatchRetained pins the process tool's
 // model-visible surface to the independent test-local fixtures.
 func TestProcessDescriptionAndSchemaMatchRetained(t *testing.T) {
-	got, err := processTool{}.describe(Invocation{}, ToolConstraints{}, harness.SessionIdentity{})
-	testassert.NoError(t, err)
-	testassert.Check(t, got.Definition.Description == wantProcessDescription, "process description = %q, want the retained description %q", got.Definition.Description, wantProcessDescription)
-	assertJSONEqual(t, got.Definition.Parameters, json.RawMessage(wantProcessParameters))
-	testassert.Check(t, got.Definition.Name == "process" && got.Available, "process definition = %+v, want name process and available", got)
+	var got model.ToolDefinition
+	for _, declaration := range standardToolDeclarations() {
+		if declaration.id == "process" {
+			got = declaration.definition
+		}
+	}
+	testassert.Check(t, got.Description == wantProcessDescription, "process description = %q, want the retained description %q", got.Description, wantProcessDescription)
+	assertJSONEqual(t, got.Parameters, json.RawMessage(wantProcessParameters))
+	testassert.Check(t, got.Name == "process", "process definition = %+v, want name process", got)
 }
 
 func TestNormalizeArguments(t *testing.T) {
 	byID := directTools(t.TempDir())
-	tc := callToolContext(t.TempDir(), ToolConstraints{})
+	tc := callToolContext(t.TempDir())
 
 	t.Run("read_file applies defaults and strips private fields", func(t *testing.T) {
 		raw, err := normalize(t, byID["read_file"], tc, "read_file", `{"path":"a.txt","_melta_receipt":"x"}`)
@@ -279,7 +257,6 @@ func TestNormalizeArguments(t *testing.T) {
 			"write_file2": `{"path":"a","content":5}`,
 			"edit_file":   `{"path":"a","old_string":"x","new_string":5}`,
 			"edit_file2":  `{"path":"a","old_string":"x","new_string":"y","replace_all":"yes"}`,
-			"apply_patch": `{"input":5}`,
 		} {
 			toolName := name
 			if strings.HasSuffix(toolName, "2") {
@@ -316,7 +293,7 @@ func TestNormalizeArguments(t *testing.T) {
 	})
 	t.Run("malformed, null and trailing argument bytes are validation errors", func(t *testing.T) {
 		for _, args := range []string{``, `not json`, `null`, `[1]`, `{"path":"a"} trailing`, `"str"`} {
-			for _, name := range []string{"read_file", "write_file", "edit_file", "apply_patch", "run_command", "process", "sleep"} {
+			for _, name := range []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"} {
 				{
 					_, err := normalize(t, byID[name], tc, name, args)
 					testassert.Check(t, err != nil, "%s normalized %q, want rejection", name, args)
@@ -326,85 +303,51 @@ func TestNormalizeArguments(t *testing.T) {
 	})
 }
 
-// bindingChangePatchInput builds one add-file patch call over the given path
-// for the binding-witness oracle.
-func bindingChangePatchInput(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]string{"input": "*** Begin Patch\n*** Add File: " + path + "\n+new\n*** End Patch"})
-	testassert.NoError(t, err)
-	return string(raw)
-}
-
 // TestPrepareBindingSurvivesCanonicalPathsRepoint proves the one-binding
-// contract at the plugin boundary: the canonical Workspace root and write-dir
-// boundary the plugin resolves for containment are the same witnesses the
-// shared preparation binds, so repointing either symlink between the plugin's
-// resolutions and the shared preparation's binding fails the execution with
-// the changed-binding error instead of executing under the repointed tree.
-// One cell per entry and bound slot: read binds the root; write, edit and
-// apply_patch bind the root and the write-dir.
+// contract at the plugin boundary: the canonical Workspace root the plugin
+// resolves for containment is the same witness the shared preparation binds,
+// so repointing the symlink between the plugin's resolution and the shared
+// preparation's binding fails the execution with the changed-binding error
+// instead of executing under the repointed tree.
 func TestPrepareBindingSurvivesCanonicalPathsRepoint(t *testing.T) {
 	cells := []struct {
-		name          string
-		toolID        string
-		args          string
-		slot          string // "root" repoints the workspace symlink, "write_dir" the write-dir symlink
-		content       string // planted in the repointed-to directory when nonempty
-		boundWriteDir bool   // the failure must name the pre-flip canonical write-dir as the bound value, not the empty-witness form
+		name    string
+		toolID  string
+		args    string
+		content string // planted in the repointed-to directory when nonempty
 	}{
-		{"read_file revalidates the root witness", "read_file", `{"path":"target.txt"}`, "root", "substituted\n", false},
-		{"write_file revalidates the root witness", "write_file", `{"path":"target.txt","content":"after"}`, "root", "", false},
-		{"write_file revalidates the write-dir witness", "write_file", `{"path":"wd/target.txt","content":"x"}`, "write_dir", "", false},
-		{"edit_file revalidates the root witness", "edit_file", `{"path":"target.txt","old_string":"beta","new_string":"BETA"}`, "root", "beta\n", false},
-		{"edit_file revalidates the write-dir witness", "edit_file", `{"path":"wd/target.txt","old_string":"beta","new_string":"BETA"}`, "write_dir", "beta\n", false},
-		{"apply_patch revalidates the root witness", "apply_patch", bindingChangePatchInput(t, "target.txt"), "root", "", false},
-		{"apply_patch revalidates the write-dir witness", "apply_patch", bindingChangePatchInput(t, "wd/target.txt"), "write_dir", "", true},
+		{"read_file revalidates the root witness", "read_file", `{"path":"target.txt"}`, "substituted\n"},
+		{"write_file revalidates the root witness", "write_file", `{"path":"target.txt","content":"after"}`, ""},
+		{"edit_file revalidates the root witness", "edit_file", `{"path":"target.txt","old_string":"beta","new_string":"BETA"}`, "beta\n"},
 	}
 	for _, cell := range cells {
 		cell := cell
 		t.Run(cell.name, func(t *testing.T) {
 			byID := directTools(t.TempDir())
-			var workspace, link, flipTo, preFlipWriteDir string
-			var constraints ToolConstraints
-			if cell.slot == "root" {
-				realA, realB := t.TempDir(), t.TempDir()
-				flipTo = realB
-				link = filepath.Join(t.TempDir(), "w")
-				workspace = link
-				testassert.NoError(t, os.Symlink(realA, link))
-			} else {
-				workspace = t.TempDir()
-				wdA, wdB := t.TempDir(), t.TempDir()
-				flipTo = wdB
-				preFlipWriteDir = wdA
-				link = filepath.Join(workspace, "wd")
-				testassert.NoError(t, os.Symlink(wdA, link))
-				constraints = ToolConstraints{WriteDir: "wd"}
-			}
+			realA, realB := t.TempDir(), t.TempDir()
+			flipTo := realB
+			link := filepath.Join(t.TempDir(), "w")
+			workspace := link
+			testassert.NoError(t, os.Symlink(realA, link))
 			if cell.content != "" {
 				testassert.NoError(t, os.WriteFile(filepath.Join(flipTo, "target.txt"), []byte(cell.content), 0o644))
 			}
 			// The seam repoints the symlink on its return: after the plugin's
-			// canonical resolutions, before the shared preparation binds.
+			// canonical resolution, before the shared preparation binds.
 			orig := canonicalPathsFn
-			canonicalPathsFn = func(root, writeDir string) (string, string, error) {
-				w, b, err := orig(root, writeDir)
+			canonicalPathsFn = func(root string) (string, error) {
+				w, err := orig(root)
 				if err != nil {
-					return w, b, err
+					return w, err
 				}
 				testassert.NoError(t, os.Remove(link))
 				testassert.NoError(t, os.Symlink(flipTo, link))
-				return w, b, err
+				return w, err
 			}
 			defer func() { canonicalPathsFn = orig }()
-			plan := prepare(t, byID[cell.toolID], callToolContext(workspace, constraints), cell.toolID, cell.args)
+			plan := prepare(t, byID[cell.toolID], callToolContext(workspace), cell.toolID, cell.args)
 			outcome := plan.Execute(context.Background())
 			testassert.Require(t, outcome.Result.Status == model.ResultError && strings.Contains(outcome.Result.Content, "changed"), "result = %+v, want the changed-binding failure without substitution", outcome.Result)
-			// The patch path threads the write-dir witness directly, so a
-			// dropped witness would fail with the empty-witness form
-			// ("changed from  to ..."); the real changed-binding error names
-			// the pre-flip canonical write-dir as the bound value.
-			testassert.Require(t, !cell.boundWriteDir || strings.Contains(outcome.Result.Content, preFlipWriteDir), "result = %+v, want the changed-binding error naming the bound write-dir %q", outcome.Result, preFlipWriteDir)
 		})
 	}
 }

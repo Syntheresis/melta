@@ -6,9 +6,6 @@ package agents
 
 import (
 	"bytes"
-	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,24 +13,17 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/toolargs"
 	"github.com/Syntheresis/melta/model"
-	"github.com/Syntheresis/melta/protocol"
 )
 
 const (
 	// ExtensionID is the supplied extension identity.
 	ExtensionID = "agents"
-	// DefinitionsCapabilityID is the concrete resolver capability the task
-	// tool and every named selection address.
-	DefinitionsCapabilityID = "agents.definitions"
 	// ConfigurationCapabilityID is the supplied pure configuration-edit
 	// service.
 	ConfigurationCapabilityID = "agents.configuration"
 	// TaskCapabilityID is the model-visible child-session tool.
 	TaskCapabilityID = "task"
-	// ModelEditID is the supplied set_model configuration edit.
-	ModelEditID = "set_model"
 )
 
 // taskDescriptionPrefix is the fixed model-facing introduction every task
@@ -90,156 +80,23 @@ func decodeSettings(raw json.RawMessage) (settings, error) {
 	return s, nil
 }
 
-// launchData is the tool's opaque ToolPlan payload: the validated call facts
-// needed by Execute after authorization.
-type launchData struct {
-	CallID         string                `json:"call_id"`
-	Prompt         string                `json:"prompt"`
-	Definition     harness.DefinitionRef `json:"definition"`
-	MaxConcurrent  int                   `json:"max_concurrent"`
-	MaxOutputBytes int                   `json:"max_output_bytes"`
-}
-
-// taskTool is the task contribution: unavailable to child Sessions, its
-// description composes the Subagent roster from the captured Agent roster,
-// preparation uses the settings retained at Open and validates the call
-// before declaring the one child.launch pair, and execution launches through
-// the declared host service.
-type taskTool struct {
-	settings settings
-}
-
-func (taskTool) describe(_ context.Context, input extension.DescribeInput) (extension.ToolDescription, error) {
-	var b strings.Builder
-	b.WriteString(taskDescriptionPrefix)
-	b.WriteString("\n\nAvailable subagent types:\n")
-	for _, at := range input.AgentTypes {
-		if at.Subagent && ownDefinition(at.Definition) {
-			fmt.Fprintf(&b, "- %s: %s\n", at.Name, at.Description)
-		}
-	}
-	return extension.ToolDescription{
-		Definition: model.ToolDefinition{
-			Name:        TaskCapabilityID,
-			Description: b.String(),
-			Parameters:  json.RawMessage(taskParameters),
-		},
-		Available: input.Session.ParentSessionID == "",
-	}, nil
-}
-
-func (taskTool) Normalize(_ extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	return normalizeCallArguments(call, normalizeTaskArgs)
-}
-
-func (t taskTool) Prepare(_ context.Context, tc extension.ToolContext, call model.ToolCall) extension.ToolPlan {
-	s := t.settings
-	// Preparation accepts only the committed normalized arguments: one
-	// strict decode-and-pass, never a second normalization.
-	args, err := toolargs.Decode(call.Arguments)
-	if err != nil {
-		return immediateError(call.ID, err)
-	}
-	prompt, ok := args["prompt"].(string)
-	if !ok {
-		return immediateError(call.ID, errors.New("missing 'prompt' parameter"))
-	}
-	subagentType, ok := args["subagent_type"].(string)
-	if !ok {
-		return immediateError(call.ID, errors.New("missing 'subagent_type' parameter"))
-	}
-	definition, err := resolveSubagent(subagentType, tc.AgentTypes)
-	if err != nil {
-		return immediateError(call.ID, fmt.Errorf("unknown subagent type %q: %w", subagentType, err))
-	}
-	data, err := json.Marshal(launchData{CallID: call.ID, Prompt: prompt, Definition: definition, MaxConcurrent: s.MaxConcurrent, MaxOutputBytes: s.MaxOutputBytes})
-	if err != nil {
-		return immediateError(call.ID, err)
-	}
-	return extension.ToolPlan{
-		Permissions: []harness.PermissionRequest{{Permission: harness.PermissionChildLaunch, Target: definition.PermissionTarget()}},
-		Data:        data,
-	}
-}
-
-func (taskTool) Execute(ctx context.Context, tc extension.ToolContext, plan extension.ToolPlan) harness.ToolOutcome {
-	var data launchData
-	if err := json.Unmarshal(plan.Data, &data); err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
-	}
-	callID := data.CallID
-	operationID, err := newOperationID()
-	if err != nil {
-		return launchOutcome(callID, err)
-	}
-	arguments, err := json.Marshal(struct {
-		Definition    harness.DefinitionRef `json:"definition"`
-		Prompt        string                `json:"prompt"`
-		OperationID   string                `json:"operation_id"`
-		MaxConcurrent int                   `json:"max_concurrent"`
-		OutputLimit   int                   `json:"output_limit"`
-	}{
-		Definition:    data.Definition,
-		Prompt:        data.Prompt,
-		OperationID:   operationID,
-		MaxConcurrent: data.MaxConcurrent,
-		OutputLimit:   data.MaxOutputBytes,
-	})
-	if err != nil {
-		return launchOutcome(callID, err)
-	}
-	result, err := tc.Calls.Call(ctx, "child_launch", "launch", arguments)
-	if err != nil {
-		return launchOutcome(callID, err)
-	}
-	if result.Failure != nil {
-		return launchOutcome(callID, errors.New(result.Failure.Message))
-	}
-	var launched struct {
-		ChildSessionID string `json:"child_session_id"`
-	}
-	if err := json.Unmarshal(result.Value, &launched); err != nil {
-		return launchOutcome(callID, err)
-	}
-	return harness.ToolOutcome{Result: model.ToolResult{
-		CallID:  callID,
-		Status:  model.ResultSuccess,
-		Content: fmt.Sprintf(taskStartedTemplate, launched.ChildSessionID),
-	}}
-}
-
-// ownDefinition reports whether one roster projection was supplied by this
-// extension's own resolver. The task tool advertises and launches only its
-// own definitions, even when another provider uses the same display name.
-func ownDefinition(ref protocol.DefinitionRef) bool {
-	return ref.ExtensionId == ExtensionID && ref.CapabilityId == DefinitionsCapabilityID
-}
-
-// resolveSubagent checks the captured roster for the exactly-named own
-// Subagent entry and returns its complete source-qualified reference: an
-// absent name and a present non-subagent type produce the retained inner
-// errors the caller wraps.
-func resolveSubagent(name string, roster []protocol.Agent) (harness.DefinitionRef, error) {
-	for _, at := range roster {
-		if at.Name != name || !ownDefinition(at.Definition) {
-			continue
-		}
-		if !at.Subagent {
-			return harness.DefinitionRef{}, errors.New("agent type is not available as a subagent")
-		}
-		return harness.DefinitionRef{
-			ExtensionID:  at.Definition.ExtensionId,
-			CapabilityID: at.Definition.CapabilityId,
-			DefinitionID: at.Definition.DefinitionId,
-		}, nil
-	}
-	return harness.DefinitionRef{}, fmt.Errorf("unknown agent type %q", name)
-}
-
 // launchOutcome renders one launch failure through the uniform tool-error
 // path: the harness's rejection details are model-facing and arrive unwrapped.
 func launchOutcome(callID string, err error) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
+	return launchOutcomeWithKey(callID, err, "child_session_id")
+}
+
+func launchOutcomeWithKey(callID string, err error, key string) harness.ToolOutcome {
+	content := err.Error()
+	var callErr *extension.CallError
+	if errors.As(err, &callErr) && len(callErr.Partial) != 0 {
+		var partial map[string]json.RawMessage
+		var id string
+		if json.Unmarshal(callErr.Partial, &partial) == nil && json.Unmarshal(partial[key], &id) == nil && id != "" {
+			content += "\nSession ID: " + id
+		}
+	}
+	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: content}}
 }
 
 // immediateError is the normalization-class immediate outcome: status error
@@ -249,15 +106,6 @@ func immediateError(callID string, cause error) extension.ToolPlan {
 	return extension.ToolPlan{Immediate: &harness.ToolOutcome{
 		Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: cause.Error()},
 	}}
-}
-
-// newOperationID mints a fresh 32-lowercase-hex operation identity.
-func newOperationID() (string, error) {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf[:]), nil
 }
 
 // normalizeTaskArgs is the task tool's member validator: private
@@ -282,7 +130,7 @@ func normalizeTaskArgs(args map[string]any) (map[string]any, error) {
 
 // normalizeCallArguments is the one shared Normalize body.
 func normalizeCallArguments(call model.ToolCall, normalize func(map[string]any) (map[string]any, error)) (json.RawMessage, error) {
-	args, err := toolargs.Decode(call.Arguments)
+	args, err := decodeArguments(call.Arguments)
 	if err != nil {
 		return nil, err
 	}

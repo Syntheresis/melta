@@ -166,10 +166,7 @@ func TestRuntimeValueConfigurationAndUnusableHome(t *testing.T) {
 			var record harness.SessionRecord
 			testassert.NoError(t, r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
 				var err error
-				record, err = r.createSessionRecord(ctx, h, workspace, harness.AgentSelection{Inputs: &harness.AgentInputs{
-					Model:        model.ModelRef{Provider: "prov", Model: "m"},
-					AssemblyMode: "none",
-				}})
+				record, err = r.createSessionRecord(ctx, h, workspace, harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}}, nil)
 				return err
 			}))
 			submitThroughRuntime(t, r, record.Identity.SessionID, "op-value-source", "hello")
@@ -201,10 +198,7 @@ func TestCredentialCaptureBlockingAndFailingCandidates(t *testing.T) {
 	var record harness.SessionRecord
 	testassert.NoError(t, r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
 		var err error
-		record, err = r.createSessionRecord(ctx, h, workspace, harness.AgentSelection{Inputs: &harness.AgentInputs{
-			Model:        model.ModelRef{Provider: "prov", Model: "m"},
-			AssemblyMode: "none",
-		}})
+		record, err = r.createSessionRecord(ctx, h, workspace, harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}}, nil)
 		return err
 	}))
 
@@ -300,29 +294,19 @@ func TestMutationCaptureRunsBeforeOwningWrites(t *testing.T) {
 	}
 }
 
-// TestDefaultAgentInputs pins the included default inputs: full assembly and
-// the seven standard tools with no model or capabilities.
-func TestDefaultAgentInputs(t *testing.T) {
-	inputs := DefaultAgentInputs()
-	testassert.Equal(t, inputs.AssemblyMode, "full")
-	testassert.Require(t, len(inputs.Tools) == 7 && inputs.Capabilities == nil && inputs.Model == (model.ModelRef{}), "default inputs = %+v, want seven tools and no model/capabilities", inputs)
-	inputs.Tools[0] = "mutated"
-	testassert.Require(t, DefaultAgentInputs().Tools[0] != "mutated", "DefaultAgentInputs aliases its slice")
-}
-
 // TestRuntimeOpenValidatesConstructionSelection proves explicit Agent inputs
 // and a host strategy are validated at construction, before any effect.
 func TestRuntimeOpenValidatesConstructionSelection(t *testing.T) {
 	e := newOwnerEnv(t)
 	base := e.options()
-	invalidInputs := harness.AgentInputs{AssemblyMode: "bogus"}
+	invalidInputs := harness.SessionInputs{Strategy: &harness.StrategySelection{ID: "bad", Settings: json.RawMessage(`invalid`)}}
 	badStrategyID := &harness.StrategyBinding{RequiresContextWindow: true, Strategy: harness.IncludedStrategyBinding().Strategy}
 	badStrategyImpl := &harness.StrategyBinding{ID: "host.strategy"}
 	for _, tc := range []struct {
 		name string
 		opts options
 	}{
-		{"invalid agent inputs", func() options { o := base; o.Agent = &invalidInputs; return o }()},
+		{"invalid inputs", func() options { o := base; o.Defaults = invalidInputs; return o }()},
 		{"empty strategy id", func() options { o := base; o.Strategy = badStrategyID; return o }()},
 		{"nil strategy implementation", func() options { o := base; o.Strategy = badStrategyImpl; return o }()},
 	} {
@@ -351,9 +335,7 @@ func TestNewEvaluatorReceivesCapturedPolicyAndFailsClosed(t *testing.T) {
 	_, err = p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
-			AgentSelection: harness.AgentSelection{Inputs: &harness.AgentInputs{
-				Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none",
-			}},
+			Inputs:   harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}},
 		},
 		RequestKind: harness.RequestKindMessage,
 	})
@@ -429,9 +411,7 @@ func TestNewEvaluatorFailurePublishesNoOperation(t *testing.T) {
 			var record harness.SessionRecord
 			testassert.NoError(t, r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
 				var createErr error
-				record, createErr = r.createSessionRecord(ctx, h, t.TempDir(), harness.AgentSelection{Inputs: &harness.AgentInputs{
-					Model: model.ModelRef{Provider: "prov", Model: "m"}, AssemblyMode: "none",
-				}})
+				record, createErr = r.createSessionRecord(ctx, h, t.TempDir(), harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}}, nil)
 				return createErr
 			}))
 			err = submitExpectFailure(r, record.Identity.SessionID, "op-evaluator", "hello")
@@ -692,7 +672,7 @@ func TestStrategyBindingIsCopiedAtOpen(t *testing.T) {
 	testassert.NoError(t, err)
 	defer func() { _ = r.Close(context.Background()) }()
 	binding.ID = "mutated"
-	testassert.Equal(t, r.config.current().composition.defaultStrategy.ID, "host.strategy")
+	testassert.Equal(t, r.config.strategy.ID, "host.strategy")
 }
 
 // contextBlockingCredentials waits for request cancellation on selected

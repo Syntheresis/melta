@@ -1,7 +1,7 @@
 <script>
   import { openDialog } from './dialogs';
   import { createEventDispatcher } from 'svelte';
-  export let children = []; // [{ id, agentType, lifecycle, lastActivity, live, unknownHeader }]
+  export let children = []; // [{ id, lifecycle, lastActivity, live, unknownHeader }]
   export let jobs = []; // [{ id }]
   export let currentChild = '';
   const dispatch = createEventDispatcher();
@@ -13,7 +13,6 @@
     // ID: no agent type, time or lineage is ever fabricated.
     if (child.unknownHeader) return 'live · header not listed';
     const parts = [child.lifecycle];
-    if (child.agentType) parts.push(child.agentType);
     if (child.live) parts.push('live');
     return parts.join(' · ');
   }

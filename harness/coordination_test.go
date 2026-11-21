@@ -55,7 +55,7 @@ type modelScript struct {
 	arrived  chan struct{}
 	gate     chan struct{}
 	attempts []modelAttempt
-	model    func(context.Context, model.Request) (model.Stream, error)
+	model    func(context.Context, model.Request, model.Extra) (model.Stream, error)
 }
 
 func newModelScript(attempts ...modelAttempt) *modelScript {
@@ -64,7 +64,7 @@ func newModelScript(attempts ...modelAttempt) *modelScript {
 	return s
 }
 
-func (s *modelScript) invoke(_ context.Context, req model.Request) (model.Stream, error) {
+func (s *modelScript) invoke(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 	s.mu.Lock()
 	s.requests = append(s.requests, req)
 	gate := s.gate
@@ -161,7 +161,7 @@ func newCancelableHarness(t *testing.T, store Storage, prepared PreparedExecutio
 
 func createSession(t *testing.T, h *Harness) string {
 	t.Helper()
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	return session.Identity.SessionID
 }
@@ -661,6 +661,240 @@ func TestBufferedItemFailureIsFinal(t *testing.T) {
 			})
 		})
 	}
+
+	t.Run("completion preparation refusal records the signal and advances", func(t *testing.T) {
+		store := emptyStore(t)
+		script := newModelScript()
+		script.gate = make(chan struct{})
+		var (
+			mu    sync.Mutex
+			calls int
+		)
+		prepare := func(context.Context, PreparationRequest) (PreparedExecution, error) {
+			mu.Lock()
+			calls++
+			call := calls
+			mu.Unlock()
+			if call == 1 { // turn-1's own execution
+				return modelPrepared(script.model), nil
+			}
+			return PreparedExecution{}, fmt.Errorf("no model configured: %w", ErrInvalid) // the production preparation refusal
+		}
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, prepare)
+		defer cancel()
+		session := createSession(t, h)
+		watch := watchSettlements(store)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
+		testassert.NoError(t, err)
+		{
+			_, err := submitText(t, h, session, "turn-1", MessageModeRegular, "hello")
+			testassert.NoError(t, err)
+		}
+		<-script.arrived // turn-1 is parked at its boundary
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "buffered report")
+			testassert.NoError(t, err)
+		}
+		waitMemberDone(t, member) // the handoff ends the membership while the report is buffered
+		script.releaseGate()      // turn-1 settles; the drain's preparation is refused
+		watch.next()              // turn-1's settlement
+		awaitHarnessQuiet(t, h, session)
+
+		signals := storedSignals(t, store, session)
+		testassert.Require(t, len(signals) == 1 && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "buffered report", "committed signals = %+v, want the buffered completion's operationless record", signals)
+		testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the refused buffered completion admitted an Operation")
+		c.mu.Lock()
+		buffers := len(c.steering) + len(c.queued)
+		c.mu.Unlock()
+		testassert.Equal(t, buffers, 0)
+	})
+
+	t.Run("completion publication failure is latched with no signal", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			err         error
+			wantLatched bool
+		}{
+			{"storage class", fmt.Errorf("%w: injected storage failure", ErrStorage), true},
+			{"marked publication", wrapPublication(errors.New("injected publication failure")), true},
+			{"plain transaction", errors.New("injected plain failure"), false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				store := emptyStore(t)
+				script := newModelScript()
+				script.gate = make(chan struct{})
+				h, cancel := newCancelableHarness(t, store, modelPrepared(script.model), nil)
+				defer cancel()
+				session := createSession(t, h)
+				c := leaseCoordinator(t, h, session)
+				member, err := admitLocked(h, c, memberSession, completionChildID)
+				testassert.NoError(t, err)
+				{
+					_, err := submitText(t, h, session, "turn-1", MessageModeRegular, "hello")
+					testassert.NoError(t, err)
+				}
+				<-script.arrived // turn-1 is parked at its boundary
+				{
+					err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "buffered report")
+					testassert.NoError(t, err)
+				}
+				waitMemberDone(t, member)
+				// The drain's completion admission fails at its input
+				// publication with a supported latch outcome.
+				store.entryHook = func(draft EntryDraft) error {
+					if draft.Kind == EntryInput && draft.OperationID == member.completionID {
+						return tc.err
+					}
+					return nil
+				}
+				script.releaseGate()
+				awaitHarnessQuiet(t, h, session)
+				store.entryHook = nil
+
+				testassert.Require(t, len(storedSignals(t, store, session)) == 0, "a failed publication committed a fallback signal")
+				testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the failed publication admitted an Operation")
+				c.mu.Lock()
+				buffers := len(c.steering) + len(c.queued)
+				c.mu.Unlock()
+				testassert.Equal(t, buffers, 0)
+				h.mu.Lock()
+				latched := h.storageFailure
+				h.mu.Unlock()
+				if tc.wantLatched {
+					testassert.Require(t, latched != nil && latched.Error() == tc.err.Error(), "latched failure = %v, want the preserved cause %v", latched, tc.err)
+				} else {
+					testassert.Require(t, latched == nil, "a plain transaction error latched %v; it is neither a refusal nor an uncertain publication", latched)
+				}
+			})
+		}
+	})
+
+	t.Run("completion refusal records the signal and advances", func(t *testing.T) {
+		store := emptyStore(t)
+		script := newModelScript()
+		script.gate = make(chan struct{})
+		h, cancel := newCancelableHarness(t, store, PreparedExecution{}, archiveDuringPrepare(store, 2, modelPrepared(script.model)))
+		defer cancel()
+		session := createSession(t, h)
+		watch := watchSettlements(store)
+		c := leaseCoordinator(t, h, session)
+		member, err := admitLocked(h, c, memberSession, completionChildID)
+		testassert.NoError(t, err)
+		{
+			_, err := submitText(t, h, session, "turn-1", MessageModeRegular, "hello")
+			testassert.NoError(t, err)
+		}
+		<-script.arrived // turn-1 is parked at its boundary
+		{
+			err := h.DeliverBackgroundCompletion(context.Background(), session, member.completionID, "buffered report")
+			testassert.NoError(t, err)
+		}
+		waitMemberDone(t, member) // the handoff ends the membership while the report is buffered
+		{
+			_, err := submitText(t, h, session, "turn-2", MessageModeQueued, "later")
+			testassert.NoError(t, err)
+		}
+		script.releaseGate() // turn-1 settles: the drain's completion admission is refused, then the ordinary item's is
+		watch.next()         // turn-1's settlement
+		awaitHarnessQuiet(t, h, session)
+
+		signals := storedSignals(t, store, session)
+		testassert.Require(t, len(signals) == 1 && signals[0].RelatedMember != nil && signals[0].RelatedMember.Kind == "session" && signals[0].RelatedMember.ID == completionChildID && signals[0].Content == "buffered report", "committed signals = %+v, want the buffered completion's operationless record", signals)
+		testassert.Require(t, !storedOperationExists(store, session, member.completionID), "the refused buffered completion admitted an Operation")
+		testassert.Require(t, !storedOperationExists(store, session, "turn-2"), "the ordinary queued item admitted an Operation")
+		c.mu.Lock()
+		buffers := len(c.steering) + len(c.queued)
+		c.mu.Unlock()
+		testassert.Equal(t, buffers, 0)
+		// The admitted input is the whole input record: the refused completion
+		// and the ordinary refused item leave nothing behind.
+		{
+			got := strings.Join(entryTexts(t, store, session), ",")
+			testassert.Equal(t, got, "hello")
+		}
+	})
+}
+
+// TestBufferedReportDiscardedBeforeRefusal proves the discarded-report race: a
+// stop that clears the originating Session's buffers while the drain's
+// admission is still preparing leaves no fallback signal for the discarded
+// item, and the stop still joins through the cleared report.
+func TestBufferedReportDiscardedBeforeRefusal(t *testing.T) {
+	store := emptyStore(t)
+	script := newModelScript()
+	script.gate = make(chan struct{})
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	park := make(chan struct{})
+	arrived := make(chan struct{})
+	var arrivedOnce sync.Once
+	prepare := func(context.Context, PreparationRequest) (PreparedExecution, error) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		if call == 1 { // the launched child's own first execution
+			return modelPrepared(script.model), nil
+		}
+		arrivedOnce.Do(func() { close(arrived) })
+		<-park // the owner's stop lands while this admission prepares
+		return PreparedExecution{}, fmt.Errorf("no model configured: %w", ErrInvalid)
+	}
+	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, prepare)
+	defer cancel()
+	root := createSession(t, h)
+	res, err := h.LaunchChildSession(context.Background(), launchRequestFor(root))
+	testassert.NoError(t, err)
+	child := res.ChildSessionID
+	childC := leaseCoordinator(t, h, child)
+
+	jobMember, err := admitLocked(h, childC, memberJob, jobFixtureID)
+	testassert.NoError(t, err)
+	{
+		err := h.DeliverBackgroundCompletion(context.Background(), child, jobMember.completionID, "discarded report")
+		testassert.NoError(t, err)
+	}
+	waitMemberDone(t, jobMember) // the handoff buffers the report under the running child
+	childC.mu.Lock()
+	buffered := len(childC.steering)
+	childC.mu.Unlock()
+	testassert.Equal(t, buffered, 1)
+
+	script.releaseGate() // the child's operation settles; the drain selects the buffered report
+	<-arrived            // the drain's admission is parked in preparation
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- h.Stop(context.Background(), root) }()
+	awaitMemberStop(t, childC, stopDone) // the owner's recursive stop clears the child's buffers
+	childC.mu.Lock()
+	discarded := len(childC.steering) + len(childC.queued)
+	childC.mu.Unlock()
+	testassert.Equal(t, discarded, 0)
+
+	close(park) // the refusal returns to a Session whose selected item is already gone
+	{
+		err := stopResult(t, stopDone)
+		testassert.NoError(t, err)
+	}
+
+	// The discarded report never reappeared; the child's own settled report
+	// still reaches the root and is refused as its own operationless signal.
+	testassert.Require(t, len(storedSignals(t, store, child)) == 0, "discarded report signals = %+v, want none", storedSignals(t, store, child))
+	testassert.Require(t, !storedOperationExists(store, child, jobMember.completionID), "the discarded report admitted an Operation")
+	rootSignals := storedSignals(t, store, root)
+	want := "Session " + child + ": success\ndone"
+	testassert.Require(t, len(rootSignals) == 1 && rootSignals[0].RelatedMember != nil && rootSignals[0].RelatedMember.Kind == "session" && rootSignals[0].RelatedMember.ID == child && rootSignals[0].Content == want, "root signals = %+v, want the child's own settled report %q", rootSignals, want)
+	{
+		rootC := cachedCoordinator(t, h, root)
+		rootC.mu.Lock()
+		live := liveBackground(rootC)
+		rootC.mu.Unlock()
+		testassert.Require(t, !live, "the stop left the child member live")
+	}
 }
 
 // TestFinalBoundarySerialization proves the coordinator linearizes the final
@@ -679,7 +913,7 @@ func TestFinalBoundarySerialization(t *testing.T) {
 			first   = true
 		)
 		inner := script.model
-		script.model = func(ctx context.Context, req model.Request) (model.Stream, error) {
+		script.model = func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 			if first { // submit at the model-result boundary, before the settlement returns
 				first = false
 				{
@@ -687,7 +921,7 @@ func TestFinalBoundarySerialization(t *testing.T) {
 					testassert.Check(t, err == nil, "boundary submit: %v", err)
 				}
 			}
-			return inner(ctx, req)
+			return inner(ctx, req, parameters)
 		}
 		prepared := modelPrepared(script.model)
 		h, cancel := newCancelableHarness(t, store, prepared, nil)
@@ -733,7 +967,7 @@ func TestFinalBoundarySerialization(t *testing.T) {
 			first   = true
 		)
 		inner := script.model
-		script.model = func(ctx context.Context, req model.Request) (model.Stream, error) {
+		script.model = func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 			if first { // defer one queued message at the final model-result boundary
 				first = false
 				{
@@ -741,7 +975,7 @@ func TestFinalBoundarySerialization(t *testing.T) {
 					testassert.Check(t, err == nil, "boundary submit: %v", err)
 				}
 			}
-			return inner(ctx, req)
+			return inner(ctx, req, parameters)
 		}
 		prepared := modelPrepared(script.model)
 		h, cancel := newCancelableHarness(t, store, prepared, nil)
@@ -799,7 +1033,7 @@ func TestAgentTypeChangeDuringBlockedEffect(t *testing.T) {
 		testassert.NoError(t, err)
 	}
 	{
-		_, err := h.ChangeAgentType(context.Background(), session, testSelection("reviewer"))
+		_, err := h.SetSessionInputs(context.Background(), session, testInputs("reviewer"))
 		testassert.NoError(t, err)
 	}
 
@@ -813,7 +1047,7 @@ func TestAgentTypeChangeDuringBlockedEffect(t *testing.T) {
 	prepareMu.Lock()
 	defer prepareMu.Unlock()
 	testassert.Equal(t, len(prepareReqs), 2)
-	testassert.Require(t, prepareReqs[0].Session.AgentSelection.Definition.DefinitionID == "coder" && prepareReqs[1].Session.AgentSelection.Definition.DefinitionID == "reviewer", "preparation agent types = %q then %q, want the capture-time value then the changed one", prepareReqs[0].Session.AgentSelection.Definition.DefinitionID, prepareReqs[1].Session.AgentSelection.Definition.DefinitionID)
+	testassert.Require(t, reflect.DeepEqual(prepareReqs[0].Session.Inputs, testInputs("coder")) && reflect.DeepEqual(prepareReqs[1].Session.Inputs, testInputs("reviewer")), "preparation inputs = %+v then %+v", prepareReqs[0].Session.Inputs, prepareReqs[1].Session.Inputs)
 }
 
 func TestSessionModelChangeDuringBlockedEffect(t *testing.T) {
@@ -830,34 +1064,67 @@ func TestSessionModelChangeDuringBlockedEffect(t *testing.T) {
 		return prepared, nil
 	})
 	defer cancel()
-	initial := AgentInputs{Model: model.ModelRef{Provider: "p", Model: "old"}, Instructions: "unchanged", AssemblyMode: "full", Tools: []string{"read_file"}, Capabilities: []string{"cap"}, Constraints: ToolConstraints{Readonly: true, WriteDir: "sub"}}
-	created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: AgentSelection{Inputs: &initial}})
+	initial := testInputs("unchanged")
+	initial.Model = modelChoice(model.ModelRef{Provider: "p", Model: "old"})
+	initial.Tools = []string{"read_file"}
+	created, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: initial})
 	testassert.NoError(t, err)
 	session := created.Identity.SessionID
 	watch := watchSettlements(store)
 	_, err = submitText(t, h, session, "turn-1", MessageModeRegular, "hello")
 	testassert.NoError(t, err)
 	<-script.arrived
+	testassert.NoError(t, h.ClaimExternalData(context.Background(), session, "parked-owner"))
 	_, err = submitText(t, h, session, "turn-2", MessageModeQueued, "later")
 	testassert.NoError(t, err)
 	updated, err := h.SetSessionModel(context.Background(), session, model.ModelRef{Provider: "p", Model: "new"})
 	testassert.NoError(t, err)
-	want := initial
+	want := initial.Owned()
 	want.Model.Model = "new"
-	testassert.Require(t, reflect.DeepEqual(*updated.State.AgentSelection.Inputs, want), "updated inputs = %+v, want %+v", updated.State.AgentSelection.Inputs, want)
+	testassert.Require(t, reflect.DeepEqual(updated.State.Inputs, want), "updated inputs = %+v, want %+v", updated.State.Inputs, want)
 	script.releaseGate()
 	watch.next()
 	watch.next()
 	mu.Lock()
-	testassert.Require(t, len(requests) == 2 && reflect.DeepEqual(*requests[0].Session.AgentSelection.Inputs, initial) && reflect.DeepEqual(*requests[1].Session.AgentSelection.Inputs, want), "captured selections = %+v", requests)
+	testassert.Require(t, len(requests) == 2 && reflect.DeepEqual(requests[0].Session.Inputs, initial) && reflect.DeepEqual(requests[1].Session.Inputs, want), "captured inputs = %+v", requests)
 	mu.Unlock()
-	changed, err := h.ChangeAgentType(context.Background(), session, testSelection("reviewer"))
+	_, err = h.SetSessionInputs(context.Background(), session, testInputs("reviewer"))
 	testassert.NoError(t, err)
-	_, err = h.SetSessionModel(context.Background(), session, model.ModelRef{Provider: "p", Model: "other"})
-	testassert.Require(t, errors.Is(err, ErrConflict), "named selection model edit = %v, want conflict", err)
+	changed, err := h.SetSessionModel(context.Background(), session, model.ModelRef{Provider: "p", Model: "other"})
+	testassert.NoError(t, err)
 	read, err := h.ReadSessionHeader(context.Background(), session)
 	testassert.NoError(t, err)
-	testassert.Require(t, read.Revision.DurableRevision == changed.Revision && read.AgentSelection.Definition.DefinitionID == "reviewer", "conflict changed session: %+v", read)
+	testassert.Require(t, read.Revision.DurableRevision == changed.Revision && *read.Inputs.Instructions == "reviewer" && modelChoiceValue(read.Inputs.Model) == (model.ModelRef{Provider: "p", Model: "other"}), "model update changed other inputs: %+v", read)
+}
+
+func TestPreparationInputSubmitAndDrain(t *testing.T) {
+	store := emptyStore(t)
+	script := newModelScript()
+	script.gate = make(chan struct{})
+	prepared := modelPrepared(script.model)
+	var mu sync.Mutex
+	var seen []string
+	h, cancel := newCancelableHarness(t, store, prepared, func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
+		mu.Lock()
+		seen = append(seen, req.Content[0].Text)
+		mu.Unlock()
+		return prepared, nil
+	})
+	defer cancel()
+	session := createSession(t, h)
+	watch := watchSettlements(store)
+	_, err := submitText(t, h, session, "first", MessageModeRegular, "first input")
+	testassert.NoError(t, err)
+	<-script.arrived
+	_, err = submitText(t, h, session, "second", MessageModeQueued, "second input")
+	testassert.NoError(t, err)
+	script.releaseGate()
+	watch.next()
+	watch.next()
+	mu.Lock()
+	testassert.Require(t, reflect.DeepEqual(seen, []string{"first input", "second input"}), "preparation saw %v", seen)
+	mu.Unlock()
+	testassert.Require(t, reflect.DeepEqual(entryTexts(t, store, session), []string{"first input", "second input"}), "committed inputs differ")
 }
 
 // TestWaitConvergence proves the Harness-lifetime row: Wait returns only after
@@ -1291,7 +1558,7 @@ func TestDrainRetiresItsOwnRunSlot(t *testing.T) {
 		h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
 			return validPrepared(), nil
 		})
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, err)
 		{
 			_, disposition := mustAdmitWithoutExecution(t, h, session.Identity.SessionID, testOpID, admissionContent("hello"))
@@ -1351,12 +1618,12 @@ func TestSessionsExecuteConcurrently(t *testing.T) {
 	first.gate = firstGate
 	second := newModelScript()
 	firstModel, secondModel := first.model, second.model
-	exec := effectExecution(func(ctx context.Context, req model.Request) (model.Stream, error) {
+	exec := effectExecution(func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 		texts := textsOf(req)
 		if texts[len(texts)-1] == "first" {
-			return firstModel(ctx, req)
+			return firstModel(ctx, req, parameters)
 		}
-		return secondModel(ctx, req)
+		return secondModel(ctx, req, parameters)
 	}, nil)
 	prepared := preparedExecuting(exec)
 	h, cancel := newCancelableHarness(t, store, prepared, nil)
@@ -1397,7 +1664,7 @@ func TestSessionsExecuteConcurrently(t *testing.T) {
 // snapshot never takes the coordinator mutex.
 func TestSnapshotCoordinatorsReleasesRegistryMutex(t *testing.T) {
 	h := newTestHarness(t, freshSessionStore(t), nil)
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	c := leaseCoordinator(t, h, session.Identity.SessionID)
 

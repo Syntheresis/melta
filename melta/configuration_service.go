@@ -1,6 +1,7 @@
 package melta
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,8 +26,9 @@ var ErrConfiguration = errors.New("melta: configuration failure")
 // configurationService is the private Melta configuration service. It
 // owns plugin registrations, reads the supplied document once per build and
 // composes only enabled installed plugins. Provider assembly uses the
-// catalog loader's captured entries; active Agent definitions and extension
-// settings are validated before factories run and the candidate can publish.
+// catalog loader's captured entries; enabled extension sections are validated
+// before factories run and the candidate can publish. Agent definitions belong
+// to the Agents activation, not this service.
 //
 // One service-local build mutex serializes initial load and reload from input
 // reads through publication. The current snapshot is one atomic pointer that
@@ -37,15 +39,14 @@ var ErrConfiguration = errors.New("melta: configuration failure")
 // publication carries its passive configuration event inside the same
 // observation section as its atomic Store.
 type configurationService struct {
-	loader        *catalog.Loader
-	configuration ConfigurationSource
-	credentials   CredentialSource
-	locations     Locations
-	strategy      *harness.StrategyBinding
-	natives       []extension.Native
-	nativeIDs     map[string]bool
-	executables   []executableExtension
-	supervisor    *executableSupervisor
+	defaults       harness.SessionInputs
+	authors        []nativeActivationSpec
+	authorFailures map[string]error
+	loader         *catalog.Loader
+	configuration  ConfigurationSource
+	credentials    CredentialSource
+	locations      Locations
+	strategy       *harness.StrategyBinding
 	// unusablePackages records selected packages that failed to load, keyed by
 	// their hash directory. An enabled section whose ID hashes to one of them
 	// rejects the candidate; a disabled section stays ignored.
@@ -75,6 +76,11 @@ type configurationService struct {
 	// set. Only names live here; no value, token or public manager.
 	heldMu    sync.Mutex
 	heldNames map[string]int
+
+	nativeMu         sync.Mutex
+	nativeCandidates map[*nativeCandidate]bool
+	nativeCurrent    *nativeCandidate
+	nativeFailures   map[string]error
 }
 
 // configurationCapture joins one published immutable configuration revision
@@ -85,6 +91,7 @@ type configurationService struct {
 // error, or log.
 type configurationCapture struct {
 	snapshot *configuration
+	native   *nativeAdmissionCapture
 
 	// releaseNames drops this reserving capture's private name reference
 	// counts after its resource cleanup finishes. It is nil for non-reserving
@@ -92,24 +99,18 @@ type configurationCapture struct {
 	releaseNames func()
 }
 
-// newConfigurationService binds the service to the composition's owned
-// declarations, the supplied configuration, credential and location sources,
-// the Melta owner context, and the Melta's passive observation. No build
-// reads a home directory, process environment, or path not named by these
-// inputs.
+// newConfigurationService binds the service to the owner's composition, the
+// supplied configuration, credential and location sources, the Melta owner
+// context, and the Melta's passive observation. No build reads a home
+// directory, process environment, or path not named by these inputs.
 func newConfigurationService(owner context.Context, c *composition, loader *catalog.Loader, configuration ConfigurationSource, credentials CredentialSource, locations Locations, strategy *harness.StrategyBinding, obs *observation) *configurationService {
-	nativeIDs := make(map[string]bool, len(c.natives))
-	for _, native := range c.natives {
-		nativeIDs[native.Declaration.ID] = true
-	}
 	return &configurationService{
 		loader:        loader,
 		configuration: configuration,
 		credentials:   credentials,
 		locations:     locations,
 		strategy:      strategy,
-		natives:       c.natives,
-		nativeIDs:     nativeIDs,
+		composition:   c,
 		owner:         owner,
 		obs:           obs,
 	}
@@ -138,11 +139,22 @@ func (s *configurationService) captureFor(ctx context.Context, reserve bool) (co
 // the child-environment union never observes an accepted preparation whose
 // names are not yet registered. No source call or publication runs here.
 func (s *configurationService) capturePreparation(ctx context.Context) (configurationCapture, error) {
+	s.nativeMu.Lock()
+	defer s.nativeMu.Unlock()
 	s.heldMu.Lock()
 	defer s.heldMu.Unlock()
-	captured, err := s.captureBodyLocked(ctx, true)
+	captured, err := s.captureBodyLocked(ctx, false)
 	if err != nil {
 		return configurationCapture{}, err
+	}
+	if captured.snapshot != nil && captured.snapshot.native != nil {
+		captured.native = captured.snapshot.native.captureLocked()
+		if captured.native == nil {
+			return configurationCapture{}, extension.ErrClosed
+		}
+	}
+	if captured.snapshot != nil && captured.snapshot.resources != nil {
+		captured.snapshot.resources.retain()
 	}
 	if captured.snapshot != nil && captured.snapshot.resources != nil && len(captured.snapshot.credentialNames) != 0 {
 		names := captured.snapshot.credentialNames
@@ -447,6 +459,9 @@ func (s *configurationService) publish(ctx context.Context) (configurationCaptur
 		if fresh != nil {
 			_ = fresh.release()
 		}
+		if candidate.native != nil {
+			_ = candidate.native.release()
+		}
 		return configurationCapture{}, err
 	}
 	return s.commit(candidate), nil
@@ -479,6 +494,10 @@ func (s *configurationService) nextGeneration() (uint64, error) {
 func (s *configurationService) commit(candidate *configuration) configurationCapture {
 	captured := configurationCapture{snapshot: candidate}
 	previous := s.published.Load()
+	s.nativeMu.Lock()
+	if candidate.native != nil {
+		candidate.native.preparePublishLocked()
+	}
 	s.obs.publish(func() []Event {
 		warningChanged := false
 		if s.warnings != nil {
@@ -486,6 +505,9 @@ func (s *configurationService) commit(candidate *configuration) configurationCap
 			warningChanged = s.warnings.setGlobal(catalogSource, catalogWarnings(candidate.catalogWarnings)) || warningChanged
 		}
 		var events []Event
+		if candidate.native != nil {
+			events = append(events, candidate.native.publishLocked()...)
+		}
 		if candidate.resources != nil && (previous == nil || previous.resources != candidate.resources) {
 			candidate.resources.runtime.obs = s.obs
 			warningChanged = candidate.resources.commitWarnings() || warningChanged
@@ -502,8 +524,12 @@ func (s *configurationService) commit(candidate *configuration) configurationCap
 		}
 		return events
 	})
+	s.nativeMu.Unlock()
 	if previous != nil && previous.resources != nil && previous.resources != candidate.resources {
 		_ = previous.resources.release()
+	}
+	if previous != nil && previous.native != nil && previous.native != candidate.native {
+		_ = previous.native.release()
 	}
 	return captured
 }
@@ -546,11 +572,11 @@ func (s *configurationService) build(ctx context.Context, generation uint64) (*c
 // buildCaptured is the one candidate construction every publisher — Reload's
 // capture and a mutation's edited bytes — runs: the captured document is
 // decoded once, the captured providers layer is delegated to the Loader so
-// provider assembly and every cost protection use that one read, sessions
-// and agent definitions are parsed against the ordinary visible export IDs
-// and the compiled tool universe, the Workspace permission inventory is
-// enumerated once into the candidate, and the plugin section is validated
-// against the owned declarations and its resource set is prepared or reused.
+// provider assembly and every cost protection use that one read, session
+// settings are parsed, the Workspace permission inventory is enumerated once
+// into the candidate, and each enabled extension section is validated against
+// its activation's manifest before its resource set is prepared or reused.
+// Agent definitions are not parsed here; the Agents activation owns them.
 // Nothing is returned until the complete candidate survives all of it. conn is
 // the catalog-loader input: nil builds over the ordinary LoadCaptured inputs
 // (which may refresh due providers and write their cache); a connection
@@ -572,25 +598,6 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 	if err != nil {
 		return nil, configurationFailure(err)
 	}
-	for id, raw := range doc.Extensions {
-		if !sectionEnabled(raw) {
-			continue
-		}
-		if unusable := s.unusablePackages[extensionDataHash(id)]; unusable != nil {
-			return nil, configurationFailure(fmt.Errorf("extension %q: selected package is unusable: %w", id, unusable))
-		}
-	}
-	var active []extension.Native
-	for _, native := range s.natives {
-		if sectionEnabled(doc.Extensions[native.Declaration.ID]) {
-			active = append(active, native)
-		}
-	}
-	graph, err := newNativeComposition(active)
-	if err != nil {
-		return nil, configurationFailure(err)
-	}
-	graph.defaultStrategy = s.strategy
 	var built catalog.BuildResult
 	if conn == nil {
 		built, err = s.loader.AssembleCaptured(ctx, doc.Providers)
@@ -603,7 +610,7 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 		}
 		return nil, configurationFailure(err)
 	}
-	secrets := resolveDeclaredSecrets(active, doc.Extensions)
+	secrets := resolveAuthorSecrets(s.authors, doc.Extensions)
 	credentials, credentialNames, err := s.captureCredentials(ctx, capturedCredentialNames(built.Catalog, secrets), key)
 	if err != nil {
 		return nil, configurationFailure(err)
@@ -621,22 +628,47 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 	if err != nil {
 		return nil, configurationFailure(err)
 	}
-	snapshot.composition = graph
+	snapshot.composition = s.composition
+	// One default model: the host's explicit choice when set, else the file's
+	// model. Admission, fallback, hydration and setup warnings all read this
+	// one captured baseline.
+	snapshot.baselineModel = snapshot.model
+	if s.defaults.Model != nil {
+		snapshot.baselineModel = *s.defaults.Model
+	}
 	snapshot.credentials = credentials
 	snapshot.credentialNames = credentialNames
 	snapshot.secrets = secrets
 	snapshot.declaredBindings = captureDeclaredBindings(secrets, credentials)
-	if err := s.validateExtensions(ctx, graph, doc.Extensions); err != nil {
-		return nil, err
-	}
 	if err := s.prepareResources(ctx, snapshot); err != nil {
 		return nil, err
 	}
-	if err := s.projectDefinitions(ctx, snapshot); err != nil {
+	var specs []nativeActivationSpec
+	for _, author := range s.authors {
+		id := author.extension.Manifest.ID
+		if !sectionEnabled(doc.Extensions[id]) {
+			continue
+		}
+		author.section = bytes.Clone(doc.Extensions[id])
+		author.bindings = make(map[string]declaredBinding)
+		for field, binding := range snapshot.declaredBindings {
+			if field.extensionID == id {
+				author.bindings[field.field] = binding
+			}
+		}
+		specs = append(specs, author)
+	}
+	snapshot.native, err = s.prepareNativeCandidate(ctx, specs)
+	if err != nil {
 		if fresh := s.freshResources(snapshot); fresh != nil {
 			_ = fresh.release()
 		}
 		return nil, err
+	}
+	for id, failure := range s.authorFailures {
+		if sectionEnabled(doc.Extensions[id]) {
+			snapshot.native.inactive[id] = failure
+		}
 	}
 	return snapshot, nil
 }
@@ -684,18 +716,6 @@ func captureWorkspacePermissions(root string) map[string]json.RawMessage {
 // interpreting other members of an inactive document.
 func sectionEnabled(raw json.RawMessage) bool {
 	return config.SectionEnabled(raw)
-}
-
-// validateExtensions validates only active installed extension sections
-// against their compiled local schemas before publication.
-func (s *configurationService) validateExtensions(ctx context.Context, graph *composition, sections map[string]json.RawMessage) error {
-	if err := s.canceled(ctx); err != nil {
-		return err
-	}
-	if err := graph.validateSettings(sections); err != nil {
-		return configurationFailure(err)
-	}
-	return nil
 }
 
 // configurationFailure classifies a complete candidate failure while

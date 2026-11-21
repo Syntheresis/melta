@@ -51,7 +51,7 @@ func Recover(ctx context.Context, store Storage) error {
 			if op.State.Status != OperationRunning {
 				continue
 			}
-			if err := recoverRunningOperation(ctx, store, sessionID, op.Admission.OperationID); err != nil {
+			if err := interruptRunningOperation(ctx, store, sessionID, op.Admission.OperationID, recoveryInterruptedDetail); err != nil {
 				if !isCorruption(err) { // a storage-service failure aborts the call
 					return err
 				}
@@ -62,12 +62,12 @@ func Recover(ctx context.Context, store Storage) error {
 	return nil
 }
 
-// recoverRunningOperation repairs one valid running Operation of a quiescent
+// interruptRunningOperation settles one valid running Operation of a quiescent
 // Session: its own transaction re-reads and decodes the current registers and
 // performs the complete terminal interruption through the shared helper — no
 // temporary Harness, coordinator, or recovery-specific result path. A second
 // run finds no running Operation and writes nothing.
-func recoverRunningOperation(ctx context.Context, store Storage, sessionID, operationID string) error {
+func interruptRunningOperation(ctx context.Context, store Storage, sessionID, operationID, detail string) error {
 	return store.Transact(ctx, func(tx Transaction) error {
 		sreg, err := tx.ReadRegister(RegisterKey{SessionID: sessionID, Kind: RegisterSession})
 		if err != nil {
@@ -88,7 +88,7 @@ func recoverRunningOperation(ctx context.Context, store Storage, sessionID, oper
 		if currentOp.State.Status != OperationRunning { // a second run finds no running Operation and writes nothing
 			return nil
 		}
-		_, _, _, err = commitTerminalSettlement(tx, sessionID, operationID, currentSession, currentOp, sreg.Revision, oreg.Revision, OperationInterruption, recoveryInterruptedDetail, nil, model.ModelRef{}, nil, false, nil, "")
+		_, _, _, err = commitTerminalSettlement(tx, sessionID, operationID, currentSession, currentOp, sreg.Revision, oreg.Revision, OperationInterruption, detail, nil, model.ModelRef{}, nil, false, nil, "")
 		return err
 	})
 }

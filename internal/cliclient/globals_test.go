@@ -21,6 +21,12 @@ func configHint(n string) protocol.Event {
 	_ = event.FromConfigurationChangedEvent(protocol.ConfigurationChangedEvent{Kind: "configuration_changed", Scope: scope, ConfigurationRevision: configuration(n).ConfigurationRevision})
 	return event
 }
+
+// agentsCurrentDiscovery advertises the shipped Agents current operation.
+func agentsCurrentDiscovery() json.RawMessage {
+	return json.RawMessage(`[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"current","mode":"service_io","input":"{}","success":"{}"},"target":"session"}]}]`)
+}
+
 func warningHint(n string) protocol.Event {
 	var scope protocol.Scope
 	_ = scope.FromRuntimeScope(protocol.RuntimeScope{Kind: "runtime"})
@@ -41,7 +47,7 @@ func TestGlobalsNoReaderCoalescesAndCoveredHintsDoNotRead(t *testing.T) {
 	testassert.Require(t, c.globalsBusy && c.globalsDirty && c.root == nil, "hints created an unintended Session reader")
 	c.mu.Unlock()
 	config := configuration("6")
-	config.Agents[0].Name = "payload-six"
+	config.Settings.Model = pointer("prov/payload-six")
 	parked.respond(config)
 	warn := warnings("6")
 	warn.Warnings = []protocol.Warning{{Message: "payload-six"}}
@@ -57,7 +63,7 @@ func TestGlobalsNoReaderCoalescesAndCoveredHintsDoNotRead(t *testing.T) {
 		c.acceptEvent(eventDelivery{c.conn, warningHint("5")})
 	}
 	c.mu.Lock()
-	testassert.Require(t, !c.globalsBusy && !c.globalsDirty && c.configuration.Agents[0].Name == "payload-six" && c.warnings.Warnings[0].Message == "payload-six", "covered hints refreshed or payload not installed atomically")
+	testassert.Require(t, !c.globalsBusy && !c.globalsDirty && c.configuration.Settings.Model != nil && *c.configuration.Settings.Model == "prov/payload-six" && c.warnings.Warnings[0].Message == "payload-six", "covered hints refreshed or payload not installed atomically")
 	c.mu.Unlock()
 	transport.mu.Lock()
 	after := len(transport.calls)
@@ -71,7 +77,7 @@ func TestGlobalClockPayloadNonregressionAndHydrationFloors(t *testing.T) {
 	c.mu.Lock()
 	c.configuration = pointer(configuration("9"))
 	c.warnings = pointer(warnings("9"))
-	c.configuration.Agents[0].Name = "accepted-nine"
+	c.configuration.Settings.Model = pointer("prov/accepted-nine")
 	c.globalsDirty = true
 	c.kickGlobalsLocked()
 	c.mu.Unlock()
@@ -79,7 +85,7 @@ func TestGlobalClockPayloadNonregressionAndHydrationFloors(t *testing.T) {
 	receive(t, transport.requests).respond(warnings("8"))
 	configReq := receive(t, transport.requests)
 	c.mu.Lock()
-	testassert.Require(t, c.configuration.Agents[0].Name == "accepted-nine" && c.warnings.WarningsRevision.Revision == "9", "older payload replaced accepted clock")
+	testassert.Require(t, c.configuration.Settings.Model != nil && *c.configuration.Settings.Model == "prov/accepted-nine" && c.warnings.WarningsRevision.Revision == "9", "older payload replaced accepted clock")
 	c.mu.Unlock()
 	configReq.respond(configuration("10"))
 	receive(t, transport.requests).respond(warnings("10"))
@@ -135,6 +141,7 @@ func TestGlobalReadsStayValidAcrossSelectionChanges(t *testing.T) {
 	destination.ConfigurationRevision = configuration("900").ConfigurationRevision
 	destination.WarningsRevision = warnings("900").WarningsRevision
 	receive(t, transport.requests).respond(destination)
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	rootReq := receive(t, transport.requests)
 	oldConfig.respond(configuration("900"))
 	rootReq.respond(destination)
@@ -261,7 +268,7 @@ func TestConnectionRepairClearsOldFloorsBeforeNewOwnerHydration(t *testing.T) {
 // unused opaque extra_body members carry the overflow numeric lexemes as
 // exact bytes, plus its malformed-delivery sibling body.
 const opaqueOverflowConfiguration = `{"configuration_revision":{"instance_id":"` + instance + `","generation":"2"},` +
-	`"settings":{"sessions":{"auto_archive":true,"archive_after_days":7,"delete_after_archive_days":7},"tools":{},"jobs":{},"compaction":{},"plugins":{}},"agents":[{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"description":"primary agent"},{"name":"planner","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"planner"},"description":"planning agent"}],` +
+	`"settings":{"sessions":{"auto_archive":true,"archive_after_days":7,"delete_after_archive_days":7},"tools":{},"jobs":{},"compaction":{},"plugins":{}},` +
 	`"providers":[{"id":"prov","name":"Prov","connected":true,` +
 	`"extra_body":{"n":9007199254740993,"big":1e400},` +
 	`"models":[{"id":"m","name":"M","context_window":4096,"source":"user",` +
@@ -284,7 +291,7 @@ func TestGlobalsAndAgentMenuOpaqueOverflowConfiguration(t *testing.T) {
 		settleTasks(t, c)
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		testassert.Require(t, c.configuration != nil && len(c.configuration.Agents) == 2 && c.configuration.Agents[0].Name == "primary", "valid opaque configuration was not adopted")
+		testassert.Require(t, c.configuration != nil && c.configuration.ConfigurationRevision.Generation == "2" && len(c.configuration.Providers) == 1, "valid opaque configuration was not adopted")
 		testassert.Require(t, c.conn == oldConn, "valid opaque configuration triggered a repair loop")
 		select {
 		case <-c.exit:
@@ -333,9 +340,7 @@ func TestGlobalsAndAgentMenuOpaqueOverflowConfiguration(t *testing.T) {
 		c, transport := fixture(t)
 		transport.globals = true
 		c.command("/agent")
-		config := configuration("1")
-		config.Agents = []protocol.Agent{}
-		receive(t, transport.requests).respond(config)
+		receive(t, transport.requests).respond(json.RawMessage(`{"kind":"success","result":[]}`))
 		settleTasks(t, c)
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -356,7 +361,18 @@ func TestGlobalsAndAgentMenuOpaqueOverflowConfiguration(t *testing.T) {
 		defer c.mu.Unlock()
 		testassert.Require(t, c.menu != nil && c.menu.kind == "/model", "empty model menu was suppressed")
 	})
-	t.Run("/agent lists the valid opaque configuration without a repair loop", func(t *testing.T) {
+	t.Run("/agent unavailable operation reports its typed error", func(t *testing.T) {
+		c, transport := fixture(t)
+		transport.globals = true
+		c.command("/agent")
+		receive(t, transport.requests).reject(404, protocol.Error{Code: protocol.ErrorCodeNotFound, Message: "agents operation is unavailable"})
+		settleTasks(t, c)
+		testassert.Require(t, strings.Contains(outputs(c), "agents operation is unavailable"), "unavailable list operation reported %q", outputs(c))
+		transport.mu.Lock()
+		defer transport.mu.Unlock()
+		testassert.Require(t, len(transport.calls) == 1 && strings.HasSuffix(transport.calls[0], "/v1/extensions/invoke"), "calls = %v, want only the invocation", transport.calls)
+	})
+	t.Run("/agent lists the registered operation without a repair loop", func(t *testing.T) {
 		c, transport := fixture(t)
 		transport.globals = true
 		c.opts.Startup = liveFixture(t, false, nil).opts
@@ -364,12 +380,12 @@ func TestGlobalsAndAgentMenuOpaqueOverflowConfiguration(t *testing.T) {
 		oldConn := c.conn
 		c.mu.Unlock()
 		c.command("/agent")
-		receive(t, transport.requests).respondBody(opaqueOverflowConfiguration)
+		receive(t, transport.requests).respond(json.RawMessage(`{"kind":"success","result":[{"name":"primary","description":"primary agent","subagent":false,"model":""},{"name":"planner","description":"planning agent","subagent":false,"model":""}]}`))
 		settleTasks(t, c)
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		testassert.Require(t, c.menu != nil && len(c.menu.items) == 2 && c.menu.items[0].Label == "primary" && c.menu.items[1].Label == "planner", "valid opaque configuration was not listed")
-		testassert.Require(t, strings.Contains(c.menu.items[0].Detail, "agents/agents.definitions") && strings.Contains(c.menu.items[1].Detail, "agents/agents.definitions"), "agent source tuple missing from menu detail: %+v", c.menu.items)
+		testassert.Require(t, c.menu.items[0].Detail == "primary agent" && c.menu.items[1].Detail == "planning agent", "agent descriptions missing: %+v", c.menu.items)
 		testassert.Require(t, c.conn == oldConn, "the /agent menu triggered a repair loop")
 		select {
 		case <-c.exit:

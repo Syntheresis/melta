@@ -43,7 +43,7 @@ func execRead(t *testing.T, root, rootCanonical string, cfg config.ToolsConfig, 
 	if err != nil {
 		return "", err
 	}
-	return call.Execute(context.Background())
+	return call.Execute(context.Background(), nil)
 }
 
 func TestPreparedReadLineRangesAndFooter(t *testing.T) {

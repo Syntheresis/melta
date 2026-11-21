@@ -28,13 +28,6 @@ type packageSelection struct {
 	Copy    string `json:"copy"`
 }
 
-// loadedPackage is one selected package's read executable selection and its
-// constructed executable native.
-type loadedPackage struct {
-	executable executableExtension
-	native     extension.Native
-}
-
 // packageManager owns the local executable-package layout beneath the one
 // data directory. One loaded code set is fixed for the owner lifetime;
 // install, list and remove only read or replace next-start selections. Every
@@ -44,8 +37,57 @@ type packageManager struct {
 
 	mu             sync.Mutex
 	loaded         map[string]string
+	selected       map[string]string
 	unusable       map[string]error
-	loadedPackages []loadedPackage
+	authorFailures map[string]error
+}
+
+func (m *packageManager) loadAuthors(environment func(context.Context, []string) ([]string, error)) ([]nativeActivationSpec, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	root := filepath.Join(m.dataDir, "extensions")
+	directory, err := safefs.OpenDirectory(root)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	entries, err := directory.ReadDir(-1)
+	_ = directory.Close()
+	if err != nil {
+		return nil, err
+	}
+	m.authorFailures = make(map[string]error)
+	var specs []nativeActivationSpec
+	for _, entry := range entries {
+		hash := entry.Name()
+		if !entry.IsDir() || !canonicalPackageHash(hash) {
+			continue
+		}
+		selected, ok, err := readSelection(filepath.Join(root, hash))
+		if err != nil {
+			m.unusable[hash] = err
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if extensionDataHash(selected.ID) != hash {
+			m.unusable[hash] = fmt.Errorf("selected package identity %q does not match its directory", selected.ID)
+			continue
+		}
+		m.selected[selected.ID] = selected.Version
+		manifest, path, err := loadAuthorPackage(m.dataDir, hash, selected)
+		if err != nil {
+			m.authorFailures[selected.ID] = err
+			continue
+		}
+		m.loaded[selected.ID] = selected.Version
+		specs = append(specs, nativeActivationSpec{extension: executableAuthorExtension(manifest, path, environment), installed: true})
+	}
+	sort.Slice(specs, func(i, j int) bool { return specs[i].extension.Manifest.ID < specs[j].extension.Manifest.ID })
+	return specs, nil
 }
 
 // newPackageManager constructs the manager before the first load. The loaded
@@ -54,84 +96,18 @@ func newPackageManager(dataDir string) *packageManager {
 	return &packageManager{
 		dataDir:  dataDir,
 		loaded:   make(map[string]string),
+		selected: make(map[string]string),
 		unusable: make(map[string]error),
 	}
 }
 
-// load reads every selected package once into the owner's fixed loaded set.
-// The supplied constructor builds each package's executable native; any
-// per-package failure, native construction included, leaves no executable
-// selection and is recorded unusable by its hash directory. The owner still
-// opens so that a disabled or uninstalled section stays silent.
-func (m *packageManager) load(buildNative func(executableExtension) (extension.Native, error)) error {
+// selectedVersion returns one installed extension's selected implementation
+// version as read from its selection record at startup; an uninstalled
+// extension has none.
+func (m *packageManager) selectedVersion(extensionID string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	root := filepath.Join(m.dataDir, "extensions")
-	directory, err := safefs.OpenDirectory(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	entries, err := directory.ReadDir(-1)
-	_ = directory.Close()
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !entry.IsDir() || !canonicalPackageHash(name) {
-			continue
-		}
-		selected, ok, err := readSelection(filepath.Join(root, name))
-		if err != nil {
-			m.unusable[name] = err
-			continue
-		}
-		if !ok {
-			continue
-		}
-		if extensionDataHash(selected.ID) != name {
-			m.unusable[name] = fmt.Errorf("selected package identity %q does not match its directory", selected.ID)
-			continue
-		}
-		executable, err := loadPackage(m.dataDir, name, selected)
-		if err != nil {
-			m.unusable[name] = err
-			continue
-		}
-		native, err := buildNative(executable)
-		if err != nil {
-			m.unusable[name] = err
-			continue
-		}
-		m.loaded[selected.ID] = selected.Version
-		m.loadedPackages = append(m.loadedPackages, loadedPackage{executable: executable, native: native})
-	}
-	sort.Slice(m.loadedPackages, func(i, j int) bool {
-		return m.loadedPackages[i].executable.Declaration.ID < m.loadedPackages[j].executable.Declaration.ID
-	})
-	return nil
-}
-
-// loadedExecutables returns the loaded code set in stable extension-ID order.
-func (m *packageManager) loadedExecutables() []executableExtension {
-	out := make([]executableExtension, len(m.loadedPackages))
-	for i, loaded := range m.loadedPackages {
-		out[i] = loaded.executable
-	}
-	return out
-}
-
-// loadedNatives returns the constructed executable natives in stable
-// extension-ID order.
-func (m *packageManager) loadedNatives() []extension.Native {
-	out := make([]extension.Native, len(m.loadedPackages))
-	for i, loaded := range m.loadedPackages {
-		out[i] = loaded.native
-	}
-	return out
+	return m.selected[extensionID]
 }
 
 // install reads one local source package's manifest and entry point, writes
@@ -157,21 +133,18 @@ func (m *packageManager) install(sourceDir string) (protocol.ExtensionPackage, e
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return protocol.ExtensionPackage{}, fmt.Errorf("decode package manifest: %v: %w", err, harness.ErrInvalid)
 	}
-	if manifest.ContractVersion != extension.ContractVersion {
-		return protocol.ExtensionPackage{}, fmt.Errorf("package contract version %q, want %q: %w", manifest.ContractVersion, extension.ContractVersion, harness.ErrInvalid)
+	if err := extension.ValidateManifest(manifest.Manifest); err != nil {
+		return protocol.ExtensionPackage{}, fmt.Errorf("package manifest: %v: %w", err, harness.ErrInvalid)
 	}
-	declaration := manifest.Declaration.Value()
-	if err := validatePackageDeclaration(declaration); err != nil {
-		return protocol.ExtensionPackage{}, fmt.Errorf("package declaration: %v: %w", err, harness.ErrInvalid)
+	id, version, entryPoint := manifest.Manifest.ID, manifest.Manifest.Version, manifest.EntryPoint
+	if !containedPackageEntryPoint(entryPoint) {
+		return protocol.ExtensionPackage{}, fmt.Errorf("entry point %q is not a contained package-relative path: %w", entryPoint, harness.ErrInvalid)
 	}
-	if !containedPackageEntryPoint(manifest.EntryPoint) {
-		return protocol.ExtensionPackage{}, fmt.Errorf("entry point %q is not a contained package-relative path: %w", manifest.EntryPoint, harness.ErrInvalid)
-	}
-	entryFile, err := sourceRoot.Open(manifest.EntryPoint)
+	entryFile, err := sourceRoot.Open(entryPoint)
 	if err != nil {
 		return protocol.ExtensionPackage{}, fmt.Errorf("open package entry point: %v: %w", err, harness.ErrInvalid)
 	}
-	if err := validatePackageEntryFile(entryFile, manifest.EntryPoint); err != nil {
+	if err := validatePackageEntryFile(entryFile, entryPoint); err != nil {
 		_ = entryFile.Close()
 		return protocol.ExtensionPackage{}, err
 	}
@@ -181,7 +154,7 @@ func (m *packageManager) install(sourceDir string) (protocol.ExtensionPackage, e
 		return protocol.ExtensionPackage{}, fmt.Errorf("read package entry point: %v: %w", err, harness.ErrInvalid)
 	}
 
-	extensionDir := filepath.Join(m.dataDir, "extensions", extensionDataHash(declaration.ID))
+	extensionDir := filepath.Join(m.dataDir, "extensions", extensionDataHash(id))
 	packagesDir := filepath.Join(extensionDir, "packages")
 	if err := safefs.EnsureDirectory(packagesDir, 0o700); err != nil {
 		return protocol.ExtensionPackage{}, err
@@ -203,16 +176,16 @@ func (m *packageManager) install(sourceDir string) (protocol.ExtensionPackage, e
 	if err := writePackageFile(filepath.Join(packageDir, "manifest.json"), manifestBytes, 0o600); err != nil {
 		return protocol.ExtensionPackage{}, err
 	}
-	if err := writePackageFile(filepath.Join(packageDir, manifest.EntryPoint), entryBytes, 0o700); err != nil {
+	if err := writePackageFile(filepath.Join(packageDir, entryPoint), entryBytes, 0o700); err != nil {
 		return protocol.ExtensionPackage{}, err
 	}
-	if err := syncPackageDirectories(packageDir, manifest.EntryPoint); err != nil {
+	if err := syncPackageDirectories(packageDir, entryPoint); err != nil {
 		return protocol.ExtensionPackage{}, err
 	}
 	if err := syncParentChain(m.dataDir, packagesDir); err != nil {
 		return protocol.ExtensionPackage{}, err
 	}
-	selected, err := json.Marshal(packageSelection{ID: declaration.ID, Version: declaration.Version, Copy: copyID})
+	selected, err := json.Marshal(packageSelection{ID: id, Version: version, Copy: copyID})
 	if err != nil {
 		return protocol.ExtensionPackage{}, err
 	}
@@ -221,9 +194,9 @@ func (m *packageManager) install(sourceDir string) (protocol.ExtensionPackage, e
 	}
 	installed = true
 	return protocol.ExtensionPackage{
-		Id:              declaration.ID,
-		LoadedVersion:   m.loaded[declaration.ID],
-		SelectedVersion: declaration.Version,
+		Id:              id,
+		LoadedVersion:   m.loaded[id],
+		SelectedVersion: version,
 	}, nil
 }
 
@@ -346,63 +319,33 @@ func (r *Melta) RemoveExtensionPackage(ctx context.Context, c Caller, extensionI
 	return r.packages.remove(extensionID)
 }
 
-// loadPackage opens one selected package's manifest and entry point beneath
-// its hash directory, validates that the manifest names exactly the selected
-// identity, and returns its executable selection.
-func loadPackage(dataDir, hash string, selected packageSelection) (executableExtension, error) {
+func loadAuthorPackage(dataDir, hash string, selected packageSelection) (extension.Manifest, string, error) {
 	packageDir := filepath.Join(dataDir, "extensions", hash, "packages", selected.Copy)
-	manifestFile, err := safefs.OpenExisting(filepath.Join(packageDir, "manifest.json"), os.O_RDONLY)
+	file, err := safefs.OpenExisting(filepath.Join(packageDir, "manifest.json"), os.O_RDONLY)
 	if err != nil {
-		return executableExtension{}, fmt.Errorf("open package manifest: %v", err)
+		return extension.Manifest{}, "", err
 	}
-	manifestBytes, err := io.ReadAll(manifestFile)
-	_ = manifestFile.Close()
+	raw, err := io.ReadAll(file)
+	_ = file.Close()
 	if err != nil {
-		return executableExtension{}, fmt.Errorf("read package manifest: %v", err)
+		return extension.Manifest{}, "", err
 	}
 	var manifest worker.Manifest
-	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
-		return executableExtension{}, fmt.Errorf("decode package manifest: %v", err)
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return extension.Manifest{}, "", err
 	}
-	if manifest.ContractVersion != extension.ContractVersion {
-		return executableExtension{}, fmt.Errorf("package contract version %q, want %q", manifest.ContractVersion, extension.ContractVersion)
+	if err := extension.ValidateManifest(manifest.Manifest); err != nil {
+		return extension.Manifest{}, "", err
 	}
-	declaration := manifest.Declaration.Value()
-	if declaration.ID != selected.ID || declaration.Version != selected.Version {
-		return executableExtension{}, fmt.Errorf("package declaration %s@%s does not match selected %s@%s", declaration.ID, declaration.Version, selected.ID, selected.Version)
+	if manifest.Manifest.ID != selected.ID || manifest.Manifest.Version != selected.Version {
+		return extension.Manifest{}, "", errors.New("package manifest does not match selected identity")
 	}
-	entryFile, err := openPackageEntry(packageDir, manifest.EntryPoint)
+	entry, err := openPackageEntry(packageDir, manifest.EntryPoint)
 	if err != nil {
-		return executableExtension{}, err
+		return extension.Manifest{}, "", err
 	}
-	_ = entryFile.Close()
-	return executableExtension{Declaration: declaration, EntryPoint: filepath.Join(packageDir, manifest.EntryPoint)}, nil
-}
-
-// validatePackageDeclaration runs the one declaration accepting owner over
-// the package's local declaration and schemas. Installation validates the
-// package's own shape; dependency resolution remains the configuration
-// build's accepting step.
-func validatePackageDeclaration(declaration extension.Declaration) error {
-	native := extension.Native{
-		Declaration: declaration,
-		Open: func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-			return extension.Instance{}, nil
-		},
-	}
-	for _, capability := range declaration.Capabilities {
-		if capability.Kind != extension.KindTool {
-			continue
-		}
-		if native.Describe == nil {
-			native.Describe = make(map[string]extension.ToolDescribe)
-		}
-		native.Describe[capability.ID] = func(context.Context, extension.DescribeInput) (extension.ToolDescription, error) {
-			return extension.ToolDescription{}, nil
-		}
-	}
-	_, err := extension.CompileNative(native)
-	return err
+	_ = entry.Close()
+	return manifest.Manifest, filepath.Join(packageDir, manifest.EntryPoint), nil
 }
 
 // openPackageEntry opens one contained package-relative entry point without

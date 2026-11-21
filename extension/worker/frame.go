@@ -29,17 +29,11 @@ const (
 
 // The closed request methods.
 const (
+	MethodHello    = "hello"
 	MethodActivate = "activate"
-	MethodOpen     = "open"
 	MethodCall     = "call"
-	MethodDispose  = "dispose"
 	MethodHostcall = "hostcall"
-)
-
-// The closed call target kinds.
-const (
-	TargetMetadata = "metadata"
-	TargetInstance = "instance"
+	MethodCommand  = "command"
 )
 
 // ErrFrameTooLarge marks a frame whose encoded envelope exceeds FrameLimit.

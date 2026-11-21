@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -132,17 +131,17 @@ func TestReviewConsumedEvidenceNamesFrozenInput(t *testing.T) {
 // uncommitted facts accounted exactly once at the next checkpoint. An initial
 // none with no model work stays a clean non-event.
 func TestReviewNoneAfterModelWork(t *testing.T) {
-	onePass := func(ctx context.Context, req model.Request) (model.Stream, error) {
+	onePass := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "one pass"), usageDelta(model.Usage{InputTokens: 7, OutputTokens: 3})), nil
 	}
 
 	t.Run("manual model work then none settles the facts on the success terminal", func(t *testing.T) {
 		exec := purposeExecution(forbiddenConversationModel(t), onePass)
-		exec.Strategy = fixtureStrategyBinding(noneAfterModelStrategy{})
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(noneAfterModelStrategy{}))
 		store := emptyStore(t)
 		prepared := compactPrepared(captureForHandoff(), exec)
 		h := newCompactHarness(t, store, prepared)
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, err)
 		c := leaseCoordinator(t, h, session.Identity.SessionID)
 		testassert.NoError(t, runManualCompact(t, h, c, session.Identity.SessionID, "compact-1"))
@@ -160,9 +159,9 @@ func TestReviewNoneAfterModelWork(t *testing.T) {
 
 	t.Run("automatic model work then none continues and the later checkpoint accounts the facts once", func(t *testing.T) {
 		strategy := &noneThenCheckpointStrategy{}
-		conversation := func() func(context.Context, model.Request) (model.Stream, error) {
+		conversation := func() func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds := 0
-			return func(context.Context, model.Request) (model.Stream, error) {
+			return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				rounds++
 				if rounds == 1 {
 					return streamOf(turnDelta("tool_calls", "work", testToolCall("call-1"))), nil
@@ -181,11 +180,11 @@ func TestReviewNoneAfterModelWork(t *testing.T) {
 				return inv, err
 			}
 			if request.Purpose == InvocationPurposeConversation {
-				inv.Tool = tool
+				inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
 			}
 			return inv, nil
 		}
-		exec.Strategy = fixtureStrategyBinding(strategy)
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(strategy))
 		h, store, c, sessionID := strategyHarness(t, exec)
 		testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
 
@@ -202,7 +201,7 @@ func TestReviewNoneAfterModelWork(t *testing.T) {
 
 	t.Run("initial none without model work stays a clean non-event", func(t *testing.T) {
 		exec := purposeExecution(quietConversation(), forbiddenMaintenanceModel(t))
-		exec.Strategy = fixtureStrategyBinding(&noneStrategy{})
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(&noneStrategy{}))
 		h, store, c, sessionID := strategyHarness(t, exec)
 		testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
 
@@ -238,12 +237,12 @@ func (s *noneThenCheckpointStrategy) Consume(ConsumeInput) (PlanOutput, error) {
 	return PlanOutput{Kind: PlanNone}, nil
 }
 
-// TestReviewEarlyFailuresSettleWithProducerWitness proves every failure
-// before any model plan still settles normally through the real automatic
-// round: the failure terminal carries the strategy's own detail, the consumed
-// evidence, and a valid producer request identity — never a stuck running
-// Operation behind a rolled-back settlement.
-func TestReviewEarlyFailuresSettleWithProducerWitness(t *testing.T) {
+// TestReviewEarlyFailuresSettleWithoutInventedRequest proves every failure
+// before any model request still settles normally through the real automatic
+// round: the failure terminal carries the strategy's own detail but no
+// invented request identity or evidence — never a stuck running Operation
+// behind a rolled-back settlement.
+func TestReviewEarlyFailuresSettleWithoutInventedRequest(t *testing.T) {
 	rows := []struct {
 		name     string
 		strategy ContextStrategy
@@ -256,7 +255,7 @@ func TestReviewEarlyFailuresSettleWithProducerWitness(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			exec := purposeExecution(quietConversation(), forbiddenMaintenanceModel(t))
-			exec.Strategy = fixtureStrategyBinding(row.strategy)
+			exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(row.strategy))
 			h, store, c, sessionID := strategyHarness(t, exec)
 			err := runAutomaticMaintenance(t, h, c, exec)
 			testassert.Require(t, err != nil, "early failure returned success")
@@ -266,8 +265,8 @@ func TestReviewEarlyFailuresSettleWithProducerWitness(t *testing.T) {
 			settlement := settlementEntryOf(t, graph)
 			testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, row.detail),
 				"settlement = %+v, want the failure terminal carrying %q", settlement, row.detail)
-			testassert.Require(t, settlement.Evidence != nil, "settlement = %+v, want the consumed evidence retained", settlement)
-			testassert.Require(t, settlement.RequestID != "", "settlement = %+v, want the procedure producer identity", settlement)
+			testassert.Require(t, settlement.Evidence == nil, "settlement = %+v, want no evidence without a request identity", settlement)
+			testassert.Require(t, settlement.RequestID == "", "settlement = %+v, want no invented request identity", settlement)
 			testassert.Require(t, operationStateOf(t, graph, testOpID).Status == OperationFailure, "operation must be terminal, not stuck running")
 		})
 	}
@@ -294,7 +293,7 @@ func TestReviewToolFreeRequestGate(t *testing.T) {
 func TestReviewBindingAgreementBeforeStrategyRuns(t *testing.T) {
 	strategy := &fixedCutStrategy{boundary: hexID(1), messages: []model.Message{{Role: model.RoleUser, Content: admissionContent("kept")}}}
 	exec := purposeExecution(quietConversation(), forbiddenMaintenanceModel(t))
-	exec.Strategy = &StrategyBinding{ID: "other.strategy/v2", Strategy: strategy}
+	exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: "other.strategy/v2", Strategy: strategy})
 	h, store, c, sessionID := strategyHarness(t, exec)
 	err := runAutomaticMaintenance(t, h, c, exec)
 	testassert.Require(t, err != nil, "a mismatched binding reached the maintenance procedure")
@@ -319,12 +318,12 @@ func TestReviewStripsOnlyInjectedPrompt(t *testing.T) {
 			capture := captureForHandoff()
 			capture.SystemPrompt = capturedPrompt
 			exec := purposeExecution(forbiddenConversationModel(t), forbiddenMaintenanceModel(t))
-			exec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
+			exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
 				return &CheckpointPlan{BoundaryEntryID: in.BoundaryEntryID, Items: authoredItems(
 					model.Message{Role: model.RoleSystem, Content: admissionContent("checkpoint system message")},
 					model.Message{Role: model.RoleUser, Content: admissionContent("kept")},
 				)}
-			}})
+			}}))
 			prepared := compactPrepared(capture, exec)
 			h := newCompactHarness(t, store, prepared)
 			c := leaseCoordinator(t, h, testSessionID)
@@ -347,12 +346,12 @@ func TestReviewStripsOnlyInjectedPrompt(t *testing.T) {
 func TestReviewRetainAndContextSources(t *testing.T) {
 	t.Run("identical canonical and contribution values permit the canonical reference", func(t *testing.T) {
 		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{Messages: []model.Message{in.CanonicalMessages[0]}}, nil
+			return RequestConsequence{Edits: appendRequestFixture(in, in.CanonicalMessages[0])}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
-		exec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
 			return &CheckpointPlan{BoundaryEntryID: in.BoundaryEntryID, Items: retainItems(0)}
-		}})
+		}}))
 		h, store, c, sessionID := strategyHarness(t, exec)
 		testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
 		graph, gerr := validateFixture(t, store, sessionID)
@@ -364,12 +363,12 @@ func TestReviewRetainAndContextSources(t *testing.T) {
 
 	t.Run("explicit authored context equal to a contribution stays authored", func(t *testing.T) {
 		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{Messages: []model.Message{in.CanonicalMessages[0]}}, nil
+			return RequestConsequence{Edits: appendRequestFixture(in, in.CanonicalMessages[0])}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
-		exec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
 			return &CheckpointPlan{BoundaryEntryID: in.BoundaryEntryID, Items: authoredItems(in.Messages[0])}
-		}})
+		}}))
 		h, store, c, sessionID := strategyHarness(t, exec)
 		testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
 		graph, gerr := validateFixture(t, store, sessionID)
@@ -380,13 +379,13 @@ func TestReviewRetainAndContextSources(t *testing.T) {
 	})
 
 	t.Run("a source position can never address a request-only contribution", func(t *testing.T) {
-		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{Messages: []model.Message{{Role: model.RoleUser, Content: admissionContent("steered addition")}}}, nil
+		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+			return RequestConsequence{Edits: appendRequestFixture(in, model.Message{Role: model.RoleUser, Content: admissionContent("steered addition")})}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
-		exec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: func(in PlanInput) *CheckpointPlan {
 			return &CheckpointPlan{BoundaryEntryID: in.BoundaryEntryID, Items: retainItems(len(in.Messages))}
-		}})
+		}}))
 		h, store, c, sessionID := strategyHarness(t, exec)
 		err := runAutomaticMaintenance(t, h, c, exec)
 		testassert.Require(t, err != nil, "an uncovered source position was accepted")
@@ -405,7 +404,7 @@ func TestReviewRetainAndContextSources(t *testing.T) {
 func TestReviewRetainResolution(t *testing.T) {
 	proposal := func(fn func(PlanInput) *CheckpointPlan) Execution {
 		exec := purposeExecution(quietConversation(), forbiddenMaintenanceModel(t))
-		exec.Strategy = fixtureStrategyBinding(proposalStrategy{checkpoint: fn})
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(proposalStrategy{checkpoint: fn}))
 		return exec
 	}
 	t.Run("index zero resolves the covered view's first message", func(t *testing.T) {
@@ -498,11 +497,11 @@ func TestReviewRetainResolution(t *testing.T) {
 	t.Run("a mutating callback cannot rewrite the frozen source copy", func(t *testing.T) {
 		strategy := &mutatingStrategy{}
 		addition := model.Message{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "addition", Extra: model.Extra{"raw": json.RawMessage(` { "n" : 1 } `)}}}}
-		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-			return RequestConsequence{Messages: []model.Message{addition}}, nil
+		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+			return RequestConsequence{Edits: appendRequestFixture(in, addition)}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
-		exec.Strategy = fixtureStrategyBinding(strategy)
+		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(strategy))
 		h, store, c, sessionID := strategyHarness(t, exec)
 		frozen, _, _, ferr := h.projectCanonical(c, testOpID)
 		testassert.NoError(t, ferr)
@@ -516,11 +515,9 @@ func TestReviewRetainResolution(t *testing.T) {
 			"checkpoint message = %+v, want the frozen source copy resolved unchanged (pristine %q)", comp.Messages, pristine)
 		testassert.Require(t, frozen[0].TextContent() == pristine,
 			"the frozen input copy was rewritten to %q", frozen[0].TextContent())
-		testassert.Require(t, comp.Evidence != nil && comp.Evidence.Prompt == captureForHandoff().SystemPrompt &&
-			reflect.DeepEqual(comp.Evidence.ToolNames, []string{"echo"}) &&
-			len(comp.Evidence.Messages) == 1 && comp.Evidence.Messages[0].TextContent() == "addition" &&
-			string(comp.Evidence.Messages[0].Content[0].Extra["raw"]) == ` { "n" : 1 } `,
-			"strategy changed the accepted contribution: evidence=%+v", comp.Evidence)
+		testassert.Require(t, comp.Evidence != nil && comp.Evidence.BoundaryEntryID != "" && comp.Evidence.Prompt == "" &&
+			len(comp.Evidence.Tools) == 0 && len(comp.Evidence.Edits) == 0 && len(comp.Evidence.HookIDs) == 0,
+			"maintenance evidence = %+v, want only the frozen canonical references", comp.Evidence)
 	})
 }
 
@@ -531,16 +528,16 @@ type mutatingStrategy struct{ passes int }
 
 func (s *mutatingStrategy) Plan(in PlanInput) (PlanOutput, error) {
 	s.passes++
-	if in.Contributions != nil {
-		in.Contributions.Prompt = "mutated"
-		in.Contributions.ToolNames[0] = "mutated"
-		in.Contributions.Messages[0].Content[0].Text = "mutated"
-		in.Contributions.Messages[0].Content[0].Extra["raw"][0] = 'x'
-	}
 	for i := range in.Messages {
 		for j := range in.Messages[i].Content {
 			in.Messages[i].Content[j].Text = "mutated by the callback"
 		}
+	}
+	for i := range in.Tools {
+		in.Tools[i].Name = "mutated"
+	}
+	if in.Measurement != nil {
+		in.Measurement.InputTokens = -1
 	}
 	return PlanOutput{Kind: PlanCheckpoint, Checkpoint: &CheckpointPlan{
 		BoundaryEntryID: in.BoundaryEntryID,

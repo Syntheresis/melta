@@ -41,7 +41,7 @@ const (
 // recordContent builds one private discovery document pointing at the
 // fixture endpoint.
 func recordContent(endpoint string) string {
-	return fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"16","credential":%q}`,
+	return fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"19","credential":%q}`,
 		endpoint, testInstance, testCredential)
 }
 
@@ -70,7 +70,7 @@ func newFixture(t *testing.T, health, events http.HandlerFunc, extra ...map[stri
 func jsonHealth() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"instance_id":%q,"protocol_version":"16"}`, testInstance)
+		fmt.Fprintf(w, `{"instance_id":%q,"protocol_version":"19"}`, testInstance)
 	}
 }
 
@@ -1096,12 +1096,19 @@ func TestDesktopHostMountedRuntime(t *testing.T) {
 	testassert.Equal(t, response.Status, http.StatusOK)
 	var health protocol.Health
 	testassert.NoError(t, json.Unmarshal([]byte(response.Body), &health))
-	testassert.Require(t, health.InstanceId == info.InstanceID && health.ProtocolVersion == protocol.N16, "health = %+v, want the connected owner", health)
+	testassert.Require(t, health.InstanceId == info.InstanceID && health.ProtocolVersion == protocol.N19, "health = %+v, want the connected owner", health)
 
-	create, err := host.Call(info.Generation, "CreateSession", `{"body":{"workspace":"/ws/smoke","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"integrated"}}}}`)
+	discovery, err := host.Call(info.Generation, "ListExtensions", `{}`)
 	testassert.NoError(t, err)
-	testassert.Require(t, create.Status == http.StatusCreated, "create status = %d: %s", create.Status, create.Body)
-	var created protocol.Session
+	testassert.Require(t, discovery.Status == http.StatusOK && strings.Contains(discovery.Body, `"name":"create"`), "extension discovery = %+v", discovery)
+	create, err := host.Call(info.Generation, "InvokeExtension", `{"body":{"extension_id":"agents","operation":"create","target":{"kind":"workspace","workspace":"/ws/smoke"},"arguments":{"agent":"integrated"},"request_id":"desktop-create"}}`)
+	testassert.NoError(t, err)
+	testassert.Require(t, create.Status == http.StatusOK, "create status = %d: %s", create.Status, create.Body)
+	var created struct {
+		Result struct {
+			SessionID string `json:"session_id"`
+		} `json:"result"`
+	}
 	testassert.NoError(t, json.Unmarshal([]byte(create.Body), &created))
 
 	// The established subscription is the delivery barrier: the committed
@@ -1131,7 +1138,7 @@ func TestDesktopHostMountedRuntime(t *testing.T) {
 			testassert.NoError(t, err)
 			scope, err := body.Scope.AsSessionScope()
 			testassert.NoError(t, err)
-			if scope.SessionId != created.SessionId {
+			if scope.SessionId != created.Result.SessionID {
 				continue
 			}
 			testassert.Equal(t, body.SessionRevision.InstanceId, info.InstanceID)
@@ -1172,4 +1179,25 @@ func TestDesktopHostAppOptions(t *testing.T) {
 	opts.OnShutdown(testCtx)
 	testassert.Require(t, host.closed, "OnShutdown did not close the host")
 	testassert.Require(t, len(opts.Bind) == 1 && opts.Bind[0] == interface{}(host) && opts.Linux != nil && opts.Linux.WebviewGpuPolicy == linux.WebviewGpuPolicyAlways, "Bind = %v, want exactly the host; Linux GPU policy = %v, want WebviewGpuPolicyAlways", opts.Bind, opts.Linux)
+}
+
+// TestDesktopHostGetSessionOperationNativeCall proves the two-address native
+// envelope reaches the runtime and returns the projected Operation read.
+func TestDesktopHostGetSessionOperationNativeCall(t *testing.T) {
+	const body = `{"operation":{"operation_id":"op-1","request_kind":"message","status":"running","admitted_at":"2026-01-02T03:04:05Z","model":"prov/m","usage":{"by_model":[]}},"inputs":{"model":"prov/m","prompt":"prompt","tools":[],"strategy":{"id":"included","settings":"{}"}}}`
+	server := newFixture(t, jsonHealth(), parkedStream(), map[string]http.HandlerFunc{
+		"/v1/sessions/s1/operations/op-1": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, body)
+		},
+	})
+	host := newHost(t, server)
+	info, err := host.Open()
+	testassert.NoError(t, err)
+	response, err := host.Call(info.Generation, "GetSessionOperation", `{"session_id":"s1","operation_id":"op-1"}`)
+	testassert.NoError(t, err)
+	testassert.Require(t, response.Status == http.StatusOK && !response.Invalid && response.Body == body, "GetSessionOperation response = %+v, want the projected 200 body", response)
 }

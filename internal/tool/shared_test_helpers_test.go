@@ -1,12 +1,12 @@
 package tool
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Syntheresis/melta/internal/snapshot"
@@ -35,28 +35,6 @@ func newCodeGroupStore(t *testing.T, groupDir string) testCodeGroupStore {
 func newTempCodeGroupStore(t *testing.T) testCodeGroupStore {
 	t.Helper()
 	return newCodeGroupStore(t, filepath.Join(t.TempDir(), "group"))
-}
-
-// execPatch runs one apply_patch through the exported Normalize* + Prepare*
-// entries and returns the structured execution result.
-func execPatch(t *testing.T, root, rootCanonical, writeDirCanonical string, opts CapabilityOptions, store SnapshotStore, args map[string]any) (PreparedPatchResult, error) {
-	t.Helper()
-	if rootCanonical == "" {
-		var err error
-		rootCanonical, err = bindWorkspaceRoot(root)
-		if err != nil {
-			return PreparedPatchResult{}, err
-		}
-	}
-	norm, err := NormalizePatchArgs(args)
-	if err != nil {
-		return PreparedPatchResult{}, err
-	}
-	call, err := PreparePatchCall(root, rootCanonical, writeDirCanonical, opts, store, norm)
-	if err != nil {
-		return PreparedPatchResult{}, err
-	}
-	return call.Execute(context.Background())
 }
 
 type snapshotCall struct {
@@ -281,11 +259,12 @@ func assertSnapshotIdentityAbsent(t *testing.T, records []snapshotIdentityRecord
 // intends to produce, shared by the lifecycle truncate/full-write/sync rows
 // and the short/foreign-write identity rows.
 type producerMutationCase struct {
-	name     string
-	existing bool
-	seed     string
-	intended string
-	run      func(t *testing.T, root, path string, store testCodeGroupStore) error
+	name        string
+	existing    bool
+	seed        string
+	intended    string
+	partialLine string
+	run         func(t *testing.T, root, path string, store testCodeGroupStore) error
 }
 
 func producerMutationCases() []producerMutationCase {
@@ -293,37 +272,23 @@ func producerMutationCases() []producerMutationCase {
 		{
 			name: "write", existing: true, seed: "before", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
 		{
 			name: "edit", existing: true, seed: "before", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execEdit(t, root, "", "", CapabilityOptions{}, store, map[string]any{
+				_, err := execEdit(t, root, "", store, map[string]any{
 					"path": path, "old_string": "before", "new_string": "after",
 				})
 				return err
 			},
 		},
 		{
-			name: "patch_update", existing: true, seed: "a\nB\nc", intended: "a\nB2\nc",
-			run: func(t *testing.T, root, _ string, store testCodeGroupStore) error {
-				_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-B\n+B2")})
-				return err
-			},
-		},
-		{
 			name: "write_created", existing: false, seed: "", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execWrite(t, root, "", "", CapabilityOptions{}, store, map[string]any{"path": path, "content": "after"})
-				return err
-			},
-		},
-		{
-			name: "patch_add_created", existing: false, seed: "", intended: "after",
-			run: func(t *testing.T, root, _ string, store testCodeGroupStore) error {
-				_, err := execPatch(t, root, "", "", CapabilityOptions{}, store, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+after")})
+				_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
@@ -351,44 +316,46 @@ func runProducerMutationCase(t *testing.T, tc producerMutationCase, step mutatio
 	err := tc.run(t, root, path, store)
 
 	testassert.Require(t, err != nil, "%s with %s succeeded, want injected mutation failure", tc.name, step)
+	var complete, foreign bool
+	var written string
+	switch step {
+	case failAfterTruncate:
+		written = ""
+	case failShortWriteError, failShortWriteNil:
+		written = tc.intended[:len(tc.intended)/2]
+	case failAfterWrite, failAfterSync:
+		complete, written = true, tc.intended
+	case failForeignWriteError, failForeignSync:
+		complete, foreign, written = true, true, string(foreignMutationBytes)
+	default:
+		t.Fatalf("unknown mutation failure step %q", step)
+	}
+	if tc.partialLine != "" {
+		var exitErr *ExitError
+		testassert.Require(t, errors.As(err, &exitErr), "patch error = %v, want partial summary", err)
+		testassert.Require(t, strings.Contains(exitErr.Output, tc.partialLine) == complete, "%s summary = %q, completed = %t", step, exitErr.Output, complete)
+	}
 	meta := soleSnapshotMeta(t, store)
 	assertSnapshotEntryCount(t, groupDir, 1)
 	if tc.existing {
 		assertEntryOriginal(t, groupDir, tc.seed)
 	}
-	prefix := tc.intended[:len(tc.intended)/2]
-	switch step {
-	case failAfterTruncate, failShortWriteError, failShortWriteNil:
-		testassert.Require(t, meta.LastWrite == nil, "%s: LastWrite = %+v, want nil: an incomplete mutation may not claim a complete identity", step, meta.LastWrite)
-	case failAfterWrite, failAfterSync, failForeignWriteError, failForeignSync:
+	if complete {
 		testassert.Require(t, meta.LastWrite != nil && meta.LastWrite.Hash == snapshotIdentityHash(tc.intended), "%s: LastWrite = %+v, want the own complete intended bytes, never a foreign reread", step, meta.LastWrite)
+	} else {
+		testassert.Require(t, meta.LastWrite == nil, "%s: LastWrite = %+v, want nil: an incomplete mutation may not claim a complete identity", step, meta.LastWrite)
 	}
-	switch step {
-	case failAfterTruncate:
-		assertFileContent(t, path, "")
-	case failShortWriteError, failShortWriteNil:
-		assertFileContent(t, path, prefix)
-	case failForeignWriteError, failForeignSync:
-		assertFileContent(t, path, string(foreignMutationBytes))
-	}
+	assertFileContent(t, path, written)
 	result := revertTestGroup(t, groupDir)
-	switch step {
-	case failAfterWrite, failAfterSync:
+	if complete && !foreign {
 		testassert.Require(t, len(result.Restored) == 1 && result.Restored[0] == path && len(result.Skipped) == 0, "restored = %v skipped = %+v, want the known-complete mutation restorable for %s", result.Restored, result.Skipped, path)
 		if tc.existing {
 			assertFileContent(t, path, tc.seed)
 		} else {
 			assertPathMissing(t, path)
 		}
-	default:
+	} else {
 		testassert.Require(t, len(result.Restored) == 0 && len(result.Skipped) == 1 && result.Skipped[0].Path == path, "restored = %v want none; skipped = %+v, want one skip for %s", result.Restored, result.Skipped, path)
-		switch step {
-		case failAfterTruncate:
-			assertFileContent(t, path, "")
-		case failShortWriteError, failShortWriteNil:
-			assertFileContent(t, path, prefix)
-		case failForeignWriteError, failForeignSync:
-			assertFileContent(t, path, string(foreignMutationBytes))
-		}
+		assertFileContent(t, path, written)
 	}
 }

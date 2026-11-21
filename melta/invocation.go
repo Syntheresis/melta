@@ -3,8 +3,6 @@ package melta
 import (
 	"encoding/json"
 	"strconv"
-
-	"github.com/Syntheresis/melta/protocol"
 )
 
 // Invocation is immutable captured baseline data for one host call tree: the
@@ -24,19 +22,6 @@ func (in Invocation) Revision() string {
 	return strconv.FormatUint(in.snapshot.generation, 10)
 }
 
-// Config returns the captured snapshot's owned JSON for extensionID, or nil
-// when the extension has no configuration in this revision.
-func (in Invocation) Config(extensionID string) json.RawMessage {
-	if in.snapshot == nil {
-		return nil
-	}
-	raw, ok := in.snapshot.extensions[extensionID]
-	if !ok {
-		return nil
-	}
-	return append(json.RawMessage(nil), raw...)
-}
-
 // toolsSettings returns the captured snapshot's owned top-level tools section.
 func (in Invocation) toolsSettings() json.RawMessage {
 	if in.snapshot == nil {
@@ -51,13 +36,4 @@ func (in Invocation) jobsSettings() json.RawMessage {
 		return nil
 	}
 	return append(json.RawMessage(nil), in.snapshot.jobs...)
-}
-
-// AgentTypes returns the captured snapshot's owned roster projection of the
-// loaded Agent definitions, preserving the snapshot's ordering.
-func (in Invocation) AgentTypes() []protocol.Agent {
-	if in.snapshot == nil {
-		return nil
-	}
-	return projectAgents(in.snapshot)
 }

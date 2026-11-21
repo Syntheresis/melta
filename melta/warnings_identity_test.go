@@ -6,10 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
-	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
 
@@ -30,56 +27,62 @@ func setupWarningsOf(t *testing.T, store *warningStore) []protocol.Warning {
 	return out
 }
 
-// TestSetupWarningsUseSuppliedPrimaryReference proves the named-model warning
-// addresses only the supplied agents/agents.definitions/primary projection:
-// a foreign resolver's first/only primary name never substitutes, while an
-// opposing supplied model readiness still drives the warning.
-func TestSetupWarningsUseSuppliedPrimaryReference(t *testing.T) {
+// TestSetupWarningsFollowTheBaselineWithoutExtensions proves the host setup
+// group reads only the captured baseline choice: an unconfigured baseline
+// reports no model (the fixture's keyless bundled provider stays connected),
+// and a configured unavailable model reports its own kind without any
+// extension present.
+func TestSetupWarningsFollowTheBaselineWithoutExtensions(t *testing.T) {
 	for _, row := range []struct {
-		name          string
-		suppliedModel string
-		installAgents bool
-		foreignModel  string
-		wantKinds     []string
-		wantMessage   string
+		doc       string
+		wantKinds []string
 	}{
-		{"foreign-first ready supplied unavailable", "prov/missing", true, "foreign/f", []string{setupModelUnavailable}, "prov/missing"},
-		{"foreign-first unavailable supplied ready", "prov/m", true, "foreign/missing", nil, ""},
-		{"foreign-only ready", "", false, "foreign/f", nil, ""},
-		{"foreign-only unavailable", "", false, "foreign/missing", nil, ""},
+		{`{}`, []string{setupNoModelKind}},
+		{`{"model":"missing/model"}`, []string{setupModelUnavailable}},
 	} {
-		t.Run(row.name, func(t *testing.T) {
+		t.Run(row.doc, func(t *testing.T) {
 			h := newServiceHarness(t)
-			writeServiceFile(t, h.configPath, warningIdentityConfig("https://prov.test/v1"))
-			if row.installAgents {
-				writeAgentDefinitions(t, h.configPath, `{"primary":{"model":"`+row.suppliedModel+`"}}`)
+			writeServiceFile(t, h.configPath, row.doc)
+			svc := h.preparedService(context.Background())
+			store := newWarningStore()
+			svc.attachWarnings(store)
+			_, err := svc.publish(context.Background())
+			testassert.NoError(t, err)
+			var kinds []string
+			for _, warning := range setupWarningsOf(t, store) {
+				kinds = append(kinds, warning.Kind)
 			}
-			enableFixturePlugin(t, h.configPath, "guestdefs")
-			guest := namedResolverExtension("guestdefs", map[string]harness.AgentInputs{
-				"primary": {
-					Model:        model.ModelRef{Provider: "foreign", Model: strings.TrimPrefix(row.foreignModel, "foreign/")},
-					Instructions: "foreign primary",
-					AssemblyMode: "simple",
-				},
-			})
-			plugins := []extension.Native{guest}
-			if row.installAgents {
-				plugins = append(plugins, agentsTestNative(guest))
-			}
-			svc := h.preparedService(context.Background(), plugins...)
+			testassert.Require(t, reflect.DeepEqual(kinds, row.wantKinds), "setup warnings = %+v, want kinds %v", kinds, row.wantKinds)
+		})
+	}
+}
+
+// TestSetupWarningsUseBaselineModel proves the baseline model choice drives
+// the unavailable warning: a usable model of a connected provider stays
+// silent, and an unavailable baseline reference names itself in the warning.
+func TestSetupWarningsUseBaselineModel(t *testing.T) {
+	for _, row := range []struct {
+		baseline  string
+		wantModel bool
+	}{
+		{"prov/m", false},
+		{"prov/missing", true},
+	} {
+		t.Run(row.baseline, func(t *testing.T) {
+			h := newServiceHarness(t)
+			doc := strings.Replace(warningIdentityConfig("https://prov.test/v1"), "{", `{"model":"`+row.baseline+`",`, 1)
+			writeServiceFile(t, h.configPath, doc)
+			svc := h.preparedService(context.Background())
 			store := newWarningStore()
 			svc.attachWarnings(store)
 			_, err := svc.publish(context.Background())
 			testassert.NoError(t, err)
 			warnings := setupWarningsOf(t, store)
-			var kinds []string
-			for _, warning := range warnings {
-				kinds = append(kinds, warning.Kind)
-				if row.wantMessage != "" {
-					testassert.Require(t, strings.Contains(warning.Message, row.wantMessage), "warning = %+v, want the supplied model %q", warning, row.wantMessage)
-				}
+			if row.wantModel {
+				testassert.Require(t, len(warnings) == 1 && warnings[0].Kind == setupModelUnavailable && strings.Contains(warnings[0].Message, row.baseline), "warnings = %+v", warnings)
+			} else {
+				testassert.Require(t, len(warnings) == 0, "warnings = %+v", warnings)
 			}
-			testassert.Require(t, reflect.DeepEqual(kinds, row.wantKinds), "setup warnings = %+v, want kinds %v", warnings, row.wantKinds)
 		})
 	}
 }

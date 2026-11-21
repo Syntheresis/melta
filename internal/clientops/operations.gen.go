@@ -184,6 +184,16 @@ var operationDescriptors = map[string]descriptor{
 			return c.GetSessionHydration(ctx, pathValue)
 		},
 	},
+	"GetSessionOperation": {
+		session:   memberRequired,
+		operation: memberRequired,
+		status:    200,
+		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
+			pathValue := protocol.SessionID(env.session)
+			operationValue := protocol.OperationID(env.operation)
+			return c.GetSessionOperation(ctx, pathValue, operationValue)
+		},
+	},
 	"GetWarnings": {
 		status: 200,
 		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
@@ -212,16 +222,16 @@ var operationDescriptors = map[string]descriptor{
 			return c.InvokeExtensionWithBody(ctx, contentTypeJSON, bytes.NewReader(env.body))
 		},
 	},
-	"ListExtensionCapabilities": {
-		status: 200,
-		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
-			return c.ListExtensionCapabilities(ctx)
-		},
-	},
 	"ListExtensionPackages": {
 		status: 200,
 		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
 			return c.ListExtensionPackages(ctx)
+		},
+	},
+	"ListExtensions": {
+		status: 200,
+		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
+			return c.ListExtensions(ctx)
 		},
 	},
 	"ListModels": {
@@ -336,13 +346,13 @@ var operationDescriptors = map[string]descriptor{
 			return c.RevertSessionCodeWithBody(ctx, pathValue, contentTypeJSON, bytes.NewReader(env.body))
 		},
 	},
-	"SetSessionAgentType": {
+	"SetSessionInputs": {
 		session: memberRequired,
 		body:    memberRequired,
 		status:  200,
 		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
 			pathValue := protocol.SessionID(env.session)
-			return c.SetSessionAgentTypeWithBody(ctx, pathValue, contentTypeJSON, bytes.NewReader(env.body))
+			return c.SetSessionInputsWithBody(ctx, pathValue, contentTypeJSON, bytes.NewReader(env.body))
 		},
 	},
 	"SetSessionModel": {

@@ -223,18 +223,3 @@ func NormalizeEditArgs(args map[string]any) (map[string]any, error) {
 	}
 	return clean, nil
 }
-
-// NormalizePatchArgs performs target apply_patch argument normalization:
-// private `_melta_` fields are stripped and the patch payload text is
-// preserved verbatim. The input member must be a string when present;
-// a wrong type is an argument-validation error, never a later patch-syntax
-// error. V4A parsing belongs to canonical preparation.
-func NormalizePatchArgs(args map[string]any) (map[string]any, error) {
-	clean := stripPrivateArgs(args)
-	if v, present := clean["input"]; present {
-		if _, ok := v.(string); !ok {
-			return nil, fmt.Errorf("apply_patch: input must be a string")
-		}
-	}
-	return clean, nil
-}

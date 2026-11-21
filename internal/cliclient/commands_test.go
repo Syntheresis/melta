@@ -164,7 +164,7 @@ func TestUnknownAttemptIdentityDraftRefreshRetryAndAbandon(t *testing.T) {
 			settleTasks(t, c)
 			c.command("/session")
 			list := receive(t, transport.requests)
-			list.respond([]protocol.Session{{SessionId: s.root, AgentSelection: fixtureSelection("primary")}})
+			list.respond([]protocol.Session{{SessionId: s.root, Inputs: protocol.SessionInputs{}}})
 			settleTasks(t, c)
 			press(c, terminal.KeyMsg{Special: terminal.KeyDown})
 			press(c, terminal.KeyMsg{Special: terminal.KeyEnter})
@@ -258,6 +258,7 @@ func TestForkRestoreOrderedPartialRetainedAcrossRetryAndNavigation(t *testing.T)
 			testassert.Require(t, restoreKind != "partial" || strings.Contains(out, "one.go") && strings.Contains(out, "two.go") && strings.Contains(out, "partial"), "partial restore dropped")
 			c.selectRoot(rootB)
 			receive(t, transport.requests).respond(hydration(rootB, "1", nil, nil))
+			receive(t, transport.requests).respond(json.RawMessage(`[]`))
 			fresh := receive(t, transport.requests)
 			fresh.respond(hydration(rootB, "1", nil, nil))
 			settleTasks(t, c)
@@ -449,12 +450,13 @@ func TestChildrenListsAndNavigationTaskMenusSuperseded(t *testing.T) {
 			old := receive(t, transport.requests)
 			c.selectRoot(rootB)
 			receive(t, transport.requests).respond(hydration(rootB, "1", nil, nil))
+			receive(t, transport.requests).respond(json.RawMessage(`[]`))
 			selected := receive(t, transport.requests)
 			selected.respond(hydration(rootB, "1", nil, nil))
 			if fail {
 				old.reject(404, protocol.Error{Code: "not_found", Message: "stale child error"})
 			} else {
-				old.respond([]protocol.Session{{SessionId: childA, ParentSessionId: pointer(rootA)}})
+				old.respond([]protocol.Session{{SessionId: childA, OwnerSessionId: pointer(rootA)}})
 			}
 			settleTasks(t, c)
 			c.mu.Lock()
@@ -463,7 +465,7 @@ func TestChildrenListsAndNavigationTaskMenusSuperseded(t *testing.T) {
 			testassert.Require(t, !strings.Contains(outputs(c), "stale child error"), "stale task error published")
 			c.command("/children")
 			open := receive(t, transport.requests)
-			open.respond([]protocol.Session{{SessionId: childA, ParentSessionId: pointer(rootA)}, {SessionId: rootA, ParentSessionId: pointer(rootB)}})
+			open.respond([]protocol.Session{{SessionId: childA, OwnerSessionId: pointer(rootA)}, {SessionId: rootA, OwnerSessionId: pointer(rootB)}})
 			receive(t, transport.requests).respond([]protocol.Session{})
 			settleTasks(t, c)
 			c.mu.Lock()
@@ -586,7 +588,7 @@ func TestRootlessRepairNeverComposes(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(protocol.Session{SessionId: rootB, Workspace: "/workspace", AgentSelection: fixtureSelection("primary")})
+			_ = json.NewEncoder(w).Encode(protocol.Session{SessionId: rootB, Workspace: "/workspace", Inputs: protocol.SessionInputs{}})
 		} else {
 			_ = json.NewEncoder(w).Encode([]protocol.Session{})
 		}

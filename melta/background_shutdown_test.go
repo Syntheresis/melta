@@ -66,14 +66,13 @@ func (s *stubStopper) Close() error {
 	return nil
 }
 
-// jobStopperExportPlugin declares one ordinary capability export of the
-// seam's declared type: the composition treats it like any other value, and
-// the owner's constructed service stays the seam.
-func jobStopperExportPlugin(id string, _ harness.JobStopper) extension.Native {
-	capabilityID := id + ".stopper"
-	capability := testServiceCapability(capabilityID)
-	return testNative(id, extension.LifetimeHarness, []extension.Capability{capability}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{capabilityID: testServiceImplementation()}}, nil
+// jobStopperExportPlugin registers one ordinary service under the seam's
+// owning id: the composition treats it like any other registration, and the
+// owner's constructed service stays the seam.
+func jobStopperExportPlugin(id string, _ harness.JobStopper) extension.Extension {
+	return testNative(id, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterService(testServiceCapability(id+".stopper"), nil)
+		return nil, err
 	})
 }
 
@@ -151,6 +150,7 @@ func TestRuntimeJobsSeamIsDirectlyBound(t *testing.T) {
 		exported := &stubStopper{events: e.events}
 		e.fixtureStore(storage.NewMemory())
 		e.fixtureJobs(constructed)
+		enableFixturePlugin(t, e.configPath, "shadow")
 		r, err := e.open(ctx,
 			jobStopperExportPlugin("shadow", exported))
 		testassert.NoError(t, err)

@@ -118,7 +118,6 @@ func TestPublicReadSessionHistoryOwnedCapture(t *testing.T) {
 					fact.Assistant.Usage.InputTokens = 999
 				}
 				if len(fact.Assistant.ToolCalls) > 0 {
-					fact.Assistant.ToolCalls[0].NormalizedArguments = json.RawMessage(`{"mutated":true}`)
 					if fact.Assistant.ToolCalls[0].Extra == nil {
 						fact.Assistant.ToolCalls[0].Extra = model.Extra{}
 					}
@@ -887,8 +886,8 @@ func (s snapshotJobStopper) StopJob(sessionID, jobID string) {
 // parks until its gate closes or its execution context is canceled, then
 // answers accordingly: a released gate completes the turn, a stop's cancel
 // settles the interruption without any output.
-func parkingModelFn(gate, arrived chan struct{}) func(context.Context, model.Request) (model.Stream, error) {
-	return func(ctx context.Context, _ model.Request) (model.Stream, error) {
+func parkingModelFn(gate, arrived chan struct{}) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		select {
 		case arrived <- struct{}{}:
 		default:
@@ -1019,8 +1018,8 @@ func TestPublicSnapshotJobMemberRevisions(t *testing.T) {
 	})
 }
 
-// TestPublicSnapshotChildStopRevisions proves the child-closure rows: the
-// permanent closure and its buffer discard are one publication, the canceled
+// TestPublicSnapshotChildStopRevisions proves the owner-stop rows: the
+// member gate and its buffer discard are one publication, the canceled
 // run's retirement and drain follow, a delivered completion steers into the
 // active parent, and a repeated stop is a no-op publication.
 func TestPublicSnapshotChildStopRevisions(t *testing.T) {
@@ -1045,18 +1044,18 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 
 		res, err := h.LaunchChildSession(ctx, harness.LaunchChildRequest{
 			ParentSessionID: root,
-			AgentSelection:  publicSelection("coder"),
+			Inputs:          publicInputs("coder"),
 			Content:         []model.ContentPart{{Kind: model.PartText, Text: "child work"}},
 			OperationID:     "child-op-1",
 			ExtensionID:     "test.extension",
-			MaxConcurrent:   1,
 			OutputLimit:     1024,
+			Report:          true,
 		})
 		testassert.NoError(t, err)
 		<-arrived // the child's Operation is parked at its boundary
 		parent, err := h.ReadSessionView(ctx, root)
 		testassert.NoError(t, err)
-		testassert.Require(t, len(parent.Background) == 1 && parent.Background[0] == (harness.BackgroundMemberView{Kind: "child", ID: res.ChildSessionID}) && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+1, "parent background = %+v; got %v, want %v", parent.Background, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+1)
+		testassert.Require(t, len(parent.Background) == 1 && parent.Background[0] == (harness.BackgroundMemberView{Kind: "session", ID: res.ChildSessionID}) && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+1, "parent background = %+v; got %v, want %v", parent.Background, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+1)
 		child, err := h.ReadSessionView(ctx, res.ChildSessionID)
 		testassert.NoError(t, err)
 		testassert.Require(t, child.History.ExecutionBusy && child.History.Revision.LocalRevision == 1 && len(child.Operations) == 1 && child.Operations[0].OperationID == "child-op-1", "child read = busy %v rev %d ops %+v", child.History.ExecutionBusy, child.History.Revision.LocalRevision, child.Operations)
@@ -1071,13 +1070,13 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 		testassert.Require(t, err == nil && len(buffered.Steering) == 1 && buffered.History.Revision.LocalRevision == child.History.Revision.LocalRevision+3, "child buffered read = %+v err %v", buffered, err)
 
 		{
-			err := h.Stop(ctx, res.ChildSessionID)
+			err := h.Stop(ctx, root)
 			testassert.NoError(t, err)
 		}
 		closed, err := h.ReadSessionView(ctx, res.ChildSessionID)
 		testassert.NoError(t, err)
-		// the closure publication plus the canceled run's retirement drain
-		testassert.Require(t, len(closed.Steering) == 0 && !closed.History.ExecutionBusy && closed.History.Revision.LocalRevision == buffered.History.Revision.LocalRevision+4, "closed child = steering %d busy %v; got %v, want %v", len(closed.Steering), closed.History.ExecutionBusy, closed.History.Revision.LocalRevision, buffered.History.Revision.LocalRevision+4)
+		// The stop and reopen publications surround the canceled run's retirement.
+		testassert.Require(t, len(closed.Steering) == 0 && !closed.History.ExecutionBusy && closed.History.Revision.LocalRevision == buffered.History.Revision.LocalRevision+5, "stopped child = steering %d busy %v; got %v, want %v", len(closed.Steering), closed.History.ExecutionBusy, closed.History.Revision.LocalRevision, buffered.History.Revision.LocalRevision+5)
 		closedFacts := closed.History.HistoryFacts(historyIDsOf(closed.History.HistoryHeaders()))
 		testassert.Require(t, len(closedFacts) == 3 && closedFacts[0].Kind == harness.EntryInput && closedFacts[1].Kind == harness.EntrySignal && closedFacts[2].Kind == harness.EntryOperationSettlement && closedFacts[2].Settlement.Status == harness.OperationInterruption, "closed child facts = %+v", closedFacts)
 		// the repeat stop is a no-op
@@ -1092,8 +1091,8 @@ func TestPublicSnapshotChildStopRevisions(t *testing.T) {
 		// the parent's member.
 		parent, err = h.ReadSessionView(ctx, root)
 		testassert.NoError(t, err)
-		// admit, enqueue, finish
-		testassert.Require(t, len(parent.Background) == 0 && (len(parent.Steering) == 1 && parent.Steering[0].Origin == harness.InputOriginRuntime && parent.Steering[0].Content[0].Text == "Task interrupted.") && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+3, "parent background after the finish = %+v; parent steering after the delivery = %+v; got %v, want %v", parent.Background, parent.Steering, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+3)
+		// admit, stop, enqueue, finish, reopen
+		testassert.Require(t, len(parent.Background) == 0 && (len(parent.Steering) == 1 && parent.Steering[0].Origin == harness.InputOriginRuntime && parent.Steering[0].Content[0].Text == "Session "+res.ChildSessionID+": interruption") && parent.History.Revision.LocalRevision == parentBefore.History.Revision.LocalRevision+5, "parent background after the finish = %+v; parent steering after the delivery = %+v; got %v, want %v", parent.Background, parent.Steering, parent.History.Revision.LocalRevision, parentBefore.History.Revision.LocalRevision+5)
 
 		f.cancel()
 		go close(parentGate)
@@ -1332,7 +1331,6 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 		f := newPublicFixtureWithJobs(t, store, snapshotJobStopper{}, script, nil, nil)
 		f.prepareHook = func(call int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
 			capture := publicCapture()
-			capture.Capabilities = []string{"cap.a", "cap.b"}
 			conversationInput, conversationOutput := 1.0, 2.0
 			compactInput := 0.5
 			capture.Pricing = &harness.ModelPricing{Input: &conversationInput, Output: &conversationOutput}
@@ -1512,7 +1510,7 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 			case harness.EntryAssistant:
 				testassert.Require(t, fact.Assistant != nil, "assistant fact fixture lost its payload: %+v", fact)
 				assistantReferences = assistantReferences || (len(fact.Assistant.Extra) > 0 && len(fact.Assistant.ToolCalls) > 0 &&
-					len(fact.Assistant.ToolCalls[0].Extra) > 0 && len(fact.Assistant.ToolCalls[0].NormalizedArguments) > 0 &&
+					len(fact.Assistant.ToolCalls[0].Extra) > 0 &&
 					fact.Assistant.Usage != nil)
 			case harness.EntryToolResult:
 				testassert.Require(t, fact.ToolResult != nil, "tool result fact fixture lost its payload: %+v", fact)
@@ -1543,7 +1541,7 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 			testassert.Require(t, op.SettledAt != nil, "operation fixture lost its settlement pointer: %+v", op)
 			record, err := h.ReadOperation(ctx, session, op.OperationID)
 			testassert.Require(t, err == nil, "ReadOperation(%s): %v", op.OperationID, err)
-			testassert.Require(t, record.State.SettledAt != nil && record.State.Terminal != nil && (len(record.Admission.Execution.Tools) != 0 && len(record.Admission.Execution.Tools[0].Parameters) != 0 && len(record.Admission.Execution.Capabilities) != 0), "operation fixture lost its terminal pointers: %+v; operation fixture lost its execution references: %+v", record.State, record.Admission.Execution)
+			testassert.Require(t, record.State.SettledAt != nil && record.State.Terminal != nil && (len(record.Admission.Execution.Tools) != 0 && len(record.Admission.Execution.Tools[0].Parameters) != 0), "operation fixture lost its terminal pointers: %+v; operation fixture lost its execution references: %+v", record.State, record.Admission.Execution)
 			if recordExpected == nil {
 				recordExpected, err = json.Marshal(record)
 				testassert.NoError(t, err)
@@ -1560,7 +1558,7 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 		mutated.TotalUsage.ByModel[0].Model.Provider = "mutated"
 		mutated.TotalUsage.ByModel[0].Usage.InputTokens = 999
 		mutated.TotalUsage.ByModel = append(mutated.TotalUsage.ByModel, harness.ModelUsage{})
-		mutated.Header.AgentSelection.Definition.DefinitionID = "mutated"
+		*mutated.Header.Inputs.Instructions = "mutated"
 		for i := range mutated.Operations {
 			op := &mutated.Operations[i]
 			op.Model.Provider = "mutated"
@@ -1576,8 +1574,6 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 		mutatedRecord.Admission.Execution.Model.Provider = "mutated"
 		mutatedRecord.Admission.Execution.Tools[0].Parameters[9] = 'p'
 		mutatedRecord.Admission.Execution.Tools = append(mutatedRecord.Admission.Execution.Tools, model.ToolDefinition{})
-		mutatedRecord.Admission.Execution.Capabilities[0] = "mutated"
-		mutatedRecord.Admission.Execution.Capabilities = append(mutatedRecord.Admission.Execution.Capabilities, "forged")
 		mutatedRecord.Admission.Execution.Compact.SystemPrompt = "mutated"
 		*mutatedRecord.Admission.Execution.Pricing.Input = 999
 		*mutatedRecord.Admission.Execution.Pricing.Output = 999
@@ -1619,15 +1615,15 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 						fact.Assistant.ToolCalls[0].Extra["c"][1] = 'x'
 						fact.Assistant.ToolCalls[0].Extra["c"] = json.RawMessage(`"mutated"`)
 					}
-					if len(fact.Assistant.ToolCalls[0].NormalizedArguments) > 0 {
-						fact.Assistant.ToolCalls[0].NormalizedArguments[5] = '2'
-					}
 					fact.Assistant.ToolCalls = append(fact.Assistant.ToolCalls, harness.ToolCallRecord{})
 				}
 				if fact.Assistant.Usage != nil {
 					*fact.Assistant.Usage = harness.UsageCount{InputTokens: 999}
 				}
 			case fact.ToolResult != nil:
+				if fact.ToolResult.Implementation != nil {
+					fact.ToolResult.Implementation.ID = "mutated"
+				}
 				if len(fact.ToolResult.Metadata) > 0 {
 					fact.ToolResult.Metadata[7] = '2'
 				}
@@ -1739,7 +1735,7 @@ func TestPublicListSessionsRowOwnership(t *testing.T) {
 		*mutated[0].ArchivedAt = mutated[0].ArchivedAt.Add(time.Hour)
 		mutated[0].Identity.Workspace = "mutated"
 		mutated[0].Lifecycle = "mutated"
-		mutated[0].AgentSelection.Definition.DefinitionID = "mutated"
+		*mutated[0].Inputs.Instructions = "mutated"
 		mutated = append(mutated, harness.SessionHeader{})
 
 		fresh, err := f.h.ListSessions(ctx)

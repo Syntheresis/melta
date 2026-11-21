@@ -65,8 +65,8 @@ func (h *Harness) runExecution(c *coordinator, control *activeExecution, operati
 	if retired {
 		h.observeInvalidation(c)
 	}
-	control.cancel() // the context dies only after the drain: a drain-installed successor owns a distinct context
-	h.childCompletionSettled(c, operationID)
+	control.cancel()                             // the context dies only after the drain: a drain-installed successor owns a distinct context
+	_ = h.childCompletionSettled(c, operationID) // asynchronous retirement; settlement latches storage failures before releasing the member
 	if releaseGraph != nil {
 		releaseGraph()
 	}
@@ -79,13 +79,23 @@ func (h *Harness) runExecution(c *coordinator, control *activeExecution, operati
 // through the one quiet gate, retains the actual publication/storage cause,
 // then disposes the owned conversation invocation, the opened Execution and
 // the preparation reservation, and drains the post-terminal buffers while the
-// reservation is held. A canceled contended acquisition skips only the drain.
+// reservation is held. A canceled contended acquisition skips the drain and
+// discards the undelivered buffers itself, so the retiring run still retires
+// into a quiet Session and its settlement notification cannot strand the
+// completion obligation.
 func (d *executionDriver) complete(res agent.TerminalResult, runErr error) error {
 	h := d.harness
 	c := d.coordinator
 	release, reserveErr := h.reserve(h.ctx, c)
 	if reserveErr == nil {
 		defer release()
+	} else { // shutdown prevented the drain: the retiring run's buffers are not deliverable
+		c.mu.Lock()
+		discarded := c.discardBuffers()
+		c.mu.Unlock()
+		if discarded {
+			h.observeInvalidation(c)
+		}
 	}
 	err := d.settleTerminal(d.control.execCtx, res, runErr)
 	h.recordStorageFailure(err) // the established outcome's storage-class cause; maintenance latches its own before disposing
@@ -137,7 +147,7 @@ func (d *executionDriver) execute(execCtx context.Context) (agent.TerminalResult
 	// mutates its retained containers after publication can never change what
 	// this execution dispatches.
 	d.capture = ownCapture(admission.Execution)
-	guard := c.bgState == bgClosed || c.interruptOp == d.operationID
+	guard := memberStopping(c) || c.interruptOp == d.operationID
 	if c.interruptOp == d.operationID {
 		c.interruptOp = "" // consumed: the marker reaches exactly the execution it names
 	}
@@ -152,14 +162,10 @@ func (d *executionDriver) execute(execCtx context.Context) (agent.TerminalResult
 		}
 		return agent.TerminalResult{}, err
 	}
-	// The opened Execution owns its selected strategy from here: the resolved
-	// StrategyBinding value is copied once, before any invocation or strategy
-	// callback, so every maintenance procedure of this Execution selects the
-	// same accepted binding and a caller mutating its own supplied binding
-	// afterwards can never change the selection. A nil selection resolves to
-	// a copy of the included binding.
-	acceptedBinding := *resolveStrategyBinding(exec.Strategy)
-	exec.Strategy = &acceptedBinding
+	// The opened Execution supplies the invocation opener and its explicit
+	// strategy fallback; a host that owns per-procedure strategy resolution
+	// supplies ResolveStrategy and the procedure accepts one binding at each
+	// start from the retained execution configuration.
 	if exec.OpenInvocation == nil {
 		if exec.Close != nil {
 			h.recordCleanupFailure(exec.Close())
@@ -192,7 +198,7 @@ func (d *executionDriver) execute(execCtx context.Context) (agent.TerminalResult
 			OutputReserve:     d.capture.OutputReserve,
 			Settings:          model.CloneRaw(d.capture.Strategy.Settings),
 		}
-		_, err = d.completeMaintenance(execCtx, planInput, nil, true)
+		_, err = d.completeMaintenance(execCtx, planInput, true)
 		return agent.TerminalResult{}, err
 	}
 	conversation, err := d.openInvocation(execCtx, InvocationPurposeConversation, d.capture.Model)

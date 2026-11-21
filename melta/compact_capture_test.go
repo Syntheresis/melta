@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Syntheresis/melta/extension"
-	agents "github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/testassert"
@@ -21,7 +20,7 @@ import (
 
 // retainedSummarizerPrompt is the compact built-in's retained summarizer
 // prompt, pinned here as an independent literal of the resolved compact
-// definition.
+// configuration.
 const retainedSummarizerPrompt = `You are summarizing a coding agent conversation so the agent can continue working with reduced context. Your summary must preserve everything the agent needs to continue without re-reading files or re-asking the user.
 
 Produce a summary with these sections:
@@ -49,11 +48,11 @@ Be specific — include file paths, function names, error messages, line numbers
 // conversation model when the compact type's model does not resolve.
 
 // compactPrepConfigDocument is the compaction-capture fixture document: the
-// referenced keyed provider beside one provider whose credential stays
-// absent, both pointed at the given endpoint. Every model carries its own
-// captured-price fixture rate.
+// baseline conversation model beside the referenced keyed provider and one
+// provider whose credential stays absent, both pointed at the given endpoint.
+// Every model carries its own captured-price fixture rate.
 func compactPrepConfigDocument(endpoint string) string {
-	return `{"providers":{"prov":` + nominalProvMember(endpoint, "PREP_COMPACT_KEY",
+	return `{"model":"prov/m","providers":{"prov":` + nominalProvMember(endpoint, "PREP_COMPACT_KEY",
 		`{"m":{"name":"M","context_window":4096,"cost":{"input":1.5,"output":3,"cache_read":0.5,"cache_write":0.25}},`+
 			`"m2":{"name":"M2","context_window":2048,"max_output_tokens":1000,"cost":{"input":0.5,"output":1,"cache_read":0.125,"cache_write":0.0625}},`+
 			`"mzero":{"name":"MZ","context_window":0,"max_output_tokens":500,"cost":{"input":0.25}}}`) +
@@ -61,8 +60,8 @@ func compactPrepConfigDocument(endpoint string) string {
 		`{"m3":{"name":"M3","context_window":1024,"max_output_tokens":200,"cost":{"input":7}}}`) + `},"sessions":{}}`
 }
 
-// agentsWithCompact appends one compact builtin overlay to the retained
-// preparation agents document.
+// compactAgentsDocument is the preparation agents document: one "solo"
+// definition on the conversation model with the fixture tool.
 const compactAgentsDocument = `{"solo":{"model":"prov/m","system_prompt":"simple","tools":["echo"]}}`
 
 func agentsWithCompact(overlay string) string {
@@ -75,9 +74,9 @@ func compactPrepConfigDocumentWith(endpoint, compaction string) string {
 	return strings.TrimSuffix(compactPrepConfigDocument(endpoint), "}") + `,"compaction":` + compaction + `}`
 }
 
-// compactPrep wires one concrete preparation (nil controlled prepare) over
-// the compact fixture documents, publishes the configuration once, and
-// returns that publication's own snapshot+credential capture.
+// compactPrep wires one concrete preparation over the compact fixture
+// documents, publishes the configuration once, and returns that publication's
+// own snapshot+credential capture with the preparation bound to it.
 func compactPrep(t *testing.T, agentsDoc, endpoint string) (configurationCapture, *preparation) {
 	t.Helper()
 	return compactPrepWith(t, agentsDoc, compactPrepConfigDocument(endpoint), endpoint)
@@ -94,49 +93,70 @@ func compactPrepWith(t *testing.T, agentsDoc, configDoc, endpoint string) (confi
 	enableFixturePlugin(t, sh.configPath, "compacttools")
 	owner, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	compact := compactToolsPlugin()
-	svc := sh.preparedService(owner, compact, fixtureAgentPlugin(compact))
+	svc := sh.preparedService(owner, compactToolsPlugin(), fixtureAgentPlugin())
 	captured, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	return captured, newPreparation(svc, sh.locations(), "", nil, nil, nil, nil, nil)
+	return captured, newPreparation(svc, sh.locations(), "", nil, nil, newArtifactIntervals(), nil, nil)
 }
 
-func compactToolsPlugin() extension.Native {
-	native := testNative("compacttools", extension.LifetimeHarness, []extension.Capability{extension.ToolCapability("echo"), extension.ToolCapability("read")}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{
-			"echo": {Tool: noopNativeTool{}},
-			"read": {Tool: noopNativeTool{}},
-		}}, nil
+// compactToolsPlugin registers the fixture's noop tools through the
+// activation API.
+func compactToolsPlugin() extension.Extension {
+	return testNative("compacttools", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		for _, id := range []string{"echo", "read"} {
+			if _, err := api.RegisterTool(testDescribeTool(id), testRegisteredTool{}, nil); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
 	})
-	native.Describe = map[string]extension.ToolDescribe{"echo": testDescribeTool("echo"), "read": testDescribeTool("read")}
-	return native
 }
 
 func compactPrepRequest() harness.PreparationRequest {
 	return harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity:       harness.SessionIdentity{SessionID: "000000000000000000000000000000aa", Workspace: "/tmp/compact-ws", CreatedAt: time.Now()},
-			AgentSelection: suppliedDefinition("solo"),
+			ExtensionState: agentState("solo"),
 		},
 		RequestKind: harness.RequestKindMessage,
 	}
 }
 
+// compactPrepSelection builds one preparation selection over the published
+// capture: the baseline candidate, the included strategy, the retained
+// activation capture and the frozen credential set.
 func compactPrepSelection(t *testing.T, captured configurationCapture, agentName string) selection {
 	t.Helper()
-	inputs, err := resolveDefinition(context.Background(), captured.snapshot, harness.DefinitionRef{ExtensionID: agents.ExtensionID, CapabilityID: agents.DefinitionsCapabilityID, DefinitionID: agentName})
-	testassert.Require(t, err == nil, "resolveDefinition(%q): %v", agentName, err)
-	sc := mustOpenScope(t, captured.snapshot.composition, context.Background(), ScopeInfo{Kind: ScopeRuntime, DataDir: t.TempDir()}, nil)
-	t.Cleanup(func() { _ = sc.close() })
-	selected := append([]string(nil), inputs.Capabilities...)
-	selected = append(selected, inputs.Tools...)
-	return selection{
-		inputs:      inputs,
-		scopes:      []*scope{sc},
-		selected:    selected,
-		invocation:  Invocation{snapshot: captured.snapshot},
-		credentials: captured.snapshot.credentials,
+	_ = agentName
+	snapshot := captured.snapshot
+	candidate := extension.AdmissionCandidate{Model: snapshot.baselineModel}
+	candidate.Strategy.ID = harness.IncludedStrategyID
+	native := snapshot.native.capture()
+	if native == nil {
+		t.Fatal("activation capture failed")
 	}
+	t.Cleanup(func() { _ = native.release() })
+	var catalog []model.ToolDefinition
+	for _, item := range standardToolDeclarations() {
+		catalog = append(catalog, item.definition)
+	}
+	return selection{
+		candidate:   candidate,
+		native:      native,
+		prompt:      newSurfacePrompt(surfaceRequest{globalRulesDir: t.TempDir(), workspace: "/tmp/compact-ws", sessionStart: time.Now()}),
+		catalog:     catalog,
+		strategy:    harness.StrategyCapture{ID: harness.IncludedStrategyID, RequiresContextWindow: true},
+		invocation:  Invocation{snapshot: snapshot},
+		credentials: snapshot.credentials,
+	}
+}
+
+func concretePrepareTest(ctx context.Context, prep *preparation, req harness.PreparationRequest, sel selection) (harness.ExecutionCapture, openInvocation, error) {
+	entry, transport, err := prep.bindModel(ctx, &sel)
+	if err != nil {
+		return harness.ExecutionCapture{}, nil, err
+	}
+	return prep.concretePrepare(ctx, req, sel, entry, transport)
 }
 
 // TestConcretePrepareCompactCapture pins every capture field the compaction
@@ -252,7 +272,10 @@ func TestConcretePrepareCompactCapture(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			captured, prep := compactPrepWith(t, tc.agentsDoc, compactPrepConfigDocumentWith("https://prov.test/v1", tc.compaction), "https://prov.test/v1")
 			sel := compactPrepSelection(t, captured, tc.agent)
-			capture, opener, err := prep.concretePrepare(context.Background(), compactPrepRequest(), sel)
+			if tc.agent == "reservable" {
+				sel.candidate.Model = m2Ref
+			}
+			capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), sel)
 			testassert.NoError(t, err)
 			testassert.Require(t, opener != nil, "concretePrepare returned no opener")
 			if capture.Model != tc.wantModel {
@@ -331,20 +354,24 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 	}{
 		{"compact model override", `{"model":"prov/m2"}`, "m2"},
 		{"conversation model default", `{}`, "m"},
+		{"missing compact credential falls back", `{"model":"p2/m3"}`, "m"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newCompactRecordingServer(t)
-			captured, prep := compactPrepWith(t, compactAgentsDocument, compactPrepConfigDocumentWith(server.URL, tc.compaction), server.URL)
+			doc := compactPrepConfigDocumentWith(server.URL, tc.compaction)
+			doc = strings.Replace(doc, `"m":{"name":"M",`, `"m":{"name":"M","extra_body":{"bound_default":"conversation"},`, 1)
+			doc = strings.Replace(doc, `"m2":{"name":"M2",`, `"m2":{"name":"M2","extra_body":{"bound_default":"maintenance"},`, 1)
+			captured, prep := compactPrepWith(t, compactAgentsDocument, doc, server.URL)
 			sel := compactPrepSelection(t, captured, "solo")
-			capture, opener, err := prep.concretePrepare(context.Background(), compactPrepRequest(), sel)
+			capture, opener, err := concretePrepareTest(context.Background(), prep, compactPrepRequest(), sel)
 			testassert.NoError(t, err)
 			admission := harness.OperationAdmission{
-				SessionID:      "000000000000000000000000000000aa",
-				OperationID:    "op-1",
-				AgentSelection: suppliedDefinition("solo"),
-				Execution:      capture,
-				AdmittedAt:     time.Now(),
+				SessionID:     "000000000000000000000000000000aa",
+				OperationID:   "op-1",
+				AdmittedEntry: harness.EntryRef{SessionID: "000000000000000000000000000000aa", EntryID: "entry-1"},
+				Execution:     capture,
+				AdmittedAt:    time.Now(),
 			}
 			inv, err := opener(context.Background(), admission, sel, harness.InvocationRequest{
 				ID:      "inv-maintenance",
@@ -353,12 +380,17 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 			})
 			testassert.NoError(t, err)
 			testassert.Require(t, inv.Model != nil, "opened maintenance invocation carries no Model callback")
+			wantDefault := `"conversation"`
+			if tc.wantCompactOn == "m2" {
+				wantDefault = `"maintenance"`
+			}
+			testassert.Equal(t, string(inv.ModelParameters["bound_default"]), wantDefault)
 			req, err := model.NewRequest(model.Request{Messages: []model.Message{{
 				Role:    "user",
 				Content: []model.ContentPart{{Kind: model.PartText, Text: "summarize"}},
 			}}})
 			testassert.NoError(t, err)
-			stream, err := inv.Model(context.Background(), req)
+			stream, err := inv.Model(context.Background(), req, nil)
 			testassert.NoError(t, err)
 			stream.Close()
 			testassert.Require(t, len(server.models) == 1 && server.models[0] == tc.wantCompactOn && len(server.auths) == 1 && server.auths[0] == "Bearer compact-secret", "maintenance Model wire models = %v, want exactly one request on %q; maintenance Model authorization = %v, want the compact transport's resolved credential", server.models, tc.wantCompactOn, server.auths)
@@ -373,7 +405,8 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 				Model:   capture.Model,
 			})
 			testassert.NoError(t, err)
-			stream, err = conv.Model(context.Background(), req)
+			testassert.Equal(t, string(conv.ModelParameters["bound_default"]), `"conversation"`)
+			stream, err = conv.Model(context.Background(), req, nil)
 			testassert.NoError(t, err)
 			stream.Close()
 			testassert.Require(t, len(server.models) == 2 && server.models[1] == "m", "conversation Model wire models = %v, want the conversation model second", server.models)

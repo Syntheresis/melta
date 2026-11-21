@@ -3,15 +3,23 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
-	"github.com/Syntheresis/melta/protocol"
 )
+
+func TestLaunchOutcomePreservesPartialSession(t *testing.T) {
+	outcome := launchOutcome("call", &extension.CallError{
+		Err:     errors.New("storage failure"),
+		Partial: json.RawMessage(`{"child_session_id":"session123"}`),
+	})
+	testassert.Equal(t, outcome.Result.Status, model.ResultError)
+	testassert.Require(t, strings.Contains(outcome.Result.Content, "storage failure") && strings.Contains(outcome.Result.Content, "session123"), "outcome lost failure or Session identity: %q", outcome.Result.Content)
+}
 
 // TestDecodeSettingsRangesAndShapes proves the settings decoder the tool's
 // preparation owns: absent/blank/null input and null members keep the
@@ -75,16 +83,35 @@ func TestDecodeSettingsRangesAndShapes(t *testing.T) {
 	}
 }
 
-// openTool opens the shipped task native with the captured extension section,
-// mirroring the real composition handoff: settings are decoded and retained
-// at Open, never at Prepare.
-func openTool(t *testing.T, section string) extension.Tool {
+// openTool activates the shipped Agents entry with the captured extension
+// section and returns its registered task tool: settings are decoded and
+// retained at activation, never at Prepare.
+func openTool(t *testing.T, section string) (extension.RegisteredTool, error) {
 	t.Helper()
-	instance, err := Native(Options{}).Open(context.Background(), extension.InstanceContext{Section: json.RawMessage(section)})
-	testassert.NoError(t, err)
-	tool := instance.Capabilities[TaskCapabilityID].Tool
-	testassert.Require(t, tool != nil, "task capability has no tool implementation")
-	return tool
+	api := &authorAPI{operations: map[string]extension.Operation{}, settings: json.RawMessage(section)}
+	if section == "" {
+		api.settings = json.RawMessage(`{"enabled":true}`)
+	}
+	if _, err := Author().Activate(context.Background(), api); err != nil {
+		return nil, err
+	}
+	testassert.Require(t, api.tool != nil, "activation registered no task tool")
+	return api.tool, nil
+}
+
+// members answers the tool's live-member lookup with count Agents Sessions.
+func members(count int) func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+	return func(_ context.Context, service, method string, _ json.RawMessage) (extension.Result, error) {
+		var out []map[string]string
+		for i := 0; i < count; i++ {
+			out = append(out, map[string]string{"kind": "session", "id": "s", "starter": ExtensionID})
+		}
+		value, _ := json.Marshal(out)
+		if out == nil {
+			value = []byte(`[]`)
+		}
+		return extension.Result{Value: value}, nil
+	}
 }
 
 // taskCall builds one completed task call for the direct preparation tests.
@@ -97,7 +124,7 @@ func taskCall(t *testing.T, args string) model.ToolCall {
 
 // TestNormalizeTaskArguments proves the member validator.
 func TestNormalizeTaskArguments(t *testing.T) {
-	got, err := taskTool{}.Normalize(extension.ToolContext{}, taskCall(t, `{"prompt":"do it","subagent_type":"secondary","extra":42,"_melta_probe":"secret","_lightcode_probe":"ordinary"}`))
+	got, err := authorTask{}.Normalize(extension.AuthorContext{}, taskCall(t, `{"prompt":"do it","subagent_type":"secondary","extra":42,"_melta_probe":"secret","_lightcode_probe":"ordinary"}`))
 	testassert.NoError(t, err)
 	var args map[string]any
 	testassert.NoError(t, json.Unmarshal(got, &args))
@@ -121,20 +148,21 @@ func TestNormalizeTaskArguments(t *testing.T) {
 		{`null`, "arguments must be a JSON object"},
 	}
 	for _, tc := range rejected {
-		_, err := taskTool{}.Normalize(extension.ToolContext{}, taskCall(t, tc.args))
+		_, err := authorTask{}.Normalize(extension.AuthorContext{}, taskCall(t, tc.args))
 		testassert.Check(t, err != nil && err.Error() == tc.want, "Normalize(%s) error = %v, want exactly %q", tc.args, err, tc.want)
 	}
 }
 
 // TestPrepareRejectsMissingAndUnknown proves the retained shape errors.
 func TestPrepareRejectsMissingAndUnknown(t *testing.T) {
-	tool := openTool(t, "")
-	tc := extension.ToolContext{}
+	tool, err := openTool(t, "")
+	testassert.NoError(t, err)
+	tc := extension.AuthorContext{Call: members(0)}
 	prepare := func(args string) extension.ToolPlan {
 		t.Helper()
 		plan := tool.Prepare(context.Background(), tc, taskCall(t, args))
 		testassert.Require(t, plan.Immediate != nil, "Prepare(%s) = %+v, want an immediate validation error", args, plan)
-		testassert.Check(t, plan.Permissions == nil && plan.Data == nil, "Prepare(%s) declared execution behind a validation error", args)
+		testassert.Check(t, plan.Permissions == nil && plan.Data == nil && plan.Start == nil, "Prepare(%s) declared execution behind a validation error", args)
 		testassert.Check(t, plan.Immediate.Result.Status == model.ResultError, "Prepare(%s) status = %q, want %q", args, plan.Immediate.Result.Status, model.ResultError)
 		return plan
 	}
@@ -148,57 +176,33 @@ func TestPrepareRejectsMissingAndUnknown(t *testing.T) {
 	}
 	{
 		got := prepare(`{"prompt":"do it","subagent_type":"ghost"}`).Immediate.Result.Content
-		testassert.Check(t, got == `unknown subagent type "ghost": unknown agent type "ghost"`, "unknown type content = %q, want the retained wrapped shape over the roster resolver's error", got)
+		testassert.Check(t, got == `unknown subagent type "ghost"`, "unknown type content = %q, want the unknown subagent refusal", got)
+	}
+	{
+		got := prepare(`{"prompt":"do it","subagent_type":"primary"}`).Immediate.Result.Content
+		testassert.Check(t, got == `unknown subagent type "primary"`, "non-subagent content = %q, want the unknown subagent refusal", got)
 	}
 }
 
-func TestExecuteUsesDeclaredChildLaunchBinding(t *testing.T) {
-	tool := openTool(t, `{"task":{"max_concurrent":9,"max_output_bytes":4096}}`)
-	call := taskCall(t, `{"prompt":"do it","subagent_type":"secondary"}`)
-	tc := extension.ToolContext{AgentTypes: []protocol.Agent{{Name: "secondary", Subagent: true, Definition: protocol.DefinitionRef{ExtensionId: ExtensionID, CapabilityId: DefinitionsCapabilityID, DefinitionId: "secondary"}}}}
-	plan := tool.Prepare(context.Background(), tc, call)
-	testassert.Require(t, plan.Immediate == nil && plan.Data != nil, "Prepare = %+v, want an executable plan", plan)
-	testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0] == (harness.PermissionRequest{Permission: harness.PermissionChildLaunch, Target: (harness.DefinitionRef{ExtensionID: ExtensionID, CapabilityID: DefinitionsCapabilityID, DefinitionID: "secondary"}).PermissionTarget()}), "permissions = %+v, want the complete canonical reference target", plan.Permissions)
-
-	var requestedBinding, requestedMethod string
-	var requestedArguments json.RawMessage
-	view := func(_ context.Context, binding, method string, arguments json.RawMessage) (extension.Result, error) {
-		requestedBinding, requestedMethod = binding, method
-		requestedArguments = append(json.RawMessage(nil), arguments...)
-		return extension.Result{Value: json.RawMessage(`{"child_session_id":"child-1"}`)}, nil
-	}
-	tc.Calls = extension.CallContext{Call: view}
-	outcome := tool.Execute(context.Background(), tc, plan)
-	testassert.Require(t, requestedBinding == "child_launch" && requestedMethod == "launch", "request = %s/%s, want the declared child_launch.launch binding", requestedBinding, requestedMethod)
-	var arguments struct {
-		Definition    harness.DefinitionRef `json:"definition"`
-		Prompt        string                `json:"prompt"`
-		OperationID   string                `json:"operation_id"`
-		MaxConcurrent int                   `json:"max_concurrent"`
-		OutputLimit   int                   `json:"output_limit"`
-	}
-	testassert.NoError(t, json.Unmarshal(requestedArguments, &arguments))
-	testassert.Check(t, arguments.Definition == (harness.DefinitionRef{ExtensionID: ExtensionID, CapabilityID: DefinitionsCapabilityID, DefinitionID: "secondary"}) && arguments.Prompt == "do it" && len(arguments.OperationID) == 32, "launch arguments = %+v, want the validated child facts and a minted operation ID", arguments)
-	testassert.Check(t, arguments.MaxConcurrent == 9 && arguments.OutputLimit == 4096, "launch arguments = %+v, want the settings retained at Open", arguments)
-	testassert.Check(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.CallID == "call-1" && strings.Contains(outcome.Result.Content, "child-1"), "outcome = %+v, want the call identity and child session ID", outcome.Result)
-}
-
-// TestOpenRetainsTaskSettings proves the single Open-time decode: absent,
-// null and default member forms keep the retained defaults, an integer object
-// retains its values, and non-integer lexemes the config schema admits as
-// integers are rejected before the candidate publishes, with no coercion.
-func TestOpenRetainsTaskSettings(t *testing.T) {
-	prepare := func(t *testing.T, tool extension.Tool) (int, int) {
+// TestActivationRetainsTaskSettings proves the single activation-time decode:
+// absent, null and default member forms keep the retained defaults, an
+// integer object retains its values, and non-integer lexemes the settings
+// schema admits as integers are rejected before the activation succeeds.
+func TestActivationRetainsTaskSettings(t *testing.T) {
+	limits := func(t *testing.T, tool extension.RegisteredTool) (int, int) {
 		t.Helper()
-		tc := extension.ToolContext{AgentTypes: []protocol.Agent{{Name: "secondary", Subagent: true, Definition: protocol.DefinitionRef{ExtensionId: ExtensionID, CapabilityId: DefinitionsCapabilityID, DefinitionId: "secondary"}}}}
-		plan := tool.Prepare(context.Background(), tc, taskCall(t, `{"prompt":"do it","subagent_type":"secondary"}`))
-		testassert.Require(t, plan.Immediate == nil && plan.Data != nil, "Prepare = %+v, want an executable plan", plan)
-		var data struct {
-			MaxConcurrent  int `json:"max_concurrent"`
-			MaxOutputBytes int `json:"max_output_bytes"`
+		call := taskCall(t, `{"prompt":"do it","subagent_type":"secondary"}`)
+		plan := tool.Prepare(context.Background(), extension.AuthorContext{Call: members(0)}, call)
+		testassert.Require(t, plan.Immediate == nil && plan.Start != nil, "Prepare = %+v, want a prepared start", plan)
+		concurrent := 0
+		for concurrent < 21 {
+			refused := tool.Prepare(context.Background(), extension.AuthorContext{Call: members(concurrent + 1)}, call)
+			if refused.Immediate != nil {
+				break
+			}
+			concurrent++
 		}
-		testassert.NoError(t, json.Unmarshal(plan.Data, &data))
-		return data.MaxConcurrent, data.MaxOutputBytes
+		return concurrent + 1, plan.Start.OutputLimit
 	}
 	for _, row := range []struct {
 		name    string
@@ -210,22 +214,23 @@ func TestOpenRetainsTaskSettings(t *testing.T) {
 		{"null members", `{"enabled":true,"task":{"max_concurrent":null,"max_output_bytes":null}}`},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			concurrent, output := prepare(t, openTool(t, row.section))
+			tool, err := openTool(t, row.section)
+			testassert.NoError(t, err)
+			concurrent, output := limits(t, tool)
 			testassert.Check(t, concurrent == 4 && output == 15360, "retained limits = %d/%d, want the defaults 4/15360", concurrent, output)
 		})
 	}
-	{
-		concurrent, output := prepare(t, openTool(t, `{"enabled":true,"task":{"max_concurrent":7,"max_output_bytes":2048}}`))
-		testassert.Check(t, concurrent == 7 && output == 2048, "retained limits = %d/%d, want 7/2048", concurrent, output)
-	}
+	tool, err := openTool(t, `{"enabled":true,"task":{"max_concurrent":7,"max_output_bytes":2048}}`)
+	testassert.NoError(t, err)
+	concurrent, output := limits(t, tool)
+	testassert.Check(t, concurrent == 7 && output == 2048, "retained limits = %d/%d, want 7/2048", concurrent, output)
 	for _, section := range []string{
 		`{"task":{"max_concurrent":1.0}}`,
 		`{"task":{"max_concurrent":1e0}}`,
 		`{"task":{"max_output_bytes":2048.0}}`,
 	} {
-		instance, err := Native(Options{}).Open(context.Background(), extension.InstanceContext{Section: json.RawMessage(section)})
-		testassert.Check(t, err != nil && strings.HasPrefix(err.Error(), "tasks: invalid settings: "), "open(%s) = %v, want the invalid-settings rejection", section, err)
-		testassert.Check(t, instance.Capabilities == nil, "open(%s) published an instance after a rejected setting", section)
+		_, err := openTool(t, section)
+		testassert.Check(t, err != nil && strings.HasPrefix(err.Error(), "tasks: invalid settings: "), "activate(%s) = %v, want the invalid-settings rejection", section, err)
 	}
 }
 
@@ -233,8 +238,7 @@ func TestOpenRetainsTaskSettings(t *testing.T) {
 // the retained absent/null/default forms and integer members while refusing a
 // non-object task document.
 func TestConfigSchemaKeepsNullDefaults(t *testing.T) {
-	compiled, err := extension.Compile([]extension.Native{Native(Options{})})
-	testassert.NoError(t, err)
+	manifest := Author().Manifest
 	for _, section := range []string{
 		`{"enabled":true}`,
 		`{"enabled":true,"task":null}`,
@@ -242,7 +246,7 @@ func TestConfigSchemaKeepsNullDefaults(t *testing.T) {
 		`{"enabled":true,"task":{"max_concurrent":null,"max_output_bytes":null}}`,
 		`{"enabled":true,"task":{"max_concurrent":7,"max_output_bytes":2048}}`,
 	} {
-		testassert.Check(t, compiled.ValidateSection(ExtensionID, json.RawMessage(section)) == nil, "config schema refused the retained form %s", section)
+		testassert.Check(t, extension.ValidateManifestSection(manifest, json.RawMessage(section)) == nil, "config schema refused the retained form %s", section)
 	}
-	testassert.Check(t, compiled.ValidateSection(ExtensionID, json.RawMessage(`{"enabled":true,"task":5}`)) != nil, "config schema accepted a non-object task document")
+	testassert.Check(t, extension.ValidateManifestSection(manifest, json.RawMessage(`{"enabled":true,"task":5}`)) != nil, "config schema accepted a non-object task document")
 }

@@ -8,108 +8,7 @@ import (
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
-	"github.com/Syntheresis/melta/prompt"
-	"github.com/Syntheresis/melta/protocol"
 )
-
-// ActivateParams is the first request's input: the exact host contract version.
-type ActivateParams struct {
-	ContractVersion string `json:"contract_version"`
-}
-
-// ActivateResult is the activation response: the wire declaration.
-type ActivateResult struct {
-	Declaration Declaration `json:"declaration"`
-}
-
-// NewContext encodes one host-issued callback context and its opaque token.
-func NewContext(token string, call extension.CallContext) Context {
-	return Context{Token: token, callContextJSON: callContextFrom(call)}
-}
-
-// NewInstanceContext encodes one open or close callback view and its token.
-func NewInstanceContext(token string, instance extension.InstanceContext) Context {
-	return Context{
-		Token: token,
-		callContextJSON: callContextJSON{
-			ExtensionID:  instance.ExtensionID,
-			ComponentID:  instance.ComponentID,
-			InstanceID:   instance.InstanceID,
-			Lifetime:     instance.Lifetime,
-			Scope:        instance.Scope,
-			Revision:     instance.Revision,
-			Section:      JSONBytes(instance.Section),
-			Workspace:    instance.Scope.Workspace,
-			SessionID:    instance.Scope.SessionID,
-			OperationID:  instance.Scope.OperationID,
-			InvocationID: instance.Scope.InvocationID,
-			Purpose:      instance.Scope.Purpose,
-		},
-	}
-}
-
-// Caller is one caller identity with the fixed callerIdentity member names.
-type Caller struct {
-	ExtensionID string `json:"extension_id"`
-	ComponentID string `json:"component_id"`
-	InstanceID  string `json:"instance_id"`
-}
-
-func (c *Caller) value() extension.CallerIdentity {
-	if c == nil {
-		return extension.CallerIdentity{}
-	}
-	return extension.CallerIdentity{ExtensionID: c.ExtensionID, ComponentID: c.ComponentID, InstanceID: c.InstanceID}
-}
-
-// Context is one host-issued callback routing context: the shared call
-// identities plus the opaque token that alone grants binding access.
-type Context struct {
-	Token string `json:"token"`
-	callContextJSON
-}
-
-func (c Context) callContext() extension.CallContext {
-	return callContextValue(c.callContextJSON)
-}
-
-// Target addresses a metadata capability or one opened instance capability.
-type Target struct {
-	Kind         string `json:"kind"`
-	CapabilityID string `json:"capability_id"`
-	InstanceID   string `json:"instance_id,omitempty"`
-}
-
-// OpenParams is one open request's input.
-type OpenParams struct {
-	InstanceID  string                  `json:"instance_id"`
-	ComponentID string                  `json:"component_id"`
-	Scope       extension.ScopeIdentity `json:"scope"`
-	Context     Context                 `json:"context"`
-	Section     JSONBytes               `json:"section"`
-}
-
-// DisposeParams is one dispose request's input.
-type DisposeParams struct {
-	InstanceID string  `json:"instance_id"`
-	Context    Context `json:"context"`
-}
-
-// CallParams is one call request's input.
-type CallParams struct {
-	Target    Target    `json:"target"`
-	Context   Context   `json:"context"`
-	Method    string    `json:"method"`
-	Arguments JSONBytes `json:"arguments"`
-}
-
-// HostcallParams is one hostcall request's input.
-type HostcallParams struct {
-	Context   Context   `json:"context"`
-	Binding   string    `json:"binding"`
-	Method    string    `json:"method"`
-	Arguments JSONBytes `json:"arguments"`
-}
 
 type modelRefJSON struct {
 	Provider string `json:"provider"`
@@ -281,21 +180,6 @@ func messageValue(v messageJSON) model.Message {
 	return out
 }
 
-func messagesFrom(v []model.Message) ([]messageJSON, error) {
-	if v == nil {
-		return nil, nil
-	}
-	out := make([]messageJSON, len(v))
-	for i, message := range v {
-		encoded, err := messageFrom(message)
-		if err != nil {
-			return nil, err
-		}
-		out[i] = encoded
-	}
-	return out, nil
-}
-
 func messagesRequired(v []model.Message) ([]messageJSON, error) {
 	out := make([]messageJSON, len(v))
 	for i, message := range v {
@@ -390,7 +274,6 @@ type permissionJSON struct {
 type toolPlanJSON struct {
 	Permissions        []permissionJSON `json:"permissions"`
 	CanonicalWorkspace string           `json:"canonical_workspace,omitempty"`
-	CanonicalWriteDir  string           `json:"canonical_write_dir,omitempty"`
 	Immediate          *toolOutcomeJSON `json:"immediate,omitempty"`
 	Data               JSONBytes        `json:"data,omitempty"`
 }
@@ -399,7 +282,6 @@ func toolPlanFrom(v extension.ToolPlan) toolPlanJSON {
 	out := toolPlanJSON{
 		Permissions:        make([]permissionJSON, len(v.Permissions)),
 		CanonicalWorkspace: v.CanonicalWorkspace,
-		CanonicalWriteDir:  v.CanonicalWriteDir,
 		Data:               JSONBytes(v.Data),
 	}
 	for i, permission := range v.Permissions {
@@ -416,7 +298,6 @@ func toolPlanValue(v toolPlanJSON) extension.ToolPlan {
 	out := extension.ToolPlan{
 		Permissions:        make([]harness.PermissionRequest, len(v.Permissions)),
 		CanonicalWorkspace: v.CanonicalWorkspace,
-		CanonicalWriteDir:  v.CanonicalWriteDir,
 		Data:               append([]byte(nil), v.Data...),
 	}
 	for i, permission := range v.Permissions {
@@ -427,301 +308,6 @@ func toolPlanValue(v toolPlanJSON) extension.ToolPlan {
 		out.Immediate = &immediate
 	}
 	return out
-}
-
-type callContextJSON struct {
-	ExtensionID  string                  `json:"extension_id"`
-	ComponentID  string                  `json:"component_id"`
-	InstanceID   string                  `json:"instance_id"`
-	Lifetime     extension.Lifetime      `json:"lifetime"`
-	Scope        extension.ScopeIdentity `json:"scope"`
-	Revision     string                  `json:"revision"`
-	Section      JSONBytes               `json:"section,omitempty"`
-	Workspace    string                  `json:"workspace,omitempty"`
-	SessionID    string                  `json:"session_id,omitempty"`
-	OperationID  string                  `json:"operation_id,omitempty"`
-	InvocationID string                  `json:"invocation_id,omitempty"`
-	Purpose      string                  `json:"purpose,omitempty"`
-	RequestID    string                  `json:"request_id,omitempty"`
-	ToolCallID   string                  `json:"tool_call_id,omitempty"`
-	EffectID     string                  `json:"effect_id,omitempty"`
-	Caller       *Caller                 `json:"caller,omitempty"`
-}
-
-func callContextFrom(v extension.CallContext) callContextJSON {
-	out := callContextJSON{
-		ExtensionID:  v.ExtensionID,
-		ComponentID:  v.ComponentID,
-		InstanceID:   v.InstanceID,
-		Lifetime:     v.Lifetime,
-		Scope:        v.Scope,
-		Revision:     v.Revision,
-		Section:      JSONBytes(v.Section),
-		Workspace:    v.Workspace,
-		SessionID:    v.SessionID,
-		OperationID:  v.OperationID,
-		InvocationID: v.InvocationID,
-		Purpose:      v.Purpose,
-		RequestID:    v.RequestID,
-		ToolCallID:   v.ToolCallID,
-		EffectID:     v.EffectID,
-	}
-	if v.Caller != (extension.CallerIdentity{}) {
-		caller := Caller{ExtensionID: v.Caller.ExtensionID, ComponentID: v.Caller.ComponentID, InstanceID: v.Caller.InstanceID}
-		out.Caller = &caller
-	}
-	return out
-}
-
-func callContextValue(v callContextJSON) extension.CallContext {
-	out := extension.CallContext{
-		ExtensionID:  v.ExtensionID,
-		ComponentID:  v.ComponentID,
-		InstanceID:   v.InstanceID,
-		Lifetime:     v.Lifetime,
-		Scope:        v.Scope,
-		Revision:     v.Revision,
-		Section:      append(json.RawMessage(nil), v.Section...),
-		Workspace:    v.Workspace,
-		SessionID:    v.SessionID,
-		OperationID:  v.OperationID,
-		InvocationID: v.InvocationID,
-		Purpose:      v.Purpose,
-		RequestID:    v.RequestID,
-		ToolCallID:   v.ToolCallID,
-		EffectID:     v.EffectID,
-	}
-	if v.Caller != nil {
-		out.Caller = extension.CallerIdentity{ExtensionID: v.Caller.ExtensionID, ComponentID: v.Caller.ComponentID, InstanceID: v.Caller.InstanceID}
-	}
-	return out
-}
-
-type toolContextJSON struct {
-	Session       harness.SessionIdentity `json:"session"`
-	Model         modelRefJSON            `json:"model"`
-	Revision      string                  `json:"revision"`
-	Workspace     string                  `json:"workspace"`
-	AdmittedEntry harness.EntryRef        `json:"admitted_entry"`
-	Constraints   harness.ToolConstraints `json:"constraints"`
-	Config        JSONBytes               `json:"config,omitempty"`
-	AgentTypes    []agentJSON             `json:"agent_types"`
-	Calls         callContextJSON         `json:"calls"`
-}
-
-func toolContextFrom(v extension.ToolContext) (toolContextJSON, error) {
-	model, err := modelRefFrom(v.Model)
-	if err != nil {
-		return toolContextJSON{}, err
-	}
-	agents, err := agentsFrom(v.AgentTypes)
-	if err != nil {
-		return toolContextJSON{}, err
-	}
-	return toolContextJSON{
-		Session:       v.Session,
-		Model:         model,
-		Revision:      v.Revision,
-		Workspace:     v.Workspace,
-		AdmittedEntry: v.AdmittedEntry,
-		Constraints:   v.Constraints,
-		Config:        JSONBytes(v.Config),
-		AgentTypes:    agents,
-		Calls:         callContextFrom(v.Calls),
-	}, nil
-}
-
-func toolContextValue(v toolContextJSON) extension.ToolContext {
-	return extension.ToolContext{
-		Session:       v.Session,
-		Model:         modelRefValue(v.Model),
-		Revision:      v.Revision,
-		Workspace:     v.Workspace,
-		AdmittedEntry: v.AdmittedEntry,
-		Constraints:   v.Constraints,
-		Config:        append(json.RawMessage(nil), v.Config...),
-		AgentTypes:    agentsValue(v.AgentTypes),
-		Calls:         callContextValue(v.Calls),
-	}
-}
-
-type definitionRefJSON struct {
-	ExtensionID  string `json:"extension_id"`
-	CapabilityID string `json:"capability_id"`
-	DefinitionID string `json:"definition_id"`
-}
-
-type agentJSON struct {
-	Name         string             `json:"name,omitempty"`
-	Description  string             `json:"description,omitempty"`
-	Model        string             `json:"model,omitempty"`
-	Tools        []string           `json:"tools,omitempty"`
-	Capabilities []string           `json:"capabilities,omitempty"`
-	Readonly     bool               `json:"readonly,omitempty"`
-	Subagent     bool               `json:"subagent,omitempty"`
-	WriteDir     string             `json:"write_dir,omitempty"`
-	Definition   *definitionRefJSON `json:"definition,omitempty"`
-}
-
-func agentFrom(v protocol.Agent) (agentJSON, error) {
-	out := agentJSON{
-		Name:         v.Name,
-		Description:  v.Description,
-		Model:        v.Model,
-		Tools:        append([]string(nil), v.Tools...),
-		Capabilities: append([]string(nil), v.Capabilities...),
-		Readonly:     v.Readonly,
-		Subagent:     v.Subagent,
-		WriteDir:     v.WriteDir,
-	}
-	if v.Definition != (protocol.DefinitionRef{}) {
-		if v.Definition.ExtensionId == "" || v.Definition.CapabilityId == "" || v.Definition.DefinitionId == "" {
-			return agentJSON{}, fmt.Errorf("worker: agent definition reference is not complete")
-		}
-		out.Definition = &definitionRefJSON{
-			ExtensionID:  v.Definition.ExtensionId,
-			CapabilityID: v.Definition.CapabilityId,
-			DefinitionID: v.Definition.DefinitionId,
-		}
-	}
-	return out, nil
-}
-
-func agentValue(v agentJSON) protocol.Agent {
-	out := protocol.Agent{
-		Name:         v.Name,
-		Description:  v.Description,
-		Model:        v.Model,
-		Tools:        append([]string(nil), v.Tools...),
-		Capabilities: append([]string(nil), v.Capabilities...),
-		Readonly:     v.Readonly,
-		Subagent:     v.Subagent,
-		WriteDir:     v.WriteDir,
-	}
-	if v.Definition != nil {
-		out.Definition = protocol.DefinitionRef{
-			ExtensionId:  v.Definition.ExtensionID,
-			CapabilityId: v.Definition.CapabilityID,
-			DefinitionId: v.Definition.DefinitionID,
-		}
-	}
-	return out
-}
-
-func agentsFrom(v []protocol.Agent) ([]agentJSON, error) {
-	if v == nil {
-		return []agentJSON{}, nil
-	}
-	out := make([]agentJSON, len(v))
-	for i, agent := range v {
-		encoded, err := agentFrom(agent)
-		if err != nil {
-			return nil, err
-		}
-		out[i] = encoded
-	}
-	return out, nil
-}
-
-func agentsValue(v []agentJSON) []protocol.Agent {
-	if v == nil {
-		return nil
-	}
-	out := make([]protocol.Agent, len(v))
-	for i, agent := range v {
-		out[i] = agentValue(agent)
-	}
-	return out
-}
-
-type describeParamsJSON struct {
-	Config      JSONBytes               `json:"config,omitempty"`
-	Model       modelRefJSON            `json:"model"`
-	Session     harness.SessionIdentity `json:"session"`
-	Constraints harness.ToolConstraints `json:"constraints"`
-	AgentTypes  []agentJSON             `json:"agent_types"`
-	Revision    string                  `json:"revision"`
-	Inputs      harness.AgentInputs     `json:"inputs"`
-}
-
-// EncodeDescribeParams encodes one tool describe input.
-func EncodeDescribeParams(v extension.DescribeInput) (json.RawMessage, error) {
-	model, err := modelRefFrom(v.Model)
-	if err != nil {
-		return nil, err
-	}
-	agents, err := agentsFrom(v.AgentTypes)
-	if err != nil {
-		return nil, err
-	}
-	return marshalValue(describeParamsJSON{
-		Config:      JSONBytes(v.Config),
-		Model:       model,
-		Session:     v.Session,
-		Constraints: v.Constraints,
-		AgentTypes:  agents,
-		Revision:    v.Revision,
-		Inputs:      v.Inputs,
-	})
-}
-
-// DecodeDescribeParams decodes one tool describe input.
-func DecodeDescribeParams(raw json.RawMessage) (extension.DescribeInput, error) {
-	var wire describeParamsJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return extension.DescribeInput{}, err
-	}
-	return extension.DescribeInput{
-		Session:     wire.Session,
-		Model:       modelRefValue(wire.Model),
-		Constraints: wire.Constraints,
-		Revision:    wire.Revision,
-		Config:      append(json.RawMessage(nil), wire.Config...),
-		AgentTypes:  agentsValue(wire.AgentTypes),
-		Inputs:      wire.Inputs,
-	}, nil
-}
-
-type toolDescriptionJSON struct {
-	Definition toolDefinitionJSON `json:"definition"`
-	Available  bool               `json:"available"`
-}
-
-// EncodeDescribeResult encodes one tool description.
-func EncodeDescribeResult(v extension.ToolDescription) (json.RawMessage, error) {
-	return marshalValue(toolDescriptionJSON{Definition: toolDefinitionFrom(v.Definition), Available: v.Available})
-}
-
-// DecodeDescribeResult decodes one tool description.
-func DecodeDescribeResult(raw json.RawMessage) (extension.ToolDescription, error) {
-	var wire toolDescriptionJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return extension.ToolDescription{}, err
-	}
-	return extension.ToolDescription{Definition: toolDefinitionValue(wire.Definition), Available: wire.Available}, nil
-}
-
-type normalizeParamsJSON struct {
-	Context toolContextJSON `json:"context"`
-	Call    toolCallJSON    `json:"call"`
-}
-
-// EncodeNormalizeParams encodes one normalize input.
-func EncodeNormalizeParams(context extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	encoded, err := toolContextFrom(context)
-	if err != nil {
-		return nil, err
-	}
-	return marshalValue(normalizeParamsJSON{Context: encoded, Call: toolCallFrom(call)})
-}
-
-// DecodeNormalizeParams decodes one normalize input.
-func DecodeNormalizeParams(raw json.RawMessage) (extension.ToolContext, model.ToolCall, error) {
-	var wire normalizeParamsJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return extension.ToolContext{}, model.ToolCall{}, err
-	}
-	return toolContextValue(wire.Context), toolCallValue(wire.Call), nil
 }
 
 type argumentsJSON struct {
@@ -744,29 +330,6 @@ func DecodeArguments(raw json.RawMessage) (json.RawMessage, error) {
 	return append(json.RawMessage(nil), wire.Arguments...), nil
 }
 
-type prepareParamsJSON struct {
-	Call    toolCallJSON    `json:"call"`
-	Context toolContextJSON `json:"context"`
-}
-
-// EncodePrepareParams encodes one prepare input.
-func EncodePrepareParams(context extension.ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	encoded, err := toolContextFrom(context)
-	if err != nil {
-		return nil, err
-	}
-	return marshalValue(prepareParamsJSON{Call: toolCallFrom(call), Context: encoded})
-}
-
-// DecodePrepareParams decodes one prepare input.
-func DecodePrepareParams(raw json.RawMessage) (extension.ToolContext, model.ToolCall, error) {
-	var wire prepareParamsJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return extension.ToolContext{}, model.ToolCall{}, err
-	}
-	return toolContextValue(wire.Context), toolCallValue(wire.Call), nil
-}
-
 // EncodePrepareResult encodes one prepared tool plan.
 func EncodePrepareResult(v extension.ToolPlan) (json.RawMessage, error) {
 	return marshalValue(toolPlanFrom(v))
@@ -779,29 +342,6 @@ func DecodePrepareResult(raw json.RawMessage) (extension.ToolPlan, error) {
 		return extension.ToolPlan{}, err
 	}
 	return toolPlanValue(wire), nil
-}
-
-type executeParamsJSON struct {
-	Context toolContextJSON `json:"context"`
-	Plan    toolPlanJSON    `json:"plan"`
-}
-
-// EncodeExecuteParams encodes one execute input.
-func EncodeExecuteParams(context extension.ToolContext, plan extension.ToolPlan) (json.RawMessage, error) {
-	encoded, err := toolContextFrom(context)
-	if err != nil {
-		return nil, err
-	}
-	return marshalValue(executeParamsJSON{Context: encoded, Plan: toolPlanFrom(plan)})
-}
-
-// DecodeExecuteParams decodes one execute input.
-func DecodeExecuteParams(raw json.RawMessage) (extension.ToolContext, extension.ToolPlan, error) {
-	var wire executeParamsJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return extension.ToolContext{}, extension.ToolPlan{}, err
-	}
-	return toolContextValue(wire.Context), toolPlanValue(wire.Plan), nil
 }
 
 // EncodeExecuteResult encodes one tool execution outcome.
@@ -818,93 +358,24 @@ func DecodeExecuteResult(raw json.RawMessage) (harness.ToolOutcome, error) {
 	return toolOutcomeValue(wire), nil
 }
 
-type preparationInputJSON struct {
-	Session     harness.SessionIdentity `json:"session"`
-	Model       modelRefJSON            `json:"model"`
-	Constraints harness.ToolConstraints `json:"constraints"`
-	Assembly    prompt.AssemblyInput    `json:"assembly"`
-	Prompt      string                  `json:"prompt"`
-	Catalog     []toolDefinitionJSON    `json:"catalog"`
-	Tools       []toolDefinitionJSON    `json:"tools"`
-	Settings    JSONBytes               `json:"settings,omitempty"`
-}
-
-// EncodePrepareHookParams encodes one preparation hook input.
-func EncodePrepareHookParams(v extension.PreparationInput) (json.RawMessage, error) {
-	model, err := modelRefFrom(v.Model)
-	if err != nil {
-		return nil, err
-	}
-	return marshalValue(preparationInputJSON{
-		Session:     v.Session,
-		Model:       model,
-		Constraints: v.Constraints,
-		Assembly:    v.Assembly,
-		Prompt:      v.Prompt,
-		Catalog:     toolDefinitionsFrom(v.Catalog),
-		Tools:       toolDefinitionsFrom(v.Tools),
-		Settings:    JSONBytes(v.Settings),
-	})
-}
-
-// DecodePrepareHookParams decodes one preparation hook input.
-func DecodePrepareHookParams(raw json.RawMessage) (extension.PreparationInput, error) {
-	var wire preparationInputJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return extension.PreparationInput{}, err
-	}
-	return extension.PreparationInput{
-		Session:     wire.Session,
-		Model:       modelRefValue(wire.Model),
-		Constraints: wire.Constraints,
-		Assembly:    wire.Assembly,
-		Prompt:      wire.Prompt,
-		Catalog:     toolDefinitionsValue(wire.Catalog),
-		Tools:       toolDefinitionsValue(wire.Tools),
-		Settings:    append(json.RawMessage(nil), wire.Settings...),
-	}, nil
-}
-
-type preparationConsequenceJSON struct {
-	Prompt       *string           `json:"prompt,omitempty"`
-	Descriptions map[string]string `json:"descriptions,omitempty"`
-	ToolNames    *[]string         `json:"tool_names,omitempty"`
-}
-
-// EncodePrepareHookResult encodes one preparation consequence. An absent tool
-// set remains absent; a present empty set stays present and empty.
-func EncodePrepareHookResult(v extension.PreparationConsequence) (json.RawMessage, error) {
-	out := preparationConsequenceJSON{Prompt: v.Prompt, Descriptions: v.Descriptions}
-	if v.ToolNames != nil {
-		toolNames := v.ToolNames
-		out.ToolNames = &toolNames
-	}
-	return marshalValue(out)
-}
-
-// DecodePrepareHookResult decodes one preparation consequence.
-func DecodePrepareHookResult(raw json.RawMessage) (extension.PreparationConsequence, error) {
-	var wire preparationConsequenceJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return extension.PreparationConsequence{}, err
-	}
-	out := extension.PreparationConsequence{Prompt: wire.Prompt, Descriptions: wire.Descriptions}
-	if wire.ToolNames != nil {
-		out.ToolNames = *wire.ToolNames
-	}
-	return out, nil
-}
-
 type requestHookInputJSON struct {
-	RequestID         string               `json:"request_id"`
-	CanonicalMessages []messageJSON        `json:"canonical_messages"`
-	Messages          []messageJSON        `json:"messages"`
-	CheckpointEntryID string               `json:"checkpoint_entry_id,omitempty"`
-	BoundaryEntryID   string               `json:"boundary_entry_id,omitempty"`
-	CapturedPrompt    string               `json:"captured_prompt"`
-	Prompt            string               `json:"prompt"`
-	Catalog           []toolDefinitionJSON `json:"catalog"`
-	Tools             []toolDefinitionJSON `json:"tools"`
+	RequestID         string                `json:"request_id"`
+	Purpose           string                `json:"purpose"`
+	Model             modelRefJSON          `json:"model"`
+	CanonicalMessages []messageJSON         `json:"canonical_messages"`
+	Messages          []messageJSON         `json:"messages"`
+	CheckpointEntryID string                `json:"checkpoint_entry_id,omitempty"`
+	BoundaryEntryID   string                `json:"boundary_entry_id,omitempty"`
+	CapturedPrompt    string                `json:"captured_prompt"`
+	Prompt            string                `json:"prompt"`
+	Catalog           []toolDefinitionJSON  `json:"catalog"`
+	Tools             []toolDefinitionJSON  `json:"tools"`
+	MessagePositions  []requestPositionJSON `json:"message_positions"`
+	Parameters        []extraJSON           `json:"parameters,omitempty"`
+}
+
+type requestPositionJSON struct {
+	Position *int `json:"position,omitempty"`
 }
 
 // EncodeRequestHookParams encodes one request hook input.
@@ -917,8 +388,21 @@ func EncodeRequestHookParams(v harness.RequestHookInput) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
+	modelRef, err := modelRefFrom(v.Model)
+	if err != nil {
+		return nil, err
+	}
+	if len(v.MessagePositions) != len(v.Messages) {
+		return nil, fmt.Errorf("request positions do not match messages")
+	}
+	positions := make([]requestPositionJSON, len(v.MessagePositions))
+	for i, position := range v.MessagePositions {
+		positions[i].Position = position
+	}
 	return marshalValue(requestHookInputJSON{
 		RequestID:         v.RequestID,
+		Purpose:           string(v.Purpose),
+		Model:             modelRef,
 		CanonicalMessages: canonical,
 		Messages:          messages,
 		CheckpointEntryID: v.CheckpointEntryID,
@@ -927,6 +411,8 @@ func EncodeRequestHookParams(v harness.RequestHookInput) (json.RawMessage, error
 		Prompt:            v.Prompt,
 		Catalog:           toolDefinitionsFrom(v.Catalog),
 		Tools:             toolDefinitionsFrom(v.Tools),
+		MessagePositions:  positions,
+		Parameters:        extraFrom(v.Parameters),
 	})
 }
 
@@ -936,8 +422,20 @@ func DecodeRequestHookParams(raw json.RawMessage) (harness.RequestHookInput, err
 	if err := unmarshalValue(raw, &wire); err != nil {
 		return harness.RequestHookInput{}, err
 	}
+	if wire.MessagePositions == nil || len(wire.MessagePositions) != len(wire.Messages) {
+		return harness.RequestHookInput{}, fmt.Errorf("request positions do not match messages")
+	}
+	positions := make([]*int, len(wire.MessagePositions))
+	for i, p := range wire.MessagePositions {
+		if p.Position != nil && *p.Position < 0 {
+			return harness.RequestHookInput{}, fmt.Errorf("request position must be nonnegative")
+		}
+		positions[i] = p.Position
+	}
 	return harness.RequestHookInput{
 		RequestID:         wire.RequestID,
+		Purpose:           harness.InvocationPurpose(wire.Purpose),
+		Model:             modelRefValue(wire.Model),
 		CanonicalMessages: messagesValue(wire.CanonicalMessages),
 		Messages:          messagesValue(wire.Messages),
 		CheckpointEntryID: wire.CheckpointEntryID,
@@ -946,27 +444,54 @@ func DecodeRequestHookParams(raw json.RawMessage) (harness.RequestHookInput, err
 		Prompt:            wire.Prompt,
 		Catalog:           toolDefinitionsValue(wire.Catalog),
 		Tools:             toolDefinitionsValue(wire.Tools),
+		MessagePositions:  positions,
+		Parameters:        extraValue(wire.Parameters),
 	}, nil
 }
 
 type requestConsequenceJSON struct {
-	Prompt    *string       `json:"prompt,omitempty"`
-	Messages  []messageJSON `json:"messages,omitempty"`
-	ToolNames *[]string     `json:"tool_names,omitempty"`
+	Prompt *string `json:"prompt,omitempty"`
+
+	Edits      *[]requestMessageEditJSON `json:"edits,omitempty"`
+	Tools      *[]toolDefinitionJSON     `json:"tools,omitempty"`
+	Parameters []extraJSON               `json:"parameters,omitempty"`
+}
+
+type requestMessageEditJSON struct {
+	Position *int               `json:"position,omitempty"`
+	Content  *[]contentPartJSON `json:"content,omitempty"`
+	Message  *messageJSON       `json:"message,omitempty"`
 }
 
 // EncodeRequestHookResult encodes one request consequence. An absent tool set
 // remains absent; a present empty set stays present and empty.
 func EncodeRequestHookResult(v harness.RequestConsequence) (json.RawMessage, error) {
-	messages, err := messagesFrom(v.Messages)
-	if err != nil {
-		return nil, err
+	out := requestConsequenceJSON{Prompt: v.Prompt, Parameters: extraFrom(v.Parameters)}
+	if v.Tools != nil {
+		tools := toolDefinitionsFrom(v.Tools)
+		out.Tools = &tools
 	}
-	out := requestConsequenceJSON{Prompt: v.Prompt, Messages: messages}
-	if v.ToolNames != nil {
-		toolNames := v.ToolNames
-		out.ToolNames = &toolNames
+	if v.Edits != nil {
+		edits := make([]requestMessageEditJSON, 0, len(v.Edits))
+		for _, edit := range v.Edits {
+			wire := requestMessageEditJSON{Position: edit.Position}
+
+			if edit.Content != nil {
+				content := contentFrom(edit.Content)
+				wire.Content = &content
+			}
+			if edit.Message != nil {
+				msg, err := messageFrom(*edit.Message)
+				if err != nil {
+					return nil, err
+				}
+				wire.Message = &msg
+			}
+			edits = append(edits, wire)
+		}
+		out.Edits = &edits
 	}
+
 	return marshalValue(out)
 }
 
@@ -976,10 +501,31 @@ func DecodeRequestHookResult(raw json.RawMessage) (harness.RequestConsequence, e
 	if err := unmarshalValue(raw, &wire); err != nil {
 		return harness.RequestConsequence{}, err
 	}
-	out := harness.RequestConsequence{Prompt: wire.Prompt, Messages: messagesValue(wire.Messages)}
-	if wire.ToolNames != nil {
-		out.ToolNames = *wire.ToolNames
+	out := harness.RequestConsequence{Prompt: wire.Prompt, Parameters: extraValue(wire.Parameters)}
+	if wire.Tools != nil {
+		out.Tools = toolDefinitionsValue(*wire.Tools)
 	}
+	if wire.Edits != nil {
+		out.Edits = make([]harness.RequestMessageEdit, 0, len(*wire.Edits))
+		for _, item := range *wire.Edits {
+			edit := harness.RequestMessageEdit{Position: item.Position}
+			if edit.Position != nil && *edit.Position < 0 {
+				return harness.RequestConsequence{}, fmt.Errorf("edit position must be a nonnegative integer")
+			}
+			if item.Content != nil {
+				edit.Content = contentValue(*item.Content)
+			}
+			if item.Message != nil {
+				msg := messageValue(*item.Message)
+				edit.Message = &msg
+			}
+			if (edit.Position == nil) == (edit.Message == nil) || edit.Message != nil && edit.Content != nil {
+				return harness.RequestConsequence{}, fmt.Errorf("edit must retain a position or add a message")
+			}
+			out.Edits = append(out.Edits, edit)
+		}
+	}
+
 	return out, nil
 }
 
@@ -1034,51 +580,6 @@ func DecodeAfterToolHookResult(raw json.RawMessage) (string, error) {
 	return wire.Content, nil
 }
 
-type requestEvidenceJSON struct {
-	CheckpointEntryID string                 `json:"checkpoint_entry_id,omitempty"`
-	BoundaryEntryID   string                 `json:"boundary_entry_id"`
-	Prompt            string                 `json:"prompt"`
-	Messages          []messageJSON          `json:"messages,omitempty"`
-	ToolNames         []string               `json:"tool_names"`
-	HookIDs           []harness.HookIdentity `json:"hook_ids,omitempty"`
-}
-
-func requestEvidenceFrom(v *harness.RequestEvidence) (*requestEvidenceJSON, error) {
-	if v == nil {
-		return nil, nil
-	}
-	messages, err := messagesFrom(v.Messages)
-	if err != nil {
-		return nil, err
-	}
-	tools := v.ToolNames
-	if tools == nil {
-		tools = []string{}
-	}
-	return &requestEvidenceJSON{
-		CheckpointEntryID: v.CheckpointEntryID,
-		BoundaryEntryID:   v.BoundaryEntryID,
-		Prompt:            v.Prompt,
-		Messages:          messages,
-		ToolNames:         tools,
-		HookIDs:           append([]harness.HookIdentity(nil), v.HookIDs...),
-	}, nil
-}
-
-func requestEvidenceValue(v *requestEvidenceJSON) *harness.RequestEvidence {
-	if v == nil {
-		return nil
-	}
-	return &harness.RequestEvidence{
-		CheckpointEntryID: v.CheckpointEntryID,
-		BoundaryEntryID:   v.BoundaryEntryID,
-		Prompt:            v.Prompt,
-		Messages:          messagesValue(v.Messages),
-		ToolNames:         v.ToolNames,
-		HookIDs:           append([]harness.HookIdentity(nil), v.HookIDs...),
-	}
-}
-
 type planInputJSON struct {
 	Trigger           string               `json:"trigger"`
 	Messages          []messageJSON        `json:"messages"`
@@ -1086,7 +587,6 @@ type planInputJSON struct {
 	BoundaryEntryID   string               `json:"boundary_entry_id"`
 	Instructions      string               `json:"instructions"`
 	Tools             []toolDefinitionJSON `json:"tools"`
-	Contributions     *requestEvidenceJSON `json:"contributions,omitempty"`
 	Measurement       *harness.UsageCount  `json:"measurement,omitempty"`
 	ContextWindow     int                  `json:"context_window"`
 	OutputReserve     int                  `json:"output_reserve"`
@@ -1098,10 +598,6 @@ func planInputFrom(v harness.PlanInput) (planInputJSON, error) {
 	if err != nil {
 		return planInputJSON{}, err
 	}
-	contributions, err := requestEvidenceFrom(v.Contributions)
-	if err != nil {
-		return planInputJSON{}, err
-	}
 	return planInputJSON{
 		Trigger:           v.Trigger,
 		Messages:          messages,
@@ -1109,7 +605,6 @@ func planInputFrom(v harness.PlanInput) (planInputJSON, error) {
 		BoundaryEntryID:   v.BoundaryEntryID,
 		Instructions:      v.Instructions,
 		Tools:             toolDefinitionsFrom(v.Tools),
-		Contributions:     contributions,
 		Measurement:       v.Measurement,
 		ContextWindow:     v.ContextWindow,
 		OutputReserve:     v.OutputReserve,
@@ -1125,7 +620,6 @@ func planInputValue(v planInputJSON) harness.PlanInput {
 		BoundaryEntryID:   v.BoundaryEntryID,
 		Instructions:      v.Instructions,
 		Tools:             toolDefinitionsValue(v.Tools),
-		Contributions:     requestEvidenceValue(v.Contributions),
 		Measurement:       v.Measurement,
 		ContextWindow:     v.ContextWindow,
 		OutputReserve:     v.OutputReserve,

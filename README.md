@@ -29,7 +29,7 @@
 
 Melta uses the OpenAI Chat Completions shape with streaming and tool calls. Provider compatibility still varies: some OpenAI-compatible models stream text correctly but do not reliably support streamed tool calls. Test a new provider/model with a real tool call before relying on it.
 
-**Tools** — `read_file` · `write_file` · `edit_file` · `apply_patch` · `run_command` · `process` · `sleep` · `task`
+**Tools** — `read_file` · `write_file` · `edit_file` · `run_command` · `process` · `sleep` · `task`; Adaptation supplies `apply_patch` for models that support it
 
 **Snapshots** — File edits are captured copy-based before they happen, grouped per admitted operation. Revert code at any owned input or fork the conversation from it. No git dependency.
 
@@ -93,6 +93,7 @@ provider `transport.api_key_env` fields:
 
 ```json
 {
+  "model": "ollama/qwen3.6:27b",
   "providers": {
     "openrouter": {
       "transport": {
@@ -123,10 +124,14 @@ provider `transport.api_key_env` fields:
 }
 ```
 
-Add model selections to the same `~/.melta/config.json` document:
+The top-level `model` is the baseline choice, including when no extensions
+are enabled. A Session's chosen model takes precedence; if it cannot bind,
+Melta tries this baseline. Named Agent definitions can select their own models
+in the same `~/.melta/config.json` document:
 
 ```json
 {
+  "model": "openrouter/z-ai/glm-5.1",
   "extensions": {
     "agents": {
       "enabled": true,
@@ -150,7 +155,7 @@ Shell-exported environment variables take precedence over values in `~/.melta/.e
 
 #### Permissions
 
-Every tool call is checked before execution against one automatic policy and never prompts. The built-in policy allows file reads and writes inside the workspace and denies sensitive file basenames (`.env`, private keys, credential files) even there. Its target permissions are scoped: `command.run`, `child.launch`, and `process.own` allow any target, and `sleep` only its fixed target; anything undeclared is denied. Child sessions are gated by the same policy. Pair targets are canonical: a resolved file path for the file pairs, one parsed shell segment (or the complete normalized command) for `command.run`, `*` for `sleep`, the complete source-qualified Agent definition reference for `child.launch` (extension, capability and definition components path-escaped and joined with `/`), and `<session-id>/<job-id>` for `process.own` read/kill (or `*` for its list action).
+Every tool call is checked before execution against one automatic policy and never prompts. The built-in policy allows file reads and writes inside the workspace and denies sensitive file basenames (`.env`, private keys, credential files) even there. Its target permissions are scoped: `command.run`, `session.own`, and `process.own` allow any target, and `sleep` only its fixed target; anything undeclared is denied. Owned Sessions are gated by the same policy. Pair targets are canonical: a resolved file path for the file pairs, one parsed shell segment (or the complete normalized command) for `command.run`, `*` for `sleep`, `<extension-id>/<start-target>` with each component path-escaped for `session.own`, and `<session-id>/<job-id>` for `process.own` read/kill (or `*` for its list action).
 
 Optional rule lists refine that policy: global rules live in the `permissions` member of `~/.melta/config.json`, per-workspace rules in `~/.melta/projects/p-<full SHA-256 of the cleaned absolute workspace path>/permissions.json` (that directory name is a storage key for the permission file, not a durable project record):
 
@@ -166,7 +171,7 @@ Optional rule lists refine that policy: global rules live in the `permissions` m
 }
 ```
 
-Rule targets are globs matched against the pair's canonical target — for example a resolved file path, a parsed `command.run` segment or complete command text, a complete Agent definition reference, a `<session-id>/<job-id>` job reference, or the fixed `*` (the rules above are illustrative). The last matching rule at a level wins, the workspace level decides before the global level, and a level's `default` applies when no rule matches. Permission names are `file.read`, `file.write`, `command.run`, `sleep`, `child.launch`, and `process.own`. A malformed block discards both user levels for that resolution, leaving the built-in policy.
+Rule targets are globs matched against the pair's canonical target — for example a resolved file path, a parsed `command.run` segment or complete command text, an owned-start reference, a `<session-id>/<job-id>` job reference, or the fixed `*` (the rules above are illustrative). The last matching rule at a level wins, the workspace level decides before the global level, and a level's `default` applies when no rule matches. Permission names are `file.read`, `file.write`, `command.run`, `sleep`, `session.own`, and `process.own`. A malformed block discards both user levels for that resolution, leaving the built-in policy.
 
 #### Run
 
@@ -229,24 +234,30 @@ valid, and Engine-only callers own persistence and recovery. See
 The complete baseline is [`melta/`](melta/): `melta.Open(ctx, Options)` in [`melta/melta.go`](melta/melta.go)
 composes the public [`harness/`](harness/) state machine, [`prompt/`](prompt/) assembler, standard tools, jobs and
 included SQLite storage. `DataDir`, `Configuration` and `Credentials` are required and explicit; the locations for
-global rules, discovery cache, workspace policies and wire debugging are optional, as are `Agent`, `Strategy`,
-native `Extensions`, the storage factory and the permission evaluator. An empty `Extensions` slice with no installed
-packages is the supported zero-extension baseline: the seven standard tools, SQLite storage, jobs and default
-prompt/rules handling are built in. The Agents and Adaptation extensions are optional. Creating a Session requires a
-non-empty local Workspace; no optional extension or network listener is required.
-[`extension/`](extension/) is the native contract (declarations, `extension.Compile`, typed callbacks and fixed host
-services), and [`extension/worker/`](extension/worker/) is the executable extension protocol. [`runtime/`](runtime/)
-is only the protocol host and first-run initialization; [`protocol/`](protocol/) is the generated contract and
+global rules, discovery cache, workspace policies and wire debugging are optional, as are `Defaults` (Session input
+defaults, including the host model), `Strategy`, native `Extensions`, the storage factory and the permission
+evaluator. An empty `Extensions` slice with no installed packages is the supported zero-extension baseline: the
+six standard tools, SQLite storage, jobs and default prompt/rules handling are built in. The Agents and Adaptation
+extensions are optional; Adaptation also supplies the multi-file `apply_patch` tool for matching models. Creating a Session requires a non-empty local Workspace; no optional extension or network
+listener is required.
+[`extension/`](extension/) is the activation-owned native contract (`extension.API`, typed callbacks and fixed host
+services), and [`extension/worker/`](extension/worker/) is the executable extension protocol. The running owner and
+the public worker entry both use the author `worker.Serve` protocol at API version 9. [`runtime/`](runtime/) is only
+the protocol host and first-run initialization; [`protocol/`](protocol/) is the generated contract and
 [`client/`](client/) the handwritten HTTP/SSE client.
 
-Extensions use the generic generated surface. `ListExtensionCapabilities` returns enabled declarations, methods,
-schemas, settings and exposures; `InvokeExtension` names one concrete capability/contract/method and one
-harness/workspace/session target, so adding an extension needs no protocol regeneration. A declared success returns
-the success envelope with its exact raw result; a validated declared failure returns HTTP 422 with the extension's
-own code/message and optional data/partial, not a baseline error code; predispatch and host failures use the normal
-typed error codes and statuses. The CLI
-(`/runtime ...`), ACP (`runtime/...`) and desktop bridge all forward these operations through the shared generated
-invocation table. There is no specialized extension UI.
+Extensions use the registered activation surface. `ListExtensions` returns every enabled extension with its
+version, optional configuration schema, settings, registered tools, client operations and inactive reason;
+`InvokeExtension` names the extension, operation, harness/workspace/session target, arguments and request ID, so
+adding an extension needs no protocol regeneration. A declared success returns the success envelope with its exact
+raw result; a validated declared failure returns HTTP 422 with the extension's own code/message and optional
+data/partial, not a baseline error code; predispatch and host failures use the normal typed error codes and statuses.
+The CLI (`/runtime ...`), ACP (`runtime/...`) and desktop bridge all forward these operations through the shared
+generated invocation table. There is no specialized extension UI. Work done for a client or Operation goes through
+that callback's own `AuthorContext.Call`, within its limits. An activation can issue an independent attributed
+Session command through `extension.API.Command` for work it does on its own; a context Melta handed to a callback
+is denied, a nil context is treated as independent, and observer delivery carries no callback mark. The command
+runs the ordinary producer under the activation's granted services and scope.
 
 Local executable extensions are installed as a directory containing `manifest.json` and a contained entry point;
 install and remove change next-start selection only and edit neither configuration nor Session data. The loaded code

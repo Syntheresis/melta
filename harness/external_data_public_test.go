@@ -44,7 +44,7 @@ func TestPublicExternalOwnerPersistenceAcrossColdHarnesses(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		h1 := ownerHarness(t, store)
-		created, err := h1.CreateSession(ctx, harness.CreateSessionRequest{Workspace: "/tmp/owners", AgentSelection: publicSelection("coder")})
+		created, err := h1.CreateSession(ctx, harness.CreateSessionRequest{Workspace: "/tmp/owners", Inputs: publicInputs("coder")})
 		testassert.NoError(t, err)
 		id := created.Identity.SessionID
 		testassert.NoError(t, h1.ClaimExternalData(ctx, id, "owner.a"))

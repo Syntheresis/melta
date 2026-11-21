@@ -1,36 +1,24 @@
 package melta
 
 import (
-	"context"
 	"os"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/prompt"
 )
 
-// surfaceRequest is the captured pure input of one composed prompt and tool
-// surface: the host-supplied identity and global rules directory, the
-// preparation's Workspace and session-start environment, the selected
-// definition's prompt fields, the captured Invocation, hard constraints, and
-// session identity, and the compiled tool specs in the agent's selection
-// order after first-occurrence dedupe.
+// surfaceRequest is the captured pure input of one composed prompt surface:
+// the host-supplied identity and global rules directory, and the preparation's
+// Workspace and session-start environment.
 type surfaceRequest struct {
 	hostIdentity   string
 	globalRulesDir string
 	workspace      string
 	sessionStart   time.Time
-	promptSize     prompt.Mode
 	promptBody     string
-	invocation     Invocation
-	model          model.ModelRef
-	constraints    harness.ToolConstraints
-	identity       harness.SessionIdentity
-	agentInputs    harness.AgentInputs
-	toolSpecs      []toolDeclaration
 	shell          string
 }
 
@@ -42,54 +30,69 @@ type surfaceResult struct {
 	Warnings []prompt.Warning
 }
 
-// composeSurface converts the captured inputs into one final owned prompt and
-// the eligible tool catalog, with no harness or storage I/O. The prompt reads
-// the explicitly supplied global and Workspace rules and assembles the
-// baseline through the public pure assembler. The catalog walks the tool specs
-// in the agent's selection order after first-occurrence dedupe: every selected
-// eligible tool is included — an exclusion can never revive a tool the hard
-// constraints made ineligible. A zero session start samples the compose time
-// once, so the resulting prompt is captured once.
-func composeSurface(ctx context.Context, req surfaceRequest) (surfaceResult, []model.ToolDefinition, error) {
-	sessionStart := req.sessionStart
-	if sessionStart.IsZero() {
-		sessionStart = time.Now()
-	}
-	rules, err := prompt.ReadRules(req.globalRulesDir, req.workspace, req.promptSize)
-	if err != nil {
-		return surfaceResult{}, nil, err
+type surfacePrompt struct {
+	input     prompt.AssemblyInput
+	globalDir string
+	read      bool
+	rules     prompt.Rules
+	assembled bool
+	result    surfaceResult
+}
+
+func newSurfacePrompt(req surfaceRequest) *surfacePrompt {
+	start := req.sessionStart
+	if start.IsZero() {
+		start = time.Now()
 	}
 	input := prompt.AssemblyInput{
-		Identity:     req.hostIdentity,
-		Instructions: req.promptBody,
-		Mode:         req.promptSize,
-		Rules:        rules,
-		Workspace:    req.workspace,
-		SessionStart: sessionStart,
+		Identity: req.hostIdentity, Instructions: req.promptBody,
+		Workspace: req.workspace, SessionStart: start,
+		OS: goruntime.GOOS, Shell: req.shell, OSDescription: captureOSDescription(),
 	}
-	if req.promptSize != prompt.ModeNone {
-		input.OS = goruntime.GOOS
-		input.Shell = req.shell
-		input.OSDescription = captureOSDescription()
-	}
-	assembled, err := prompt.Assemble(input)
-	if err != nil {
-		return surfaceResult{}, nil, err
-	}
-	result := surfaceResult{Prompt: assembled, Assembly: input, Warnings: rules.Warnings}
+	return &surfacePrompt{input: input, globalDir: req.globalRulesDir}
+}
 
-	catalog := make([]model.ToolDefinition, 0, len(req.toolSpecs))
-	for _, spec := range req.toolSpecs {
-		description, err := spec.describe(ctx, req.invocation, req.model, req.constraints, req.identity, req.agentInputs)
-		if err != nil {
-			return surfaceResult{}, nil, err
-		}
-		if !description.Available {
-			continue
-		}
-		catalog = append(catalog, description.Definition)
+func (p *surfacePrompt) readRules() prompt.Rules {
+	if !p.read {
+		p.read = true
+		p.rules = prompt.ReadRules(p.globalDir, p.input.Workspace)
 	}
-	return result, catalog, nil
+	rules := p.rules
+	rules.Warnings = slices.Clone(rules.Warnings)
+	return rules
+}
+
+func (p *surfacePrompt) sections() []prompt.Section {
+	return prompt.BaselineSections(p.input)
+}
+
+func (p *surfacePrompt) environment() string {
+	return prompt.Environment(p.input)
+}
+
+func (p *surfacePrompt) ruleSections() (string, []prompt.Section, error) {
+	rules := p.readRules()
+	return prompt.CombinedRules(rules), prompt.RuleSections(rules), nil
+}
+
+func (p *surfacePrompt) defaultPrompt() (surfaceResult, error) {
+	if !p.assembled {
+		p.assembled = true
+		input := p.input
+		input.Rules = p.readRules()
+		p.result = surfaceResult{Prompt: prompt.Assemble(input), Assembly: input, Warnings: input.Rules.Warnings}
+	}
+	result := p.result
+	result.Warnings = slices.Clone(result.Warnings)
+	result.Assembly.Rules.Warnings = slices.Clone(result.Assembly.Rules.Warnings)
+	return result, nil
+}
+
+func (p *surfacePrompt) resolve(replacement *string) (surfaceResult, error) {
+	if replacement != nil {
+		return surfaceResult{Prompt: *replacement, Warnings: slices.Clone(p.rules.Warnings)}, nil
+	}
+	return p.defaultPrompt()
 }
 
 // captureOSDescription samples the platform description once per composed

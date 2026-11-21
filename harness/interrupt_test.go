@@ -18,7 +18,7 @@ import (
 func TestInterruptBlockedModelAttemptSettlesContractInterruption(t *testing.T) {
 	store := emptyStore(t)
 	started := make(chan struct{})
-	modelFn := func(ctx context.Context, req model.Request) (model.Stream, error) {
+	modelFn := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		started <- struct{}{}
 		<-ctx.Done() // the physical attempt parks until the interrupt cancels the execution context
 		return nil, ctx.Err()
@@ -63,7 +63,7 @@ func TestInterruptBlockedForegroundToolSettlesRealResult(t *testing.T) {
 		requests []model.Request
 		started  = make(chan struct{})
 	)
-	modelFn := func(ctx context.Context, req model.Request) (model.Stream, error) {
+	modelFn := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		mu.Lock()
 		calls++
 		n := calls
@@ -160,7 +160,7 @@ func TestInterruptSettlesUnstartedExecutionAtEntry(t *testing.T) {
 	opener := func(runs *int) func(context.Context, OperationAdmission) (Execution, error) {
 		return func(context.Context, OperationAdmission) (Execution, error) {
 			*runs++
-			return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+			return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return completedTurnStream(), nil
 			}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 		}
@@ -270,7 +270,7 @@ func TestInterruptSteeringPreservesBufferOrder(t *testing.T) {
 		toolArrived = make(chan struct{})
 		toolGate    = make(chan struct{})
 	)
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		mu.Lock()
 		modelCalls++
 		firstModel := modelCalls == 1
@@ -357,7 +357,7 @@ func TestInterruptSteeringPreservesBufferOrder(t *testing.T) {
 func TestInterruptLeavesBackgroundGroupOpen(t *testing.T) {
 	store := emptyStore(t)
 	started := make(chan struct{})
-	modelFn := func(ctx context.Context, req model.Request) (model.Stream, error) {
+	modelFn := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		started <- struct{}{}
 		<-ctx.Done()
 		return nil, ctx.Err()

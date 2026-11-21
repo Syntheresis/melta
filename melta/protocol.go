@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/big"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -31,7 +32,7 @@ func (r *Melta) Health(ctx context.Context, c Caller) (protocol.Health, error) {
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return protocol.Health{}, err
 	}
-	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N16}, nil
+	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N19}, nil
 }
 
 // ListSessions projects Session headers under one required workspace and
@@ -120,7 +121,7 @@ func (r *Melta) ListWorkspaces(ctx context.Context, c Caller) ([]protocol.Worksp
 // the protocol server supplies it before wire emission.
 func projectSession(header harness.SessionHeader, instance string) protocol.Session {
 	out := protocol.Session{
-		AgentSelection:  projectAgentSelection(header.AgentSelection),
+		Inputs:          projectSessionInputs(header.Inputs),
 		CreatedAt:       header.Identity.CreatedAt.UTC(),
 		LastActivity:    header.LastActivity.UTC(),
 		Lifecycle:       protocol.SessionLifecycle(header.Lifecycle),
@@ -136,9 +137,9 @@ func projectSession(header harness.SessionHeader, instance string) protocol.Sess
 		current := header.CurrentOperationID
 		out.CurrentOperationId = &current
 	}
-	if header.Identity.ParentSessionID != "" {
-		parent := header.Identity.ParentSessionID
-		out.ParentSessionId = &parent
+	if header.Identity.OwnerSessionID != "" {
+		parent := header.Identity.OwnerSessionID
+		out.OwnerSessionId = &parent
 	}
 	if header.Identity.SourceSessionID != "" {
 		source := header.Identity.SourceSessionID
@@ -148,18 +149,17 @@ func projectSession(header harness.SessionHeader, instance string) protocol.Sess
 }
 
 // projectOperation maps one owned Operation register to its generated header:
-// admission identity, the captured Agent type and model ref, the terminal
-// status and detail, and the canonical register totals as decimal strings.
+// admission identity, the captured model ref, the terminal status and detail,
+// and the canonical register totals as decimal strings.
 func projectOperation(record harness.OperationRecord) protocol.Operation {
 	summary := harness.OperationSummary{
-		OperationID:    record.Admission.OperationID,
-		RequestKind:    record.Admission.RequestKind,
-		AgentSelection: record.Admission.AgentSelection,
-		Model:          record.Admission.Execution.Model,
-		AdmittedAt:     record.Admission.AdmittedAt,
-		Status:         record.State.Status,
-		SettledAt:      record.State.SettledAt,
-		Usage:          record.State.Usage,
+		OperationID: record.Admission.OperationID,
+		RequestKind: record.Admission.RequestKind,
+		Model:       record.Admission.Execution.Model,
+		AdmittedAt:  record.Admission.AdmittedAt,
+		Status:      record.State.Status,
+		SettledAt:   record.State.SettledAt,
+		Usage:       record.State.Usage,
 	}
 	if record.State.Terminal != nil {
 		summary.Detail = record.State.Terminal.Detail
@@ -176,13 +176,12 @@ func projectOperationSummary(summary harness.OperationSummary) protocol.Operatio
 	usage := projectUsage(summary.Usage)
 	usage.EstimatedCostUsd = summary.EstimatedCostUSD
 	op := protocol.Operation{
-		AdmittedAt:     summary.AdmittedAt.UTC(),
-		AgentSelection: projectAgentSelection(summary.AgentSelection),
-		Model:          summary.Model.String(),
-		OperationId:    summary.OperationID,
-		RequestKind:    protocol.OperationRequestKind(summary.RequestKind),
-		Status:         protocol.OperationStatus(summary.Status),
-		Usage:          usage,
+		AdmittedAt:  summary.AdmittedAt.UTC(),
+		Model:       summary.Model.String(),
+		OperationId: summary.OperationID,
+		RequestKind: protocol.OperationRequestKind(summary.RequestKind),
+		Status:      protocol.OperationStatus(summary.Status),
+		Usage:       usage,
 	}
 	if summary.SettledAt != nil {
 		settled := summary.SettledAt.UTC()
@@ -396,16 +395,16 @@ func projectToolCall(call harness.ToolCallRecord, results map[string]harness.Too
 		Arguments: string(arguments),
 		Extra:     extraObject(call.Extra),
 	}
-	if len(call.NormalizedArguments) > 0 {
-		normalized := protocol.JSONObject{}
-		if err := json.Unmarshal(call.NormalizedArguments, &normalized); err != nil {
-			return protocol.ToolCallView{}, fmt.Errorf("tool call %q normalized arguments: %v", call.ID, err)
-		}
-		view.NormalizedArguments = &normalized
-	}
 	result, ok := results[call.ResultEntryID]
 	if !ok {
 		return view, nil
+	}
+	if len(result.NormalizedArguments) > 0 {
+		normalized := protocol.JSONObject{}
+		if err := json.Unmarshal(result.NormalizedArguments, &normalized); err != nil {
+			return protocol.ToolCallView{}, fmt.Errorf("tool call %q normalized arguments: %v", call.ID, err)
+		}
+		view.NormalizedArguments = &normalized
 	}
 	status := protocol.ToolCallStatus(result.Status)
 	content := result.Content
@@ -729,33 +728,25 @@ func projectPendingInputs(items []harness.PendingInput) ([]protocol.PendingInput
 	return out, nil
 }
 
-// sessionSelection is the shared pure resolution of one Session's current
-// Agent type under one captured configuration: the configured model identity
-// when the resolved definition names one, and that exact model's catalog
-// context window when it is usable there. It resolves the selected
-// definition once through the captured roster and the captured catalog and
-// joins nothing else.
+// sessionSelection is the shared pure resolution of one Session's model
+// choice under one captured configuration: the Session's stored model when
+// set, otherwise the captured baseline model, and that exact model's catalog
+// context window when it is usable there. It resolves through the captured
+// catalog and joins nothing else.
 type sessionSelection struct {
 	model  *model.ModelRef
 	window int
 }
 
-// resolveSessionSelection resolves the current Agent type's model selection
-// and window. An unknown, duplicate, or empty-name definition and a
-// definition with no configured model yield no selection. A configured model
-// that is absent from the captured catalog, or whose entry has no positive
-// window, stays identifiable with a zero window: admission still refuses it
-// and no fallback model is invented.
-func resolveSessionSelection(selection harness.AgentSelection, captured *configuration) sessionSelection {
-	var selected model.ModelRef
-	if selection.Inputs != nil {
-		selected = selection.Inputs.Model
-	} else if selection.Definition != nil {
-		definition, ok := captured.projectedDefinition(*selection.Definition)
-		if !ok {
-			return sessionSelection{}
-		}
-		selected = definition.inputs.Model
+// resolveSessionSelection resolves the stored model choice and its context
+// window. An unset stored choice uses the captured baseline model. A chosen
+// model that is absent from the captured catalog, or whose entry has no
+// positive window, stays identifiable with a zero window. This is the stored
+// choice; admission independently binds its effective model.
+func resolveSessionSelection(selection harness.SessionInputs, captured *configuration) sessionSelection {
+	selected := captured.baselineModel
+	if selection.Model != nil {
+		selected = *selection.Model
 	}
 	if selected.IsZero() {
 		return sessionSelection{}
@@ -834,7 +825,7 @@ func projectHydration(view harness.SessionReadView, page protocol.ConversationPa
 	for _, member := range view.Background {
 		background = append(background, protocol.BackgroundMember{Kind: protocol.BackgroundMemberKind(member.Kind), Id: member.ID})
 	}
-	selection := resolveSessionSelection(view.Header.AgentSelection, captured)
+	selection := resolveSessionSelection(view.Header.Inputs, captured)
 	var selectedModel *protocol.ModelRef
 	if selection.model != nil {
 		rendered := selection.model.String()
@@ -882,6 +873,64 @@ func (r *Melta) GetHistory(ctx context.Context, c Caller, sessionID string, curs
 		return protocol.HistoryPage{}, err
 	}
 	return page, nil
+}
+
+// GetSessionOperation reads one Session's Operation header and its effective
+// execution inputs: the captured model, prompt, admitted tool subset and
+// selected strategy. It authorizes exactly like the other Session reads and
+// projects only public fields — never implementations, extension state,
+// settings or secrets.
+func (r *Melta) GetSessionOperation(ctx context.Context, c Caller, sessionID, operationID string) (protocol.SessionOperation, error) {
+	var out protocol.SessionOperation
+	if err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
+		if err := r.authorize(c, ctx, h, CallerScope{Kind: CallerScopeSession, SessionID: sessionID}); err != nil {
+			return err
+		}
+		record, err := h.ReadOperation(ctx, sessionID, operationID)
+		if err != nil {
+			return err
+		}
+		out.Operation = projectOperation(record)
+		out.Inputs, err = projectOperationInputs(record.Admission.Execution)
+		return err
+	}); err != nil {
+		return protocol.SessionOperation{}, err
+	}
+	return out, nil
+}
+
+// projectOperationInputs projects the captured effective execution inputs onto
+// their public shape. The advertised tools follow the admitted selection order
+// when the capture carries one, taking each named definition from the captured
+// catalog; a nil selection means the whole captured catalog.
+func projectOperationInputs(exec harness.ExecutionCapture) (protocol.OperationInputs, error) {
+	tools := exec.Tools
+	if exec.InitialToolNames != nil {
+		tools = make([]model.ToolDefinition, 0, len(exec.InitialToolNames))
+		for _, name := range exec.InitialToolNames {
+			index := slices.IndexFunc(exec.Tools, func(tool model.ToolDefinition) bool { return tool.Name == name })
+			if index < 0 {
+				return protocol.OperationInputs{}, fmt.Errorf("operation tool %q is missing from the captured catalog: %w", name, harness.ErrCorrupt)
+			}
+			tools = append(tools, exec.Tools[index])
+		}
+	}
+	projected := make([]protocol.OperationTool, 0, len(tools))
+	for _, definition := range tools {
+		var parameters protocol.JSONObject
+		if err := json.Unmarshal(definition.Parameters, &parameters); err != nil {
+			return protocol.OperationInputs{}, fmt.Errorf("operation tool %q parameters: %v: %w", definition.Name, err, harness.ErrCorrupt)
+		}
+		projected = append(projected, protocol.OperationTool{
+			Name: definition.Name, Description: definition.Description, Parameters: parameters,
+		})
+	}
+	return protocol.OperationInputs{
+		Model:    protocol.ModelRef(exec.Model.String()),
+		Prompt:   exec.SystemPrompt,
+		Tools:    projected,
+		Strategy: protocol.StrategySelection{Id: exec.Strategy.ID, Settings: string(exec.Strategy.Settings)},
+	}, nil
 }
 
 // GetHydration is the private Session-owned hydration builder: one Harness

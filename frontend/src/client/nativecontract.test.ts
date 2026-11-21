@@ -26,11 +26,12 @@ describe('native invocation contract', () => {
     allows('ListSessions', '{"query":{"workspace":"/ws","lifecycle":"open"}}');
     allows('ListModels', '{"query":{"all":false}}');
     allows('GetSessionHydration', '{"session_id":"root1"}');
+    allows('GetSessionOperation', '{"session_id":"root1","operation_id":"op-1"}');
     allows('GetSessionHistory', '{"session_id":"root1"}');
     allows('GetSessionHistory', '{"session_id":"root1","query":{}}');
     allows('GetSessionHistory', '{"session_id":"root1","query":{"cursor":"abc"}}');
     allows('SubmitSession', '{"session_id":"root1","body":{"operation_id":"op1"}}');
-    allows('CreateSession', '{"body":{"workspace":"/ws","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"}}}}');
+    allows('CreateSession', '{"body":{"workspace":"/ws"}}');
     allows('SetSessionModel', '{"session_id":"root1","body":{"model":"prov/m"}}');
     allows('ResetProviderField', '{"field":"name","query":{"provider_id":"prov1"}}');
     allows('ResetProviderModelField', '{"field":"hidden","query":{"provider_id":"prov1","model_id":"m1"}}');
@@ -52,6 +53,7 @@ describe('native invocation contract', () => {
 
   it('rejects forbidden, undeclared, missing, null and mistyped envelope members', () => {
     rejects('GetHealth', '{"session_id":"root1"}');
+    rejects('GetHealth', '{"operation_id":"op-1"}');
     rejects('GetHealth', '{"bogus":1}');
     rejects('GetHealth', '{"toString":"root1"}');
     rejects('DeleteSession', '{}');

@@ -103,7 +103,7 @@ func modelFreePrep(f *publicFixture, strategy harness.ContextStrategy, openParke
 		if err != nil {
 			return exec, err
 		}
-		exec.Strategy = &harness.StrategyBinding{ID: "test.strategy/v1", Strategy: strategy}
+		exec.ResolveStrategy = publicFixedStrategyResolver(&harness.StrategyBinding{ID: "test.strategy/v1", Strategy: strategy})
 		return exec, nil
 	}
 }
@@ -230,7 +230,7 @@ func TestPublicManualCompactBlockedPlanSubmitBuffersUntilCompletion(t *testing.T
 		var f *publicFixture
 		var session string
 		conversationCalls := 0
-		conversationFn := func(ctx context.Context, req model.Request) (model.Stream, error) {
+		conversationFn := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 			conversationCalls++
 			if conversationCalls > 1 { // the successor, after the compacting fixture's own history turn
 				rec, err := f.h.ReadOperation(context.Background(), session, "c-1")
@@ -238,7 +238,7 @@ func TestPublicManualCompactBlockedPlanSubmitBuffersUntilCompletion(t *testing.T
 				testassert.Require(t, rec.State.Status == harness.OperationSuccess && rec.State.Terminal != nil,
 					"successor model dispatch observed before the manual compact completed: %+v", rec.State)
 			}
-			return conversation.effect(ctx, req)
+			return conversation.effect(ctx, req, nil)
 		}
 		f = newPublicFixtureWithJobs(t, store, nil, conversation, conversationFn, compact.effect)
 		strategy := &modelFreeStrategy{checkpoint: true, armed: armed, parked: make(chan struct{}, 1), release: make(chan struct{})}

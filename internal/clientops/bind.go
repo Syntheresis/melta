@@ -31,12 +31,13 @@ func invalidParams(format string, args ...any) error {
 // SDK call that binds the operation's path and query arguments from the
 // already-bound envelope and performs exactly that request.
 type descriptor struct {
-	session memberRule
-	field   memberRule
-	query   memberRule
-	body    memberRule
-	status  int
-	call    func(context.Context, protocol.ClientInterface, envelope) (*http.Response, error)
+	session   memberRule
+	operation memberRule
+	field     memberRule
+	query     memberRule
+	body      memberRule
+	status    int
+	call      func(context.Context, protocol.ClientInterface, envelope) (*http.Response, error)
 }
 
 // invokeGenerated looks up one native operation, binds its declared envelope
@@ -49,7 +50,7 @@ func invokeGenerated(ctx context.Context, c protocol.ClientInterface, operation 
 	if !ok {
 		return nil, 0, invalidParams("unknown operation %q", operation)
 	}
-	env, err := bindEnvelope(params, declared.session, declared.field, declared.query, declared.body)
+	env, err := bindEnvelope(params, declared.session, declared.operation, declared.field, declared.query, declared.body)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -72,10 +73,11 @@ func OperationNames() []string {
 // envelope is one bound invocation envelope: only the members the addressed
 // operation declares are populated.
 type envelope struct {
-	session string
-	field   string
-	query   json.RawMessage
-	body    json.RawMessage
+	session   string
+	operation string
+	field     string
+	query     json.RawMessage
+	body      json.RawMessage
 }
 
 // memberRule declares how one envelope member must appear for one operation:
@@ -91,10 +93,11 @@ const (
 
 // envelopeDoc is the envelope's raw declaration before membership checks.
 type envelopeDoc struct {
-	SessionID json.RawMessage `json:"session_id"`
-	Field     json.RawMessage `json:"field"`
-	Query     json.RawMessage `json:"query"`
-	Body      json.RawMessage `json:"body"`
+	SessionID   json.RawMessage `json:"session_id"`
+	OperationID json.RawMessage `json:"operation_id"`
+	Field       json.RawMessage `json:"field"`
+	Query       json.RawMessage `json:"query"`
+	Body        json.RawMessage `json:"body"`
 }
 
 // bindEnvelope decodes one invocation envelope as a single document with
@@ -103,7 +106,7 @@ type envelopeDoc struct {
 // are absent or present and non-null, and members the operation does not
 // declare must be absent. Missing params is the empty envelope; a supplied
 // null is invalid params like every other non-object form.
-func bindEnvelope(params json.RawMessage, session, field, query, body memberRule) (envelope, error) {
+func bindEnvelope(params json.RawMessage, session, operation, field, query, body memberRule) (envelope, error) {
 	if len(params) == 0 {
 		params = []byte("{}")
 	}
@@ -128,6 +131,15 @@ func bindEnvelope(params json.RawMessage, session, field, query, body memberRule
 	if rawSession != nil {
 		if err := json.Unmarshal(rawSession, &env.session); err != nil {
 			return envelope{}, invalidParams("session_id: %v", err)
+		}
+	}
+	rawOperation, err := takeMember(doc.OperationID, "operation_id", operation)
+	if err != nil {
+		return envelope{}, err
+	}
+	if rawOperation != nil {
+		if err := json.Unmarshal(rawOperation, &env.operation); err != nil {
+			return envelope{}, invalidParams("operation_id: %v", err)
 		}
 	}
 	rawField, err := takeMember(doc.Field, "field", field)

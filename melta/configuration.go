@@ -16,24 +16,27 @@ import (
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/jobs"
+	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
 
 // configuration is the immutable snapshot of one effective input set: the
 // assembled catalog with its build warnings and each model's source label,
-// the immutable Agent roster projection supplied by the active definition
-// resolvers, the session policy, every compiled plugin's owned raw
-// configuration section, the owned decoded provider user layer this same
-// build consumed, and the captured global and Workspace permission inputs.
-// Input documents are discarded once the snapshot is built; later consumers
-// add their own fields when they land.
+// the session policy, every enabled extension's owned raw configuration
+// section, the owned decoded provider user layer this same build consumed,
+// and the captured global and Workspace permission inputs. Input documents
+// are discarded once the snapshot is built.
 type configuration struct {
+	// model is the file choice; baselineModel is the one default model used
+	// for admission and fallback.
+	model                model.ModelRef
+	baselineModel        model.ModelRef
 	generation           uint64
 	resources            *resourceSet
+	native               *nativeCandidate
 	composition          *composition
 	catalog              *catalog.Catalog
 	catalogWarnings      []catalog.Warning
-	definitions          []agentDefinition
 	sessions             config.SessionConfig
 	tools                json.RawMessage
 	jobs                 json.RawMessage
@@ -56,6 +59,7 @@ type configuration struct {
 // numbers stay exact through the UseNumber decoder, and no legacy
 // whole-document shape or permission rule is enforced.
 type capturedConfigDocument struct {
+	Model       *string                    `json:"model"`
 	Providers   map[string]any             `json:"providers"`
 	Sessions    json.RawMessage            `json:"sessions"`
 	Tools       json.RawMessage            `json:"tools"`
@@ -110,26 +114,21 @@ func (c *configuration) declaredSecretNames() []string {
 	return names
 }
 
-// resolveDeclaredSecrets inspects the SecretRef metadata of every active
-// installed declaration against its captured section and records the
-// non-secret credential names without executing extension code.
-func resolveDeclaredSecrets(declarations []extension.Native, sections map[string]json.RawMessage) []declaredSecret {
+// resolveAuthorSecrets inspects the SecretRef metadata of every active author
+// extension against its captured section and records the non-secret credential
+// names without executing extension code.
+func resolveAuthorSecrets(authors []nativeActivationSpec, sections map[string]json.RawMessage) []declaredSecret {
 	var out []declaredSecret
-	for _, native := range declarations {
-		declaration := native.Declaration
-		if len(declaration.Secrets) == 0 {
-			continue
-		}
-		section := sections[declaration.ID]
+	for _, spec := range authors {
+		manifest := spec.extension.Manifest
+		section := sections[manifest.ID]
 		if !sectionEnabled(section) {
 			continue
 		}
-		for _, secret := range declaration.Secrets {
-			name, ok := extension.SecretName(section, secret.Field)
-			if !ok {
-				continue
+		for _, secret := range manifest.Secrets {
+			if name, ok := extension.SecretName(section, secret.Field); ok {
+				out = append(out, declaredSecret{extensionID: manifest.ID, field: secret.Field, lifetime: secret.Lifetime, name: name})
 			}
-			out = append(out, declaredSecret{extensionID: declaration.ID, field: secret.Field, lifetime: secret.Lifetime, name: name})
 		}
 	}
 	return out
@@ -159,11 +158,15 @@ func decodeCapturedConfig(configData []byte) (capturedConfigDocument, error) {
 // newConfiguration assembles the complete snapshot from one decoded captured
 // document, the provider assembly already performed for the captured
 // providers layer (a catalog entry never rereads the main configuration), and
-// the captured Workspace permission bytes. Agent definitions are not parsed
-// here: the active resolver extensions supply the roster projection after
-// their Harness resources are ready. Plugin-section validation belongs to the
-// publisher, not here.
+// the captured Workspace permission bytes. Nothing here parses Agent
+// definitions: the Agents activation owns its definition section and supplies
+// the current roster through its registered operations and admission hook.
+// Plugin-section validation belongs to the publisher, not here.
 func newConfiguration(generation uint64, doc capturedConfigDocument, built catalog.BuildResult, workspacePermissions map[string]json.RawMessage) (*configuration, error) {
+	ref, err := config.ParseOptionalModel(doc.Model)
+	if err != nil {
+		return nil, fmt.Errorf("captured configuration: %w", err)
+	}
 	sessions, err := config.ParseSessions(doc.Sessions)
 	if err != nil {
 		return nil, fmt.Errorf("captured configuration sessions: %w", err)
@@ -179,6 +182,7 @@ func newConfiguration(generation uint64, doc capturedConfigDocument, built catal
 		return nil, fmt.Errorf("captured configuration compaction: %w", err)
 	}
 	return &configuration{
+		model:                ref,
 		generation:           generation,
 		catalog:              built.Catalog,
 		catalogWarnings:      built.Warnings,
@@ -194,29 +198,26 @@ func newConfiguration(generation uint64, doc capturedConfigDocument, built catal
 	}, nil
 }
 
-// projectSettings projects one captured revision's settings view: the parsed
-// session policy beside the top-level baseline sections and every owned raw
-// plugin section. The baseline sections are copied as their exact captured
-// JSON objects, with an absent section projected as the empty object so its
-// owning service applies its defaults at consumption. Every plugin section is
-// an opaque JSON document string. This is a lossless transport projection, not
-// an interpreted settings authority — each section is returned as captured
-// and the owning declaration's validator owns interpretation. An owned empty
-// object is an empty document, absent plugin sections are absent map members,
-// and unowned numbers survive as their exact lexemes inside the copied bytes.
-func projectSettings(sessions config.SessionConfig, tools, jobs, compaction json.RawMessage, plugins map[string]json.RawMessage) protocol.Settings {
+// projectSettings projects the file model, session policy and owned sections
+// from one revision. Absent baseline sections project as empty objects;
+// extension sections remain opaque document strings with exact numeric lexemes.
+func projectSettings(snapshot *configuration) protocol.Settings {
 	out := protocol.Settings{
 		Sessions: protocol.SessionsSettings{
-			AutoArchive:            sessions.AutoArchive,
-			ArchiveAfterDays:       sessions.ArchiveAfterDays,
-			DeleteAfterArchiveDays: sessions.DeleteAfterArchiveDays,
+			AutoArchive:            snapshot.sessions.AutoArchive,
+			ArchiveAfterDays:       snapshot.sessions.ArchiveAfterDays,
+			DeleteAfterArchiveDays: snapshot.sessions.DeleteAfterArchiveDays,
 		},
-		Tools:      projectSettingsObject(tools),
-		Jobs:       projectSettingsObject(jobs),
-		Compaction: projectSettingsObject(compaction),
-		Extensions: make(protocol.ExtensionsSettings, len(plugins)),
+		Tools:      projectSettingsObject(snapshot.tools),
+		Jobs:       projectSettingsObject(snapshot.jobs),
+		Compaction: projectSettingsObject(snapshot.compaction),
+		Extensions: make(protocol.ExtensionsSettings, len(snapshot.extensions)),
 	}
-	for id, raw := range plugins {
+	if !snapshot.model.IsZero() {
+		value := protocol.ModelRef(snapshot.model.String())
+		out.Model = &value
+	}
+	for id, raw := range snapshot.extensions {
 		out.Extensions[id] = string(raw)
 	}
 	return out

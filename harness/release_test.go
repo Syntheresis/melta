@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -327,7 +326,7 @@ func TestPreparationReservationReleasesOnDiscards(t *testing.T) {
 		testassert.Equal(t, opens, 0)
 	})
 
-	t.Run("cap-rejected child launch discards with release", func(t *testing.T) {
+	t.Run("stopping parent rejects child launch with release", func(t *testing.T) {
 		counters := &reservationCounters{}
 		opens := 0
 		prepared := PreparedExecution{
@@ -341,14 +340,12 @@ func TestPreparationReservationReleasesOnDiscards(t *testing.T) {
 		h, cancel := releasingHarness(t, freshSessionStore(t), prepared)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		{
-			_, err := admitLocked(h, c, memberChild, "existing-child", 0)
-			testassert.NoError(t, err)
-		}
+		c.mu.Lock()
+		c.stop = &stopInterval{done: make(chan struct{})}
+		c.mu.Unlock()
 		req := launchRequest()
-		req.MaxConcurrent = 1
 		_, err := h.LaunchChildSession(context.Background(), req)
-		testassert.Require(t, err != nil, "capped launch = nil, want the cap rejection")
+		testassert.Require(t, err != nil, "stopping parent launch = nil, want rejection")
 		testassert.Equal(t, counters.releases.Load(), int64(1))
 		testassert.Equal(t, opens, 0)
 	})
@@ -400,15 +397,12 @@ func TestPreparationReservationReleasesOnDiscards(t *testing.T) {
 		h, cancel := releasingHarness(t, store, prepared)
 		defer cancel()
 		c := leaseCoordinator(t, h, testSessionID)
-		store.txHook = func(string) error { // the group closes between the launch commit and the handoff
-			c.mu.Lock()
-			c.bgState = bgStopping
-			c.mu.Unlock()
-			return nil
-		}
-		_, err := h.LaunchChildSession(context.Background(), launchRequest())
-		store.txHook = nil
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "closed or stopping"), "rejected handoff launch = %v, want the closed-or-stopping rejection", err)
+		request := launchRequest()
+		request.Report = false // the isolated release never runs a reporting parent
+		stopLaunchOnChildInput(store, c, request.ParentSessionID, request.OperationID)
+		result, err := h.LaunchChildSession(context.Background(), request)
+		testassert.NoError(t, err)
+		testassert.Require(t, result.ChildSessionID != "", "committed launch did not return its session ID")
 		testassert.Equal(t, counters.releases.Load(), int64(1))
 		testassert.Equal(t, opens, 0) // no adoption: the rejected launch never starts the child execution
 	})
@@ -556,7 +550,7 @@ func TestAdoptedReservationReleasesOnceAfterClose(t *testing.T) {
 			Open: func(context.Context, OperationAdmission) (Execution, error) {
 				return Execution{
 					OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-						return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+						return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 							return completedTurnStream(), nil
 						}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 					},
@@ -620,7 +614,7 @@ func TestReservationReleaseFailureIsRetained(t *testing.T) {
 		prepared := PreparedExecution{
 			Capture: testCapture(),
 			Open: func(context.Context, OperationAdmission) (Execution, error) {
-				return effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+				return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return completedTurnStream(), nil
 				}, nil), nil
 			},
@@ -658,7 +652,7 @@ func TestOpenedConversationInvocationOwnershipRows(t *testing.T) {
 				return Execution{OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 					opens.Add(1)
 					testassert.Require(t, request.Purpose == InvocationPurposeConversation, "conversation request purpose = %q, want conversation", request.Purpose)
-					return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+					return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return completedTurnStream(), nil
 					}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
 				}}, nil

@@ -23,7 +23,8 @@ func TestHistoryRoundTripsOpaqueNumbers(t *testing.T) {
 		caller := testCaller(r)
 
 		workspace := filepath.Join(e.home, "exact")
-		created, err := r.CreateSession(ctx, caller, workspace, wireSelection("solo"))
+		ref := protocol.ModelRef("prov/m")
+		created, err := r.CreateSession(ctx, caller, workspace, &protocol.SessionInputs{Model: &ref})
 		testassert.Require(t, err == nil, "create: %v", err)
 		session := created.SessionId
 		var part protocol.ContentPart

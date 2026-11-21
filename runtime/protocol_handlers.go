@@ -49,8 +49,8 @@ func (rt *protocolHandlers) ReloadConfiguration(w http.ResponseWriter, r *http.R
 }
 
 // ListExtensionCapabilities serves the enabled extensions' immutable catalog.
-func (rt *protocolHandlers) ListExtensionCapabilities(w http.ResponseWriter, r *http.Request) {
-	catalog, err := rt.owner.ListExtensionCapabilities(r.Context(), rt.server.caller)
+func (rt *protocolHandlers) ListExtensions(w http.ResponseWriter, r *http.Request) {
+	catalog, err := rt.owner.ListExtensions(r.Context(), rt.server.caller)
 	if err != nil {
 		writeProtocolError(w, err)
 		return
@@ -166,7 +166,7 @@ func (rt *protocolHandlers) GetConfiguration(w http.ResponseWriter, r *http.Requ
 	rt.writeJSON(w, http.StatusOK, &view)
 }
 
-// UpdateConfigurationSettings serves the settings/extension-edit writer.
+// UpdateConfigurationSettings serves the complete settings writer.
 func (rt *protocolHandlers) UpdateConfigurationSettings(w http.ResponseWriter, r *http.Request) {
 	var body protocol.UpdateSettingsRequest
 	if err := decodeRequestBody(r, &body); err != nil {
@@ -390,7 +390,7 @@ func (rt *protocolHandlers) CreateSession(w http.ResponseWriter, r *http.Request
 		writeProtocolError(w, err)
 		return
 	}
-	header, err := rt.owner.CreateSession(r.Context(), rt.server.caller, body.Workspace, body.AgentSelection)
+	header, err := rt.owner.CreateSession(r.Context(), rt.server.caller, body.Workspace, body.Inputs)
 	if err != nil {
 		writeProtocolError(w, err)
 		return
@@ -513,15 +513,15 @@ func (rt *protocolHandlers) ForkSession(w http.ResponseWriter, r *http.Request, 
 	rt.writeJSON(w, http.StatusOK, &result)
 }
 
-// SetSessionAgentType serves the Agent-type change; only subsequent
-// admissions use the new selection.
-func (rt *protocolHandlers) SetSessionAgentType(w http.ResponseWriter, r *http.Request, id protocol.SessionID) {
-	var body protocol.SetSessionAgentTypeRequest
+// SetSessionInputs serves the inputs change; only subsequent admissions use
+// the new selection.
+func (rt *protocolHandlers) SetSessionInputs(w http.ResponseWriter, r *http.Request, id protocol.SessionID) {
+	var body protocol.SetSessionInputsRequest
 	if err := decodeRequestBody(r, &body); err != nil {
 		writeProtocolError(w, err)
 		return
 	}
-	header, err := rt.owner.SetSessionAgentType(r.Context(), rt.server.caller, id, body)
+	header, err := rt.owner.SetSessionInputs(r.Context(), rt.server.caller, id, body)
 	if err != nil {
 		writeProtocolError(w, err)
 		return
@@ -548,6 +548,17 @@ func (rt *protocolHandlers) GetSessionHistory(w http.ResponseWriter, r *http.Req
 		return
 	}
 	rt.writeJSON(w, http.StatusOK, &page)
+}
+
+// GetSessionOperation serves one Operation header with its effective
+// execution inputs under the owning Session's read authority.
+func (rt *protocolHandlers) GetSessionOperation(w http.ResponseWriter, r *http.Request, id protocol.SessionID, operationId protocol.OperationID) {
+	operation, err := rt.owner.GetSessionOperation(r.Context(), rt.server.caller, id, operationId)
+	if err != nil {
+		writeProtocolError(w, err)
+		return
+	}
+	rt.writeJSON(w, http.StatusOK, &operation)
 }
 
 // GetSessionCodeSnapshots serves the per-Operation snapshot groups.

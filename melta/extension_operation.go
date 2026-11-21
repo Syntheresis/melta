@@ -5,18 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/protocol"
 )
 
-// ListExtensionCapabilities projects every enabled extension's immutable
-// declaration: its configuration schema, captured non-secret settings, every
-// declared capability and method, and its explicit exposures. The projection
-// reads only the published revision and copies immutable values; it builds no
-// factory, reserves no resource and executes no extension code.
-func (r *Melta) ListExtensionCapabilities(ctx context.Context, c Caller) ([]protocol.ExtensionCapabilityCatalog, error) {
+// ListExtensions returns the registered tools and client operations.
+func (r *Melta) ListExtensions(ctx context.Context, c Caller) ([]protocol.RegisteredExtension, error) {
 	release, err := r.enter(ctx)
 	if err != nil {
 		return nil, err
@@ -25,94 +22,91 @@ func (r *Melta) ListExtensionCapabilities(ctx context.Context, c Caller) ([]prot
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return nil, err
 	}
-	captured, err := r.config.capture(ctx)
+	captured, err := r.config.capturePreparation(ctx)
 	if err != nil {
 		return nil, err
 	}
-	snapshot := captured.snapshot
-	if snapshot == nil {
-		return nil, fmt.Errorf("extension catalog requires published configuration: %w", ErrClosed)
+	if captured.snapshot == nil || captured.native == nil {
+		return nil, ErrClosed
 	}
-	return projectExtensionCatalog(snapshot), nil
-}
-
-// projectExtensionCatalog is the data-only catalog body: compiled declarations
-// are the enabled installed set in registration order, so a zero-capability
-// extension is still one entry and hidden methods remain visible.
-func projectExtensionCatalog(snapshot *configuration) []protocol.ExtensionCapabilityCatalog {
-	if snapshot == nil || snapshot.composition == nil || snapshot.composition.compiled == nil {
-		return []protocol.ExtensionCapabilityCatalog{}
+	defer func() {
+		_ = captured.native.release()
+		_ = captured.snapshot.resources.release()
+		captured.releaseHeldNames()
+	}()
+	stage, err := captured.native.stage()
+	if err != nil {
+		return nil, err
 	}
-	declarations := snapshot.composition.compiled.Declarations()
-	out := make([]protocol.ExtensionCapabilityCatalog, 0, len(declarations))
-	for _, declaration := range declarations {
-		settings := json.RawMessage("{}")
-		if section := snapshot.extensions[declaration.Declaration.ID]; len(section) != 0 {
-			settings = section
-		}
-		entry := protocol.ExtensionCapabilityCatalog{
-			ExtensionId:         declaration.Declaration.ID,
-			Version:             declaration.Declaration.Version,
-			ConfigurationSchema: string(declaration.Declaration.ConfigSchema),
-			Settings:            string(settings),
-			Capabilities:        make([]protocol.ExtensionCapability, 0, len(declaration.Declaration.Capabilities)),
-			Exposed:             make([]protocol.ExtensionExposure, 0, len(declaration.Declaration.Exposed)),
-		}
-		for _, capability := range declaration.Declaration.Capabilities {
-			entry.Capabilities = append(entry.Capabilities, projectExtensionCapability(capability))
-		}
-		for _, exposed := range declaration.Declaration.Exposed {
-			entry.Exposed = append(entry.Exposed, protocol.ExtensionExposure{
-				CapabilityId: exposed.Method.CapabilityID,
-				Method:       exposed.Method.Method,
-				Kind:         protocol.ExtensionExposureKind(exposed.Kind),
-				Target:       protocol.ExtensionExposureTarget(exposed.Target),
-			})
-		}
-		out = append(out, entry)
+	defer stage.release()
+	r.config.nativeMu.Lock()
+	inactive := make(map[string]error, len(captured.snapshot.native.inactive))
+	for id, reason := range captured.snapshot.native.inactive {
+		inactive[id] = reason
 	}
-	return out
-}
-
-func projectExtensionCapability(capability extension.Capability) protocol.ExtensionCapability {
-	out := protocol.ExtensionCapability{
-		CapabilityId:    capability.ID,
-		ContractId:      capability.ContractID,
-		ContractVersion: capability.ContractVersion,
-		Kind:            protocol.ExtensionCapabilityKind(capability.Kind),
-		Methods:         make([]protocol.ExtensionMethod, 0, len(capability.Methods)),
-	}
-	for _, method := range capability.Methods {
-		projected := protocol.ExtensionMethod{
-			Name:    method.Name,
-			Mode:    protocol.ExtensionMethodMode(method.Mode),
-			Input:   string(method.Input),
-			Success: string(method.Success),
+	r.config.nativeMu.Unlock()
+	out := make([]protocol.RegisteredExtension, 0, len(r.config.authors)+len(inactive))
+	seen := make(map[string]bool)
+	for _, spec := range r.config.authors {
+		manifest := spec.extension.Manifest
+		section := captured.snapshot.extensions[manifest.ID]
+		if !sectionEnabled(section) || seen[manifest.ID] {
+			continue
 		}
-		if len(method.Error) != 0 {
-			value := string(method.Error)
-			projected.Error = &value
+		seen[manifest.ID] = true
+		schema := protocol.ExtensionConfigDocument(manifest.SettingsSchema)
+		item := protocol.RegisteredExtension{
+			ExtensionId: manifest.ID, Version: manifest.Version,
+			ConfigurationSchema: &schema, Settings: string(section),
+			Tools: []string{}, Operations: []protocol.RegisteredExtensionOperation{},
 		}
-		if len(method.Partial) != 0 {
-			value := string(method.Partial)
-			projected.Partial = &value
+		if failure := inactive[manifest.ID]; failure != nil {
+			reason := failure.Error()
+			item.InactiveReason = &reason
 		}
-		out.Methods = append(out.Methods, projected)
-	}
-	if len(capability.Hooks) != 0 {
-		hooks := make([]protocol.ExtensionHook, 0, len(capability.Hooks))
-		for _, hook := range capability.Hooks {
-			hooks = append(hooks, protocol.ExtensionHook{
-				Boundary: protocol.ExtensionHookBoundary(hook.Boundary),
-				Mode:     protocol.ExtensionHookMode(hook.Mode),
-			})
+		for _, entry := range stage.entries {
+			if entry.activation.id != manifest.ID {
+				continue
+			}
+			switch entry.kind {
+			case "tool":
+				item.Tools = append(item.Tools, entry.name)
+			case "operation":
+				op := entry.value.(struct {
+					target extension.ExposedTargetKind
+					method nativeServiceMethod
+				})
+				method := op.method.contract.Method
+				projected := protocol.ExtensionMethod{Name: method.Name, Mode: protocol.ExtensionMethodMode(method.Mode), Input: string(method.Input), Success: string(method.Success)}
+				if len(method.Error) != 0 {
+					value := string(method.Error)
+					projected.Error = &value
+				}
+				if len(method.Partial) != 0 {
+					value := string(method.Partial)
+					projected.Partial = &value
+				}
+				item.Operations = append(item.Operations, protocol.RegisteredExtensionOperation{Method: projected, Target: protocol.RegisteredExtensionOperationTarget(op.target)})
+			}
 		}
-		out.Hooks = &hooks
+		out = append(out, item)
 	}
-	if capability.Strategy != nil {
-		out.Strategy = &protocol.ExtensionStrategy{RequiresContextWindow: capability.Strategy.RequiresContextWindow}
+	var missing []string
+	for id := range inactive {
+		if !seen[id] {
+			missing = append(missing, id)
+		}
 	}
-	return out
+	sort.Strings(missing)
+	for _, id := range missing {
+		reason := inactive[id].Error()
+		out = append(out, protocol.RegisteredExtension{
+			ExtensionId: id, Version: r.packages.selectedVersion(id),
+			Settings: string(captured.snapshot.extensions[id]),
+			Tools:    []string{}, Operations: []protocol.RegisteredExtensionOperation{}, InactiveReason: &reason,
+		})
+	}
+	return out, nil
 }
 
 // InvokeExtension resolves one declared exposure, authorizes its exact target
@@ -122,124 +116,46 @@ func projectExtensionCapability(capability extension.Capability) protocol.Extens
 // a nil Go error; every predispatch or host failure is the ordinary public Go
 // error class.
 func (r *Melta) InvokeExtension(ctx context.Context, c Caller, request protocol.ExtensionInvocationRequest) (extension.Result, error) {
-	// Own the raw value before any slow construction or extension callback can
-	// observe caller-retained bytes. A nil optional value is the JSON null.
+	if err := validateInvocationAddress(request); err != nil {
+		return extension.Result{}, err
+	}
 	arguments := json.RawMessage("null")
 	if request.Arguments != nil {
 		arguments = append(json.RawMessage(nil), (*request.Arguments)...)
 	}
-	var result extension.Result
-	if err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
-		if err := validateInvocationAddress(request); err != nil {
-			return err
-		}
-		captured, err := r.config.captureFor(ctx, true)
-		if err != nil {
-			return err
-		}
-		snapshot := captured.snapshot
-		if snapshot == nil || snapshot.resources == nil {
-			return fmt.Errorf("extension invocation requires published configuration: %w", ErrClosed)
-		}
-		defer func() { _ = snapshot.resources.release() }()
+	return r.invokeRegisteredOperation(ctx, c, request.ExtensionId, request.Operation, request.Target, arguments, request.RequestId)
+}
 
-		capability, ok := snapshot.composition.compiled.Capability(request.CapabilityId)
-		if !ok {
-			return fmt.Errorf("capability %q is not declared: %w", request.CapabilityId, harness.ErrNotFound)
-		}
-		if capability.Declaration.Declaration.ID != request.ExtensionId {
-			return fmt.Errorf("capability %q does not belong to extension %q: %w", request.CapabilityId, request.ExtensionId, harness.ErrInvalid)
-		}
-		if capability.ContractID != request.ContractId || capability.ContractVersion != request.ContractVersion {
-			return fmt.Errorf("capability %q contract is %s/v%s, not %s/v%s: %w", request.CapabilityId, capability.ContractID, capability.ContractVersion, request.ContractId, request.ContractVersion, harness.ErrInvalid)
-		}
-		method, ok := capability.Methods[request.Method]
-		if !ok {
-			return fmt.Errorf("capability %q method %q is not declared: %w", request.CapabilityId, request.Method, harness.ErrNotFound)
-		}
-		exposed, ok := capability.Declaration.Exposed[extension.MethodKey{CapabilityID: request.CapabilityId, Method: request.Method}]
-		if !ok {
-			return fmt.Errorf("capability %q method %q is not exposed: %w", request.CapabilityId, request.Method, ErrDenied)
-		}
-		target, err := resolveInvocationTarget(request.Target, exposed.Target)
-		if err != nil {
-			return err
-		}
-		if err := r.authorize(c, ctx, h, target); err != nil {
-			return err
-		}
-		sessionID, workspace := "", ""
-		switch target.Kind {
-		case CallerScopeSession:
-			header, err := h.ReadSessionHeader(ctx, target.SessionID)
-			if err != nil {
-				return err
-			}
-			sessionID = target.SessionID
-			workspace = header.Identity.Workspace
-		case CallerScopeWorkspace:
-			workspace = target.Workspace
-		}
-		if err := extension.ValidateArguments(capability.Methods, request.Method, arguments); err != nil {
-			return fmt.Errorf("%w: %w", harness.ErrInvalid, err)
-		}
-
-		providerScope := snapshot.resources.runtime
-		if capability.Component.Lifetime == extension.LifetimeWorkspace {
-			if workspace == "" {
-				return fmt.Errorf("workspace-scoped capability %q requires a workspace target: %w", capability.ID, harness.ErrInvalid)
-			}
-			workspaceInfo := ScopeInfo{Kind: ScopeWorkspace, DataDir: providerScope.info.DataDir, Workspace: workspace, Revision: snapshot.resources.revisionString()}
-			providerScope, err = snapshot.resources.workspaces.get(ctx, workspaceInfo)
-			if err != nil {
-				return err
-			}
-		}
-		provider := providerScope.capabilities[capability.ID]
-		if provider == nil {
-			return fmt.Errorf("capability %q is unavailable in its scope: %w", capability.ID, ErrClosed)
-		}
-		identity := callIdentity{
-			session:   harness.SessionIdentity{SessionID: sessionID},
-			workspace: workspace,
-			requestID: request.RequestId,
-			revision:  snapshot.resources.revisionString(),
-			grant: nativeGrant{
-				pure:         method.Mode == extension.ModePure,
-				commands:     exposed.Kind == extension.ExposedSessionWork,
-				commandScope: target,
-			},
-		}
-		result, err = snapshot.composition.invokeAcceptedProvider(ctx, provider, capability.Methods, request.Method, arguments, nil, identity, false)
-		if err != nil {
-			return err
-		}
-		if exposed.Kind == extension.ExposedQuery && target.Kind == CallerScopeSession && result.Failure == nil {
-			// A successful query must not be captured after its Session was
-			// deleted. The owner read is cancellation-independent so a late
-			// request cancellation cannot replace a produced result, and only
-			// an actually deleted Session replaces it with not-found.
-			if _, err := h.ReadSessionHeader(context.WithoutCancel(ctx), target.SessionID); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		return extension.Result{}, err
+func (r *Melta) invocationTarget(ctx context.Context, caller Caller, h *harness.Harness, input protocol.ExtensionInvocationTarget, declared extension.ExposedTargetKind) (CallerScope, harness.SessionIdentity, error) {
+	target, err := resolveInvocationTarget(input, declared)
+	if err != nil {
+		return CallerScope{}, harness.SessionIdentity{}, err
 	}
-	return result, nil
+	if err := r.authorize(caller, ctx, h, target); err != nil {
+		return CallerScope{}, harness.SessionIdentity{}, err
+	}
+	if target.Kind == CallerScopeSession {
+		header, err := h.ReadSessionHeader(ctx, target.SessionID)
+		if err != nil {
+			return CallerScope{}, harness.SessionIdentity{}, err
+		}
+		return target, header.Identity, nil
+	}
+	return target, harness.SessionIdentity{Workspace: target.Workspace}, nil
+}
+
+func recheckInvocationSession(ctx context.Context, h *harness.Harness, target CallerScope) error {
+	_, err := h.ReadSessionHeader(context.WithoutCancel(ctx), target.SessionID)
+	return err
 }
 
 // validateInvocationAddress enforces the nonempty addressing strings and the
 // closed target union's exact member shape before any declaration lookup.
 func validateInvocationAddress(request protocol.ExtensionInvocationRequest) error {
 	for name, value := range map[string]string{
-		"extension_id":     request.ExtensionId,
-		"capability_id":    request.CapabilityId,
-		"contract_id":      request.ContractId,
-		"contract_version": request.ContractVersion,
-		"method":           request.Method,
-		"request_id":       request.RequestId,
+		"extension_id": request.ExtensionId,
+		"operation":    request.Operation,
+		"request_id":   request.RequestId,
 	} {
 		if value == "" {
 			return fmt.Errorf("invocation member %q must be non-empty: %w", name, harness.ErrInvalid)

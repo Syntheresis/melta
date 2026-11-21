@@ -174,7 +174,7 @@ func TestFrameFollowsAcceptedReaderAssignments(t *testing.T) {
 	c, transport := fixture(t)
 	r, done := c.startReader()
 	h := hydration(rootA, "1", inputs(2, 2), pointer("oldest"))
-	h.ActiveOperation = &protocol.Operation{OperationId: "active", RequestKind: "message", Status: "running", AgentSelection: fixtureSelection("primary"), Model: "provider/model"}
+	h.ActiveOperation = &protocol.Operation{OperationId: "active", RequestKind: "message", Status: "running", Model: "provider/model"}
 	receive(t, transport.requests).respond(h)
 	barrier(t, done)
 	frame := func(content string) string {
@@ -260,7 +260,7 @@ func TestActualWriterProvisionalBoundedNoncanonicalAndReset(t *testing.T) {
 	c, transport := fixture(t)
 	r, done := c.startReader()
 	h := hydration(rootA, "1", inputs(1, 1), nil)
-	h.ActiveOperation = &protocol.Operation{OperationId: "active", RequestKind: "compact", Model: "captured/model", AgentSelection: fixtureSelection("captured-type")}
+	h.ActiveOperation = &protocol.Operation{OperationId: "active", RequestKind: "compact", Model: "captured/model"}
 	h.SelectedModel = pointer("future/model")
 	receive(t, transport.requests).respond(h)
 	barrier(t, done)
@@ -292,6 +292,32 @@ func TestActualWriterProvisionalBoundedNoncanonicalAndReset(t *testing.T) {
 	c.mu.Lock()
 	testassert.Require(t, c.provisional == "" && !c.provisionalTruncated, "accepted hydration did not clear provisional")
 	c.mu.Unlock()
+	c.requestExit(nil)
+}
+
+func TestActualWriterRanWithLatestAdmission(t *testing.T) {
+	c, transport := fixture(t)
+	_, done := c.startReader()
+	h := hydration(rootA, "1", inputs(1, 1), nil)
+	h.SelectedModel = pointer("choice/model")
+	h.ActiveOperation = nil
+	// Hydration sorts by operation_id; the newest admission is neither the
+	// first nor the last in that order.
+	h.Operations = []protocol.Operation{
+		{OperationId: "aaa-old", RequestKind: "message", Status: protocol.OperationStatusSuccess, AdmittedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Model: "old/model"},
+		{OperationId: "mmm-new", RequestKind: "message", Status: protocol.OperationStatusSuccess, AdmittedAt: time.Date(2026, 1, 2, 3, 4, 9, 0, time.UTC), Model: "new/model"},
+		{OperationId: "zzz-mid", RequestKind: "message", Status: protocol.OperationStatusSuccess, AdmittedAt: time.Date(2026, 1, 2, 3, 4, 7, 0, time.UTC), Model: "mid/model"},
+	}
+	receive(t, transport.requests).respond(h)
+	barrier(t, done)
+	screen := newScreen(100)
+	go c.writer(screen)
+	c.mu.Lock()
+	c.width = 100
+	c.notifyLocked()
+	c.mu.Unlock()
+	frameContaining(t, screen, "ran with: new/model")
+	testassert.Require(t, !strings.Contains(screen.text(), "old/model") && !strings.Contains(screen.text(), "mid/model"), "operation-id order won over admission order")
 	c.requestExit(nil)
 }
 
@@ -361,7 +387,7 @@ func TestActualClipboardRefusalAndNoLoadedAssistant(t *testing.T) {
 			c, transport := fixture(t)
 			_, done := c.startReader()
 			h := hydration(rootA, "1", append(inputs(1, 1), test.tail...), pointer("unloaded-older"))
-			h.ActiveOperation = &protocol.Operation{OperationId: "active", RequestKind: "message", Status: "running", AgentSelection: fixtureSelection("primary"), Model: "provider/model"}
+			h.ActiveOperation = &protocol.Operation{OperationId: "active", RequestKind: "message", Status: "running", Model: "provider/model"}
 			receive(t, transport.requests).respond(h)
 			barrier(t, done)
 			screen := newScreen(80)
@@ -390,7 +416,7 @@ func TestProgressTupleUnmatchedOperationRepairsWithoutReplay(t *testing.T) {
 	c, transport := fixture(t)
 	r, done := c.startReader()
 	h := hydration(rootA, "1", inputs(1, 1), nil)
-	h.ActiveOperation = &protocol.Operation{OperationId: "first", RequestKind: "message", Status: "running", AgentSelection: fixtureSelection("primary"), Model: "provider/model"}
+	h.ActiveOperation = &protocol.Operation{OperationId: "first", RequestKind: "message", Status: "running", Model: "provider/model"}
 	receive(t, transport.requests).respond(h)
 	barrier(t, done)
 	tool := func(session, operation string) protocol.Event {
@@ -493,4 +519,45 @@ func TestCheckpointRendererInspectsAdmittedFields(t *testing.T) {
 	// checkpoint producer's identity.
 	testassert.Require(t, strings.Contains(result, "source: prov/model") && strings.Contains(result, "source: prov/compact"), "per-message source not inspectable: %s", result)
 	c.requestExit(nil)
+}
+
+// TestStatusLineShowsSelectedAgent proves the root status line shows the
+// Session's selected Agent from the advertised Agents current operation and
+// shows nothing when the operation is absent or carries no selection.
+func TestStatusLineShowsSelectedAgent(t *testing.T) {
+	for _, row := range []struct {
+		name      string
+		discovery json.RawMessage
+		current   string
+		want      string
+	}{
+		{"advertised selection", agentsCurrentDiscovery(), `{"kind":"success","result":{"agent":"planner"}}`, "Agent: planner"},
+		{"advertised without selection", agentsCurrentDiscovery(), `{"kind":"success","result":{}}`, ""},
+		{"not advertised", json.RawMessage(`[]`), "", ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			c, transport := fixture(t)
+			c.selectRoot(rootA)
+			receive(t, transport.requests).respond(hydration(rootA, "1", inputs(1, 1), nil))
+			receive(t, transport.requests).respond(row.discovery)
+			if row.current != "" {
+				receive(t, transport.requests).respond(json.RawMessage(row.current))
+			}
+			receive(t, transport.requests).respond(hydration(rootA, "1", inputs(1, 1), nil))
+			settleTasks(t, c)
+			screen := newScreen(100)
+			go c.writer(screen)
+			c.mu.Lock()
+			c.width = 100
+			c.notifyLocked()
+			c.mu.Unlock()
+			frameContaining(t, screen, "Model choice:")
+			shown := strings.Contains(screen.text(), "Agent:")
+			testassert.Require(t, shown == (row.want != ""), "status line agent display = %v, want %v: %s", shown, row.want != "", screen.text())
+			if row.want != "" {
+				testassert.Require(t, strings.Contains(screen.text(), row.want), "status line = %s, want %q", screen.text(), row.want)
+			}
+			c.requestExit(nil)
+		})
+	}
 }

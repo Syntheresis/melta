@@ -54,12 +54,12 @@ func (publicNoopStopper) StopJob(string, string) {}
 func publicChildLaunch(root string) harness.LaunchChildRequest {
 	return harness.LaunchChildRequest{
 		ParentSessionID: root,
-		AgentSelection:  publicSelection("coder"),
+		Inputs:          publicInputs("coder"),
 		Content:         []model.ContentPart{{Kind: model.PartText, Text: "child"}},
 		OperationID:     "child-op-1",
 		ExtensionID:     "test.extension",
-		MaxConcurrent:   2,
 		OutputLimit:     1024,
+		Report:          true,
 	}
 }
 
@@ -166,7 +166,7 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 				return harness.PreparedExecution{
 					Capture: ownedCapture,
 					Open: func(_ context.Context, admission harness.OperationAdmission) (harness.Execution, error) {
-						conversationAttempt := func(_ context.Context, req model.Request) (model.Stream, error) {
+						conversationAttempt := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 							mu.Lock()
 							requests = append(requests, requestObservation{admission.SessionID, admission.OperationID, req})
 							mu.Unlock()
@@ -182,7 +182,7 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 							}
 							return summaryTurnStream("child answer", model.Usage{}), nil
 						}
-						compactAttempt := func(_ context.Context, req model.Request) (model.Stream, error) {
+						compactAttempt := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 							mu.Lock()
 							compactRequests = append(compactRequests, req)
 							first := len(compactRequests) == 1
@@ -200,9 +200,8 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 									attempt = compactAttempt
 								}
 								return harness.InvocationExecution{
-									Model:         attempt,
-									Tool:          publicImmediateTool,
-									NormalizeTool: publicNormalize,
+									Model:      attempt,
+									LookupTool: fixtureToolLookup(publicImmediateTool, publicNormalize),
 								}, nil
 							},
 							Close: func() error {
@@ -270,7 +269,7 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 			}
 			if observed.session == root && observed.operation == completionID {
 				got := texts(observed.request)
-				foundParent = len(got) == 2 && got[1] == "child answer"
+				foundParent = len(got) == 2 && got[1] == "Session "+child+": success\nchild answer"
 			}
 		}
 		testassert.Check(t, len(compactRequests) == 0, "ordinary first child turn compacted")
@@ -407,6 +406,8 @@ func TestObservePublicBothStores(t *testing.T) {
 			deltas   int
 			started  int
 			finished int
+			admitted int
+			settled  int
 		)
 		for _, fact := range sink.snapshot() {
 			testassert.Require(t, fact.SessionID == session, "fact names a foreign session: %+v", fact)
@@ -421,6 +422,12 @@ func TestObservePublicBothStores(t *testing.T) {
 			case harness.FactToolFinished:
 				finished++
 				testassert.Require(t, fact.OperationID == "op-1" && fact.CallID == "call-1" && fact.Status == model.ResultSuccess, "tool finished fact = %+v", fact)
+			case harness.FactOperationAdmitted:
+				admitted++
+				testassert.Require(t, fact.OperationID == "op-1", "admitted fact = %+v", fact)
+			case harness.FactOperationSettled:
+				settled++
+				testassert.Require(t, fact.OperationID == "op-1" && fact.OperationStatus == harness.OperationSuccess, "settled fact = %+v", fact)
 			default:
 				t.Fatalf("fact kind %q is outside the closed set", fact.Kind)
 			}
@@ -433,7 +440,7 @@ func TestObservePublicBothStores(t *testing.T) {
 			_, pair, ok := h.ReadObservation(session)
 			testassert.Require(t, ok && pair == current, "cached publication read = %+v %v, quiet snapshot = %+v", pair, ok, current)
 		}
-		testassert.Require(t, deltas == 2 && started == 1 && finished == 1, "progress counts = deltas %d started %d finished %d", deltas, started, finished)
+		testassert.Require(t, deltas == 2 && started == 1 && finished == 1 && admitted == 1 && settled == 1, "progress counts = deltas %d started %d finished %d admitted %d settled %d", deltas, started, finished, admitted, settled)
 
 		// Restart: recovery and the new owner's reads replay nothing.
 		cancel()
@@ -465,7 +472,7 @@ func TestObservePublicBothStores(t *testing.T) {
 			testassert.Require(t, len(got) == 0, "the restarted owner replayed %+v", got)
 		}
 		{
-			_, err := restarted.ChangeAgentType(context.Background(), session, publicSelection("planner"))
+			_, err := restarted.SetSessionInputs(context.Background(), session, publicInputs("planner"))
 			testassert.NoError(t, err)
 		}
 		{

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
@@ -44,11 +43,9 @@ func workspaceScopeInfo(workspace string) ScopeInfo {
 	return ScopeInfo{Kind: ScopeWorkspace, DataDir: "/owner/data", Workspace: workspace}
 }
 
-func mustComposition(t *testing.T, natives ...extension.Native) *composition {
+func mustComposition(t *testing.T) *composition {
 	t.Helper()
-	c, err := newNativeComposition(natives)
-	testassert.NoError(t, err)
-	return c
+	return newComposition()
 }
 
 func mustOpenScope(t *testing.T, c *composition, ctx context.Context, info ScopeInfo, ancestors []*scope) *scope {

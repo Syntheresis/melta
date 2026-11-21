@@ -6,7 +6,6 @@ package prompt
 
 import (
 	_ "embed"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,24 +43,11 @@ var overridableSections = map[string]string{
 	"language":       languageSection,
 }
 
-// Mode selects one of the three baseline prompt sizes. It is a closed set:
-// every other value, including the empty string, is invalid input.
-type Mode string
-
 const (
-	ModeNone   Mode = "none"
-	ModeSimple Mode = "simple"
-	ModeFull   Mode = "full"
-
 	WarnRulesTooLarge  = "rules_too_large"
 	WarnRulesNotFound  = "rules_not_found"
 	WarnRulesReadError = "rules_read_error"
 )
-
-// ErrInvalidInput is the typed invalid-input failure for an unsupported mode.
-var ErrInvalidInput = errors.New("prompt: invalid input")
-
-const agentPromptHeading = "## Your Role and Instructions"
 
 // Warning is one non-fatal rule-reading diagnostic.
 type Warning struct {
@@ -78,13 +64,11 @@ type Rules struct {
 }
 
 // AssemblyInput is the complete pure input of one baseline prompt. Identity is
-// the application-supplied persona; none mode renders Instructions alone.
-// OS, Shell and OSDescription are captured environment values rendered by the
-// full and simple sizes; OS is the platform identifier.
+// the application-supplied persona. OS, Shell and OSDescription are captured
+// environment values rendered by the baseline; OS is the platform identifier.
 type AssemblyInput struct {
 	Identity      string    `json:"identity"`
 	Instructions  string    `json:"instructions"`
-	Mode          Mode      `json:"mode"`
 	Rules         Rules     `json:"rules"`
 	Workspace     string    `json:"workspace"`
 	SessionStart  time.Time `json:"session_start"`
@@ -93,18 +77,11 @@ type AssemblyInput struct {
 	OSDescription string    `json:"os_description"`
 }
 
-// ReadRules reads the current global and Workspace AGENTS.md text for mode.
-// None reads nothing and yields no diagnostics. An empty global directory
-// performs no global lookup. Ordinary read problems become warnings while an
-// unsupported mode fails with ErrInvalidInput before any read.
-func ReadRules(globalDir, workspace string, mode Mode) (Rules, error) {
-	if !validMode(mode) {
-		return Rules{}, fmt.Errorf("%w: unsupported mode %q", ErrInvalidInput, mode)
-	}
+// ReadRules reads the current global and Workspace AGENTS.md text. An empty
+// global directory performs no global lookup. Ordinary read problems become
+// warnings while the readable layer still contributes its text.
+func ReadRules(globalDir, workspace string) Rules {
 	var rules Rules
-	if mode == ModeNone {
-		return rules, nil
-	}
 
 	if globalDir != "" {
 		content, err := readRulesFile(globalDir)
@@ -130,53 +107,33 @@ func ReadRules(globalDir, workspace string, mode Mode) (Rules, error) {
 	if len(combined) > 20000 {
 		rules.Warnings = append(rules.Warnings, Warning{Kind: WarnRulesTooLarge, Message: fmt.Sprintf("Rules file exceeds 20,000 characters (%d chars). Consider trimming it.", len(combined))})
 	}
-	return rules, nil
+	return rules
 }
 
 // Assemble renders the complete baseline prompt for input. It performs no I/O
-// and reads no ambient value: equal inputs produce equal output. None returns
-// the trimmed Instructions alone; full and simple retain the baseline section
-// order, separators, rules suppression and role-heading normalization.
-func Assemble(input AssemblyInput) (string, error) {
-	if !validMode(input.Mode) {
-		return "", fmt.Errorf("%w: unsupported mode %q", ErrInvalidInput, input.Mode)
-	}
-	if input.Mode == ModeNone {
-		return strings.TrimSpace(input.Instructions), nil
-	}
-	return buildSpec(input), nil
-}
-
-func validMode(mode Mode) bool {
-	switch mode {
-	case ModeNone, ModeSimple, ModeFull:
-		return true
-	default:
-		return false
-	}
+// and reads no ambient value: equal inputs produce equal output.
+func Assemble(input AssemblyInput) string {
+	return buildSpec(input)
 }
 
 func buildSpec(input AssemblyInput) string {
 	var b strings.Builder
 
-	for _, section := range defaultSectionsForMode(input) {
-		b.WriteString(strings.TrimSpace(section))
+	for _, section := range BaselineSections(input) {
+		b.WriteString(strings.TrimSpace(section.Text))
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(renderEnvironment(input))
+	b.WriteString(Environment(input))
 	b.WriteString("\n\n")
 
-	rulesContent := strings.TrimSpace(input.Rules.GlobalText + "\n\n" + input.Rules.WorkspaceText)
-	overridden := detectOverrides(rulesContent)
-	for _, name := range overridableOrderForMode(input.Mode) {
-		if !overridden[name] {
-			b.WriteString(strings.TrimSpace(overridableSections[name]))
-			b.WriteString("\n\n")
-		}
+	rulesContent := CombinedRules(input.Rules)
+	for _, section := range RuleSections(input.Rules) {
+		b.WriteString(strings.TrimSpace(section.Text))
+		b.WriteString("\n\n")
 	}
 
-	writeAgentBody(&b, input.Instructions)
+	writeInstructions(&b, input.Instructions)
 
 	trimmed := strings.TrimSpace(rulesContent)
 	if trimmed != "" {
@@ -187,64 +144,53 @@ func buildSpec(input AssemblyInput) string {
 	return strings.TrimSpace(b.String())
 }
 
-func defaultSectionsForMode(input AssemblyInput) []string {
-	if input.Mode == ModeSimple {
-		return []string{
-			input.Identity,
-			coreRulesSection,
-			compactionAwarenessSection,
+// Section is one named baseline prompt section.
+type Section struct {
+	Name string
+	Text string
+}
+
+// CombinedRules joins the global and Workspace rules in their assembly order.
+func CombinedRules(rules Rules) string {
+	return strings.TrimSpace(rules.GlobalText + "\n\n" + rules.WorkspaceText)
+}
+
+// BaselineSections returns the sections preceding the environment.
+func BaselineSections(input AssemblyInput) []Section {
+	return []Section{
+		{"identity", input.Identity},
+		{"core_rules", coreRulesSection},
+		{"rules_file_guide", rulesFileGuideSection},
+		{"compaction_awareness", compactionAwarenessSection},
+	}
+}
+
+// RuleSections returns the sections not suppressed by rules headings.
+func RuleSections(rules Rules) []Section {
+	overridden := detectOverrides(CombinedRules(rules))
+	var sections []Section
+	for _, name := range overridableOrder {
+		if !overridden[name] {
+			sections = append(sections, Section{name, overridableSections[name]})
 		}
 	}
-	return []string{
-		input.Identity,
-		coreRulesSection,
-		rulesFileGuideSection,
-		compactionAwarenessSection,
-	}
+	return sections
 }
 
-func overridableOrderForMode(mode Mode) []string {
-	if mode == ModeSimple {
-		return []string{"safety"}
-	}
-	return overridableOrder
-}
-
-func writeAgentBody(b *strings.Builder, body string) {
+// writeInstructions inserts the supplied instructions text as one trimmed
+// block, adding nothing: rendering the extension's own heading belongs to the
+// extension that supplies the text.
+func writeInstructions(b *strings.Builder, body string) {
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return
-	}
-	if !startsWithAgentPromptHeading(body) {
-		b.WriteString(agentPromptHeading)
-		b.WriteString("\n\n")
 	}
 	b.WriteString(body)
 	b.WriteString("\n\n")
 }
 
-func startsWithAgentPromptHeading(body string) bool {
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, "#") {
-			return false
-		}
-		headingText := strings.TrimLeft(line, "#")
-		headingText = strings.TrimSpace(headingText)
-		headingText = strings.TrimSpace(strings.TrimRight(headingText, "#"))
-		headingText = strings.ToLower(headingText)
-		headingText = strings.ReplaceAll(headingText, "-", " ")
-		headingText = strings.ReplaceAll(headingText, "_", " ")
-		headingText = strings.Join(strings.Fields(headingText), " ")
-		return headingText == "your role and instructions"
-	}
-	return false
-}
-
-func renderEnvironment(input AssemblyInput) string {
+// Environment renders the captured environment without reading rules.
+func Environment(input AssemblyInput) string {
 	return fmt.Sprintf("## Environment\n\nWorking directory: %s\nPlatform: %s\nShell: %s\nOS: %s\nSession started: %s",
 		input.Workspace,
 		input.OS,

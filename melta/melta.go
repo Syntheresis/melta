@@ -1,11 +1,14 @@
 package melta
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -29,8 +32,9 @@ var ErrOwned = errors.New("melta: data directory owned by another Melta")
 // sources, and the complete plugin set — builtin.Plugins() for the shipped
 // registration, an ordinary custom slice for a custom build. Optional
 // locations are independently selected; an omitted location performs no
-// lookup there. Nil Agent and Strategy select the included defaults, and nil
-// NewEvaluator selects the included permission evaluator.
+// lookup there. Empty Defaults supplies no Session defaults, a nil Strategy
+// selects the included one, and nil NewEvaluator selects the included
+// permission evaluator.
 type Options struct {
 	DataDir       string
 	Configuration ConfigurationSource
@@ -41,10 +45,17 @@ type Options struct {
 	// value supplies no identity, never an implicit fallback.
 	Identity string
 
-	Agent    *harness.AgentInputs
+	Defaults harness.SessionInputs
 	Strategy *harness.StrategyBinding
 
-	Extensions []extension.Native
+	Extensions []extension.Extension
+
+	// ExtensionAccess narrows one supplied or installed extension's host
+	// grants, keyed by extension ID. A missing entry keeps the default: every
+	// manifest-requested service and the whole-owner scope. Services nil keeps
+	// every requested service; a non-nil list intersects the manifest where an
+	// empty list grants none. Scope nil keeps the whole-owner scope.
+	ExtensionAccess map[string]ExtensionAccess
 
 	// OpenStore optionally replaces the included SQLite construction. The
 	// supplied factory owns exclusivity of its actual storage namespace; the
@@ -60,21 +71,86 @@ type Options struct {
 	BeforeRelease func() error
 }
 
+// ExtensionAccess is one embedder-supplied extension grant: the subset of the
+// manifest-requested host services allowed and the command/observation scope.
+// Zero members keep the default.
+type ExtensionAccess struct {
+	Services []string
+	Scope    *CallerScope
+}
+
+func cloneAuthorExtensions(values []extension.Extension) []extension.Extension {
+	out := slices.Clone(values)
+	for i := range out {
+		out[i].Manifest.SettingsSchema = bytes.Clone(out[i].Manifest.SettingsSchema)
+		out[i].Manifest.Services = slices.Clone(out[i].Manifest.Services)
+		out[i].Manifest.Secrets = slices.Clone(out[i].Manifest.Secrets)
+	}
+	return out
+}
+
+// cloneExtensionAccess validates and owns the embedder's per-extension grants.
+// A scope is checked by the same constructor every Caller grant uses; nothing
+// shares a caller-owned slice or pointer.
+func cloneExtensionAccess(values map[string]ExtensionAccess) (map[string]ExtensionAccess, error) {
+	if values == nil {
+		return nil, nil
+	}
+	out := make(map[string]ExtensionAccess, len(values))
+	for id, access := range values {
+		cloned := ExtensionAccess{Services: slices.Clone(access.Services)}
+		if access.Scope != nil {
+			scope := *access.Scope
+			if _, err := newCaller(CallerContext{Origin: harness.InputOriginPlugin, ExtensionID: id, Scope: scope}); err != nil {
+				return nil, fmt.Errorf("melta: options.ExtensionAccess[%q].Scope: %v: %w", id, err, harness.ErrInvalid)
+			}
+			cloned.Scope = &scope
+		}
+		out[id] = cloned
+	}
+	return out, nil
+}
+
+// applyExtensionAccess feeds one supplied or installed activation's effective
+// services and granted scope from the embedder's entry. A missing entry keeps
+// the all-requested, whole-owner default.
+func applyExtensionAccess(spec nativeActivationSpec, access map[string]ExtensionAccess) nativeActivationSpec {
+	if access == nil {
+		return spec
+	}
+	entry, ok := access[spec.extension.Manifest.ID]
+	if !ok {
+		return spec
+	}
+	if entry.Services != nil {
+		spec.approvedServices = slices.Clone(entry.Services)
+	}
+	if entry.Scope != nil {
+		spec.scope = *entry.Scope
+	}
+	return spec
+}
+
 // Open constructs the complete managed Melta with concrete production
 // preparation and returns the published owner. It delegates to the private
 // lifecycle implementation, which owns every retained property: explicit
 // sources and locations, ownership-before-I/O, config publication,
 // recovery-before-execution, one admitted-call gate, and the joined shutdown.
 func Open(ctx context.Context, opts Options) (*Melta, error) {
+	access, err := cloneExtensionAccess(opts.ExtensionAccess)
+	if err != nil {
+		return nil, err
+	}
 	return open(ctx, options{
 		DataDir:       opts.DataDir,
 		Configuration: opts.Configuration,
 		Credentials:   opts.Credentials,
 		Locations:     opts.Locations,
 		Identity:      opts.Identity,
-		Agent:         opts.Agent,
+		Defaults:      opts.Defaults.Owned(),
 		Strategy:      opts.Strategy,
-		Extensions:    opts.Extensions,
+		Extensions:    cloneAuthorExtensions(opts.Extensions),
+		Access:        access,
 		OpenStore:     opts.OpenStore,
 		NewEvaluator:  opts.NewEvaluator,
 		BeforeRelease: opts.BeforeRelease,
@@ -93,9 +169,10 @@ type options struct {
 	Credentials   CredentialSource
 	Locations     Locations
 	Identity      string
-	Agent         *harness.AgentInputs
+	Defaults      harness.SessionInputs
 	Strategy      *harness.StrategyBinding
-	Extensions    []extension.Native
+	Extensions    []extension.Extension
+	Access        map[string]ExtensionAccess
 
 	OpenStore     func(context.Context, string) (harness.Storage, func() error, error)
 	NewEvaluator  func(PolicyInputs) (harness.PermissionEvaluator, error)
@@ -116,7 +193,6 @@ type Melta struct {
 	obs           *observation
 	warnings      *warningStore
 	passive       *observationAdapter
-	agentInputs   harness.AgentInputs
 	harness       *harness.Harness
 	artifacts     *artifactIntervals
 	dataDir       string
@@ -176,12 +252,9 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	if options.Credentials == nil {
 		return nil, fmt.Errorf("melta: options.Credentials must be non-nil: %w", harness.ErrInvalid)
 	}
-	inputs := DefaultAgentInputs()
-	if options.Agent != nil {
-		if err := harness.ValidateAgentInputs(*options.Agent); err != nil {
-			return nil, fmt.Errorf("melta: options.Agent: %v: %w", err, harness.ErrInvalid)
-		}
-		inputs = options.Agent.Owned()
+	inputs := options.Defaults.Owned()
+	if _, err := json.Marshal(inputs); err != nil {
+		return nil, fmt.Errorf("melta: options.Defaults: %v: %w", err, harness.ErrInvalid)
 	}
 	strategy := harness.IncludedStrategyBinding()
 	if options.Strategy != nil {
@@ -201,9 +274,6 @@ func open(ctx context.Context, options options) (*Melta, error) {
 		return nil, err
 	}
 	var configService *configurationService
-	supervisor := newExecutableSupervisor(func(ctx context.Context, excluded []string) ([]string, error) {
-		return configService.executableEnvironment(ctx, excluded)
-	})
 	lock, ok, err := atomicfs.TryAcquire(filepath.Join(dataDir, "runtime.lock"))
 	if err != nil {
 		return nil, err
@@ -213,13 +283,14 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	}
 	work, cancelWork := context.WithCancel(ctx)
 	packages := newPackageManager(dataDir)
-	if err := packages.load(supervisor.native); err != nil {
+	installed, err := packages.loadAuthors(func(ctx context.Context, excluded []string) ([]string, error) {
+		return configService.executableEnvironment(ctx, excluded)
+	})
+	if err != nil {
 		cancelWork()
 		return nil, errors.Join(err, lock.Release())
 	}
-	natives := append([]extension.Native(nil), options.Extensions...)
-	natives = append(natives, packages.loadedNatives()...)
-	c := registeredComposition(natives)
+	c := newComposition()
 
 	obs := newObservation()
 	// The warning store and the passive publication adapter initialize
@@ -234,9 +305,17 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	c.reportWarning = adapter.reportPluginWarning
 	loader := catalog.NewLoader(options.Locations.DiscoveryCacheDir, nil)
 	configService = newConfigurationService(work, c, loader, options.Configuration, options.Credentials, options.Locations, strategy, obs)
-	configService.executables = packages.loadedExecutables()
+	configService.defaults = inputs
+	configService.dataDir = dataDir
+	for _, author := range options.Extensions {
+		configService.authors = append(configService.authors, applyExtensionAccess(nativeActivationSpec{extension: author}, options.Access))
+	}
+	for i := range installed {
+		installed[i] = applyExtensionAccess(installed[i], options.Access)
+	}
+	configService.authors = append(configService.authors, installed...)
+	configService.authorFailures = packages.authorFailures
 	configService.unusablePackages = packages.unusable
-	configService.supervisor = supervisor
 	configService.instance = instance
 	configService.attachWarnings(warnings)
 	// The private per-Session artifact interval registry initializes before
@@ -253,7 +332,7 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	}
 	if err := configService.canceled(work); err != nil {
 		cancelWork()
-		return nil, errors.Join(err, lock.Release())
+		return nil, errors.Join(err, initial.native.release(), lock.Release())
 	}
 
 	// unwind releases the acquired prefix in reverse acquisition order: each
@@ -261,7 +340,7 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	// completion callback — and the ownership lock releases last. A failed
 	// construction never appends its own resource: openScope already cleaned
 	// the partial scope it built.
-	var acquired []func() error
+	acquired := []func() error{initial.native.release}
 	unwind := func(cause error) (*Melta, error) {
 		cancelWork()
 		errs := []error{cause}
@@ -292,16 +371,8 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	c.standardValues = newStandardTools(dataDir, jobsService)
 	background := &backgroundBridge{}
 	c.hosts.background = background
-	configService.composition = c
-	configService.dataDir = dataDir
-	if err := configService.prepareResources(work, initial); err != nil {
-		return unwind(err)
-	}
 	resources := initial.resources
 	acquired = append(acquired, resources.release)
-	if err := configService.projectDefinitions(work, initial); err != nil {
-		return unwind(err)
-	}
 	if err := configService.canceled(work); err != nil {
 		return unwind(err)
 	}
@@ -342,7 +413,6 @@ func open(ctx context.Context, options options) (*Melta, error) {
 		obs:           obs,
 		warnings:      warnings,
 		passive:       adapter,
-		agentInputs:   inputs,
 		harness:       h,
 		artifacts:     artifacts,
 		dataDir:       dataDir,
@@ -443,10 +513,9 @@ func (r *Melta) withHarness(ctx context.Context, fn func(context.Context, *harne
 
 // createSessionRecord is the one root creation core: the existing empty
 // workspace check wraps the shared harness.ErrInvalid sentinel, the Workspace
-// is normalized with filepath.Abs alone, and the Harness retains its
-// nonempty-only Agent-type selection. It executes inside the Caller's
-// admission.
-func (r *Melta) createSessionRecord(ctx context.Context, h *harness.Harness, workspace string, selection harness.AgentSelection) (harness.SessionRecord, error) {
+// is normalized with filepath.Abs alone, and the Harness stores the validated
+// Session inputs. It executes inside the Caller's admission.
+func (r *Melta) createSessionRecord(ctx context.Context, h *harness.Harness, workspace string, inputs harness.SessionInputs, states map[string]harness.SessionStateValue) (harness.SessionRecord, error) {
 	if workspace == "" {
 		return harness.SessionRecord{}, fmt.Errorf("workspace must be non-empty: %w", harness.ErrInvalid)
 	}
@@ -454,7 +523,7 @@ func (r *Melta) createSessionRecord(ctx context.Context, h *harness.Harness, wor
 	if err != nil {
 		return harness.SessionRecord{}, fmt.Errorf("normalize Workspace: %w", err)
 	}
-	return h.CreateSession(ctx, harness.CreateSessionRequest{Workspace: normalized, AgentSelection: selection})
+	return h.CreateSession(ctx, harness.CreateSessionRequest{Workspace: normalized, Inputs: inputs, ExtensionState: states})
 }
 
 // DeleteSession is the private canonical Session deletion: the whole body
@@ -577,6 +646,9 @@ func (r *Melta) joinShutdown() error {
 	}
 	if current := r.config.current(); current != nil && current.resources != nil {
 		_ = current.resources.release()
+	}
+	if current := r.config.current(); current != nil && current.native != nil {
+		errs = append(errs, current.native.release())
 	}
 	r.config.cleanupMu.Lock()
 	errs = append(errs, r.config.cleanupErr)

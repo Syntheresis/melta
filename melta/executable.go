@@ -1,7 +1,6 @@
 package melta
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,14 +17,6 @@ import (
 	"github.com/Syntheresis/melta/harness"
 )
 
-// executableExtension is one installed code selection: its declaration and the
-// executable entry point that serves it. Package installation supplies it until
-// the package loader owns that lifecycle.
-type executableExtension struct {
-	Declaration extension.Declaration
-	EntryPoint  string
-}
-
 const (
 	// executableQueuedFrames bounds the one outbound frame queue.
 	executableQueuedFrames = 256
@@ -38,9 +29,8 @@ const (
 )
 
 // executableShutdownGrace is the cooperative cancellation/stop window before
-// the process group is terminated. The production value is five seconds; tests
-// may shorten it to exercise the same deadline path.
-var executableShutdownGrace = 5 * time.Second
+// the process group is terminated.
+const executableShutdownGrace = 5 * time.Second
 
 // executableCall is one host-issued call context's nested-call entry point.
 type executableCall func(context.Context, string, string, json.RawMessage) (extension.Result, error)
@@ -64,82 +54,6 @@ type executableParentCloser interface {
 // in-process adapter or controlled barrier process.
 var spawnExecutable = func(_ context.Context, path string, environment []string) (executableProcess, error) {
 	return spawnExecutableProcess(path, environment)
-}
-
-// executableSupervisor owns the one live activation per executable extension.
-// Resource sets retain an activation while they use it; the last release
-// stops it. A failed activation remains failed while any set retains it and is
-// never restarted.
-type executableSupervisor struct {
-	environment func(context.Context, []string) ([]string, error)
-
-	mu          sync.Mutex
-	activations map[string]*executableActivation
-}
-
-func newExecutableSupervisor(environment func(context.Context, []string) ([]string, error)) *executableSupervisor {
-	return &executableSupervisor{environment: environment, activations: make(map[string]*executableActivation)}
-}
-
-// acquire retains the executable's activation, starting it when no set holds
-// one. A failed live activation reports its failure instead of restarting.
-func (s *executableSupervisor) acquire(ctx context.Context, executable executableExtension, excluded []string) error {
-	id := executable.Declaration.ID
-	s.mu.Lock()
-	activation, ok := s.activations[id]
-	if ok {
-		activation.refs++
-		s.mu.Unlock()
-		<-activation.ready
-		activation.mu.Lock()
-		failed := activation.failed
-		activation.mu.Unlock()
-		return failed
-	}
-	activation = newExecutableActivation(executable, s.environment)
-	activation.refs = 1
-	s.activations[id] = activation
-	s.mu.Unlock()
-	return activation.start(ctx, excluded)
-}
-
-// release drops one set's hold and joins the termination after the last one.
-func (s *executableSupervisor) release(id string) {
-	s.mu.Lock()
-	activation := s.activations[id]
-	if activation == nil {
-		s.mu.Unlock()
-		return
-	}
-	activation.refs--
-	last := activation.refs == 0
-	if last {
-		delete(s.activations, id)
-	}
-	s.mu.Unlock()
-	if last {
-		activation.stop()
-	}
-}
-
-// live returns the usable activation for one executable.
-func (s *executableSupervisor) live(id string) (*executableActivation, error) {
-	s.mu.Lock()
-	activation := s.activations[id]
-	s.mu.Unlock()
-	if activation == nil {
-		return nil, fmt.Errorf("executable extension %q has no activation: %w", id, extension.ErrClosed)
-	}
-	activation.mu.Lock()
-	failed, closed := activation.failed, activation.closed
-	activation.mu.Unlock()
-	if failed != nil {
-		return nil, failed
-	}
-	if closed {
-		return nil, extension.ErrClosed
-	}
-	return activation, nil
 }
 
 // outboundFrame is one queued frame. request names the pending request whose
@@ -177,7 +91,7 @@ type requestOutcome struct {
 
 // executableActivation is one supervised worker process and its protocol state.
 type executableActivation struct {
-	declaration extension.Declaration
+	author      *executableAuthor
 	entryPoint  string
 	environment func(context.Context, []string) ([]string, error)
 	process     executableProcess
@@ -195,7 +109,6 @@ type executableActivation struct {
 	cooperativeOnce sync.Once
 
 	mu            sync.Mutex
-	refs          int
 	next          uint64
 	live          int
 	failed        error
@@ -207,10 +120,9 @@ type executableActivation struct {
 	hostcalls     map[string]context.CancelFunc
 }
 
-func newExecutableActivation(executable executableExtension, environment func(context.Context, []string) ([]string, error)) *executableActivation {
+func newExecutableActivation(entryPoint string, environment func(context.Context, []string) ([]string, error)) *executableActivation {
 	return &executableActivation{
-		declaration: executable.Declaration,
-		entryPoint:  executable.EntryPoint,
+		entryPoint:  entryPoint,
 		environment: environment,
 		out:         make(chan outboundFrame, executableQueuedFrames),
 		done:        make(chan struct{}),
@@ -226,8 +138,8 @@ func newExecutableActivation(executable executableExtension, environment func(co
 	}
 }
 
-// start spawns the process and completes the exact-version activation
-// handshake before any instance opens.
+// start spawns the process and completes the exact-manifest author handshake
+// before any callback runs.
 func (a *executableActivation) start(ctx context.Context, excluded []string) (err error) {
 	defer close(a.ready)
 	a.mu.Lock()
@@ -241,12 +153,10 @@ func (a *executableActivation) start(ctx context.Context, excluded []string) (er
 	}
 	environment, err := a.environment(ctx, excluded)
 	if err != nil {
-		a.startTermination(err, false)
 		return err
 	}
 	process, err := spawnExecutable(ctx, a.entryPoint, environment)
 	if err != nil {
-		a.startTermination(err, false)
 		return err
 	}
 	a.mu.Lock()
@@ -269,11 +179,7 @@ func (a *executableActivation) start(ctx context.Context, excluded []string) (er
 	activateCtx, cancel := context.WithTimeout(ctx, executableReadiness)
 	defer cancel()
 	activated := make(chan requestOutcome, 1)
-	go func() {
-		activated <- a.request(activateCtx, worker.MethodActivate, func(string) (any, error) {
-			return worker.ActivateParams{ContractVersion: extension.ContractVersion}, nil
-		}, nil, a.activateResponse)
-	}()
+	go func() { activated <- a.authorHandshake(activateCtx) }()
 	var outcome requestOutcome
 	select {
 	case outcome = <-activated:
@@ -299,26 +205,6 @@ func (a *executableActivation) activationError(outcome requestOutcome) error {
 	failed := a.failed
 	a.mu.Unlock()
 	return failed
-}
-
-// activateResponse validates the activation declaration.
-func (a *executableActivation) activateResponse(raw json.RawMessage) (any, error) {
-	var result worker.ActivateResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, fmt.Errorf("activation result: %w", err)
-	}
-	wantDeclaration, err := json.Marshal(worker.NewDeclaration(a.declaration))
-	if err != nil {
-		return nil, err
-	}
-	gotDeclaration, err := json.Marshal(result.Declaration)
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(gotDeclaration, wantDeclaration) {
-		return nil, errors.New("activation declaration differs from the supplied declaration")
-	}
-	return result, nil
 }
 
 // request sends one host request and waits for its validated terminal. build
@@ -621,6 +507,12 @@ func (a *executableActivation) readLoop(reader *worker.Reader) {
 func (a *executableActivation) handleFrame(frame worker.Frame) error {
 	switch frame.Kind {
 	case worker.KindRequest:
+		if frame.Method == "register" || frame.Method == "remove" {
+			return a.authorRegistration(frame)
+		}
+		if frame.Method == worker.MethodCommand {
+			return a.command(frame)
+		}
 		if frame.Method != worker.MethodHostcall {
 			return fmt.Errorf("worker: request method %q is not a hostcall", frame.Method)
 		}
@@ -673,54 +565,98 @@ func (a *executableActivation) response(frame worker.Frame) error {
 	return nil
 }
 
+// beginCall registers one bounded live worker->host call: the live cap, the
+// duplicate identity guard, and its cancellable context.
+func (a *executableActivation) beginCall(id string) (context.Context, context.CancelFunc, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.hostcalls) >= executableLiveCalls {
+		return nil, nil, fmt.Errorf("worker: more than %d live hostcalls", executableLiveCalls)
+	}
+	if _, duplicate := a.hostcalls[id]; duplicate {
+		return nil, nil, fmt.Errorf("worker: duplicate hostcall id %q", id)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.hostcalls[id] = cancel
+	return ctx, cancel, nil
+}
+
+// launchCall runs one registered call concurrently and responds with the
+// hostcall result/error frame shapes.
+func (a *executableActivation) launchCall(id string, run func(context.Context) (extension.Result, error)) error {
+	ctx, cancel, err := a.beginCall(id)
+	if err != nil {
+		return err
+	}
+	go func() {
+		result, err := run(ctx)
+		a.mu.Lock()
+		delete(a.hostcalls, id)
+		a.mu.Unlock()
+		cancel()
+		if err != nil {
+			a.respondError(id, executableFailure(err))
+			return
+		}
+		a.respondResult(id, result)
+	}()
+	return nil
+}
+
 // hostcall resolves one worker callback through its token and queues its
 // response through the bounded writer.
 func (a *executableActivation) hostcall(frame worker.Frame) error {
 	if frame.ID == "" {
 		return errors.New("worker: hostcall without an id")
 	}
-	var params worker.HostcallParams
+	var params worker.AuthorHostcallParams
 	if err := json.Unmarshal(frame.Params, &params); err != nil {
 		return fmt.Errorf("worker: hostcall params: %w", err)
 	}
-	if params.Context.Token == "" {
+	if params.Token == "" {
 		return errors.New("worker: hostcall without a context token")
 	}
-	if params.Binding == "" || params.Method == "" {
+	if params.Service == "" || params.Method == "" {
 		return errors.New("worker: hostcall without a binding or method")
 	}
 	a.mu.Lock()
-	call := a.tokens[params.Context.Token]
+	call := a.tokens[params.Token]
+	a.mu.Unlock()
 	if call == nil {
-		a.mu.Unlock()
 		a.respondError(frame.ID, &worker.Error{Class: worker.ClassClosed, Message: "hostcall token is closed"})
 		return nil
 	}
-	if len(a.hostcalls) >= executableLiveCalls {
-		a.mu.Unlock()
-		return fmt.Errorf("worker: more than %d live hostcalls", executableLiveCalls)
-	}
-	if _, duplicate := a.hostcalls[frame.ID]; duplicate {
-		a.mu.Unlock()
-		return fmt.Errorf("worker: duplicate hostcall id %q", frame.ID)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	a.hostcalls[frame.ID] = cancel
-	a.mu.Unlock()
+	return a.launchCall(frame.ID, func(ctx context.Context) (extension.Result, error) {
+		return call(ctx, params.Service, params.Method, append(json.RawMessage(nil), params.Arguments...))
+	})
+}
 
-	go func() {
-		result, err := call(ctx, params.Binding, params.Method, append(json.RawMessage(nil), params.Arguments...))
-		a.mu.Lock()
-		delete(a.hostcalls, frame.ID)
-		a.mu.Unlock()
-		cancel()
-		if err != nil {
-			a.respondError(frame.ID, executableFailure(err))
-			return
-		}
-		a.respondResult(frame.ID, result)
-	}()
-	return nil
+// command resolves one worker->host independent command against the
+// activation of this worker process and queues its response through the
+// bounded writer, using exactly the hostcall result/error frame shapes.
+func (a *executableActivation) command(frame worker.Frame) error {
+	if frame.ID == "" {
+		return errors.New("worker: command without an id")
+	}
+	var params worker.AuthorCommandParams
+	if err := json.Unmarshal(frame.Params, &params); err != nil {
+		return fmt.Errorf("worker: command params: %w", err)
+	}
+	if params.Method == "" {
+		return errors.New("worker: command without a method")
+	}
+	a.mu.Lock()
+	var api extension.API
+	if a.author != nil {
+		api = a.author.api
+	}
+	a.mu.Unlock()
+	if api == nil {
+		return errors.New("worker: command before activation")
+	}
+	return a.launchCall(frame.ID, func(ctx context.Context) (extension.Result, error) {
+		return api.Command(ctx, params.Target, params.Method, append(json.RawMessage(nil), params.Arguments...))
+	})
 }
 
 // respondResult queues one hostcall success response.
@@ -794,6 +730,9 @@ func (a *executableActivation) startTermination(cause error, cooperative bool) {
 		cause = extension.ErrClosed
 	}
 	a.failed = cause
+	if !cooperative && a.author != nil && a.author.native != nil {
+		a.author.native.markLost(cause)
+	}
 	a.mu.Unlock()
 	go a.terminateRun(cause, cooperative)
 }

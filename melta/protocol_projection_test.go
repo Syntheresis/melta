@@ -171,12 +171,12 @@ func launchChildThroughRuntime(t *testing.T, r *Melta, parent, operationID strin
 	err := r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
 		res, err := h.LaunchChildSession(ctx, harness.LaunchChildRequest{
 			ParentSessionID: parent,
-			AgentSelection:  suppliedDefinition("worker"),
+			ExtensionState:  agentState("worker"),
 			Content:         []model.ContentPart{{Kind: model.PartText, Text: "child work"}},
 			OperationID:     operationID,
 			ExtensionID:     "test.extension",
-			MaxConcurrent:   1,
 			OutputLimit:     4096,
+			Report:          true,
 		})
 		if err != nil {
 			return err
@@ -247,7 +247,7 @@ func assertStableHeader(t *testing.T, header protocol.Session, sessionHeader har
 	t.Helper()
 	currentOK := (wantCurrent == "") == (header.CurrentOperationId == nil) &&
 		(wantCurrent == "" || *header.CurrentOperationId == wantCurrent)
-	testassert.Require(t, header.SessionId == sessionID && header.Workspace == workspace && header.Lifecycle == protocol.Open && header.AgentSelection.Definition.DefinitionId == agent && header.ArchivedAt == nil && currentOK && header.CreatedAt.Equal(sessionHeader.Identity.CreatedAt) && header.LastActivity.Equal(sessionHeader.LastActivity), "header = %+v, want the open %s header at %s with current operation %q; header times = (%v, %v), want the read times (%v, %v)", header, sessionID, workspace, wantCurrent, header.CreatedAt, header.LastActivity, sessionHeader.Identity.CreatedAt, sessionHeader.LastActivity)
+	testassert.Require(t, header.SessionId == sessionID && header.Workspace == workspace && header.Lifecycle == protocol.Open && reflect.DeepEqual(header.Inputs, projectSessionInputs(sessionHeader.Inputs)) && header.ArchivedAt == nil && currentOK && header.CreatedAt.Equal(sessionHeader.Identity.CreatedAt) && header.LastActivity.Equal(sessionHeader.LastActivity), "header = %+v, want the open %s header at %s with current operation %q; header times = (%v, %v), want the read times (%v, %v)", header, sessionID, workspace, wantCurrent, header.CreatedAt, header.LastActivity, sessionHeader.Identity.CreatedAt, sessionHeader.LastActivity)
 	testassert.Equal(t, header.CreatedAt.Location(), time.UTC)
 	if header.SessionRevision != wantSessionRevision(t, sessionHeader, instance) {
 		t.Fatalf("session_revision = %+v, want the read pair %+v", header.SessionRevision, wantSessionRevision(t, sessionHeader, instance))
@@ -270,7 +270,7 @@ func TestProjectionSessionHeaderRootForkChild(t *testing.T) {
 		rootHeader := projectSession(headerThroughRuntime(t, r, root.Identity.SessionID), r.instance)
 		assertStableHeader(t, rootHeader, headerThroughRuntime(t, r, root.Identity.SessionID),
 			root.Identity.SessionID, workspace, "solo", "", r.instance)
-		testassert.Require(t, rootHeader.ParentSessionId == nil && rootHeader.SourceSessionId == nil, "root lineage pointers = (%v, %v), want none", rootHeader.ParentSessionId, rootHeader.SourceSessionId)
+		testassert.Require(t, rootHeader.OwnerSessionId == nil && rootHeader.SourceSessionId == nil, "root lineage pointers = (%v, %v), want none", rootHeader.OwnerSessionId, rootHeader.SourceSessionId)
 
 		// One settled admission gives the fork its committed input boundary;
 		// its terminal cleanup proves the settled idle source Fork requires.
@@ -290,14 +290,14 @@ func TestProjectionSessionHeaderRootForkChild(t *testing.T) {
 		forkHeader := projectSession(headerThroughRuntime(t, r, forked), r.instance)
 		assertStableHeader(t, forkHeader, headerThroughRuntime(t, r, forked),
 			forked, workspace, "solo", "fork-op-1", r.instance)
-		testassert.Require(t, forkHeader.SourceSessionId != nil && *forkHeader.SourceSessionId == root.Identity.SessionID && forkHeader.ParentSessionId == nil, "fork source = %v, want %s; fork parent pointer = %v, want none", forkHeader.SourceSessionId, root.Identity.SessionID, forkHeader.ParentSessionId)
+		testassert.Require(t, forkHeader.SourceSessionId != nil && *forkHeader.SourceSessionId == root.Identity.SessionID && forkHeader.OwnerSessionId == nil, "fork source = %v, want %s; fork parent pointer = %v, want none", forkHeader.SourceSessionId, root.Identity.SessionID, forkHeader.OwnerSessionId)
 
 		child := launchChildThroughRuntime(t, r, root.Identity.SessionID, "child-op-1")
 		awaitModelArrival(t, e)
 		childHeader := projectSession(headerThroughRuntime(t, r, child), r.instance)
 		assertStableHeader(t, childHeader, headerThroughRuntime(t, r, child),
 			child, workspace, "worker", "child-op-1", r.instance)
-		testassert.Require(t, childHeader.ParentSessionId != nil && *childHeader.ParentSessionId == root.Identity.SessionID && childHeader.SourceSessionId == nil, "child parent = %v, want %s; child source pointer = %v, want none", childHeader.ParentSessionId, root.Identity.SessionID, childHeader.SourceSessionId)
+		testassert.Require(t, childHeader.OwnerSessionId != nil && *childHeader.OwnerSessionId == root.Identity.SessionID && childHeader.SourceSessionId == nil, "child parent = %v, want %s; child source pointer = %v, want none", childHeader.OwnerSessionId, root.Identity.SessionID, childHeader.SourceSessionId)
 
 		release()
 		awaitOperation(t, r, forked, "fork-op-1", harness.OperationSuccess)
@@ -320,7 +320,7 @@ func TestProjectionOperationActiveAndTerminal(t *testing.T) {
 		awaitModelArrival(t, e)
 
 		active := projectOperation(readOperation(t, r, session, "op-1"))
-		testassert.Require(t, active.OperationId == "op-1" && active.RequestKind == protocol.OperationRequestKindMessage && active.Status == protocol.OperationStatusRunning && active.SettledAt == nil && active.Detail == nil && active.AgentSelection.Definition.DefinitionId == "solo" && active.Model == "prov/m" && !active.AdmittedAt.IsZero(), "active projection = %+v, want the running message op-1 with no terminal members", active)
+		testassert.Require(t, active.OperationId == "op-1" && active.RequestKind == protocol.OperationRequestKindMessage && active.Status == protocol.OperationStatusRunning && active.SettledAt == nil && active.Detail == nil && active.Model == "prov/m" && !active.AdmittedAt.IsZero(), "active projection = %+v, want the running message op-1 with no terminal members", active)
 
 		close(gate)
 		record := awaitOperation(t, r, session, "op-1", harness.OperationSuccess)
@@ -466,10 +466,13 @@ func TestProjectionCallerCopyOwnership(t *testing.T) {
 		defer closeProjectionRuntime(r)
 		ws := filepath.Join(e.home, "owned")
 		session := projectionSession(t, r, ws, "solo").Identity.SessionID
+		tools := []string{"read_file"}
+		_, err := r.SetSessionInputs(context.Background(), testCaller(r), session, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Tools: &tools}})
+		testassert.NoError(t, err)
 
 		header := projectSession(headerThroughRuntime(t, r, session), r.instance)
 		wantHeader := projectSession(headerThroughRuntime(t, r, session), r.instance)
-		header.AgentSelection.Definition.DefinitionId = "mutated"
+		(*header.Inputs.Tools)[0] = "mutated"
 		header.Workspace = "mutated"
 		header.Lifecycle = protocol.Archived
 		header.SessionId = "mutated"
@@ -644,13 +647,13 @@ func TestProjectionHeaderCarriesNoInternalRepresentation(t *testing.T) {
 
 		header := projectSession(headerThroughRuntime(t, r, session), r.instance)
 		assertExactJSONKeys(t, header, []string{
-			"agent_selection", "agent_selection.definition", "created_at", "last_activity", "lifecycle", "session_id",
+			"created_at", "inputs", "last_activity", "lifecycle", "session_id",
 			"session_revision", "session_revision.durable_revision", "session_revision.instance_id",
 			"session_revision.local_revision", "workspace",
 		})
 		snap := sessionViewThroughRuntime(t, r, session)
 		operationJSON := assertExactJSONKeys(t, projectOperationSummary(snap.Operations[0]), []string{
-			"admitted_at", "agent_selection", "agent_selection.definition", "model", "operation_id", "request_kind",
+			"admitted_at", "model", "operation_id", "request_kind",
 			"settled_at", "status", "usage", "usage.by_model",
 		})
 		testassert.Require(t, strings.Contains(operationJSON, `"by_model":[]`), "empty usage = %s, want the non-nil [] array", operationJSON)
@@ -731,7 +734,7 @@ func TestProjectionCostEstimatesFromCapturedPricing(t *testing.T) {
 		pricedSummary := projectOperationSummary(view.Operations[0])
 		testassert.Require(t, pricedSummary.Usage.EstimatedCostUsd != nil && math.Abs(*pricedSummary.Usage.EstimatedCostUsd-want) < 1e-12, "priced Operation estimate = %+v, want %v", pricedSummary.Usage, want)
 		assertExactJSONKeys(t, pricedSummary, []string{
-			"admitted_at", "agent_selection", "agent_selection.definition", "model", "operation_id", "request_kind",
+			"admitted_at", "model", "operation_id", "request_kind",
 			"settled_at", "status", "usage", "usage.by_model", "usage.estimated_cost_usd",
 		})
 
@@ -753,7 +756,7 @@ func TestProjectionCostEstimatesFromCapturedPricing(t *testing.T) {
 		testassert.Require(t, repriced.Usage.EstimatedCostUsd != nil && math.Abs(*repriced.Usage.EstimatedCostUsd-want) < 1e-12, "priced Operation estimate after the sibling turn = %+v, want %v", repriced.Usage, want)
 		testassert.Require(t, unreported.Usage.EstimatedCostUsd == nil, "unreported Operation estimate = %+v, want absent", unreported.Usage)
 		assertExactJSONKeys(t, unreported, []string{
-			"admitted_at", "agent_selection", "agent_selection.definition", "model", "operation_id", "request_kind",
+			"admitted_at", "model", "operation_id", "request_kind",
 			"settled_at", "status", "usage", "usage.by_model",
 		})
 	})

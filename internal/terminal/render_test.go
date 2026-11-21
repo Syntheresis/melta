@@ -96,6 +96,21 @@ func TestRenderToolCallShowsEditChangeCounts(t *testing.T) {
 	testassert.Require(t, strings.Contains(rendered, colorGreen+"+2"+colorCyan) && strings.Contains(rendered, colorRed+"-1"+colorCyan), "edit_file header missing green inserted-line count: %q; edit_file header missing red deleted-line count: %q", rendered, rendered)
 }
 
+func TestRenderToolCallShowsFilePreviewMetadataForAnyToolName(t *testing.T) {
+	metadata := map[string]any{"edit_preview_files": []editpreview.FileEntry{{
+		Path: "a.go", Op: "M",
+		Preview: editpreview.Preview{Hunks: []editpreview.Hunk{{Rows: []editpreview.Row{
+			{Kind: editpreview.KindRemove, OldLine: 1, Text: "old"},
+			{Kind: editpreview.KindAdd, NewLine: 1, Text: "new"},
+		}}}},
+	}}}
+
+	header := RenderToolCall("model_patch", `{}`, metadata)
+	testassert.Require(t, strings.Contains(header, colorGreen+"+1"+colorCyan) && strings.Contains(header, colorRed+"-1"+colorCyan), "tool header missing the metadata-derived change counts: %q", header)
+	output := RenderToolResult("model_patch", `{}`, "", true, false, true, 80, metadata)
+	testassert.Require(t, strings.Contains(output, "a.go") && strings.Contains(output, "new"), "tool result did not render the file preview for a non-owning tool name: %q", output)
+}
+
 func TestRenderToolCallPreservesMultilineCommandHeader(t *testing.T) {
 	rendered := RenderToolCall("run_command", `{"command":"cd /tmp && git commit -m \"Title\n\n    - one\n    - two with a deliberately long line that should not be shortened by the header renderer\""}`, nil)
 	testassert.Require(t, strings.Contains(rendered, "Title"+nl+"     (3 more lines)") && !strings.Contains(rendered, `Title - one - two`) && !strings.Contains(rendered, "- one") && !strings.Contains(rendered, "- two") && !strings.Contains(rendered, "..."), "tool header should collapse multiline command with continuation marker: %q; tool header should not collapse multiline command into one line: %q; tool header should hide continuation command lines: %q; tool header should not truncate command lines: %q", rendered, rendered, rendered, rendered)
@@ -139,6 +154,14 @@ func TestExtractJSONNumber(t *testing.T) {
 		got := extractJSONNumber(tc.json, tc.key)
 		testassert.Check(t, got == tc.want, "extractJSONNumber(%q, %q) = %q, want %q", tc.json, tc.key, got, tc.want)
 	}
+}
+
+// TestFormatToolArgsTaskIsGeneric proves a tool name with no specific header
+// rule, including an extension-registered one named task, renders generically.
+func TestFormatToolArgsTaskIsGeneric(t *testing.T) {
+	args := `{"prompt":"do the work","subagent_type":"secondary"}`
+	got := FormatToolArgs("task", args)
+	testassert.Check(t, got == FormatHeaderArg(args, 80), "FormatToolArgs task = %q, want the generic header", got)
 }
 
 func TestFormatToolArgsSleepQuotedNumberFallback(t *testing.T) {

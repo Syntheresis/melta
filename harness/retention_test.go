@@ -398,12 +398,12 @@ func newCancelledCompletionFixture(t *testing.T, storage Storage, store *graphSt
 	parentLease, parentRelease := leaseCoordinatorNow(t, h, completionParentID)
 	t.Cleanup(parentRelease)
 	childLease, childRelease := leaseCoordinatorNow(t, h, completionChildID)
-	parentMember, err := admitLocked(h, parentLease, memberChild, completionChildID, 0)
+	parentMember, err := admitLocked(h, parentLease, memberSession, completionChildID)
 	testassert.NoError(t, err)
-	jobMember, err := admitLocked(h, childLease, memberJob, jobFixtureID, 0)
+	jobMember, err := admitLocked(h, childLease, memberJob, jobFixtureID)
 	testassert.NoError(t, err)
 	childLease.mu.Lock()
-	childLease.pendingCompletion = &launchInfo{completionID: parentMember.completionID, outputLimit: 1024}
+	childLease.pendingCompletion = &launchInfo{completionID: parentMember.completionID, outputLimit: 1024, report: true}
 	childLease.mu.Unlock()
 	childRelease()
 
@@ -452,7 +452,7 @@ func TestCancelledMemberFinishSettlesTheChildCompletion(t *testing.T) {
 		}
 		testassert.Equal(t, jobFacts, 1)
 		signals := storedSignals(t, store, completionParentID)
-		testassert.Require(t, len(signals) == 1 && signals[0].Content == "child text", "parent signals = %+v, want the child's rendered completion as the closed-path record", signals)
+		testassert.Require(t, len(signals) == 1 && signals[0].Content == "Session "+completionChildID+": success\nchild text", "parent signals = %+v, want the child's rendered completion as the closed-path record", signals)
 		{
 			childSignals := storedSignals(t, store, completionChildID)
 			testassert.Require(t, len(childSignals) == 1 && childSignals[0].Content == "job done", "child signals = %+v, want the job's own completion record", childSignals)
@@ -539,11 +539,9 @@ func TestCancelledMemberFinishSettlesTheChildCompletion(t *testing.T) {
 	})
 }
 
-// TestStopAllClosesAnIdleGraphlessChildWithoutLoading proves the
-// classification rule: an established idle child whose graph was released is
-// closed by StopAll through its retained identity and local handles — no graph
-// load and no storage read — while the parent's established cell stays.
-func TestStopAllClosesAnIdleGraphlessChildWithoutLoading(t *testing.T) {
+// TestStopAllGraphlessSessionDoesNotLoad proves an established idle Session
+// with durable owner lineage does not trigger a graph load during StopAll.
+func TestStopAllGraphlessSessionDoesNotLoad(t *testing.T) {
 	store := completionChildGraph(completionParentID, false, OperationSuccess, "", "").storage(t)
 	addRootSession(t, store, completionParentID)
 	counting := &observationCountingStorage{Storage: store}
@@ -571,11 +569,7 @@ func TestStopAllClosesAnIdleGraphlessChildWithoutLoading(t *testing.T) {
 		err := h.StopAll(ctx)
 		testassert.NoError(t, err)
 	}
-	testassert.Require(t, counting.calls == before, "StopAll performed %d storage reads, want none: an idle child closes through its local handles", counting.calls-before)
-	child.mu.Lock()
-	closed := child.bgState == bgClosed
-	child.mu.Unlock()
-	testassert.Require(t, closed, "the idle graphless child was not closed by StopAll")
+	testassert.Require(t, counting.calls == before, "StopAll performed %d storage reads, want none", counting.calls-before)
 }
 
 // TestMetadataListingLeavesNoResidentCorpus proves the metadata working set
@@ -753,7 +747,7 @@ func TestExecutionUsePinsTheGraphThroughSuccessorDrain(t *testing.T) {
 	second := make(chan struct{})
 	secondArrived := make(chan struct{}, 1)
 	var attempts atomic.Int32
-	modelFn := func(ctx context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		if attempts.Add(1) == 1 {
 			select {
 			case <-first:
@@ -841,16 +835,16 @@ func TestChildCompletionRendersThroughAGraphlessChild(t *testing.T) {
 	child.mu.Unlock()
 	testassert.Require(t, childGraph == nil, "the child's released graph stayed resident")
 
-	member, err := admitLocked(h, parent, memberChild, completionChildID, 0)
+	member, err := admitLocked(h, parent, memberSession, completionChildID)
 	testassert.NoError(t, err)
 	child.mu.Lock()
-	child.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024}
+	child.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: 1024, report: true}
 	child.mu.Unlock()
 
 	h.childCompletionSettled(child, "")
 	{
 		got := runtimeInputTextRaw(t, store, completionParentID)
-		testassert.Equal(t, got, "child text")
+		testassert.Equal(t, got, "Session "+completionChildID+": success\nchild text")
 	}
 	assertMemberCount(t, parent, 0)
 }

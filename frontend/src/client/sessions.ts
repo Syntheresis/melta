@@ -31,11 +31,9 @@ export function compareSessionActivity(
   return a.session_id < b.session_id ? -1 : 1;
 }
 
-// Drop child headers and apply the shared chronology order.
-export function sortOpenRoots<T extends { last_activity: string; session_id: string; parent_session_id?: string }>(
+// Apply the shared chronology order without changing the source list.
+export function sortSessions<T extends { last_activity: string; session_id: string }>(
   sessions: T[],
 ): T[] {
-  return sessions
-    .filter((session) => !session.parent_session_id)
-    .sort(compareSessionActivity);
+  return sessions.slice().sort(compareSessionActivity);
 }

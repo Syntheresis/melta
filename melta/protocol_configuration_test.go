@@ -65,9 +65,9 @@ const configurationAgentsDocument = `{
 // settingsPlugins composes placeholder plugins with the shipped IDs the
 // settings projection reads; their validators accept any object because the
 // projection, not their validation, is the axis under test.
-func settingsPlugins() []extension.Native {
+func settingsPlugins() []extension.Extension {
 	var opens atomic.Int64 // the fixture counters are unread here
-	return []extension.Native{
+	return []extension.Extension{
 		servicePlugin("capowner", &opens, acceptValidator),
 		servicePlugin("jobcap", &opens, acceptValidator),
 		servicePlugin("tasks", &opens, acceptValidator),
@@ -77,18 +77,14 @@ func settingsPlugins() []extension.Native {
 
 // rosterToolPlugin provides one real tool declaration so the composed tool
 // universe admits the fixture's agent tool lists.
-func rosterToolPlugin() extension.Native {
-	native := testNative("prodtools", extension.LifetimeHarness, []extension.Capability{extension.ToolCapability("prod_read")}, nil, func(context.Context, extension.InstanceContext) (extension.Instance, error) {
-		return extension.Instance{Capabilities: map[string]extension.Implementation{"prod_read": {Tool: fileReadTool{}}}}, nil
-	})
-	native.Describe["prod_read"] = fileReadTool{}.describe
-	return native
+func rosterToolPlugin() extension.Extension {
+	return testToolNative("prod_read", fileReadTool{})
 }
 
 // openConfigurationRuntime opens one composed Melta over the given store
 // with the given documents and extra plugins, using the controlled
 // preparation (these tests admit nothing).
-func openConfigurationRuntime(t *testing.T, store harness.Storage, configDoc, agentsDoc string, extra ...extension.Native) (*Melta, *ownerEnv) {
+func openConfigurationRuntime(t *testing.T, store harness.Storage, configDoc, agentsDoc string, extra ...extension.Extension) (*Melta, *ownerEnv) {
 	t.Helper()
 	e := newOwnerEnv(t)
 	return openConfigurationRuntimeWithEnv(t, store, e, configDoc, agentsDoc, extra...)
@@ -269,7 +265,7 @@ func TestRuntimeSharedCredentialReference(t *testing.T) {
 
 // openConfigurationRuntimeWithEnv is openConfigurationRuntime with a
 // pre-configured env (the .env must exist before Open loads it).
-func openConfigurationRuntimeWithEnv(t *testing.T, store harness.Storage, e *ownerEnv, configDoc, agentsDoc string, extra ...extension.Native) (*Melta, *ownerEnv) {
+func openConfigurationRuntimeWithEnv(t *testing.T, store harness.Storage, e *ownerEnv, configDoc, agentsDoc string, extra ...extension.Extension) (*Melta, *ownerEnv) {
 	t.Helper()
 	writeServiceFile(t, e.configPath, configDoc)
 	if agentsDoc != "" {
@@ -281,12 +277,12 @@ func openConfigurationRuntimeWithEnv(t *testing.T, store harness.Storage, e *own
 	return r, e
 }
 
-// TestConfigurationViewProjectsSettingsAndRoster pins the settings view: the
-// parsed session policy, the top-level baseline sections as exact objects,
-// each owned plugin section returned as its exact opaque document string —
-// no ID-chosen decoder, no injected defaults, an owned empty object as `{}` —
-// absent sections omitted, and the Agent roster's public fields.
-func TestConfigurationViewProjectsSettingsAndRoster(t *testing.T) {
+// TestConfigurationViewProjectsSettings pins the settings view: the parsed
+// session policy, the top-level baseline sections as exact objects, each owned
+// plugin section returned as its exact opaque document string — no ID-chosen
+// decoder, no injected defaults, an owned empty object as `{}` — and absent
+// sections omitted.
+func TestConfigurationViewProjectsSettings(t *testing.T) {
 	eachPrepStoreOnce(t, func(t *testing.T, store harness.Storage) {
 		r, _ := openConfigurationRuntime(t, store, configurationProvidersDocument, configurationAgentsDocument, settingsPlugins()...)
 		defer closeProjectionRuntime(r)
@@ -318,20 +314,6 @@ func TestConfigurationViewProjectsSettingsAndRoster(t *testing.T) {
 		testassert.NoError(t, err)
 		testassert.Require(t, len(absentView.Settings.Extensions) == 0, "absent extension sections projected = %+v, want none", absentView.Settings.Extensions)
 		testassert.Require(t, string(absentView.Settings.Tools) == `{}` && string(absentView.Settings.Jobs) == `{}` && string(absentView.Settings.Compaction) == `{}`, "absent baseline sections = %s/%s/%s, want empty objects", absentView.Settings.Tools, absentView.Settings.Jobs, absentView.Settings.Compaction)
-
-		// The Agent roster: the primary model selection and the worker's
-		// public fields with the trimmed write dir.
-		var primary, worker *protocol.Agent
-		for i := range view.Agents {
-			switch view.Agents[i].Name {
-			case "primary":
-				primary = &view.Agents[i]
-			case "worker":
-				worker = &view.Agents[i]
-			}
-		}
-		testassert.Require(t, primary != nil && primary.Model == "prov/m" && primary.Definition == (protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "primary"}), "primary roster entry = %+v, want the configured model and full reference", primary)
-		testassert.Require(t, worker != nil && worker.Subagent && worker.Readonly && worker.Description == "w" && worker.WriteDir == "/ws" && worker.Definition == (protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "worker"}), "worker roster entry = %+v, want the public definition fields with the trimmed write dir and full reference", worker)
 	})
 }
 
@@ -538,11 +520,6 @@ func TestConfigurationReadsOwnReturnedValues(t *testing.T) {
 		if len(baseline.Settings.Tools) > 0 {
 			baseline.Settings.Tools[0] = 'x'
 		}
-		for i := range baseline.Agents {
-			if baseline.Agents[i].Name == "worker" && len(baseline.Agents[i].Tools) > 0 {
-				baseline.Agents[i].Tools[0] = "mutated"
-			}
-		}
 
 		fresh, err := r.GetConfiguration(context.Background(), testCaller(r))
 		testassert.NoError(t, err)
@@ -616,7 +593,7 @@ func TestConfigurationFailedReloadLeavesClocksUnchanged(t *testing.T) {
 func TestConfigurationSetupWarningsLifecycle(t *testing.T) {
 	eachPrepStoreOnce(t, func(t *testing.T, store harness.Storage) {
 		e := newOwnerEnv(t)
-		disconnectedDoc := `{"providers":{"prov":{"transport":{"base_url":"https://prov.test/v1","api_key_env":"UNSET_SETUP_KEY"},"discovery":false,"models":{"m":{"context_window":4096}}}}}`
+		disconnectedDoc := `{"model":"prov/m","providers":{"prov":{"transport":{"base_url":"https://prov.test/v1","api_key_env":"UNSET_SETUP_KEY"},"discovery":false,"models":{"m":{"context_window":4096}}}}}`
 		definitions := `{"primary":{"model":"prov/m"}}`
 		r, _ := openConfigurationRuntimeWithEnv(t, store, e, disconnectedDoc, definitions)
 		defer closeProjectionRuntime(r)
@@ -707,69 +684,6 @@ func TestConfigurationSetupWarningsLifecycle(t *testing.T) {
 		testassert.Require(t, slices.IsSorted(sources) && len(sources) >= 2 && sources[0] == "runtime:catalog", "broken-reload warning order = %v, want lexical global groups", sources)
 		testassert.Require(t, catalogSeen && setupSeen, "broken-reload warnings = %+v, want both the catalog and setup groups", broken.Warnings)
 	})
-}
-
-// TestConfigurationRosterRequiredArrays pins the Agent roster over the real
-// current definitions — the builtins (including compact, which declares no
-// capabilities and no tools) beside a nonempty custom sibling: every
-// required array member serializes as a present [] rather than null, the
-// selected model identity and trimmed write dir come from the existing
-// normalization producer, and no prompt, LSP, or other private definition
-// field is exposed.
-func TestConfigurationRosterRequiredArrays(t *testing.T) {
-	eachPrepStoreOnce(t, func(t *testing.T, store harness.Storage) {
-		r, _ := openConfigurationRuntime(t, store, configurationProvidersDocument, configurationAgentsDocument, settingsPlugins()...)
-		defer closeProjectionRuntime(r)
-
-		view, err := r.GetConfiguration(context.Background(), testCaller(r))
-		testassert.NoError(t, err)
-		type rosterProbe struct {
-			Name         string          `json:"name"`
-			Model        string          `json:"model"`
-			WriteDir     string          `json:"write_dir"`
-			Tools        json.RawMessage `json:"tools"`
-			Capabilities json.RawMessage `json:"capabilities"`
-			Description  string          `json:"description"`
-			Subagent     bool            `json:"subagent"`
-			Readonly     bool            `json:"readonly"`
-		}
-		data, err := json.Marshal(view.Agents)
-		testassert.NoError(t, err)
-		var probes []rosterProbe
-		testassert.NoError(t, json.Unmarshal(data, &probes))
-		byName := make(map[string]rosterProbe, len(probes))
-		for _, probe := range probes {
-			for _, field := range []struct {
-				name  string
-				value json.RawMessage
-			}{{"tools", probe.Tools}, {"capabilities", probe.Capabilities}} {
-				testassert.Require(t, field.value != nil && string(field.value) != "null", "agent %q's required %s member = %q, want a present array", probe.Name, field.name, field.value)
-			}
-			byName[probe.Name] = probe
-		}
-		compact, ok := byName["compact"]
-		if !ok {
-			t.Fatalf("roster misses the compact builtin: %v", probeNames(probes, func(p rosterProbe) string { return p.Name }))
-		}
-		testassert.Require(t, string(compact.Tools) == "[]" && string(compact.Capabilities) == "[]", "compact arrays = tools %s capabilities %s, want the required empty []", compact.Tools, compact.Capabilities)
-		// The retained resolution chain: compact inherits the primary's model
-		// through secondary; the projection shows the resolved selection.
-		testassert.Equal(t, compact.Model, "prov/m")
-		worker, ok := byName["worker"]
-		if !ok {
-			t.Fatalf("roster misses the custom sibling: %v", probeNames(probes, func(p rosterProbe) string { return p.Name }))
-		}
-		testassert.Require(t, string(worker.Tools) == `["prod_read"]` && string(worker.Capabilities) == "[]" && worker.WriteDir == "/ws" && worker.Subagent && worker.Readonly && worker.Description == "w", "worker arrays = tools %s capabilities %s, want the nonempty tools and empty [] capabilities; worker public fields = %+v, want the normalized definition values", worker.Tools, worker.Capabilities, worker)
-		testassert.Require(t, !strings.Contains(string(data), "system_prompt") && !strings.Contains(string(data), "lsp") && !strings.Contains(string(data), "prompt\":"), "roster exposes private definition fields: %s", data)
-	})
-}
-
-func probeNames[T any](probes []T, name func(T) string) []string {
-	out := make([]string, 0, len(probes))
-	for _, probe := range probes {
-		out = append(out, name(probe))
-	}
-	return out
 }
 
 // TestConfigurationProviderExtrasExactAndOwned pins the provider view's

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
@@ -185,7 +186,7 @@ func TestRuntimeObservationPublishesCommittedTransitionsInOrder(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
 	r, err := e.open(context.Background(),
-		e.ordinaryPlugin("w", ScopeWorkspace, "w.cap"))
+		e.ordinaryPlugin("w", "w.cap"))
 	testassert.NoError(t, err)
 	sub, err := r.Subscribe(16)
 	testassert.NoError(t, err)
@@ -219,7 +220,7 @@ func TestObservationPausedPublisherOrdersTheNextPublication(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
 	r, err := e.open(context.Background(),
-		e.ordinaryPlugin("w", ScopeWorkspace, "w.cap"))
+		e.ordinaryPlugin("w", "w.cap"))
 	testassert.NoError(t, err)
 	defer func() {
 		{
@@ -387,6 +388,94 @@ func TestObservationSaturatedSubscriberIsRemovedAndHealthyOnesContinue(t *testin
 	drainClosed(t, healthy)
 }
 
+// TestObservationScopedObserverIgnoresOutOfScopeFlood proves the owner-side
+// scope filter: an observer whose handler is blocked survives more than its
+// queue capacity of out-of-scope committed facts and, once unblocked, still
+// receives an in-scope fact.
+func TestObservationScopedObserverIgnoresOutOfScopeFlood(t *testing.T) {
+	o := newObservation()
+	adapter := newObservationAdapter(o, nil)
+	activation := &nativeActivation{owner: &configurationService{}, id: "fixture", scope: CallerScope{Kind: CallerScopeSession, SessionID: "session-a"}}
+	block := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var once sync.Once
+	blocked := make(chan extension.Fact, 1)
+	received := make(chan extension.Fact, 4)
+	entry := &nativeRegistration{id: "observer", activation: activation, kind: "observer", current: true}
+	delivery := o.attachObserver(activation, func(_ context.Context, fact extension.Fact) error {
+		once.Do(func() {
+			entered <- struct{}{}
+			<-block
+			blocked <- fact
+		})
+		received <- fact
+		return nil
+	}, entry)
+	entry.observer = delivery
+	activation.entries = []*nativeRegistration{entry}
+	capture := func() *nativeAdmissionCapture {
+		return &nativeAdmissionCapture{activations: []*nativeActivation{activation}}
+	}
+
+	// One in-scope fact blocks the handler and one more queues.
+	inScope := capture()
+	adapter.retainCapture("session-a", inScope)
+	adapter.observeOperationFact(harness.HarnessFact{Kind: harness.FactOperationAdmitted, SessionID: "session-a", OperationID: "a-1"})
+	adapter.observeOperationFact(harness.HarnessFact{Kind: harness.FactOperationSettled, SessionID: "session-a", OperationID: "a-1", OperationStatus: harness.OperationSuccess})
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the in-scope observer never started")
+	}
+
+	// More than the queue capacity of out-of-scope committed facts resolves a
+	// capture but is filtered before any enqueue.
+	for i := range observerQueueCapacity + 4 {
+		outOfScope := capture()
+		adapter.retainCapture("session-b", outOfScope)
+		adapter.observeOperationFact(harness.HarnessFact{Kind: harness.FactOperationAdmitted, SessionID: "session-b", OperationID: fmt.Sprintf("b-%d", i)})
+		adapter.observeOperationFact(harness.HarnessFact{Kind: harness.FactOperationSettled, SessionID: "session-b", OperationID: fmt.Sprintf("b-%d", i), OperationStatus: harness.OperationSuccess})
+		adapter.releaseCapture("session-b", outOfScope)
+	}
+	select {
+	case <-delivery.done:
+		t.Fatal("out-of-scope facts overflowed or detached the scoped observer")
+	default:
+	}
+
+	close(block)
+	select {
+	case fact := <-blocked:
+		testassert.Require(t, fact.SessionID == "session-a" && fact.OperationID == "a-1", "blocked in-scope fact = %+v", fact)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the blocked in-scope fact never finished")
+	}
+	select {
+	case fact := <-received:
+		testassert.Require(t, fact.OperationID == "a-1", "queued in-scope fact = %+v", fact)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the queued in-scope fact never arrived")
+	}
+
+	// A later in-scope operation still reaches the same observer.
+	later := capture()
+	adapter.retainCapture("session-a", later)
+	adapter.observeOperationFact(harness.HarnessFact{Kind: harness.FactOperationAdmitted, SessionID: "session-a", OperationID: "a-2"})
+	adapter.observeOperationFact(harness.HarnessFact{Kind: harness.FactOperationSettled, SessionID: "session-a", OperationID: "a-2", OperationStatus: harness.OperationSuccess})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case fact := <-received:
+			if fact.OperationID == "a-2" && fact.Kind == extension.FactOperationSettled {
+				o.closeAll()
+				return
+			}
+		case <-time.After(10 * time.Millisecond):
+			testassert.Require(t, !time.Now().After(deadline), "the later in-scope settlement never arrived")
+		}
+	}
+}
+
 func TestObservationSubscriptionCloseRacesPublication(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
@@ -461,7 +550,7 @@ func TestRuntimeShutdownDoesNotWaitForUndrainedObservers(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
 	r, err := e.open(context.Background(),
-		e.ordinaryPlugin("w", ScopeWorkspace, "w.cap"))
+		e.ordinaryPlugin("w", "w.cap"))
 	testassert.NoError(t, err)
 	stalled, err := r.Subscribe(1)
 	testassert.NoError(t, err)
@@ -499,7 +588,7 @@ func TestObservationSubscriberLossDoesNotAffectExecution(t *testing.T) {
 		e := newOwnerEnv(t)
 		e.fixtureStore(store)
 		r, err := e.open(context.Background(),
-			e.ordinaryPlugin("w", ScopeWorkspace, "w.cap"))
+			e.ordinaryPlugin("w", "w.cap"))
 		testassert.NoError(t, err)
 		session, err := r.createSession(context.Background(), e.dataDir, "solo")
 		testassert.NoError(t, err)
@@ -723,6 +812,97 @@ func TestObservationRefusalDeltaProgress(t *testing.T) {
 		}
 		testassert.Require(t, slices.Equal(got, want), "progress = %+v, want the exact fragment order and operation identity %+v", got, want)
 	})
+}
+
+// TestObservationObserverOverflowDetachesOnlyThatRegistration proves one
+// saturated observer registration detaches without blocking the producer or
+// the healthy sibling: the later fact reaches the healthy observer only.
+func TestObservationObserverOverflowDetachesOnlyThatRegistration(t *testing.T) {
+	o := newObservation()
+	owner := &configurationService{}
+	activation := &nativeActivation{owner: owner, id: "fixture", scope: harnessScope}
+	block := make(chan struct{})
+	saturatedEntry := &nativeRegistration{id: "saturated", activation: activation, kind: "observer", current: true}
+	saturated := o.attachObserver(activation, func(context.Context, extension.Fact) error {
+		<-block
+		return nil
+	}, saturatedEntry)
+	saturatedEntry.observer = saturated
+	healthyEntry := &nativeRegistration{id: "healthy", activation: activation, kind: "observer", current: true}
+	healthyFacts := make(chan extension.Fact, 1)
+	healthy := o.attachObserver(activation, func(_ context.Context, fact extension.Fact) error {
+		select {
+		case healthyFacts <- fact:
+		default:
+		}
+		return nil
+	}, healthyEntry)
+	healthyEntry.observer = healthy
+	activation.entries = []*nativeRegistration{saturatedEntry, healthyEntry}
+	for i := range observerQueueCapacity + 2 {
+		saturated.enqueue(extension.Fact{Kind: extension.FactOperationAdmitted, SessionID: "s", OperationID: fmt.Sprintf("op-%d", i)})
+	}
+	select {
+	case <-saturated.done:
+	default:
+		t.Fatal("a saturated observer registration stayed attached")
+	}
+	healthy.enqueue(extension.Fact{Kind: extension.FactOperationSettled, SessionID: "s", OperationID: "op-after"})
+	select {
+	case fact := <-healthyFacts:
+		testassert.Require(t, fact.OperationID == "op-after", "healthy observer fact = %+v", fact)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the healthy observer received no fact after its sibling saturated")
+	}
+	close(block)
+	o.closeAll()
+}
+
+// TestObservationObserverFailureDetachesOnlyThatRegistration proves an
+// observer error and a panic each detach their own registration while the
+// healthy observer continues.
+func TestObservationObserverFailureDetachesOnlyThatRegistration(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		observer func(context.Context, extension.Fact) error
+	}{
+		{name: "error", observer: func(context.Context, extension.Fact) error { return errors.New("observer failure") }},
+		{name: "panic", observer: func(context.Context, extension.Fact) error { panic("observer panic") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			o := newObservation()
+			owner := &configurationService{}
+			activation := &nativeActivation{owner: owner, id: "fixture", scope: harnessScope}
+			failingEntry := &nativeRegistration{id: "failing", activation: activation, kind: "observer", current: true}
+			failing := o.attachObserver(activation, test.observer, failingEntry)
+			failingEntry.observer = failing
+			healthyEntry := &nativeRegistration{id: "healthy", activation: activation, kind: "observer", current: true}
+			healthyFacts := make(chan extension.Fact, 1)
+			healthy := o.attachObserver(activation, func(_ context.Context, fact extension.Fact) error {
+				select {
+				case healthyFacts <- fact:
+				default:
+				}
+				return nil
+			}, healthyEntry)
+			healthyEntry.observer = healthy
+			activation.entries = []*nativeRegistration{failingEntry, healthyEntry}
+			failing.enqueue(extension.Fact{Kind: extension.FactOperationAdmitted, SessionID: "s", OperationID: "failing"})
+			healthy.enqueue(extension.Fact{Kind: extension.FactOperationSettled, SessionID: "s", OperationID: "healthy"})
+			select {
+			case <-failing.done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the failing observer stayed attached")
+			}
+			select {
+			case fact := <-healthyFacts:
+				testassert.Require(t, fact.OperationID == "healthy", "healthy observer fact = %+v", fact)
+			case <-time.After(10 * time.Second):
+				t.Fatal("the healthy observer received no fact")
+			}
+			o.closeAll()
+		})
+	}
 }
 
 // lessPair reports whether one wire revision pair is strictly older than

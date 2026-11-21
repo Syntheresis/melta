@@ -43,7 +43,7 @@ type attemptResult struct {
 // attempt receives its own deep-owned copy of the logical request, so no
 // callback can reach the next attempt's view, the retained evidence, or the
 // captured catalog.
-func runModelAttempts(ctx context.Context, req model.Request, attempt func(context.Context, model.Request) (model.Stream, error), retry RetryPolicy) attemptResult {
+func runModelAttempts(ctx context.Context, req model.Request, parameters model.Extra, attempt func(context.Context, model.Request, model.Extra) (model.Stream, error), retry RetryPolicy) attemptResult {
 	if retry == nil {
 		retry = standardRetryPolicy
 	}
@@ -55,7 +55,7 @@ func runModelAttempts(ctx context.Context, req model.Request, attempt func(conte
 		if err != nil { // the shared validator is the boundary owner; a request it rejects is a boundary violation, never dispatched
 			return attemptResult{kind: attemptInvalid, err: &agent.ProtocolError{Boundary: "model", Detail: err.Error()}}
 		}
-		stream, attemptErr := attempt(ctx, owned) // every physical attempt receives its own deep-owned copy through the shared model constructor
+		stream, attemptErr := attempt(ctx, owned, parameters.Clone())
 		if attemptErr == nil && stream != nil {
 			return attemptResult{kind: attemptAccepted, stream: stream}
 		}

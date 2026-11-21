@@ -4,17 +4,10 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
-	"github.com/Syntheresis/melta/protocol"
 )
-
-type ToolConstraints = harness.ToolConstraints
-
-func wireSelection(name string) *protocol.AgentSelection {
-	value := projectAgentSelection(harness.AgentSelection{Definition: &harness.DefinitionRef{ExtensionID: "agents", CapabilityID: "agents.definitions", DefinitionID: name}})
-	return &value
-}
 
 // ConfiguredInvocationForTest builds one configured Invocation whose
 // captured snapshot carries the given top-level baseline sections and
@@ -42,6 +35,41 @@ func EqualEventForTest(a, b Event) bool {
 	return equalEvent(a, b)
 }
 
+// publishForTest runs one prepared candidate through the locked publication
+// steps the configuration commit uses, so tests observe the same publication
+// the ready snapshot gets.
+func (c *nativeCandidate) publishForTest() error {
+	c.owner.nativeMu.Lock()
+	defer c.owner.nativeMu.Unlock()
+	if c.holds == 0 {
+		return extension.ErrClosed
+	}
+	c.preparePublishLocked()
+	if c.owner.obs != nil {
+		c.owner.obs.publish(c.publishLocked)
+	} else {
+		c.publishLocked()
+	}
+	return nil
+}
+
+// snapshotForTest captures one candidate's ready registrations the way the
+// cleanup path captures the current publication.
+func (c *nativeCandidate) snapshotForTest() *nativeSnapshot {
+	c.owner.nativeMu.Lock()
+	defer c.owner.nativeMu.Unlock()
+	if c.holds == 0 {
+		return nil
+	}
+	var activations []*nativeActivation
+	for _, a := range c.activations {
+		if a != nil && c.ready[a] {
+			activations = append(activations, a)
+		}
+	}
+	return c.snapshotLocked(activations)
+}
+
 // createSession is the shared in-package fixture: it enters the owner's
 // admitted-call gate and runs the one normalized creation core so tests
 // needing the full Harness record observe the real gate.
@@ -49,7 +77,13 @@ func (r *Melta) createSession(ctx context.Context, workspace, agentType string) 
 	var record harness.SessionRecord
 	if err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
 		var err error
-		record, err = r.createSessionRecord(ctx, h, workspace, harness.AgentSelection{Definition: &harness.DefinitionRef{ExtensionID: "agents", CapabilityID: "agents.definitions", DefinitionID: agentType}})
+		state, marshalErr := json.Marshal(struct {
+			Agent string `json:"agent"`
+		}{agentType})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		record, err = r.createSessionRecord(ctx, h, workspace, harness.SessionInputs{}, map[string]harness.SessionStateValue{"agents": state})
 		return err
 	}); err != nil {
 		return harness.SessionRecord{}, err

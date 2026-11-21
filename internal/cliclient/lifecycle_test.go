@@ -35,7 +35,7 @@ func liveFixture(t *testing.T, active bool, special func(http.ResponseWriter, *h
 	t.Helper()
 	live := &liveRuntime{feeds: make(chan protocol.Event, 1024), streams: make(chan struct{}, 32), hydration: hydration(rootA, "1", []protocol.ConversationItem{assistant("canonical", "canonical clipboard", false)}, nil), special: special}
 	if active {
-		live.hydration.ActiveOperation = &protocol.Operation{OperationId: strings.Repeat("2", 32), RequestKind: "message", Status: "running", AgentSelection: fixtureSelection("captured"), Model: "captured/model"}
+		live.hydration.ActiveOperation = &protocol.Operation{OperationId: strings.Repeat("2", 32), RequestKind: "message", Status: "running", Model: "captured/model"}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		live.mu.Lock()
@@ -68,15 +68,17 @@ func liveFixture(t *testing.T, active bool, special func(http.ResponseWriter, *h
 			}
 		case r.URL.Path == "/v1/configuration":
 			_ = json.NewEncoder(w).Encode(configuration("1"))
+		case r.URL.Path == "/v1/extensions":
+			_ = json.NewEncoder(w).Encode([]protocol.RegisteredExtension{})
 		case r.URL.Path == "/v1/warnings":
 			_ = json.NewEncoder(w).Encode(warnings("1"))
 		case r.URL.Path == "/v1/sessions":
-			_ = json.NewEncoder(w).Encode([]protocol.Session{{SessionId: childA, ParentSessionId: pointer(rootA)}, {SessionId: rootA, Lifecycle: "open", Workspace: "/workspace"}})
+			_ = json.NewEncoder(w).Encode([]protocol.Session{{SessionId: childA, OwnerSessionId: pointer(rootA)}, {SessionId: rootA, Lifecycle: "open", Workspace: "/workspace"}})
 		case strings.HasSuffix(r.URL.Path, "/hydration"):
 			h := live.hydration
 			h.Session.SessionId = strings.Split(r.URL.Path, "/")[3]
 			if h.Session.SessionId != rootA {
-				h.Session.ParentSessionId = pointer(rootA)
+				h.Session.OwnerSessionId = pointer(rootA)
 			}
 			_ = json.NewEncoder(w).Encode(h)
 		case strings.HasSuffix(r.URL.Path, "/submit"):
@@ -283,6 +285,43 @@ func TestRunParkedStartupReadStopAndOutputCancel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunOwnedOnlyStartupCreatesRoot(t *testing.T) {
+	created := make(chan struct{}, 1)
+	var live *liveRuntime
+	live = liveFixture(t, false, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/v1/sessions" {
+			return false
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode([]protocol.Session{{SessionId: childA, OwnerSessionId: pointer(rootA)}})
+		case http.MethodPost:
+			var request protocol.CreateSessionRequest
+			testassert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			testassert.Equal(t, request.Workspace, "/workspace")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(live.hydration.Session)
+			created <- struct{}{}
+		default:
+			t.Errorf("unexpected startup method %s", r.Method)
+		}
+		return true
+	})
+	input, write := pipeInput(t)
+	c := New(Options{Startup: live.opts, Workspace: "/workspace"})
+	screen := newScreen(80)
+	done := runClient(c, input, screen)
+	barrier(t, created)
+	frameContaining(t, screen, "canonical clipboard")
+	c.mu.Lock()
+	selected := c.rootID
+	c.mu.Unlock()
+	testassert.Equal(t, selected, rootA)
+	write.Close()
+	testassert.NoError(t, receive(t, done))
 }
 
 func TestRunSSEBeforeReadsRejectsEstablishmentFailure(t *testing.T) {

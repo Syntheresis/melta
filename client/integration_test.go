@@ -32,7 +32,7 @@ import (
 // reserve fits the context window: every turn is one completed model attempt
 // with no in-flight automatic compaction, whose compact request would
 // otherwise reach the same stateless fixture endpoint.
-const clientConfigDocument = `{"providers":{"prov":{"transport":{"base_url":%q,"api_key_env":"CLIENT_TEST_KEY"},"discovery":false,"models":{"m":{"name":"M","context_window":4096,"max_output_tokens":512}}}},"extensions":{"agents":{"enabled":true,"definitions":%s},"adaptation":{"enabled":true}}}`
+const clientConfigDocument = `{"model":"prov/m","providers":{"prov":{"transport":{"base_url":%q,"api_key_env":"CLIENT_TEST_KEY"},"discovery":false,"models":{"m":{"name":"M","context_window":4096,"max_output_tokens":512}}}},"extensions":{"agents":{"enabled":true,"definitions":%s},"adaptation":{"enabled":true}}}`
 
 const clientAgentsDocument = `{"integrated":{"model":"prov/m","system_prompt":"simple"}}`
 
@@ -119,7 +119,7 @@ func textContentPart(t *testing.T, text string) protocol.ContentPart {
 // createSession creates one Session through the generated operation.
 func createSession(t *testing.T, c *client.Client, workspace string) string {
 	t.Helper()
-	resp, err := c.CreateSessionWithResponse(context.Background(), protocol.CreateSessionRequest{Workspace: workspace, AgentSelection: &protocol.AgentSelection{Definition: &protocol.DefinitionRef{ExtensionId: "agents", CapabilityId: "agents.definitions", DefinitionId: "integrated"}}})
+	resp, err := c.CreateSessionWithResponse(context.Background(), protocol.CreateSessionRequest{Workspace: workspace})
 	testassert.NoError(t, err)
 	testassert.Require(t, resp.JSON201 != nil, "CreateSession status %d: %s", resp.HTTPResponse.StatusCode, resp.Body)
 	return resp.JSON201.SessionId

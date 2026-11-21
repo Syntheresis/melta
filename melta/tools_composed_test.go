@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,12 +15,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/atomicfs"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/jobs"
+	"github.com/Syntheresis/melta/internal/snapshot"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
-	"github.com/Syntheresis/melta/internal/tool"
 	"github.com/Syntheresis/melta/model"
 )
 
@@ -87,7 +88,7 @@ func TestComposedToolsSettingsPublication(t *testing.T) {
 }
 
 // toolExportIDs are the baseline standard tools in declaration order.
-var toolExportIDs = []string{"read_file", "write_file", "edit_file", "apply_patch", "run_command", "process", "sleep"}
+var toolExportIDs = []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"}
 
 // fakeJobs is the scriptable jobs.Jobs test double: it records every call
 // and serves scripted errors, reservations, and live results.
@@ -136,6 +137,10 @@ func (f *fakeJobs) List(string) string {
 
 func (f *fakeJobs) Live(string) []string { return f.live }
 
+func (f *fakeJobs) StopJob(string, string) {}
+
+func (f *fakeJobs) Close() error { return nil }
+
 // realJobs constructs the real jobs service over one data root and registers
 // its Close with the test.
 func realJobs(t *testing.T, dataDir string) *jobs.Manager {
@@ -159,30 +164,27 @@ func openTools(t *testing.T, dataDir string) map[string]Tool {
 	return newStandardTools(dataDir, &fakeJobs{})
 }
 
-// TestStandardToolsCompiledIntoComposition proves the baseline tool universe:
-// the seven standard tool declarations compile into every composition without
-// any registration, each resolves through the one export table as an ordinary
-// standard provider, an optional export naming one collides as a duplicate
-// provider, and an ordinary dependency on one resolves through the same
-// provider rules as any other capability.
-func TestStandardToolsCompiledIntoComposition(t *testing.T) {
-	c, err := newNativeComposition(nil)
-	testassert.Require(t, err == nil, "newNativeComposition(nil): %v", err)
-	declarations := standardToolDeclarations()
-	baseline := make([]string, 0, len(declarations))
-	for _, declaration := range declarations {
-		baseline = append(baseline, declaration.id)
-	}
-	for _, id := range baseline {
-		export, ok := c.exports[id]
-		testassert.Require(t, ok && export.standard && export.standardDescribe != nil, "tool %q has no compiled baseline export", id)
-	}
-	for _, id := range toolExportIDs {
-		spec, ok := c.toolSpec(id)
-		testassert.Require(t, ok && spec.id == id && spec.standardDescribe != nil, "tool %q has no compiled baseline declaration", id)
-	}
+// TestStandardToolsReservedAgainstShadowing proves the baseline tool universe:
+// the six standard tool values are constructed directly with no
+// registration, and a registration naming one standard tool is refused while
+// the extension's own names still register.
+func TestStandardToolsReservedAgainstShadowing(t *testing.T) {
+	owner := &configurationService{}
+	e := testNative("shadow", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, testRegisteredTool{}, nil); err == nil {
+			return nil, errors.New("standard tool shadow accepted")
+		}
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "custom_tool", Parameters: json.RawMessage(`{}`)}, testRegisteredTool{}, nil)
+		return nil, err
+	})
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})
+	testassert.NoError(t, err)
+	defer candidate.release()
+	stage := candidate.snapshotForTest()
+	defer stage.release()
+	testassert.Require(t, stage.tools["custom_tool"] != nil && stage.tools["read_file"] == nil, "registrations = %v, want only the extension's own name", stage.tools)
 	byID, _ := openToolsComposed(t, t.TempDir(), &fakeJobs{}, nil)
-	testassert.Equal(t, len(byID), 7)
+	testassert.Equal(t, len(byID), 6)
 }
 
 // stubManagedEnv returns one real manager bound to a throwaway .env whose
@@ -196,9 +198,9 @@ func stubManagedEnv(t *testing.T) *config.ManagedEnv {
 // envCallContext is a callToolContext whose call-time environment producer
 // is one empty real manager: the ambient environment passes through
 // unfiltered.
-func envCallContext(t *testing.T, workspace string, constraints ToolConstraints) ToolContext {
+func envCallContext(t *testing.T, workspace string) ToolContext {
 	t.Helper()
-	tc := callToolContext(workspace, constraints)
+	tc := callToolContext(workspace)
 	tc.SubprocessEnv = testSubprocessEnv(stubManagedEnv(t))
 	return tc
 }
@@ -318,13 +320,14 @@ func toolsCapture(names []string) harness.ExecutionCapture {
 // policy, the background bridge, the captured invocation, and the call-time
 // subprocess environment producer.
 type toolsHarnessOpts struct {
-	jobsValue     jobs.Jobs // the tool-facing jobs provider; realJobs wins when set
-	realJobs      bool      // construct the real jobs service over the fixture data root
-	advertise     []string
-	permissions   harness.PermissionPolicy
-	background    BackgroundServices
-	invocation    Invocation
-	subprocessEnv func(context.Context) ([]string, error)
+	jobsValue          jobs.Jobs // the tool-facing jobs provider; realJobs wins when set
+	realJobs           bool      // construct the real jobs service over the fixture data root
+	advertise          []string
+	permissions        harness.PermissionPolicy
+	background         BackgroundServices
+	invocation         Invocation
+	subprocessEnv      func(context.Context) ([]string, error)
+	authorizationHooks []harness.AuthorizationHook
 	// store, when non-nil, is the durable store behind the fixture's
 	// Harness; the zero value opens a temporary SQLite store.
 	store harness.Storage
@@ -345,12 +348,12 @@ type toolsHarness struct {
 	admission harness.EntryRef
 }
 
-func newToolsHarness(t *testing.T, modelFn func(context.Context, model.Request) (model.Stream, error)) *toolsHarness {
+func newToolsHarness(t *testing.T, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) *toolsHarness {
 	t.Helper()
 	return newToolsHarnessWith(t, modelFn, toolsHarnessOpts{})
 }
 
-func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Request) (model.Stream, error), opts toolsHarnessOpts) *toolsHarness {
+func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error), opts toolsHarnessOpts) *toolsHarness {
 	t.Helper()
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -376,7 +379,7 @@ func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Reque
 	byID, _ := openToolsComposed(t, dataDir, jobsValue, nil)
 	advertise := opts.advertise
 	if advertise == nil {
-		advertise = []string{"read_file", "write_file", "edit_file", "apply_patch"}
+		advertise = []string{"read_file", "write_file", "edit_file"}
 	}
 
 	owner, cancel := context.WithCancel(ctx)
@@ -400,7 +403,6 @@ func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Reque
 						Workspace:     workspace,
 						AdmittedEntry: admission.AdmittedEntry,
 						Invocation:    opts.invocation,
-						Constraints:   ToolConstraints{Readonly: admission.Execution.Readonly, WriteDir: admission.Execution.WriteDir},
 						Background:    background,
 						SubprocessEnv: opts.subprocessEnv,
 					}
@@ -408,17 +410,18 @@ func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Reque
 						Permissions: opts.permissions,
 						OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 							return harness.InvocationExecution{
-								Model: modelFn,
-								NormalizeTool: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+								Model:              modelFn,
+								AuthorizationHooks: opts.authorizationHooks,
+								BindLocation:       locationBinder(workspace),
+								LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) harness.PreparedTool {
+									return byID[call.Name].Prepare(ctx, tc, call)
+								}, func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 									tool, ok := byID[call.Name]
 									if !ok {
 										return nil, fmt.Errorf("unknown tool %q", call.Name)
 									}
 									return tool.Normalize(context.Background(), tc, call)
-								},
-								Tool: func(_ context.Context, call model.ToolCall) harness.PreparedTool {
-									return byID[call.Name].Prepare(ctx, tc, call)
-								},
+								}),
 							}, nil
 						},
 					}, nil
@@ -447,7 +450,7 @@ func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Reque
 
 func (th *toolsHarness) createSession() string {
 	th.t.Helper()
-	rec, err := th.h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: th.workspace, AgentSelection: suppliedDefinition("coder")})
+	rec, err := th.h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: th.workspace, ExtensionState: agentState("coder")})
 	if err != nil {
 		th.t.Fatalf("CreateSession: %v", err)
 	}
@@ -566,7 +569,7 @@ func (th *toolsHarness) readToolResults(sessionID string) map[string]model.ToolR
 func TestComposedToolsHarnessAllowDenyEffect(t *testing.T) {
 	attempt := 0
 	var mu sync.Mutex
-	modelFn := func(_ context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		mu.Lock()
 		attempt++
 		n := attempt
@@ -637,7 +640,7 @@ func TestComposedToolsHarnessRecovery(t *testing.T) {
 	arrived := make(chan struct{}, 1)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	modelFn := func(_ context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		select {
 		case arrived <- struct{}{}:
 		default:
@@ -680,7 +683,7 @@ func TestRunCommandPrepareTargets(t *testing.T) {
 	ws := t.TempDir()
 
 	t.Run("conclusive simple commands declare one target per segment", func(t *testing.T) {
-		plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{}), "run_command", `{"command":"echo one; echo two && echo three"}`)
+		plan := prepare(t, byID["run_command"], envCallContext(t, ws), "run_command", `{"command":"echo one; echo two && echo three"}`)
 		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 3, "plan = %+v, want an executor plan; pairs = %+v, want one command.run pair per segment", plan, plan.Permissions)
 		want := []string{"echo one", "echo two", "echo three"}
 		for i, pair := range plan.Permissions {
@@ -701,77 +704,23 @@ func TestRunCommandPrepareTargets(t *testing.T) {
 			// byte — the heredoc body and the trailing newline — preserved.
 			{"{\"command\":\"  \\ncat <<EOF\\nbody\\nEOF\\n\"}", "cat <<EOF\nbody\nEOF\n"},
 		} {
-			plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{}), "run_command", tc.args)
+			plan := prepare(t, byID["run_command"], envCallContext(t, ws), "run_command", tc.args)
 			testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "command.run", "%s: pairs = %+v, want the single complete-command target", tc.args, plan.Permissions)
 			testassert.Require(t, plan.Permissions[0].Target == tc.want, "%s: target = %q, want %q", tc.args, plan.Permissions[0].Target, tc.want)
 		}
 	})
 
 	t.Run("all-blank text takes the whole-command fallback with the original input", func(t *testing.T) {
-		plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{}), "run_command", `{"command":"   "}`)
+		plan := prepare(t, byID["run_command"], envCallContext(t, ws), "run_command", `{"command":"   "}`)
 		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Target == "   ", "pairs = %+v, want the unchanged original blank input as the one target", plan.Permissions)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "(No output)", "result = %+v, want the retained no-op run", outcome.Result)
 	})
 
 	t.Run("empty command text is an immediate argument error", func(t *testing.T) {
-		plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{}), "run_command", `{"command":""}`)
+		plan := prepare(t, byID["run_command"], envCallContext(t, ws), "run_command", `{"command":""}`)
 		testassert.Require(t, plan.Execute == nil && plan.Immediate != nil, "plan = %+v, want one immediate outcome", plan)
 		testassert.Require(t, plan.Immediate.Result.Status == model.ResultError && plan.Immediate.Result.Content == "run_command: command is required", "immediate = %+v, want the retained required error", plan.Immediate)
-	})
-
-	t.Run("readonly declares the rewritten command and executes it", func(t *testing.T) {
-		plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{Readonly: true}), "run_command", `{"command":"git status --short"}`)
-		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "command.run", "pairs = %+v, want one command.run pair", plan.Permissions)
-		target := plan.Permissions[0].Target
-		testassert.Require(t, strings.HasPrefix(target, "git --no-pager --no-optional-locks") && strings.Contains(target, "status --short") != false, "target = %q, want the rewritten read-only git command", target)
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultError, "result = %+v, want the git failure settled as an error result", outcome.Result)
-	})
-
-	t.Run("readonly plain command runs in the workspace", func(t *testing.T) {
-		plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{Readonly: true}), "run_command", `{"command":"pwd"}`)
-		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Target == "pwd", "pairs = %+v, want the unchanged pwd target", plan.Permissions)
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.TrimSpace(outcome.Result.Content) == ws, "result = %+v, want pwd in the workspace", outcome.Result)
-	})
-
-	t.Run("readonly rejection is an immediate error with the fixed text", func(t *testing.T) {
-		plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{Readonly: true}), "run_command", `{"command":"curl example.com"}`)
-		testassert.Require(t, plan.Execute == nil && plan.Immediate != nil, "plan = %+v, want one immediate outcome", plan)
-		testassert.Require(t, plan.Immediate.Result.Status == model.ResultError && strings.Contains(plan.Immediate.Result.Content, "read-only agent") && !strings.Contains(plan.Immediate.Result.Content, "curl"), "immediate = %+v, want the fixed rejection that never echoes the command", plan.Immediate)
-	})
-
-	t.Run("readonly blank and empty commands settle the fixed rejection", func(t *testing.T) {
-		for _, args := range []string{`{"command":""}`, `{"command":"   "}`, "{\"command\":\" \\n\\t \"}"} {
-			plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{Readonly: true}), "run_command", args)
-			testassert.Require(t, plan.Execute == nil && plan.Immediate != nil, "%s: plan = %+v, want one immediate outcome", args, plan)
-			testassert.Require(t, plan.Immediate.Result.Status == model.ResultError && plan.Immediate.Result.Content == tool.ReadOnlyRunCommandRejected, "%s: immediate = %+v, want the fixed rejection that never echoes the command", args, plan.Immediate)
-		}
-	})
-
-	t.Run("readonly ignores a model timeout override", func(t *testing.T) {
-		// cat on a FIFO blocks until the test's writer opens it at two
-		// seconds: honoring the 1s override would time out, while the
-		// retained captured default lets the command finish.
-		fifo := filepath.Join(ws, "pipe")
-		testassert.NoError(t, exec.Command("mkfifo", fifo).Run())
-		go func() {
-			time.Sleep(2 * time.Second)
-			f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-			if err == nil {
-				_, _ = f.WriteString("done")
-				_ = f.Close()
-			}
-		}()
-		start := time.Now()
-		plan := prepare(t, byID["run_command"], envCallContext(t, ws, ToolConstraints{Readonly: true}), "run_command", `{"command":"cat pipe","timeout":1}`)
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "done", "result = %+v, want the default timeout to let the command finish", outcome.Result)
-		{
-			elapsed := time.Since(start)
-			testassert.Require(t, elapsed >= 2*time.Second, "elapsed %s, want the 1s override ignored in favor of the captured default", elapsed)
-		}
 	})
 }
 
@@ -779,7 +728,7 @@ func TestRunCommandExecuteOutcomes(t *testing.T) {
 	dataDir := t.TempDir()
 	byID := openTools(t, dataDir)
 	ws := t.TempDir()
-	tc := callToolContext(ws, ToolConstraints{})
+	tc := callToolContext(ws)
 	tc.SubprocessEnv = testSubprocessEnv(stubManagedEnv(t))
 
 	t.Run("success carries the captured output", func(t *testing.T) {
@@ -864,7 +813,7 @@ func TestRunCommandExecuteOutcomes(t *testing.T) {
 
 func TestSleepTool(t *testing.T) {
 	byID := openTools(t, t.TempDir())
-	tc := callToolContext(t.TempDir(), ToolConstraints{})
+	tc := callToolContext(t.TempDir())
 	sleepTool := byID["sleep"]
 
 	t.Run("normalization strips private fields, requires strict integers and clamps to 1..300", func(t *testing.T) {
@@ -922,91 +871,19 @@ func TestSleepTool(t *testing.T) {
 	})
 }
 
-// TestReadOnlyRunCommandExecutesRewriteSuppressingGitContentHelpers drives
-// the shipped plugin's readonly run_command over a git repository whose
-// configured content helpers (diff.external and the secret textconv driver)
-// append to a marker file. The rewritten command suppresses both, so a
-// successful execution must never create the marker — raw and rewritten
-// commands are distinguishable by observable effect, not output shape.
-func TestReadOnlyRunCommandExecutesRewriteSuppressingGitContentHelpers(t *testing.T) {
-	repo := t.TempDir()
-	// Isolate HOME so user-level git configuration (signing, hooks,
-	// templates) cannot leak into or break the fixture.
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		{
-			output, err := cmd.CombinedOutput()
-			testassert.Require(t, err == nil, "git %v: %v\n%s", args, err, output)
-		}
-	}
-	runGit("init")
-	runGit("config", "user.email", "test@example.invalid")
-	runGit("config", "user.name", "Test User")
-
-	marker := filepath.Join(repo, "helper-ran")
-	textconv := filepath.Join(repo, "textconv.sh")
-	external := filepath.Join(repo, "external.sh")
-	writeScript := func(path, content string) {
-		t.Helper()
-		testassert.NoError(t, os.WriteFile(path, []byte(content), 0o755))
-	}
-	writeScript(textconv, fmt.Sprintf("#!/bin/sh\nprintf textconv >> %q\ncat \"$1\"\n", marker))
-	writeScript(external, fmt.Sprintf("#!/bin/sh\nprintf external >> %q\nexit 0\n", marker))
-
-	testassert.NoError(t, os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("*.secret diff=secret\n"), 0o644))
-	testassert.NoError(t, os.WriteFile(filepath.Join(repo, "file.secret"), []byte("one\n"), 0o644))
-	runGit("add", ".")
-	runGit("commit", "-m", "initial")
-	runGit("config", "diff.secret.textconv", textconv)
-	runGit("config", "diff.external", external)
-	testassert.NoError(t, os.WriteFile(filepath.Join(repo, "file.secret"), []byte("two\n"), 0o644))
-	runGit("add", "file.secret")
-	runGit("commit", "-m", "second")
-	testassert.NoError(t, os.WriteFile(filepath.Join(repo, "file.secret"), []byte("three\n"), 0o644))
-
-	byID := openTools(t, t.TempDir())
-	for _, command := range []string{
-		"git diff -- file.secret",
-		"git log -p -1 -- file.secret",
-		"git show HEAD -- file.secret",
-		"git show HEAD:file.secret",
-		"git blame -- file.secret",
-	} {
-		t.Run(command, func(t *testing.T) {
-			_ = os.Remove(marker)
-			plan := prepare(t, byID["run_command"], envCallContext(t, repo, ToolConstraints{Readonly: true}), "run_command", `{"command":"`+command+`"}`)
-			testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "command.run", "pairs = %+v, want one command.run pair", plan.Permissions)
-			{
-				target := plan.Permissions[0].Target
-				testassert.Require(t, strings.HasPrefix(target, "git --no-pager --no-optional-locks"), "target = %q, want the rewritten read-only git command", target)
-			}
-			outcome := plan.Execute(context.Background())
-			testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "result = %+v, want the rewritten command to succeed", outcome.Result)
-			if _, err := os.Stat(marker); err == nil {
-				data, _ := os.ReadFile(marker)
-				t.Fatalf("executed the raw command instead of the rewrite: helper marker = %q", data)
-			} else if !os.IsNotExist(err) {
-				t.Fatalf("marker read error = %v", err)
-			}
-		})
-	}
-}
-
 func TestPrepareShapesAndCanonicals(t *testing.T) {
 	byID := openTools(t, t.TempDir())
 
 	t.Run("read_file binds canonical targets with file.read pairs", func(t *testing.T) {
 		ws := t.TempDir()
 		testassert.NoError(t, os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("hello\n"), 0o644))
-		plan := prepare(t, byID["read_file"], callToolContext(ws, ToolConstraints{}), "read_file", `{"path":"notes.txt"}`)
+		plan := prepare(t, byID["read_file"], callToolContext(ws), "read_file", `{"path":"notes.txt"}`)
 		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "file.read", "plan = %+v, want one executor; permissions = %+v, want one file.read pair", plan, plan.Permissions)
-		testassert.Require(t, plan.Permissions[0].Target == filepath.Join(ws, "notes.txt") && plan.CanonicalWorkspace == ws && plan.CanonicalWriteDir == "", "target = %q, want the canonical file path; canonicals = %q/%q, want the workspace and an empty write dir", plan.Permissions[0].Target, plan.CanonicalWorkspace, plan.CanonicalWriteDir)
+		testassert.Require(t, plan.Permissions[0].Target == filepath.Join(ws, "notes.txt") && plan.CanonicalWorkspace == ws, "target = %q, canonical workspace = %q, want the canonical file path in the workspace", plan.Permissions[0].Target, plan.CanonicalWorkspace)
 	})
 	t.Run("read_file of a missing leaf declares the parent directory too", func(t *testing.T) {
 		ws := t.TempDir()
-		plan := prepare(t, byID["read_file"], callToolContext(ws, ToolConstraints{}), "read_file", `{"path":"ghost.txt"}`)
+		plan := prepare(t, byID["read_file"], callToolContext(ws), "read_file", `{"path":"ghost.txt"}`)
 		testassert.Require(t, len(plan.Permissions) == 2, "permissions = %+v, want the file and parent-directory file.read pairs", plan.Permissions)
 		for _, pair := range plan.Permissions {
 			testassert.Require(t, pair.Permission == "file.read" && pair.Target != "", "pair = %+v, want a nonempty canonical file.read pair", pair)
@@ -1016,39 +893,19 @@ func TestPrepareShapesAndCanonicals(t *testing.T) {
 		real := t.TempDir()
 		link := filepath.Join(t.TempDir(), "link")
 		testassert.NoError(t, os.Symlink(real, link))
-		plan := prepare(t, byID["read_file"], callToolContext(link, ToolConstraints{}), "read_file", `{"path":"a.txt"}`)
+		plan := prepare(t, byID["read_file"], callToolContext(link), "read_file", `{"path":"a.txt"}`)
 		testassert.Equal(t, plan.CanonicalWorkspace, real)
 	})
-	t.Run("write_file declares file.write and the canonical write-dir boundary", func(t *testing.T) {
+	t.Run("write_file declares file.write on the canonical target", func(t *testing.T) {
 		ws := t.TempDir()
 		testassert.NoError(t, os.MkdirAll(filepath.Join(ws, "wd"), 0o755))
-		constraints := ToolConstraints{WriteDir: "wd"}
-		plan := prepare(t, byID["write_file"], callToolContext(ws, constraints), "write_file", `{"path":"wd/out.txt","content":"x"}`)
+		plan := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"wd/out.txt","content":"x"}`)
 		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "file.write", "plan = %+v, want one executor; permissions = %+v, want one file.write pair", plan, plan.Permissions)
-		wantBoundary := filepath.Join(ws, "wd")
-		testassert.Require(t, plan.CanonicalWriteDir == wantBoundary && plan.CanonicalWorkspace == ws, "canonicals = %q/%q, want %q/%q", plan.CanonicalWorkspace, plan.CanonicalWriteDir, ws, wantBoundary)
-	})
-	t.Run("apply_patch declares every source and destination in declaration order", func(t *testing.T) {
-		ws := t.TempDir()
-		for name, content := range map[string]string{"b.txt": "old\n", "c.txt": "gone\n", "d.txt": "d\n"} {
-			testassert.NoError(t, os.WriteFile(filepath.Join(ws, name), []byte(content), 0o644))
-		}
-		patch := "*** Begin Patch\n*** Add File: a.txt\n+new\n*** Update File: b.txt\n@@\n-old\n+new\n*** Delete File: c.txt\n*** Update File: d.txt\n*** Move to: e.txt\n*** End Patch"
-		input, err := json.Marshal(map[string]string{"input": patch})
-		testassert.NoError(t, err)
-		plan := prepare(t, byID["apply_patch"], callToolContext(ws, ToolConstraints{}), "apply_patch", string(input))
-		want := []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}
-		if len(plan.Permissions) != len(want) {
-			t.Fatalf("permissions = %+v, want %d file.write pairs in declaration order", plan.Permissions, len(want))
-		}
-		for i, name := range want {
-			pair := plan.Permissions[i]
-			testassert.Require(t, pair.Permission == "file.write" && pair.Target == filepath.Join(ws, name), "pair %d = %+v, want file.write on %s", i, pair, name)
-		}
+		testassert.Require(t, plan.Permissions[0].Target == filepath.Join(ws, "wd", "out.txt") && plan.CanonicalWorkspace == ws, "target = %q, canonical workspace = %q, want the canonical file path in the workspace", plan.Permissions[0].Target, plan.CanonicalWorkspace)
 	})
 	t.Run("undecodable arguments in Prepare map to the immediate validation error", func(t *testing.T) {
 		ws := t.TempDir()
-		plan := prepare(t, byID["read_file"], callToolContext(ws, ToolConstraints{}), "read_file", `{"path":`)
+		plan := prepare(t, byID["read_file"], callToolContext(ws), "read_file", `{"path":`)
 		testassert.Require(t, plan.Execute == nil && plan.Immediate != nil, "plan = %+v, want one immediate outcome", plan)
 		outcome := *plan.Immediate
 		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.CallID == "call-1" && outcome.Result.Content != "", "immediate = %+v, want the bounded validation error for the original call", outcome)
@@ -1061,33 +918,27 @@ func TestPrepareShapesAndCanonicals(t *testing.T) {
 		// "1e0" spelling canonicalizes once at normalization, and
 		// preparation consumes the byte-identical committed value and reads
 		// exactly line 1 with the canonical integer window.
-		committed, err := normalize(t, tool, callToolContext(ws, ToolConstraints{}), "read_file", `{"path":"f.txt","offset":1e0,"limit":1.0}`)
+		committed, err := normalize(t, tool, callToolContext(ws), "read_file", `{"path":"f.txt","offset":1e0,"limit":1.0}`)
 		testassert.NoError(t, err)
 		testassert.Require(t, string(committed) == `{"limit":1,"offset":1,"path":"f.txt"}`, "committed normalized arguments = %s, want the canonical integers once", committed)
-		plan := prepare(t, tool, callToolContext(ws, ToolConstraints{}), "read_file", string(committed))
+		plan := prepare(t, tool, callToolContext(ws), "read_file", string(committed))
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.HasPrefix(outcome.Result.Content, "1\tone\n") && strings.Contains(outcome.Result.Content, "(Showing lines 1-1 of 3. Use offset=2 to continue.)"), "result = %+v, want the canonical 1/1 window through preparation", outcome.Result)
 		// Preparation performs no validation or defaulting of its own: an
 		// un-normalized fraction handed directly to Prepare is not a second
 		// normalization error — preparation binds targets and parses the
 		// canonical lexeme only at its point of use.
-		plan = prepare(t, tool, callToolContext(ws, ToolConstraints{}), "read_file", `{"path":"f.txt","offset":2.5}`)
+		plan = prepare(t, tool, callToolContext(ws), "read_file", `{"path":"f.txt","offset":2.5}`)
 		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "plan = %+v, want one executor: Prepare runs no second normalization", plan)
 	})
 	t.Run("failed canonical preparation maps to the immediate denial", func(t *testing.T) {
 		ws := t.TempDir()
 		loop := filepath.Join(ws, "loop")
 		testassert.NoError(t, os.Symlink("loop", loop))
-		plan := prepare(t, byID["write_file"], callToolContext(ws, ToolConstraints{WriteDir: "loop"}), "write_file", `{"path":"out.txt","content":"x"}`)
+		plan := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"loop/out.txt","content":"x"}`)
 		testassert.Require(t, plan.Execute == nil && plan.Immediate != nil, "plan = %+v, want one immediate outcome", plan)
 		outcome := *plan.Immediate
 		testassert.Require(t, outcome.Result.Status == model.ResultDenied && outcome.Result.Content == "Permission denied.", "immediate = %+v, want the fixed denial", outcome)
-	})
-	t.Run("a write target outside the write dir is denied at preparation", func(t *testing.T) {
-		ws := t.TempDir()
-		testassert.NoError(t, os.MkdirAll(filepath.Join(ws, "wd"), 0o755))
-		plan := prepare(t, byID["edit_file"], callToolContext(ws, ToolConstraints{WriteDir: "wd"}), "edit_file", `{"path":"outside.txt","old_string":"a","new_string":"b"}`)
-		testassert.Require(t, plan.Execute == nil && plan.Immediate != nil && plan.Immediate.Result.Status == model.ResultDenied, "plan = %+v, want the preparation denial", plan)
 	})
 }
 
@@ -1098,14 +949,14 @@ func TestExecuteFileEffects(t *testing.T) {
 	t.Run("read_file returns bounded numbered content and no metadata", func(t *testing.T) {
 		ws := t.TempDir()
 		testassert.NoError(t, os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("one\ntwo\nthree\n"), 0o644))
-		plan := prepare(t, byID["read_file"], callToolContext(ws, ToolConstraints{}), "read_file", `{"path":"notes.txt","offset":2,"limit":2}`)
+		plan := prepare(t, byID["read_file"], callToolContext(ws), "read_file", `{"path":"notes.txt","offset":2,"limit":2}`)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.CallID == "call-1" && strings.Contains(outcome.Result.Content, "2\ttwo") && strings.Contains(outcome.Result.Content, "3\tthree") && outcome.Metadata == nil, "result = %+v, want success for call-1; content = %q, want the numbered requested window; metadata = %s, want none for read_file", outcome.Result, outcome.Result.Content, outcome.Metadata)
 	})
 	t.Run("read_file of a missing file returns the suggestion outcome", func(t *testing.T) {
 		ws := t.TempDir()
 		testassert.NoError(t, os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("x\n"), 0o644))
-		plan := prepare(t, byID["read_file"], callToolContext(ws, ToolConstraints{}), "read_file", `{"path":"notes.tx"}`)
+		plan := prepare(t, byID["read_file"], callToolContext(ws), "read_file", `{"path":"notes.tx"}`)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.Contains(outcome.Result.Content, "not found"), "result = %+v, want the bounded not-found suggestions outcome", outcome)
 	})
@@ -1113,7 +964,7 @@ func TestExecuteFileEffects(t *testing.T) {
 		dataDir := t.TempDir()
 		byID := openTools(t, dataDir)
 		ws := t.TempDir()
-		plan := prepare(t, byID["write_file"], callToolContext(ws, ToolConstraints{}), "write_file", `{"path":"sub/dir/new.txt","content":"body"}`)
+		plan := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"sub/dir/new.txt","content":"body"}`)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.Contains(outcome.Result.Content, "Wrote"), "result = %+v, want the write success", outcome.Result)
 		data, err := os.ReadFile(filepath.Join(ws, "sub", "dir", "new.txt"))
@@ -1137,7 +988,7 @@ func TestExecuteFileEffects(t *testing.T) {
 	t.Run("edit_file mutates the file and emits the edit_preview metadata shape", func(t *testing.T) {
 		ws := t.TempDir()
 		testassert.NoError(t, os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("alpha\nbeta\ngamma\n"), 0o644))
-		plan := prepare(t, byID["edit_file"], callToolContext(ws, ToolConstraints{}), "edit_file", `{"path":"notes.txt","old_string":"beta","new_string":"BETA"}`)
+		plan := prepare(t, byID["edit_file"], callToolContext(ws), "edit_file", `{"path":"notes.txt","old_string":"beta","new_string":"BETA"}`)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.Contains(outcome.Result.Content, "lines 2"), "result = %+v, want the edit summary", outcome.Result)
 		data, err := os.ReadFile(filepath.Join(ws, "notes.txt"))
@@ -1159,63 +1010,16 @@ func TestExecuteFileEffects(t *testing.T) {
 		}
 		testassert.Require(t, metadata.EditPreview != nil && len(metadata.EditPreview.Hunks) == 1 && len(metadata.EditPreview.Hunks[0].Rows) == 2, "metadata = %s, want one hunk with the remove/add diff rows", outcome.Metadata)
 	})
-	t.Run("apply_patch applies add update move delete and emits the per-file preview shape", func(t *testing.T) {
-		ws := t.TempDir()
-		for name, content := range map[string]string{"b.txt": "old\n", "c.txt": "gone\n", "d.txt": "d\n"} {
-			testassert.NoError(t, os.WriteFile(filepath.Join(ws, name), []byte(content), 0o644))
-		}
-		patch := "*** Begin Patch\n*** Add File: a.txt\n+new\n*** Update File: b.txt\n@@\n-old\n+new\n*** Delete File: c.txt\n*** Update File: d.txt\n*** Move to: e.txt\n*** End Patch"
-		input, err := json.Marshal(map[string]string{"input": patch})
-		testassert.NoError(t, err)
-		plan := prepare(t, byID["apply_patch"], callToolContext(ws, ToolConstraints{}), "apply_patch", string(input))
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.Contains(outcome.Result.Content, "Success. Updated the following files:"), "result = %+v, want the patch success summary", outcome.Result)
-		{
-			_, err := os.Stat(filepath.Join(ws, "a.txt"))
-			testassert.NoError(t, err)
-		}
-		data, err := os.ReadFile(filepath.Join(ws, "b.txt"))
-		testassert.Require(t, err == nil && string(data) == "new\n", "updated file = (%q, %v), want the replacement", data, err)
-		{
-			_, err := os.Stat(filepath.Join(ws, "c.txt"))
-			testassert.Require(t, errors.Is(err, os.ErrNotExist), "deleted file stat = %v, want gone", err)
-		}
-		{
-			_, err := os.Stat(filepath.Join(ws, "d.txt"))
-			testassert.Require(t, errors.Is(err, os.ErrNotExist), "move source stat = %v, want gone", err)
-		}
-		{
-			data, err := os.ReadFile(filepath.Join(ws, "e.txt"))
-			testassert.Require(t, err == nil && string(data) == "d\n", "move destination = (%q, %v), want the renamed content", data, err)
-		}
-		testassert.Require(t, outcome.Metadata != nil, "apply_patch emitted no metadata")
-		var metadata struct {
-			Files []struct {
-				Path string `json:"path"`
-				Op   string `json:"op"`
-			} `json:"edit_preview_files"`
-		}
-		{
-			err := json.Unmarshal(outcome.Metadata, &metadata)
-			testassert.Require(t, err == nil, "metadata %s is not the documented shape: %v", outcome.Metadata, err)
-		}
-		var ops []string
-		for _, f := range metadata.Files {
-			ops = append(ops, f.Path+"="+f.Op)
-		}
-		// The engine emits the move destination (M) before its source (D).
-		testassert.Require(t, strings.Join(ops, ",") == "a.txt=A,b.txt=M,c.txt=D,e.txt=M,d.txt=D", "previews = %v, want the full A/M/D list with content retained", ops)
-	})
 	t.Run("successive calls of one operation share the disk group through fresh handles", func(t *testing.T) {
 		dataDir := t.TempDir()
 		byID := openTools(t, dataDir)
 		ws := t.TempDir()
-		first := prepare(t, byID["write_file"], callToolContext(ws, ToolConstraints{}), "write_file", `{"path":"one.txt","content":"1"}`)
+		first := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"one.txt","content":"1"}`)
 		{
 			outcome := first.Execute(context.Background())
 			testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "first write = %+v", outcome.Result)
 		}
-		second := prepare(t, byID["write_file"], callToolContext(ws, ToolConstraints{}), "write_file", `{"path":"two.txt","content":"2"}`)
+		second := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"two.txt","content":"2"}`)
 		{
 			outcome := second.Execute(context.Background())
 			testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "second write = %+v", outcome.Result)
@@ -1230,7 +1034,7 @@ func TestExecuteFileEffects(t *testing.T) {
 		dataDir := t.TempDir()
 		byID := openTools(t, dataDir)
 		ws := t.TempDir()
-		tc := callToolContext(ws, ToolConstraints{})
+		tc := callToolContext(ws)
 		tc.AdmittedEntry = harness.EntryRef{SessionID: testSessionID, EntryID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 		plan := prepare(t, byID["write_file"], tc, "write_file", `{"path":"other.txt","content":"x"}`)
 		{
@@ -1241,24 +1045,6 @@ func TestExecuteFileEffects(t *testing.T) {
 		if entries, err := os.ReadDir(turnDir); err != nil || len(entries) != 1 {
 			t.Fatalf("other group turn dir = (%d entries, %v), want exactly one entry", len(entries), err)
 		}
-	})
-	t.Run("a readonly agent with a write dir writes inside the boundary", func(t *testing.T) {
-		ws := t.TempDir()
-		testassert.NoError(t, os.MkdirAll(filepath.Join(ws, "wd"), 0o755))
-		tc := callToolContext(ws, ToolConstraints{Readonly: true, WriteDir: "wd"})
-		plan := prepare(t, byID["write_file"], tc, "write_file", `{"path":"wd/allowed.txt","content":"x"}`)
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "write = %+v, want success inside the write dir", outcome.Result)
-	})
-	t.Run("executed patch failures surface as error outcomes", func(t *testing.T) {
-		ws := t.TempDir()
-		testassert.NoError(t, os.WriteFile(filepath.Join(ws, "b.txt"), []byte("different\n"), 0o644))
-		patch := "*** Begin Patch\n*** Update File: b.txt\n@@\n-old\n+new\n*** End Patch"
-		input, err := json.Marshal(map[string]string{"input": patch})
-		testassert.NoError(t, err)
-		plan := prepare(t, byID["apply_patch"], callToolContext(ws, ToolConstraints{}), "apply_patch", string(input))
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content != "", "result = %+v, want the failed-hunk error outcome", outcome.Result)
 	})
 }
 
@@ -1271,7 +1057,7 @@ func TestFailedCallRetainsEarlierSnapshot(t *testing.T) {
 	dataDir := t.TempDir()
 	byID := openTools(t, dataDir)
 	ws := t.TempDir()
-	tc := callToolContext(ws, ToolConstraints{})
+	tc := callToolContext(ws)
 	testassert.NoError(t, os.WriteFile(filepath.Join(ws, "a.txt"), []byte("alpha\n"), 0o644))
 	testassert.NoError(t, os.WriteFile(filepath.Join(ws, "b.txt"), []byte("beta\n"), 0o644))
 
@@ -1327,7 +1113,7 @@ func TestExecutedPlanRejectsPostAuthorizationBindingChange(t *testing.T) {
 	testassert.NoError(t, os.WriteFile(real, []byte("before\n"), 0o644))
 	link := filepath.Join(ws, "alias.txt")
 	testassert.NoError(t, os.Symlink(real, link))
-	plan := prepare(t, byID["write_file"], callToolContext(ws, ToolConstraints{}), "write_file", `{"path":"alias.txt","content":"after"}`)
+	plan := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"alias.txt","content":"after"}`)
 	// Repoint the alias at a different leaf after authorization.
 	other := filepath.Join(ws, "other.txt")
 	testassert.NoError(t, os.WriteFile(other, []byte("do not touch\n"), 0o644))
@@ -1342,6 +1128,74 @@ func TestExecutedPlanRejectsPostAuthorizationBindingChange(t *testing.T) {
 	}
 }
 
+func TestAuthorizationWitnessRecheckedAfterSnapshot(t *testing.T) {
+	for _, flip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("flip=%v", flip), func(t *testing.T) {
+			var calls int
+			modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+				calls++
+				if calls == 1 {
+					return toolCallStream("call-write", "write_file", `{"path":"target.txt","content":"after"}`), nil
+				}
+				return stopStream("done"), nil
+			}
+			hook := harness.AuthorizationHook{Run: func(_ context.Context, _ harness.PreparedAction, bind func(string) (string, error)) (*string, error) {
+				_, err := bind("guard")
+				return nil, err
+			}}
+			th := newToolsHarnessWith(t, modelFn, toolsHarnessOpts{advertise: []string{"write_file"}, authorizationHooks: []harness.AuthorizationHook{hook}})
+			first, second := t.TempDir(), t.TempDir()
+			link := filepath.Join(th.workspace, "guard")
+			testassert.NoError(t, os.Symlink(first, link))
+			target := filepath.Join(th.workspace, "target.txt")
+			testassert.NoError(t, os.WriteFile(target, []byte("before"), 0o600))
+			session := th.createSession()
+			previous := atomicfs.SyncFileFunc
+			flipped := false
+			atomicfs.SyncFileFunc = func(f *os.File) error {
+				if flip && !flipped && strings.HasPrefix(filepath.Base(f.Name()), "meta.json.tmp-") {
+					flipped = true
+					if err := os.Remove(link); err != nil {
+						return err
+					}
+					if err := os.Symlink(second, link); err != nil {
+						return err
+					}
+				}
+				if previous != nil {
+					return previous(f)
+				}
+				return f.Sync()
+			}
+			t.Cleanup(func() { atomicfs.SyncFileFunc = previous })
+			th.submit(session, "op-1", "write")
+			th.awaitSettled(session, "op-1")
+			result := th.readToolResults(session)["call-write"]
+			data, err := os.ReadFile(target)
+			testassert.NoError(t, err)
+			th.mu.Lock()
+			admitted := th.admission
+			th.mu.Unlock()
+			codeStore, err := snapshot.OpenCodeStore(groupDir(th.dataDir, session, admitted.EntryID))
+			testassert.NoError(t, err)
+			entries, err := codeStore.ListEntries()
+			testassert.NoError(t, err)
+			if flip {
+				testassert.Require(t, flipped && result.Status == model.ResultError && string(data) == "before" && len(entries) == 0, "flipped=%v result=%+v target=%q snapshots=%+v", flipped, result, data, entries)
+			} else {
+				testassert.Require(t, result.Status == model.ResultSuccess && string(data) == "after" && len(entries) == 1 && entries[0].LastWrite != nil, "result=%+v target=%q snapshots=%+v", result, data, entries)
+			}
+			reverted, err := snapshot.RevertCodeGroups([]string{groupDir(th.dataDir, session, admitted.EntryID)})
+			testassert.NoError(t, err)
+			data, err = os.ReadFile(target)
+			testassert.NoError(t, err)
+			if string(data) != "before" || len(reverted.Skipped) != 0 || len(reverted.Restored) != len(entries) {
+				t.Fatalf("revert=%+v target=%q", reverted, data)
+			}
+		})
+	}
+}
+
 // TestExecutedReadFailsUnderWorkspaceRootChange proves the closure
 // revalidates the bound canonical Workspace root: repointing the root
 // symlink after preparation fails the execution without reading the
@@ -1352,7 +1206,7 @@ func TestExecutedReadFailsUnderWorkspaceRootChange(t *testing.T) {
 	testassert.NoError(t, os.WriteFile(filepath.Join(real, "notes.txt"), []byte("real\n"), 0o644))
 	link := filepath.Join(t.TempDir(), "ws-link")
 	testassert.NoError(t, os.Symlink(real, link))
-	plan := prepare(t, byID["read_file"], callToolContext(link, ToolConstraints{}), "read_file", `{"path":"notes.txt"}`)
+	plan := prepare(t, byID["read_file"], callToolContext(link), "read_file", `{"path":"notes.txt"}`)
 	testassert.NoError(t, os.Remove(link))
 	other := t.TempDir()
 	testassert.NoError(t, os.WriteFile(filepath.Join(other, "notes.txt"), []byte("substituted\n"), 0o644))
@@ -1370,7 +1224,7 @@ func TestBackgroundStartFailuresRenderOneWrapperAndAbortReservation(t *testing.T
 	t.Run("handoff rejection renders through the wrapper and aborts the reservation", func(t *testing.T) {
 		fake := &fakeJobs{}
 		byID, _ := openToolsComposed(t, t.TempDir(), fake, nil)
-		tc := callToolContext(ws, ToolConstraints{})
+		tc := callToolContext(ws)
 		tc.SubprocessEnv = testSubprocessEnv(stubManagedEnv(t))
 		tc.Background = &scriptBackground{startErr: errors.New("background group is closed or stopping")}
 		plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"true","background":true}`)
@@ -1383,7 +1237,7 @@ func TestBackgroundStartFailuresRenderOneWrapperAndAbortReservation(t *testing.T
 	t.Run("spawn failure renders through the wrapper and aborts the reservation", func(t *testing.T) {
 		fake := &fakeJobs{startErr: errors.New("spawn boom")}
 		byID, _ := openToolsComposed(t, t.TempDir(), fake, nil)
-		tc := callToolContext(ws, ToolConstraints{})
+		tc := callToolContext(ws)
 		tc.SubprocessEnv = testSubprocessEnv(stubManagedEnv(t))
 		tc.Background = &scriptBackground{}
 		plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"true","background":true}`)
@@ -1395,7 +1249,7 @@ func TestBackgroundStartFailuresRenderOneWrapperAndAbortReservation(t *testing.T
 	t.Run("reserve failure renders through the wrapper without an abort", func(t *testing.T) {
 		fake := &fakeJobs{reserveErr: errors.New("process: manager is closed")}
 		byID, _ := openToolsComposed(t, t.TempDir(), fake, nil)
-		tc := callToolContext(ws, ToolConstraints{})
+		tc := callToolContext(ws)
 		tc.SubprocessEnv = testSubprocessEnv(stubManagedEnv(t))
 		tc.Background = &scriptBackground{}
 		plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"true","background":true}`)
@@ -1405,42 +1259,6 @@ func TestBackgroundStartFailuresRenderOneWrapperAndAbortReservation(t *testing.T
 	})
 }
 
-// TestReadOnlyBackgroundStartRewritesAndHonorsTimeout pins the readonly
-// background path: the rewritten command runs under the one permission
-// target, the model timeout override is forwarded when >= 1 and absent or
-// sub-one becomes 0, and the immediate result is the retained template.
-func TestReadOnlyBackgroundStartRewritesAndHonorsTimeout(t *testing.T) {
-	fake := &fakeJobs{live: []string{"b0b0b0b0", "11111111"}}
-	byID, _ := openToolsComposed(t, t.TempDir(), fake, nil)
-	ws := t.TempDir()
-	tc := callToolContext(ws, ToolConstraints{Readonly: true})
-	tc.SubprocessEnv = testSubprocessEnv(stubManagedEnv(t))
-	tc.Background = &scriptBackground{}
-
-	wantCommand, err := tool.ReadOnlyCommand("git status")
-	testassert.NoError(t, err)
-	plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"git status","background":true,"timeout":5}`)
-	testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "command.run" && plan.Permissions[0].Target == wantCommand, "plan = %+v, want an executor plan; pairs = %+v, want the one command.run pair on the rewritten command", plan, plan.Permissions)
-	outcome := plan.Execute(context.Background())
-	wantContent := fmt.Sprintf("Command running in the background with ID: `%s`. You will be notified when it finishes. If your next steps do not depend on its output, continue with them; otherwise use sleep to wait and process to read the output.\nRunning in the background: `%s`.", "b0b0b0b0", strings.Join(fake.live, ", "))
-	testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == wantContent, "result = %+v, want the retained immediate template %q", outcome.Result, wantContent)
-	testassert.Equal(t, len(fake.started), 1)
-	req := fake.started[0]
-	testassert.Require(t, req.Command == wantCommand && req.TimeoutSec == 5 && req.Workspace == ws && req.SessionID == testSessionID, "start request = %+v, want the rewritten command, timeout 5, the workspace, and the session", req)
-
-	// Absent or sub-one background timeout becomes 0.
-	plan = prepare(t, byID["run_command"], tc, "run_command", `{"command":"pwd","background":true}`)
-	outcome = plan.Execute(context.Background())
-	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "result = %+v, want success", outcome.Result)
-	testassert.Require(t, len(fake.started) == 2 && fake.started[1].TimeoutSec == 0 && fake.started[1].Command == "pwd", "started = %+v, want the second start with timeout 0 and the plain pwd command", fake.started)
-}
-
-// TestRunCommandConcurrentManagedWritesSpawnChildren drives real foreground
-// and background children while a writer loops TrySet/TryRemove on the one
-// manager. The single-manager critical section means an owned value is never
-// observable at a process start: every child sees the external sibling and no
-// managed value at all — never a partial or leaked line. Bounded counts and a
-// joined writer keep the failure cleanup honest.
 func TestRunCommandConcurrentManagedWritesSpawnChildren(t *testing.T) {
 	const (
 		externalKey = "MELTA_CONCURRENT_EXTERNAL"
@@ -1454,7 +1272,7 @@ func TestRunCommandConcurrentManagedWritesSpawnChildren(t *testing.T) {
 	jobsInst := realJobs(t, jobsDir)
 	byID := newStandardTools(jobsDir, jobsInst)
 	ws := t.TempDir()
-	tc := callToolContext(ws, ToolConstraints{})
+	tc := callToolContext(ws)
 	tc.SubprocessEnv = testSubprocessEnv(managed)
 	tc.Background = &scriptBackground{}
 
@@ -1558,7 +1376,7 @@ func TestBackgroundJobEnvironmentScrubsManagedKey(t *testing.T) {
 	byID := newStandardTools(dataDir, jobsInst)
 	managed := stubManagedEnv(t)
 	ws := t.TempDir()
-	tc := callToolContext(ws, ToolConstraints{})
+	tc := callToolContext(ws)
 	tc.SubprocessEnv = testSubprocessEnv(managed)
 	tc.Background = &scriptBackground{}
 	plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"printf '%s|%s' \"$MELTA_BG_UNLISTED\" \"$MELTA_BG_MANAGED\"; sleep 30","background":true}`)
@@ -1610,7 +1428,7 @@ func TestBackgroundStartRealProcessDeliversTruncatedSteeringCompletion(t *testin
 	var mu sync.Mutex
 	attempt := 0
 	completion := ""
-	modelFn := func(_ context.Context, req model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		if text := completionTextIn(req); text != "" {
 			mu.Lock()
 			completion = text
@@ -1712,7 +1530,7 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 	byID := newStandardTools(jobsDir, jobsInst)
 	process := byID["process"]
 	ws := t.TempDir()
-	tc := callToolContext(ws, ToolConstraints{})
+	tc := callToolContext(ws)
 
 	t.Run("empty list retains the empty text on the fixed target", func(t *testing.T) {
 		plan := prepare(t, process, tc, "process", `{"action":"list"}`)
@@ -1752,7 +1570,7 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 	})
 
 	t.Run("a foreign session id reaches the capability and returns the same text", func(t *testing.T) {
-		tcForeign := callToolContext(ws, ToolConstraints{})
+		tcForeign := callToolContext(ws)
 		tcForeign.AdmittedEntry.SessionID = "ffffffffffffffffffffffffffffffff"
 		plan := prepare(t, process, tcForeign, "process", fmt.Sprintf(`{"action":"kill","id":"%s"}`, runningID))
 		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Target == "ffffffffffffffffffffffffffffffff/"+runningID, "pairs = %+v, want the foreign owner-scoped target", plan.Permissions)
@@ -1805,7 +1623,7 @@ func TestProcessToolValidationIsImmediateError(t *testing.T) {
 		{`{"action":"kill","id":"deadbeeg"}`, `process: no process with ID "deadbeeg"`},
 	}
 	for _, tc := range cases {
-		plan := prepare(t, process, callToolContext(ws, ToolConstraints{}), "process", tc.args)
+		plan := prepare(t, process, callToolContext(ws), "process", tc.args)
 		testassert.Require(t, plan.Execute == nil && plan.Immediate != nil, "%s: plan = %+v, want one immediate outcome", tc.args, plan)
 		testassert.Require(t, plan.Immediate.Result.Status == model.ResultError && plan.Immediate.Result.Content == tc.want && len(plan.Permissions) == 0, "%s: immediate = %+v, want error %q; %s: pairs = %+v, want no permission target", tc.args, plan.Immediate.Result, tc.want, tc.args, plan.Permissions)
 	}
@@ -1824,7 +1642,7 @@ func TestComposedPermissionDenialSettlesOnlyTheCall(t *testing.T) {
 	]}`), nil)
 	attempt := 0
 	var mu sync.Mutex
-	modelFn := func(_ context.Context, _ model.Request) (model.Stream, error) {
+	modelFn := func(_ context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 		mu.Lock()
 		attempt++
 		n := attempt
@@ -1882,7 +1700,7 @@ func TestRunCommandNilSubprocessEnvNoStart(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			marker := filepath.Join(ws, strings.ReplaceAll(testCase.name, " ", "-")+"-marker")
-			tc := callToolContext(ws, ToolConstraints{})
+			tc := callToolContext(ws)
 			tc.SubprocessEnv = testCase.producer
 			plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"touch `+marker+`"}`)
 			outcome := plan.Execute(context.Background())
@@ -1902,7 +1720,7 @@ func TestBackgroundNilSubprocessEnvNoReservation(t *testing.T) {
 	ws := t.TempDir()
 	fake := &fakeJobs{}
 	byID, _ := openToolsComposed(t, t.TempDir(), fake, nil)
-	tc := callToolContext(ws, ToolConstraints{})
+	tc := callToolContext(ws)
 	tc.Background = &scriptBackground{}
 	plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"true","background":true}`)
 	outcome := plan.Execute(context.Background())
@@ -1924,7 +1742,7 @@ func TestRunCommandEnvResolvedAtStartNotPrepare(t *testing.T) {
 	t.Setenv(external, "early-value")
 	runCommand := openTools(t, t.TempDir())["run_command"]
 	ws := t.TempDir()
-	tc := callToolContext(ws, ToolConstraints{})
+	tc := callToolContext(ws)
 	tc.SubprocessEnv = testSubprocessEnv(managed)
 	plan := prepare(t, runCommand, tc, "run_command", `{"command":"printf '%s|%s' \"$MELTA_TIMING_EXTERNAL\" \"$MELTA_SCRUB_LATE\""}`)
 	// Both clocks move after Prepare: the external sibling changes and the
@@ -1944,7 +1762,7 @@ func TestBackgroundNilEnvSnapshotAbortsBeforeStart(t *testing.T) {
 	ws := t.TempDir()
 	fake := &fakeJobs{}
 	byID, _ := openToolsComposed(t, t.TempDir(), fake, nil)
-	tc := callToolContext(ws, ToolConstraints{})
+	tc := callToolContext(ws)
 	tc.SubprocessEnv = func(context.Context) ([]string, error) { return nil, nil } // a nil snapshot is never an ambient fallback
 	tc.Background = &scriptBackground{}
 	plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"true","background":true}`)

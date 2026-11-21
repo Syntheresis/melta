@@ -34,8 +34,16 @@ import (
 
 var publicModelRef = model.ModelRef{Provider: "prov", Model: "gpt-x"}
 
-func publicSelection(name string) harness.AgentSelection {
-	return harness.AgentSelection{Definition: &harness.DefinitionRef{ExtensionID: "agents", CapabilityID: "agents.definitions", DefinitionID: name}}
+// publicFixedStrategyResolver yields one fixed strategy binding for any
+// captured identity; the Harness checks the returned identity and window once.
+func publicFixedStrategyResolver(binding *harness.StrategyBinding) func(context.Context, string) (*harness.StrategyBinding, error) {
+	return func(context.Context, string) (*harness.StrategyBinding, error) {
+		return binding, nil
+	}
+}
+
+func publicInputs(name string) harness.SessionInputs {
+	return harness.SessionInputs{Instructions: &name}
 }
 
 // publicCapture is the fixed prepared capture of the suite.
@@ -72,18 +80,17 @@ func publicNormalize(_ context.Context, call model.ToolCall) (json.RawMessage, e
 // publicExecution is the suite's ordinary opened execution: an opener whose
 // invocations carry the two actual model callbacks selected by purpose, the
 // suite's required normalizer, and the immediate "no tools" result plan.
-func publicExecution(conversation, compact func(context.Context, model.Request) (model.Stream, error)) harness.Execution {
+func publicExecution(conversation, compact func(context.Context, model.Request, model.Extra) (model.Stream, error)) harness.Execution {
 	return harness.Execution{OpenInvocation: func(_ context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 		modelFn := conversation
 		if request.Purpose == harness.InvocationPurposeMaintenance {
 			modelFn = compact
 		}
 		return harness.InvocationExecution{
-			Model:         modelFn,
-			NormalizeTool: publicNormalize,
-			Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+			Model: modelFn,
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 				return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-			},
+			}, publicNormalize),
 		}, nil
 	}}
 }
@@ -91,13 +98,13 @@ func publicExecution(conversation, compact func(context.Context, model.Request) 
 // publicExecutionOver is the suite's opened execution shape over a caller's
 // tool-plan function: its invocations carry the purpose-selected model
 // callbacks, the suite's required normalizer, and the given plan.
-func publicExecutionOver(conversation, compact func(context.Context, model.Request) (model.Stream, error), tool func(context.Context, model.ToolCall) harness.PreparedTool) harness.Execution {
+func publicExecutionOver(conversation, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), tool func(context.Context, model.ToolCall) harness.PreparedTool) harness.Execution {
 	return harness.Execution{OpenInvocation: func(_ context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 		modelFn := conversation
 		if request.Purpose == harness.InvocationPurposeMaintenance {
 			modelFn = compact
 		}
-		return harness.InvocationExecution{Model: modelFn, NormalizeTool: publicNormalize, Tool: tool}, nil
+		return harness.InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(tool, publicNormalize)}, nil
 	}}
 }
 
@@ -209,7 +216,7 @@ func newScriptModel(attempts ...publicAttempt) *scriptModel {
 	return &scriptModel{arrived: make(chan struct{}, 16), attempts: attempts}
 }
 
-func (s *scriptModel) effect(_ context.Context, req model.Request) (model.Stream, error) {
+func (s *scriptModel) effect(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 	s.mu.Lock()
 	s.requests = append(s.requests, req)
 	gate := s.gate
@@ -289,14 +296,14 @@ type publicFixture struct {
 	defaultPrep harness.PreparedExecution
 }
 
-func newPublicFixture(t *testing.T, store harness.Storage, script *scriptModel, modelFn func(context.Context, model.Request) (model.Stream, error)) *publicFixture {
+func newPublicFixture(t *testing.T, store harness.Storage, script *scriptModel, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) *publicFixture {
 	return newPublicFixtureWithJobs(t, store, nil, script, modelFn, nil)
 }
 
 // newPublicFixtureWithJobs is the fixture's core builder: the same scripted
 // preparation over a Harness whose optional Jobs seam is installed. A nil
 // compact callback resolves to the conversation callback.
-func newPublicFixtureWithJobs(t *testing.T, store harness.Storage, stopper harness.JobStopper, script *scriptModel, modelFn, compactFn func(context.Context, model.Request) (model.Stream, error)) *publicFixture {
+func newPublicFixtureWithJobs(t *testing.T, store harness.Storage, stopper harness.JobStopper, script *scriptModel, modelFn, compactFn func(context.Context, model.Request, model.Extra) (model.Stream, error)) *publicFixture {
 	t.Helper()
 	if modelFn == nil {
 		modelFn = script.effect
@@ -371,7 +378,7 @@ func (f *publicFixture) close() { f.cancel() }
 
 func createSession(t *testing.T, h *harness.Harness) string {
 	t.Helper()
-	session, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: publicSelection("coder")})
+	session, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: "/tmp/works", Inputs: publicInputs("coder")})
 	testassert.NoError(t, err)
 	return session.Identity.SessionID
 }
@@ -447,7 +454,7 @@ func TestPublicTurnLifecycle(t *testing.T) {
 		res, err := submit(t, f.h, session, "op-1", harness.MessageModeRegular, "hello")
 		testassert.Require(t, err == nil && res.Disposition == harness.DispositionAdmitted && res.Operation != nil, "first submit = %+v err %v, want admitted", res, err)
 		rec := res.Operation
-		testassert.Require(t, rec.State.Status == harness.OperationRunning && rec.Admission.AgentSelection.Definition.DefinitionID == "coder" && rec.Admission.Execution.ConfigurationRevision == "rev-1" && rec.Admission.Execution.Model == publicModelRef, "admitted record = %+v", rec)
+		testassert.Require(t, rec.State.Status == harness.OperationRunning && reflect.DeepEqual(rec.Admission.Inputs, publicInputs("coder")) && rec.Admission.Execution.ConfigurationRevision == "rev-1" && rec.Admission.Execution.Model == publicModelRef, "admitted record = %+v", rec)
 		<-script.arrived // parked at the first model boundary: the Session is active
 		{
 			got := texts(script.seen()[0])
@@ -486,7 +493,7 @@ func TestPublicTurnLifecycle(t *testing.T) {
 		second, err := f.h.ReadOperation(context.Background(), session, "op-2")
 		testassert.Require(t, err == nil && second.State.Status == harness.OperationFailure && second.State.Terminal != nil && second.State.Terminal.Detail == "second turn failed", "drained operation = %+v err %v, want terminal failure with its detail", second, err)
 		calls := f.preparationCalls()
-		testassert.Require(t, len(calls) == 2 && calls[0].Session.AgentSelection.Definition.DefinitionID == "coder" && calls[1].Session.AgentSelection.Definition.DefinitionID == "coder", "preparation calls = %+v, want one per admission with the Session type", calls)
+		testassert.Require(t, len(calls) == 2 && reflect.DeepEqual(calls[0].Session.Inputs, publicInputs("coder")) && reflect.DeepEqual(calls[1].Session.Inputs, publicInputs("coder")), "preparation calls = %+v, want one per admission with the Session inputs", calls)
 	})
 }
 
@@ -903,8 +910,8 @@ func TestPublicAgentTypeChange(t *testing.T) {
 			_, err := submit(t, f.h, session, "op-2", harness.MessageModeQueued, "queued-1")
 			testassert.NoError(t, err)
 		}
-		changed, err := f.h.ChangeAgentType(context.Background(), session, publicSelection("reviewer"))
-		testassert.Require(t, err == nil && changed.State.AgentSelection.Definition.DefinitionID == "reviewer", "ChangeAgentType = %+v err %v, want success during the blocked effect", changed, err)
+		changed, err := f.h.SetSessionInputs(context.Background(), session, publicInputs("reviewer"))
+		testassert.Require(t, err == nil && reflect.DeepEqual(changed.State.Inputs, publicInputs("reviewer")), "SetSessionInputs = %+v err %v, want success during the blocked effect", changed, err)
 		script.releaseGate()
 
 		<-f.prepare // the drained admission prepared again
@@ -914,9 +921,9 @@ func TestPublicAgentTypeChange(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		calls := f.preparationCalls()
-		testassert.Require(t, len(calls) == 2 && calls[0].Session.AgentSelection.Definition.DefinitionID == "coder" && calls[1].Session.AgentSelection.Definition.DefinitionID == "reviewer", "preparation agent types = %+v, want the capture-time value then the changed one", calls)
+		testassert.Require(t, len(calls) == 2 && reflect.DeepEqual(calls[0].Session.Inputs, publicInputs("coder")) && reflect.DeepEqual(calls[1].Session.Inputs, publicInputs("reviewer")), "preparation inputs = %+v, want the capture-time value then the changed one", calls)
 		first, err := f.h.ReadOperation(context.Background(), session, "op-1")
-		testassert.Require(t, err == nil && first.Admission.AgentSelection.Definition.DefinitionID == "coder" && first.State.Status == harness.OperationSuccess, "first operation = %+v err %v, want the immutable capture and success", first, err)
+		testassert.Require(t, err == nil && reflect.DeepEqual(first.Admission.Inputs, publicInputs("coder")) && first.State.Status == harness.OperationSuccess, "first operation = %+v err %v, want the immutable capture and success", first, err)
 	})
 }
 
@@ -1374,7 +1381,6 @@ func TestPublicOpenerInputMutationKeepsAdmittedExecution(t *testing.T) {
 				settled := make(chan struct{}, 1)
 				capture := publicCapture()
 				capture.Tools = []model.ToolDefinition{admitted}
-				capture.Capabilities = []string{"cap.one", "cap.two"}
 				f.prepareHook = func(int, harness.PreparationRequest) (harness.PreparedExecution, error) {
 					return harness.PreparedExecution{
 						Capture: capture,
@@ -1384,16 +1390,14 @@ func TestPublicOpenerInputMutationKeepsAdmittedExecution(t *testing.T) {
 								adm.Execution.Tools[0].Name = "renamed"
 								adm.Execution.Tools[0].Description = "renamed"
 								tamper(adm.Execution.Tools[0].Parameters, "admitted", "tampered")
-								adm.Execution.Capabilities[0] = "dropped"
 							}
 							return harness.Execution{
 								OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 									return harness.InvocationExecution{
-										Model:         script.effect,
-										NormalizeTool: publicNormalize,
-										Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+										Model: script.effect,
+										LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 											return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-										},
+										}, publicNormalize),
 									}, nil
 								},
 								Close: func() error { // runs after the terminal settlement commits
@@ -1432,7 +1436,7 @@ func TestPublicOpenerInputMutationKeepsAdmittedExecution(t *testing.T) {
 				testassert.NoError(t, err)
 				testassert.Equal(t, rec.State.Status, harness.OperationSuccess)
 				durable := rec.Admission.Execution
-				testassert.Require(t, len(durable.Tools) == 1 && durable.Tools[0].Name == "echo" && durable.Tools[0].Description == "echoes" && string(durable.Tools[0].Parameters) == string(admittedParams) && reflect.DeepEqual(durable.Capabilities, []string{"cap.one", "cap.two"}), "durable capture = %+v, want the admitted values", durable)
+				testassert.Require(t, len(durable.Tools) == 1 && durable.Tools[0].Name == "echo" && durable.Tools[0].Description == "echoes" && string(durable.Tools[0].Parameters) == string(admittedParams), "durable capture = %+v, want the admitted values", durable)
 			})
 		})
 	}
@@ -1559,7 +1563,7 @@ func TestPublicFinalBoundarySerialization(t *testing.T) {
 				first   = true
 			)
 			inner := script.effect
-			boundary := func(ctx context.Context, req model.Request) (model.Stream, error) {
+			boundary := func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 				if first { // submit at the model-result boundary, before the settlement returns
 					first = false
 					{
@@ -1567,7 +1571,7 @@ func TestPublicFinalBoundarySerialization(t *testing.T) {
 						testassert.Check(t, err == nil, "boundary submit: %v", err)
 					}
 				}
-				return inner(ctx, req)
+				return inner(ctx, req, parameters)
 			}
 			f = newPublicFixture(t, store, script, boundary)
 			defer f.close()
@@ -1612,7 +1616,7 @@ func TestPublicFinalBoundarySerialization(t *testing.T) {
 				first   = true
 			)
 			inner := script.effect
-			boundary := func(ctx context.Context, req model.Request) (model.Stream, error) {
+			boundary := func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 				if first { // defer one queued message at the final model-result boundary
 					first = false
 					{
@@ -1620,7 +1624,7 @@ func TestPublicFinalBoundarySerialization(t *testing.T) {
 						testassert.Check(t, err == nil, "boundary submit: %v", err)
 					}
 				}
-				return inner(ctx, req)
+				return inner(ctx, req, parameters)
 			}
 			f = newPublicFixture(t, store, script, boundary)
 			defer f.close()
@@ -1661,12 +1665,12 @@ func TestPublicSessionsExecuteConcurrently(t *testing.T) {
 			publicFail("second session settled"), // model-originated terminal: durable regardless of later cancellation
 		)
 		parkedEffect, finishedEffect := parked.effect, finished.effect
-		route := func(ctx context.Context, req model.Request) (model.Stream, error) {
+		route := func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
 			got := texts(req)
 			if got[len(got)-1] == "first" {
-				return parkedEffect(ctx, req)
+				return parkedEffect(ctx, req, parameters)
 			}
-			return finishedEffect(ctx, req)
+			return finishedEffect(ctx, req, parameters)
 		}
 		f := newPublicFixture(t, store, parked, route)
 		defer f.close()
@@ -1913,18 +1917,14 @@ func TestPublicToolMetadataPersistsOpaqueAcrossStores(t *testing.T) {
 
 // TestPublicPreparedPermissionBoundarySurvivesRestart proves the prepared
 // permission boundary through the public surface on both stores: the
-// committed capture
-// carries the durable permission capability members; the advertised call's
-// original normalization commits at the assistant producer and the allowed
-// executor consumes those committed bytes; an immediate-success plan that
+// advertised call is normalized at dispatch and the allowed executor consumes
+// the intent's committed bytes; an immediate-success plan that
 // omits its declarations is denied through the public path with the fixed
 // bounded content and no metadata; and recovery revalidates the whole result
 // with the capture and normalization unchanged.
 func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		capture := publicCapture()
-		capture.Readonly = true
-		capture.WriteDir = "/w/sub"
 		script := newScriptModel(
 			publicTurn("call-1", "call-2"),
 			publicTurn(),
@@ -1971,7 +1971,6 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 		testassert.Require(t, string(consumed) == `{"x":1}`, "executor saw arguments %s, want the committed normalized bytes", consumed)
 		rec, err := f.h.ReadOperation(context.Background(), session, "op-1")
 		testassert.NoError(t, err)
-		testassert.Require(t, rec.Admission.Execution.Readonly && rec.Admission.Execution.WriteDir == "/w/sub", "committed capture = %v %q, want the durable permission capability members", rec.Admission.Execution.Readonly, rec.Admission.Execution.WriteDir)
 		var normalized, denial, settled int
 		for _, entry := range recoverEntries(t, store, session) {
 			var wire map[string]json.RawMessage
@@ -1980,21 +1979,12 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 				testassert.Require(t, err == nil, "decode %s payload: %v", entry.ID, err)
 			}
 			switch entry.Kind {
-			case harness.EntryAssistant:
-				var calls []struct {
-					ID                  string `json:"id"`
-					NormalizedArguments []byte `json:"normalized_arguments_base64"`
-				}
-				{
-					err := json.Unmarshal(wire["tool_calls"], &calls)
-					testassert.NoError(t, err)
-				}
-				for _, call := range calls {
-					testassert.Require(t, string(call.NormalizedArguments) == `{"x":1}`, "%s normalized_arguments = %s, want the producer's committed object", call.ID, call.NormalizedArguments)
-					normalized++
-				}
 			case harness.EntryToolResult:
 				settled++
+				var args []byte
+				testassert.NoError(t, json.Unmarshal(wire["normalized_arguments_base64"], &args))
+				testassert.Require(t, string(args) == `{"x":1}` && len(wire["implementation"]) > 0, "tool result missing bound implementation or effective arguments: %s", entry.Payload)
+				normalized++
 				var callID, status string
 				{
 					err := json.Unmarshal(wire["tool_call_id"], &callID)
@@ -2022,7 +2012,7 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		after, err := f.h.ReadOperation(context.Background(), session, "op-1")
-		testassert.Require(t, err == nil && after.Admission.Execution.WriteDir == "/w/sub" && after.Admission.Execution.Readonly, "capture after recovery = %+v err %v, want the same durable constraints", after.Admission.Execution, err)
+		testassert.Require(t, err == nil && reflect.DeepEqual(after.Admission.Execution, rec.Admission.Execution), "capture after recovery = %+v err %v, want the committed capture unchanged", after.Admission.Execution, err)
 	})
 }
 
@@ -2074,7 +2064,7 @@ func TestPublicSessionLifecycle(t *testing.T) {
 				testassert.Equal(t, reg.Revision, back.Revision)
 			}
 			testassert.Require(t, back.State.LastActivity.After(originalActivity), "reopen left last activity at %v, want it advanced past %v", back.State.LastActivity, originalActivity)
-			testassert.Require(t, back.Identity == first.Identity && back.State.AgentSelection.Definition.DefinitionID == "coder", "reopen changed identity or Agent type: %+v", back)
+			testassert.Require(t, back.Identity == first.Identity && reflect.DeepEqual(back.State.Inputs, publicInputs("coder")), "reopen changed identity or inputs: %+v", back)
 
 			againOpen, err := f.h.ReopenSession(ctx, session)
 			testassert.Require(t, err == nil && againOpen.Revision == back.Revision && againOpen.State.LastActivity.Equal(back.State.LastActivity), "second reopen = %+v err %v, want the no-write success", againOpen, err)
@@ -2149,7 +2139,7 @@ func TestPublicSessionLifecycle(t *testing.T) {
 			defer closeRelease.Do(func() { close(release) }) // the latch releases in every outcome
 			defer script.releaseGate()                       // the gated attempt releases in every outcome
 			h = f.h
-			session, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: publicSelection("coder")})
+			session, err := h.CreateSession(context.Background(), harness.CreateSessionRequest{Workspace: "/tmp/works", Inputs: publicInputs("coder")})
 			testassert.NoError(t, err)
 			sessionID = session.Identity.SessionID
 
@@ -2280,7 +2270,7 @@ func TestPublicSessionLifecycle(t *testing.T) {
 				testassert.Require(t, errors.Is(err, harness.ErrNotFound), "submit after delete = err %v, want ErrNotFound", err)
 			}
 			{
-				_, err := f.h.ChangeAgentType(ctx, session, publicSelection("reviewer"))
+				_, err := f.h.SetSessionInputs(ctx, session, publicInputs("reviewer"))
 				testassert.Require(t, errors.Is(err, harness.ErrNotFound), "agent-type change after delete = err %v, want ErrNotFound", err)
 			}
 			{
@@ -2686,7 +2676,7 @@ func seedArchivedSession(t *testing.T, store harness.Storage) string {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	payload := fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q},`+
-			`"state":{"lifecycle":"archived","archived_at":%q,"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},`+
+			`"state":{"lifecycle":"archived","archived_at":%q,"inputs":{"instructions":"coder"},"extension_state":{},`+
 			`"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`, id, now, now, now)
 	err := store.Transact(context.Background(), func(tx harness.Transaction) error {
 		_, err := tx.InsertRegister(harness.RegisterDraft{
@@ -2933,7 +2923,7 @@ func assertRollback(t *testing.T, store harness.Storage, h *harness.Harness, ses
 	testassert.Require(t, after.Revision == before.Revision && bytes.Equal(after.Payload, before.Payload), "failed transition changed the durable register (revision %d -> %d)", before.Revision, after.Revision)
 	got, err := h.ReadSessionHeader(context.Background(), session)
 	testassert.NoError(t, err)
-	testassert.Require(t, got.Revision == want.Revision && got.Lifecycle == want.Lifecycle && got.LastActivity.Equal(want.LastActivity) && reflect.DeepEqual(got.AgentSelection, want.AgentSelection) && ((got.ArchivedAt == nil) == (want.ArchivedAt == nil) && (got.ArchivedAt == nil || got.ArchivedAt.Equal(*want.ArchivedAt))), "cached view after failed transition = %+v, want the pre-attempt record; cached view archived_at after failed transition = %v, want %v", got, got.ArchivedAt, want.ArchivedAt)
+	testassert.Require(t, got.Revision == want.Revision && got.Lifecycle == want.Lifecycle && got.LastActivity.Equal(want.LastActivity) && reflect.DeepEqual(got.Inputs, want.Inputs) && ((got.ArchivedAt == nil) == (want.ArchivedAt == nil) && (got.ArchivedAt == nil || got.ArchivedAt.Equal(*want.ArchivedAt))), "cached view after failed transition = %+v, want the pre-attempt record; cached view archived_at after failed transition = %v, want %v", got, got.ArchivedAt, want.ArchivedAt)
 }
 
 // TestPublicLifecycleRollbackOnTransactionFailure proves the lifecycle row's
@@ -3294,7 +3284,7 @@ func rawSessionRegister(sessionID, currentOp string) string {
 	}
 	return fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q},`+
-			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}}%s,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
+			`"state":{"lifecycle":"open","inputs":{"instructions":"coder"},"extension_state":{}%s,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		sessionID, now, current, now)
 }
 
@@ -3304,10 +3294,10 @@ func rawAdmission(sessionID, operationID, entryID string) string {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	return fmt.Sprintf(
 		`{"session_id":%q,"operation_id":%q,"request_kind":"message",`+
-			`"admitted_entry":{"session_id":%q,"entry_id":%q},"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},`+
+			`"admitted_entry":{"session_id":%q,"entry_id":%q},"inputs":{"instructions":"coder"},`+
 			`"execution":{"configuration_revision":"rev-1","model":{"provider":"prov","model":"gpt-x"},`+
 			`"context_window":4096,"output_reserve":2048,`+
-			`"system_prompt":"system","tools":[%s],"initial_tool_names":["echo"],"readonly":false,"write_dir":"",`+
+			`"system_prompt":"system","tools":[%s],"initial_tool_names":["echo"],`+
 			`"compact":{"model":{"provider":"cprov","model":"compact-x"},"system_prompt":"summarize"},`+
 			`"strategy":{"id":"melta.summary/v1","requires_context_window":true}},"admitted_at":%q}`,
 		sessionID, operationID, sessionID, entryID, rawToolDefinition, now)
@@ -3332,7 +3322,7 @@ func rawAssistantEntryPayload(sessionID, entryID, operationID, boundaryID string
 	}
 	return fmt.Sprintf(
 		`{"session_id":%q,"entry_id":%q,"operation_id":%q,"status":"completed",`+
-			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":"done"}],"tool_calls":[%s],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":[]}}`,
+			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":"done"}],"tool_calls":[%s],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[]}}`,
 		sessionID, entryID, operationID, strings.Join(parts, ","), "request-a-"+entryID, boundaryID)
 }
 
@@ -3361,10 +3351,10 @@ func seedRunningOperationShape(t *testing.T, store harness.Storage, activeEffect
 	switch activeEffect {
 	case "model":
 		modelReserved = newRawSessionID(t)
-		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live","model":{"provider":"prov","model":"gpt-x"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]}}`, modelReserved, entryID)
-		requestJSON = fmt.Sprintf(`,"running_request":{"request_id":"request-live","boundary_entry_id":%q,"hook_results":[]}`, entryID)
+		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live","model":{"provider":"prov","model":"gpt-x"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]}}`, modelReserved, entryID)
+		requestJSON = fmt.Sprintf(`,"running_request":{"request_id":"request-live","purpose":"conversation","boundary_entry_id":%q,"hook_results":[]}`, entryID)
 	case "tool":
-		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"tool","result_entry_id":%q,"tool_call_id":%q,"final_arguments_base64":"eyJ4IjoxfQ=="}`, reserved[0], calls[0])
+		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"tool","result_entry_id":%q,"tool_call_id":%q,"final_arguments_base64":"eyJ4IjoxfQ==","implementation":{"id":"echo","extension_id":"ext.raw"}}`, reserved[0], calls[0])
 	case "hook":
 		modelReserved = newRawSessionID(t) // the hook effect's own reserved result identity
 		activeEffectJSON = fmt.Sprintf(`,"active_effect":{"kind":"hook","result_entry_id":%q,"tool_call_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","input_arguments_base64":""}`, modelReserved, calls[0])
@@ -3636,6 +3626,21 @@ func TestPublicRecoverRunningOperationShapes(t *testing.T) {
 					testassert.NoError(t, err)
 				}
 				assertRecoveredOperation(t, store, sessionID, "op-1", pre, modelReserved, wantResults)
+				for _, entry := range recoverEntries(t, store, sessionID) {
+					if entry.Kind != harness.EntryToolResult {
+						continue
+					}
+					var wire struct {
+						Implementation *harness.ToolImplementation `json:"implementation"`
+						Arguments      []byte                      `json:"normalized_arguments_base64"`
+					}
+					testassert.NoError(t, json.Unmarshal(entry.Payload, &wire))
+					if shape.activeEffect == "tool" && entry.ID == pendingResultIDs[0] {
+						testassert.Require(t, wire.Implementation != nil && wire.Implementation.ID == "echo" && wire.Implementation.ExtensionID == "ext.raw" && string(wire.Arguments) == `{"x":1}`, "recovered active tool binding = %+v arguments = %q", wire.Implementation, wire.Arguments)
+					} else {
+						testassert.Require(t, wire.Implementation == nil && len(wire.Arguments) == 0, "unstarted tool acquired binding = %+v arguments = %q", wire.Implementation, wire.Arguments)
+					}
+				}
 				assertRecoverIdempotent(t, store, sessionID, "op-1")
 
 				h := harnessOver(t, store) // one Harness after recovery: materialization verification only
@@ -3735,7 +3740,7 @@ const (
 // answering the given assistant entry's call under the reserved identity.
 func rawToolResultPayload(sessionID, entryID, operationID, assistantEntryID, callID string) string {
 	return fmt.Sprintf(
-		`{"session_id":%q,"entry_id":%q,"operation_id":%q,"assistant_entry":{"session_id":%q,"entry_id":%q},"tool_call_id":%q,"status":"success","content":"done","original_content":"done","evidence":"observed"}`,
+		`{"session_id":%q,"entry_id":%q,"operation_id":%q,"assistant_entry":{"session_id":%q,"entry_id":%q},"tool_call_id":%q,"status":"success","content":"done","original_content":"done","evidence":"observed","normalized_arguments_base64":"e30=","implementation":{"id":"echo"}}`,
 		sessionID, entryID, operationID, sessionID, assistantEntryID, callID)
 }
 
@@ -3820,7 +3825,7 @@ func rawCopiedAssistantPayload(sessionID, entryID, boundaryID string, calls [][2
 	}
 	return fmt.Sprintf(
 		`{"session_id":%q,"entry_id":%q,"status":"completed",`+
-			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":"done"}],"tool_calls":[%s],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":[]}}`,
+			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":"done"}],"tool_calls":[%s],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[]}}`,
 		sessionID, entryID, strings.Join(parts, ","), "request-a-"+entryID, boundaryID)
 }
 
@@ -3828,7 +3833,7 @@ func rawCopiedAssistantPayload(sessionID, entryID, boundaryID string, calls [][2
 // payload answering the given copied assistant entry's call.
 func rawCopiedResultPayload(sessionID, entryID, assistantEntryID, callID string) string {
 	return fmt.Sprintf(
-		`{"session_id":%q,"entry_id":%q,"assistant_entry":{"session_id":%q,"entry_id":%q},"tool_call_id":%q,"status":"success","content":"done","original_content":"done","evidence":"observed"}`,
+		`{"session_id":%q,"entry_id":%q,"assistant_entry":{"session_id":%q,"entry_id":%q},"tool_call_id":%q,"status":"success","content":"done","original_content":"done","evidence":"observed","normalized_arguments_base64":"e30=","implementation":{"id":"echo"}}`,
 		sessionID, entryID, sessionID, assistantEntryID, callID)
 }
 
@@ -4566,12 +4571,12 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				input := snapEntryOf(snap, harness.EntryInput)
 				hookEntry := newRawSessionID(t)
 				snapAppendEntry(snap, sessionID, hookEntry, "op-1", harness.EntryHookResult, fmt.Sprintf(
-					`{"session_id":%q,"entry_id":%q,"operation_id":"op-1","hook_id":"cap.hook.one","extension_id":"ext.raw","request_id":"request-corrupt","status":"success","evidence":"observed","input_evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]},"consequence":{}}`,
+					`{"session_id":%q,"entry_id":%q,"operation_id":"op-1","hook_id":"cap.hook.one","extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","status":"success","evidence":"observed","input_evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]},"consequence":{}}`,
 					sessionID, hookEntry, input.ID))
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.two","hook_extension_id":"ext.raw2","request_id":"request-corrupt","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]}}`, newRawSessionID(t), input.ID))
-					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","boundary_entry_id":%q,"hook_results":[{"session_id":%q,"entry_id":%q}]}`, input.ID, sessionID, hookEntry))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.two","hook_extension_id":"ext.raw2","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]}}`, newRawSessionID(t), input.ID))
+					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","boundary_entry_id":%q,"hook_results":[{"session_id":%q,"entry_id":%q}]}`, input.ID, sessionID, hookEntry))
 				})
 			},
 		},
@@ -4590,7 +4595,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				})
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","checkpoint_entry_id":%q,"boundary_entry_id":%q}`, comp, input.ID))
+					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","checkpoint_entry_id":%q,"boundary_entry_id":%q}`, comp, input.ID))
 				})
 			},
 		},
@@ -4609,8 +4614,8 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				})
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","request_id":"request-corrupt","evidence":{"boundary_entry_id":%q,"checkpoint_entry_id":%q,"prompt":"system","tool_names":["echo"]}}`, newRawSessionID(t), input.ID, comp))
-					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","checkpoint_entry_id":%q,"boundary_entry_id":%q}`, comp, input.ID))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"checkpoint_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]}}`, newRawSessionID(t), input.ID, comp))
+					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","checkpoint_entry_id":%q,"boundary_entry_id":%q}`, comp, input.ID))
 				})
 			},
 		},
@@ -4625,7 +4630,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 					rawHookResultPayload(sessionID, hook, "op-1", "cap.hook.one", "call-1"))
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"tool","result_entry_id":%q,"tool_call_id":"call-1","final_arguments_base64":"eyJ4IjoxfQ=="}`, snapReservedResultID(t, snap)))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"tool","result_entry_id":%q,"tool_call_id":"call-1","final_arguments_base64":"eyJ4IjoxfQ==","implementation":{"id":"echo"}}`, snapReservedResultID(t, snap)))
 				})
 			},
 		},
@@ -4907,7 +4912,7 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 		detail    string
 	}{
 		{"missing prompt", "prompt", nil, `required member "prompt" is missing`},
-		{"null names", "tool_names", json.RawMessage(`null`), `member "tool_names" must not be null`},
+		{"null advertisement", "tools", json.RawMessage(`null`), `member "tools" must not be null`},
 	} {
 		rows = append(rows, corruptSiblingRow{
 			name:   "assistant evidence: " + mutation.name,
@@ -4928,12 +4933,12 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 		})
 	}
 	rows = append(rows, corruptSiblingRow{
-		name: "assistant evidence: foreign catalog name", seed: seedCorruptSiblingPendingCall,
-		detail: "evidence tool name \"foreign\" is outside the captured catalog",
+		name: "assistant evidence: malformed definition", seed: seedCorruptSiblingPendingCall,
+		detail: "tool definition",
 		mutate: func(t *testing.T, snap *sessionSnapshot) {
 			entry := snapEntryOf(snap, harness.EntryAssistant)
 			entry.Payload = editPayloadObject(t, entry.Payload, func(obj map[string]json.RawMessage) {
-				obj["evidence"] = editPayloadObject(t, obj["evidence"], func(ev map[string]json.RawMessage) { ev["tool_names"] = json.RawMessage(`["foreign"]`) })
+				obj["evidence"] = editPayloadObject(t, obj["evidence"], func(ev map[string]json.RawMessage) { ev["tools"] = json.RawMessage(`["foreign"]`) })
 			})
 		},
 	})
@@ -4966,31 +4971,19 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 		})
 	}
 
-	// The assistant normalized_arguments member inventory: the producer only
-	// ever writes one complete JSON object, so a persisted non-object member
-	// (an array representative — every wrong kind fails the same object check)
-	// is codec corruption: it isolates its Session at decode and can never
-	// reach the tool boundary as executable input.
-	normalizedKinds := []struct {
-		name  string
-		wrong json.RawMessage
-	}{
-		{"array kind", json.RawMessage(`[1,2]`)},
-	}
-	for _, mutation := range normalizedKinds {
-		rows = append(rows, corruptSiblingRow{
-			name: "assistant normalized_arguments wire: " + mutation.name,
-			seed: seedCorruptSiblingPendingCall,
-			mutate: func(t *testing.T, snap *sessionSnapshot) {
-				entry := snapEntryOf(snap, harness.EntryAssistant)
-				entry.Payload = editPayloadObject(t, entry.Payload, func(obj map[string]json.RawMessage) {
-					obj["tool_calls"] = editJSONArray(t, obj["tool_calls"], func(items []map[string]json.RawMessage) {
-						items[0]["normalized_arguments_base64"], _ = json.Marshal(base64.StdEncoding.EncodeToString(mutation.wrong))
-					})
+	// Assistant records no longer accept a speculative normalization member.
+	rows = append(rows, corruptSiblingRow{
+		name: "assistant normalized_arguments wire: array kind",
+		seed: seedCorruptSiblingPendingCall,
+		mutate: func(t *testing.T, snap *sessionSnapshot) {
+			entry := snapEntryOf(snap, harness.EntryAssistant)
+			entry.Payload = editPayloadObject(t, entry.Payload, func(obj map[string]json.RawMessage) {
+				obj["tool_calls"] = editJSONArray(t, obj["tool_calls"], func(items []map[string]json.RawMessage) {
+					items[0]["normalized_arguments_base64"], _ = json.Marshal(base64.StdEncoding.EncodeToString([]byte(`[1,2]`)))
 				})
-			},
-		})
-	}
+			})
+		},
+	})
 
 	// The forbidden input_arguments_base64 membership inventory: a member its
 	// binding never permits corrupts the Session at the shared decode before
@@ -5006,11 +4999,11 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				input := snapEntryOf(snap, harness.EntryInput)
 				hook := newRawSessionID(t)
 				snapAppendEntry(snap, sessionID, hook, "op-1", harness.EntryHookResult, fmt.Sprintf(
-					`{"session_id":%q,"entry_id":%q,"operation_id":"op-1","hook_id":"cap.hook.one","extension_id":"ext.raw","request_id":"request-corrupt","status":"success","evidence":"observed","input_evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]},"consequence":{},"input_arguments_base64":""}`,
+					`{"session_id":%q,"entry_id":%q,"operation_id":"op-1","hook_id":"cap.hook.one","extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","status":"success","evidence":"observed","input_evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]},"consequence":{},"input_arguments_base64":""}`,
 					sessionID, hook, input.ID))
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","boundary_entry_id":%q,"hook_results":[{"session_id":%q,"entry_id":%q}]}`, input.ID, sessionID, hook))
+					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","boundary_entry_id":%q,"hook_results":[{"session_id":%q,"entry_id":%q}]}`, input.ID, sessionID, hook))
 				})
 			},
 		},
@@ -5022,8 +5015,8 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				input := snapEntryOf(snap, harness.EntryInput)
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","request_id":"request-corrupt","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]},"input_arguments_base64":""}`, newRawSessionID(t), input.ID))
-					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","boundary_entry_id":%q}`, input.ID))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"hook","result_entry_id":%q,"hook_id":"cap.hook.one","hook_extension_id":"ext.raw","request_id":"request-corrupt","purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]},"input_arguments_base64":""}`, newRawSessionID(t), input.ID))
+					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","boundary_entry_id":%q}`, input.ID))
 				})
 			},
 		},
@@ -5035,8 +5028,8 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 				input := snapEntryOf(snap, harness.EntryInput)
 				reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 				reg.Payload = editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"model","result_entry_id":%q,"request_id":"request-corrupt","model":{"provider":"prov","model":"m"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]},"input_arguments_base64":""}`, newRawSessionID(t), input.ID))
-					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","boundary_entry_id":%q}`, input.ID))
+					state["active_effect"] = json.RawMessage(fmt.Sprintf(`{"kind":"model","result_entry_id":%q,"request_id":"request-corrupt","model":{"provider":"prov","model":"m"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[{"name":"echo","description":"echoes","parameters_base64":"e30="}]},"input_arguments_base64":""}`, newRawSessionID(t), input.ID))
+					state["running_request"] = json.RawMessage(fmt.Sprintf(`{"request_id":"request-corrupt","purpose":"conversation","boundary_entry_id":%q}`, input.ID))
 				})
 			},
 		},
@@ -5156,18 +5149,18 @@ func TestPublicRecoverCorruptSibling(t *testing.T) {
 		})
 	}
 
-	// A malformed persisted execution-capture permission member isolates its
+	// A malformed persisted execution-capture numeric member isolates its
 	// Session with the typed corruption error while a valid sibling stays
 	// usable. The codec table owns the missing/null/wrong-type shape
-	// enumeration for both members; this row proves the recovery routing.
+	// enumeration; this row proves the recovery routing.
 	rows = append(rows, corruptSiblingRow{
-		name: "operation admission execution wire: malformed readonly",
+		name: "operation admission execution wire: malformed context_window",
 		seed: seedCorruptSiblingRunning,
 		mutate: func(t *testing.T, snap *sessionSnapshot) {
 			reg := snapRegisterOf(snap, harness.RegisterOperation, "op-1")
 			reg.Payload = editOperationAdmission(t, reg.Payload, func(admission map[string]json.RawMessage) {
 				admission["execution"] = editPayloadObject(t, admission["execution"], func(exec map[string]json.RawMessage) {
-					exec["readonly"] = json.RawMessage(`"true"`)
+					exec["context_window"] = json.RawMessage(`"x"`)
 				})
 			})
 		},
@@ -5316,7 +5309,7 @@ func rawForkSessionRegister(sessionID, sourceID, boundaryID, currentOp string) s
 	return fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q,`+
 			`"source_session_id":%q,"source_boundary_entry_id":%q},`+
-			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}}%s,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
+			`"state":{"lifecycle":"open","inputs":{"instructions":"coder"},"extension_state":{}%s,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		sessionID, now, sourceID, boundaryID, current, now)
 }
 
@@ -5376,7 +5369,7 @@ func (s *corruptReadStore) ReadRegister(ctx context.Context, key harness.Registe
 // destination execution starts after the commit and projects the copied
 // prefix before the fork input.
 func TestPublicForkPrepareOwnsSelection(t *testing.T) {
-	for _, form := range []string{"definition", "resolved"} {
+	for _, form := range []string{"instructions", "tools"} {
 		t.Run(form, func(t *testing.T) {
 			store := storage.NewMemory()
 			script := newScriptModel(publicTurn(), publicTurn())
@@ -5386,30 +5379,58 @@ func TestPublicForkPrepareOwnsSelection(t *testing.T) {
 			_, err := submit(t, f.h, source, "source-op", harness.MessageModeRegular, "hello")
 			testassert.NoError(t, err)
 			awaitTerminal(t, f.h, source, "source-op")
-			selection := publicSelection("coder")
-			if form == "resolved" {
-				selection = harness.AgentSelection{Inputs: &harness.AgentInputs{AssemblyMode: "full", Tools: []string{"read_file"}, Capabilities: []string{"cap"}, Strategy: harness.StrategySelection{Settings: json.RawMessage(`{"selected":1}`)}}}
+			selection := publicInputs("coder")
+			if form == "tools" {
+				selection = harness.SessionInputs{Tools: []string{"read_file"}, Strategy: &harness.StrategySelection{ID: "strategy", Settings: json.RawMessage(`{"selected":1}`)}}
 			}
-			_, err = f.h.ChangeAgentType(context.Background(), source, selection)
+			_, err = f.h.SetSessionInputs(context.Background(), source, selection)
+			testassert.NoError(t, err)
+			_, err = f.h.SetSessionExtensionState(context.Background(), source, "dormant", []byte(` {"v":1} `))
 			testassert.NoError(t, err)
 			boundary := forkEntryOf(t, store, source, harness.EntryInput, "source-op").ID
 			f.prepareHook = func(_ int, req harness.PreparationRequest) (harness.PreparedExecution, error) {
-				if req.Session.AgentSelection.Inputs != nil {
-					i := req.Session.AgentSelection.Inputs
-					i.Tools[0], i.Capabilities[0], i.Strategy.Settings[2] = "changed", "changed", 'X'
+				testassert.Require(t, len(req.Content) == 1 && req.Content[0].Text == "fork", "fork preparation input = %+v", req.Content)
+				testassert.Equal(t, string(req.Session.ExtensionState["dormant"]), ` {"v":1} `)
+				req.Session.ExtensionState["dormant"][0] = 'x'
+				if form == "tools" {
+					i := req.Session.Inputs
+					i.Tools[0], i.Strategy.Settings[2] = "changed", 'X'
 				} else {
-					req.Session.AgentSelection.Definition.DefinitionID = "changed"
+					*req.Session.Inputs.Instructions = "changed"
 				}
 				return f.defaultPrep, nil
 			}
 			forked, err := f.h.Fork(context.Background(), harness.ForkRequest{Origin: harness.InputOriginUser, SourceSessionID: source, BoundaryEntryID: boundary, OperationID: "fork-op", Content: []model.ContentPart{{Kind: model.PartText, Text: "fork"}}})
 			testassert.NoError(t, err)
-			testassert.Require(t, reflect.DeepEqual(forked.Session.State.AgentSelection, selection) && reflect.DeepEqual(forked.Operation.Admission.AgentSelection, selection), "fork callback changed selection: %+v", forked)
+			forkEntryOf(t, store, forked.Session.Identity.SessionID, harness.EntryInput, "fork-op")
+			testassert.Require(t, reflect.DeepEqual(forked.Session.State.Inputs, selection) && reflect.DeepEqual(forked.Operation.Admission.Inputs, selection) && string(forked.Session.State.ExtensionState["dormant"]) == ` {"v":1} `, "fork callback changed inputs or state: %+v", forked)
 			header, err := f.h.ReadSessionHeader(context.Background(), source)
 			testassert.NoError(t, err)
-			testassert.Require(t, reflect.DeepEqual(header.AgentSelection, selection), "fork callback changed source: %+v", header)
+			testassert.Require(t, reflect.DeepEqual(header.Inputs, selection), "fork callback changed source: %+v", header)
 		})
 	}
+}
+
+func TestPublicForkPreparationRefusalLeavesNoDestination(t *testing.T) {
+	store := storage.NewMemory()
+	f := newPublicFixture(t, store, newScriptModel(publicTurn()), nil)
+	defer f.close()
+	source := createSession(t, f.h)
+	_, err := submit(t, f.h, source, "source-op", harness.MessageModeRegular, "hello")
+	testassert.NoError(t, err)
+	awaitTerminal(t, f.h, source, "source-op")
+	boundary := forkEntryOf(t, store, source, harness.EntryInput, "source-op").ID
+	refused := errors.New("refused preparation")
+	f.prepareHook = func(_ int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
+		return harness.PreparedExecution{}, refused
+	}
+	result, err := f.h.Fork(context.Background(), harness.ForkRequest{
+		Origin: harness.InputOriginUser, SourceSessionID: source, BoundaryEntryID: boundary,
+		OperationID: "refused-fork", Content: []model.ContentPart{{Kind: model.PartText, Text: "fork"}},
+	})
+	testassert.Require(t, errors.Is(err, refused) && result.Session.Identity.SessionID == "", "refused fork = %+v, %v", result, err)
+	sessions, err := f.h.ListSessions(context.Background())
+	testassert.Require(t, err == nil && len(sessions) == 1 && sessions[0].Identity.SessionID == source, "sessions after refusal = %+v, %v", sessions, err)
 }
 
 func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
@@ -5496,7 +5517,7 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		dest := res.Session.Identity.SessionID
 		testassert.Require(t, dest != source && res.Session.Identity.SessionID != "", "fork session identity = %+v, want one fresh identity", res.Session.Identity)
 		testassert.Require(t, len(storedOwners(t, store, dest)) == 0, "durable fork destination owners = %v, want none", storedOwners(t, store, dest))
-		testassert.Require(t, res.Session.Identity.Workspace == "/tmp/works" && res.Session.Identity.SourceSessionID == source && res.Session.Identity.SourceBoundaryEntryID == boundary && (res.Session.State.Lifecycle == harness.LifecycleOpen && res.Session.State.AgentSelection.Definition.DefinitionID == "coder" && len(res.Session.State.Usage.ByModel) == 0 && res.Session.State.CurrentOperationID == "fork-1" && len(res.Session.State.ExternalDataOwners) == 0) && (res.Operation.State.Status == harness.OperationRunning && res.Operation.Admission.OperationID == "fork-1" && res.Operation.Admission.RequestKind == harness.RequestKindMessage && res.Operation.Admission.AgentSelection.Definition.DefinitionID == "coder" && res.Operation.Admission.AdmittedEntry.SessionID == dest && res.Operation.Admission.Execution.ConfigurationRevision == "rev-1"), "fork identity = %+v, want the inherited workspace and source/boundary lineage; fork session state = %+v, want open, the source type, zero usage, and the running fork; fork operation = %+v, want a running message admission with the fresh capture", res.Session.Identity, res.Session.State, res.Operation)
+		testassert.Require(t, res.Session.Identity.Workspace == "/tmp/works" && res.Session.Identity.SourceSessionID == source && res.Session.Identity.SourceBoundaryEntryID == boundary && (res.Session.State.Lifecycle == harness.LifecycleOpen && reflect.DeepEqual(res.Session.State.Inputs, publicInputs("coder")) && len(res.Session.State.Usage.ByModel) == 0 && res.Session.State.CurrentOperationID == "fork-1" && len(res.Session.State.ExternalDataOwners) == 0) && (res.Operation.State.Status == harness.OperationRunning && res.Operation.Admission.OperationID == "fork-1" && res.Operation.Admission.RequestKind == harness.RequestKindMessage && reflect.DeepEqual(res.Operation.Admission.Inputs, publicInputs("coder")) && res.Operation.Admission.AdmittedEntry.SessionID == dest && res.Operation.Admission.Execution.ConfigurationRevision == "rev-1"), "fork identity = %+v, want the inherited workspace and source/boundary lineage; fork session state = %+v; fork operation = %+v", res.Session.Identity, res.Session.State, res.Operation)
 
 		<-forkScript.arrived // the destination execution reached its model boundary
 		{
@@ -5511,7 +5532,7 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		}
 
 		calls := f2.preparationCalls()
-		testassert.Require(t, len(calls) == 1 && calls[0].Session.Identity.Workspace == "/tmp/works" && calls[0].Session.AgentSelection.Definition.DefinitionID == "coder", "fork preparation calls = %+v, want one call with the source workspace and Agent type", calls)
+		testassert.Require(t, len(calls) == 1 && calls[0].Session.Identity.Workspace == "/tmp/works" && reflect.DeepEqual(calls[0].Session.Inputs, publicInputs("coder")), "fork preparation calls = %+v, want one call with the source workspace and inputs", calls)
 
 		// the source is byte-identical after the fork
 		assertForkSourceUnchanged(t, store, source, before)
@@ -5555,20 +5576,23 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		}
 		testassert.Require(t, copiedAssistant.Usage == nil, "copied assistant carries source usage")
 		testassert.Require(t, len(copiedAssistant.ToolCalls) == 1 && copiedAssistant.ToolCalls[0].ID == "call-1" && copiedAssistant.ToolCalls[0].ResultEntryID == entries[2].ID, "copied call reservation = %+v, want it rewritten to the copied result entry %s", copiedAssistant.ToolCalls, entries[2].ID)
-		testassert.Require(t, string(copiedAssistant.ToolCalls[0].NormalizedArguments) == `{"x":1}`, "copied assistant normalized arguments = %s, want the source's committed normalization preserved verbatim", copiedAssistant.ToolCalls[0].NormalizedArguments)
 		var copiedResult struct {
 			AssistantEntry struct {
 				SessionID string `json:"session_id"`
 				EntryID   string `json:"entry_id"`
 			} `json:"assistant_entry"`
-			ToolCallID string `json:"tool_call_id"`
-			Metadata   []byte `json:"metadata_base64"`
+			ToolCallID          string                      `json:"tool_call_id"`
+			Metadata            []byte                      `json:"metadata_base64"`
+			NormalizedArguments []byte                      `json:"normalized_arguments_base64"`
+			Implementation      *harness.ToolImplementation `json:"implementation"`
 		}
 		{
 			err := json.Unmarshal(entries[2].Payload, &copiedResult)
 			testassert.NoError(t, err)
 		}
 		testassert.Require(t, copiedResult.AssistantEntry.SessionID == dest && copiedResult.AssistantEntry.EntryID == entries[1].ID && copiedResult.ToolCallID == "call-1" && string(copiedResult.Metadata) == `{ "n" : [1, 1.0, 1e0, 9007199254740993], "s" : "<>&" }`, "copied result reference = %+v, want it rewritten inside the copied prefix; copied result metadata = %s, want the source metadata preserved verbatim", copiedResult.AssistantEntry, copiedResult.Metadata)
+		testassert.Require(t, string(copiedResult.NormalizedArguments) == `{"x":1}`, "copied result arguments = %s", copiedResult.NormalizedArguments)
+		testassert.Require(t, copiedResult.Implementation != nil && copiedResult.Implementation.ID == "echo", "copied implementation = %+v", copiedResult.Implementation)
 		var copiedSignal struct {
 			RelatedOperation struct {
 				SessionID   string `json:"session_id"`
@@ -6064,7 +6088,7 @@ func TestPublicForkSourceRevisionRace(t *testing.T) {
 			// a foreign writer changes the source under the reservation
 			reg := sessionRegister(t, store, source)
 			edited := editStateObject(t, reg.Payload, func(state map[string]json.RawMessage) {
-				state["agent_selection"] = json.RawMessage(`{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"reviewer"}}`)
+				state["inputs"] = json.RawMessage(`{"instructions":"reviewer"}`)
 			})
 			if err := store.Transact(ctx, func(tx harness.Transaction) error {
 				_, err := tx.ReplaceRegister(harness.RegisterKey{SessionID: source, Kind: harness.RegisterSession}, reg.Revision, edited)
@@ -6101,7 +6125,7 @@ func mustForeignPayload(t *testing.T, snap sessionSnapshot) json.RawMessage {
 	for i := range snap.registers {
 		if snap.registers[i].Key.Kind == harness.RegisterSession {
 			return editStateObject(t, snap.registers[i].Payload, func(state map[string]json.RawMessage) {
-				state["agent_selection"] = json.RawMessage(`{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"reviewer"}}`)
+				state["inputs"] = json.RawMessage(`{"instructions":"reviewer"}`)
 			})
 		}
 	}
@@ -6283,11 +6307,10 @@ func TestPublicExecutionResourceLifetime(t *testing.T) {
 							openMu.Unlock()
 							events <- fmt.Sprintf("invocation:%s:%s", adm.OperationID, request.Purpose)
 							return harness.InvocationExecution{
-								Model:         script.effect,
-								NormalizeTool: publicNormalize,
-								Tool: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+								Model: script.effect,
+								LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
 									return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-								},
+								}, publicNormalize),
 								Close: func() error {
 									events <- fmt.Sprintf("invocation-close:%s:%s", adm.OperationID, request.Purpose)
 									return nil
@@ -6411,12 +6434,13 @@ func TestPublicRecoverHookShapes(t *testing.T) {
 				ToolCallID string `json:"tool_call_id"`
 				Status     string `json:"status"`
 				Error      string `json:"error"`
+				Evidence   string `json:"evidence"`
 			}
 			{
 				err := json.Unmarshal(hook.Payload, &hookWire)
 				testassert.NoError(t, err)
 			}
-			testassert.Require(t, hookWire.HookID == "cap.hook.one" && hookWire.ToolCallID == "call-1" && hookWire.Status == "interrupted" && hookWire.Error == recoveredInterruptionDetail, "interrupted hook result = %+v, want the recovery-settled interrupted evidence", hookWire)
+			testassert.Require(t, hookWire.HookID == "cap.hook.one" && hookWire.ToolCallID == "call-1" && hookWire.Status == "interrupted" && hookWire.Error == recoveredInterruptionDetail && hookWire.Evidence == "unknown", "interrupted hook result = %+v, want the recovery-settled unknown evidence", hookWire)
 			// The call under the active hook effect is proven unstarted but
 			// uncertain: the hook may have taken effect.
 			assertRecoveredOperation(t, store, sessionID, "op-1", append(pre, hook), "", []recoveredToolResult{{
@@ -6424,6 +6448,9 @@ func TestPublicRecoverHookShapes(t *testing.T) {
 				Content:  "Pre-tool hook outcome unknown; the hook may have taken effect. The tool was not executed.\n\nTool call interrupted.",
 				Evidence: "not_started",
 			}})
+			var toolWire map[string]json.RawMessage
+			testassert.NoError(t, json.Unmarshal(entries[len(pre)+1].Payload, &toolWire))
+			testassert.Require(t, toolWire["implementation"] == nil && toolWire["normalized_arguments_base64"] == nil, "active hook recovery fabricated a tool binding: %s", entries[len(pre)+1].Payload)
 			assertRecoverIdempotent(t, store, sessionID, "op-1")
 
 			h := harnessOver(t, store)
@@ -6736,7 +6763,7 @@ func rawSessionRegisterWithCompaction(sessionID, currentOp, compactionEntryID st
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	return fmt.Sprintf(
 		`{"identity":{"session_id":%q,"workspace":"/tmp/works","created_at":%q},`+
-			`"state":{"lifecycle":"open","agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},"current_operation_id":%q,`+
+			`"state":{"lifecycle":"open","inputs":{"instructions":"coder"},"extension_state":{},"current_operation_id":%q,`+
 			`"checkpoint_entry_id":%q,"usage":{"by_model":[]},"last_activity":%q,"external_data_owners":[]}}`,
 		sessionID, now, currentOp, compactionEntryID, now)
 }
@@ -6747,10 +6774,10 @@ func rawCompactAdmission(sessionID, operationID string) string {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	return fmt.Sprintf(
 		`{"session_id":%q,"operation_id":%q,"request_kind":"compact",`+
-			`"agent_selection":{"definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"coder"}},`+
+			`"inputs":{"instructions":"coder"},`+
 			`"execution":{"configuration_revision":"rev-1","model":{"provider":"prov","model":"gpt-x"},`+
 			`"context_window":4096,"output_reserve":2048,`+
-			`"system_prompt":"system","tools":[%s],"initial_tool_names":["echo"],"readonly":false,"write_dir":"",`+
+			`"system_prompt":"system","tools":[%s],"initial_tool_names":["echo"],`+
 			`"compact":{"model":{"provider":"cprov","model":"compact-x"},"system_prompt":"summarize"},`+
 			`"strategy":{"id":"melta.summary/v1","requires_context_window":true}},"admitted_at":%q}`,
 		sessionID, operationID, rawToolDefinition, now)
@@ -6763,7 +6790,7 @@ func rawCompactionEntryPayload(sessionID, entryID, operationID, summary, boundar
 			`"messages":[{"role":"assistant","source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":%q}]}],`+
 			`"boundary_entry_id":%q,"configuration_revision":"rev-1",`+
 			`"facts":[{"request_id":%q,"model":{"provider":"prov","model":"gpt-x"},"input":[{"role":"user","content":[{"kind":"text","text":"transcript seed"}]}]}],`+
-			`"consumed_request_id":"request-seed","evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":["echo"]}}`,
+			`"evidence":{"boundary_entry_id":%q,"prompt":"","tools":[]}}`,
 		sessionID, entryID, operationID, "[Previous conversation summary]\n\n"+summary+"\n\n[End of summary. Continue from here.]", boundaryID, "maintainer-"+entryID, boundaryID)
 }
 
@@ -6780,7 +6807,7 @@ func rawSettledSuccessOperation(t *testing.T, store harness.Storage, sessionID, 
 			sessionID, inputID, operationID, inputText))
 	insertRawEntry(t, store, sessionID, assistantID, operationID, harness.EntryAssistant,
 		fmt.Sprintf(`{"session_id":%q,"entry_id":%q,"operation_id":%q,"status":"completed",`+
-			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":%q}],"tool_calls":[],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tool_names":[]}}`,
+			`"source":{"provider":"prov","model":"gpt-x"},"content":[{"kind":"text","text":%q}],"tool_calls":[],"request_id":%q,"evidence":{"boundary_entry_id":%q,"prompt":"system","tools":[]}}`,
 			sessionID, assistantID, operationID, assistantText, "request-a-"+assistantID, inputID))
 	insertRawEntry(t, store, sessionID, settlementID, operationID, harness.EntryOperationSettlement,
 		fmt.Sprintf(`{"session_id":%q,"entry_id":%q,"operation_id":%q,"status":"success"}`, sessionID, settlementID, operationID))
@@ -6814,8 +6841,9 @@ func TestPublicRecoverRunningCompactOperation(t *testing.T) {
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterOperation, OperationID: "compact-op"},
 			fmt.Sprintf(`{"admission":%s,"state":{"status":"running","started_at":%q,`+
-				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"prov","model":"compact-x"},"purpose":"maintenance"},"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
-				rawCompactAdmission(sessionID, "compact-op"), now, reserved))
+				`"running_request":{"request_id":"maintainer-live","purpose":"maintenance","checkpoint_entry_id":%q,"boundary_entry_id":%q,"hook_results":[]},`+
+				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"prov","model":"compact-x"},"purpose":"maintenance","evidence":{"boundary_entry_id":%q,"checkpoint_entry_id":%q,"prompt":"","tools":[],"summary_input":[{"role":"user","content":[{"kind":"text","text":"draft summary input"}]}]}},"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
+				rawCompactAdmission(sessionID, "compact-op"), now, compactionID, compactionID, reserved, compactionID, compactionID))
 
 		// The seeded shape: a running compact request with a live model intent.
 		state := recoverOpStateAt(t, store, sessionID, "compact-op")
@@ -6904,17 +6932,13 @@ func TestPublicRecoverRunningCompactOperation(t *testing.T) {
 	})
 }
 
-// TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer proves the
-// automatic-maintenance recovery sibling: process loss retains no Facts, so
-// the settlement of a running Operation with a suspended conversation request
-// recovers the live model producer from the committed maintenance intent —
-// the request witness names the maintenance producer instead of the suspended
-// request, the Model names the effective compact model, the absent Usage
-// report stays absent with no fabricated Facts or evidence, the token totals
-// stay integer-empty, and the read-time estimate for the Operation and the
-// Session is unknown, neither zero nor a partial known sum. No effect
-// replays.
-func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T) {
+// TestPublicRejectForgedPreviousVersionRunningRequest proves the previous
+// record shape is corruption before any repair: a running request without its
+// purpose and a maintenance intent naming a different producer are rejected by
+// the cold validator, recovery leaves the Session byte-identical, writes no
+// settlement or signal, and a Harness constructed afterwards reports
+// corruption instead of materializing the forged state.
+func TestPublicRejectForgedPreviousVersionRunningRequest(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		sessionID, entryID := newRawSessionID(t), newRawSessionID(t)
@@ -6925,9 +6949,88 @@ func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T)
 		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterOperation, OperationID: "maint-op"},
 			fmt.Sprintf(`{"admission":%s,"state":{"status":"running","started_at":%q,`+
 				`"running_request":{"request_id":"request-suspended","boundary_entry_id":%q,"hook_results":[]},`+
-				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance"},`+
+				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance","evidence":{"boundary_entry_id":%q,"prompt":"","tools":[],"summary_input":[{"role":"user","content":[{"kind":"text","text":"draft summary input"}]}]}},`+
 				`"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
-				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved))
+				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved, entryID))
+		entriesBefore := recoverEntries(t, store, sessionID)
+		regBefore := operationRegister(t, store, sessionID, "maint-op")
+
+		{
+			err := harness.Recover(ctx, store)
+			testassert.NoError(t, err) // a corrupt Session is left unchanged and does not block the pass
+		}
+		entriesAfter := recoverEntries(t, store, sessionID)
+		regAfter := operationRegister(t, store, sessionID, "maint-op")
+		testassert.Require(t, len(entriesAfter) == len(entriesBefore) && bytes.Equal(regAfter.Payload, regBefore.Payload) && regAfter.Revision == regBefore.Revision,
+			"recovery changed the forged Session: %d -> %d entries, register revision %d -> %d", len(entriesBefore), len(entriesAfter), regBefore.Revision, regAfter.Revision)
+
+		h := harnessOver(t, store)
+		_, err := h.ReadSessionHeader(ctx, sessionID)
+		testassert.Require(t, errors.Is(err, harness.ErrCorrupt), "cold read = %v, want corruption for the forged previous-version state", err)
+	})
+}
+
+// TestPublicRejectMismatchedRunningRequestProducer proves the purpose-present
+// producer mismatch is corruption before any repair: the running request and
+// the maintenance model intent name different request identities, so the cold
+// validator rejects the Session, recovery leaves it byte-identical, and a
+// Harness constructed afterwards reports corruption instead of materializing
+// the forged state.
+func TestPublicRejectMismatchedRunningRequestProducer(t *testing.T) {
+	eachStore(t, func(t *testing.T, store harness.Storage) {
+		ctx := context.Background()
+		sessionID, entryID := newRawSessionID(t), newRawSessionID(t)
+		reserved := newRawSessionID(t)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterSession}, rawSessionRegister(sessionID, "maint-op"))
+		insertRawEntry(t, store, sessionID, entryID, "maint-op", harness.EntryInput, rawInputEntryPayload(sessionID, entryID, "maint-op"))
+		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterOperation, OperationID: "maint-op"},
+			fmt.Sprintf(`{"admission":%s,"state":{"status":"running","started_at":%q,`+
+				`"running_request":{"request_id":"request-suspended","purpose":"maintenance","boundary_entry_id":%q,"hook_results":[]},`+
+				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance","evidence":{"boundary_entry_id":%q,"prompt":"","tools":[],"summary_input":[{"role":"user","content":[{"kind":"text","text":"draft summary input"}]}]}},`+
+				`"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
+				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved, entryID))
+		entriesBefore := recoverEntries(t, store, sessionID)
+		regBefore := operationRegister(t, store, sessionID, "maint-op")
+
+		{
+			err := harness.Recover(ctx, store)
+			testassert.NoError(t, err)
+		}
+		entriesAfter := recoverEntries(t, store, sessionID)
+		regAfter := operationRegister(t, store, sessionID, "maint-op")
+		testassert.Require(t, len(entriesAfter) == len(entriesBefore) && bytes.Equal(regAfter.Payload, regBefore.Payload) && regAfter.Revision == regBefore.Revision,
+			"recovery changed the mismatched Session: %d -> %d entries, register revision %d -> %d", len(entriesBefore), len(entriesAfter), regBefore.Revision, regAfter.Revision)
+
+		h := harnessOver(t, store)
+		_, err := h.ReadSessionHeader(ctx, sessionID)
+		testassert.Require(t, errors.Is(err, harness.ErrCorrupt), "cold read = %v, want corruption for the mismatched producer state", err)
+	})
+}
+
+// TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer proves the
+// automatic-maintenance recovery sibling: process loss retains no Facts, so
+// the settlement of a running Operation with a purpose-bound summary request
+// recovers the live model producer from the committed maintenance intent —
+// the request witness and the model intent name the same maintainer identity,
+// the Model names the effective compact model, the absent Usage report stays
+// absent with no fabricated Facts or evidence, the token totals stay
+// integer-empty, and the read-time estimate for the Operation and the Session
+// is unknown, neither zero nor a partial known sum. No effect replays.
+func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T) {
+	eachStore(t, func(t *testing.T, store harness.Storage) {
+		ctx := context.Background()
+		sessionID, entryID := newRawSessionID(t), newRawSessionID(t)
+		reserved := newRawSessionID(t)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterSession}, rawSessionRegister(sessionID, "maint-op"))
+		insertRawEntry(t, store, sessionID, entryID, "maint-op", harness.EntryInput, rawInputEntryPayload(sessionID, entryID, "maint-op"))
+		insertRawRegister(t, store, harness.RegisterKey{SessionID: sessionID, Kind: harness.RegisterOperation, OperationID: "maint-op"},
+			fmt.Sprintf(`{"admission":%s,"state":{"status":"running","started_at":%q,`+
+				`"running_request":{"request_id":"maintainer-live","purpose":"maintenance","boundary_entry_id":%q,"hook_results":[]},`+
+				`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"maintainer-live","model":{"provider":"cprov","model":"compact-x"},"purpose":"maintenance","evidence":{"boundary_entry_id":%q,"prompt":"","tools":[],"summary_input":[{"role":"user","content":[{"kind":"text","text":"draft summary input"}]}]}},`+
+				`"pending_tool_calls":[],"usage":{"by_model":[]}}}`,
+				rawAdmission(sessionID, "maint-op", entryID), now, entryID, reserved, entryID))
 
 		pre := recoverEntries(t, store, sessionID)
 		{
@@ -6941,10 +7044,9 @@ func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T)
 		assertRecoverIdempotent(t, store, sessionID, "maint-op")
 
 		// The settlement recovers the producer from the maintenance intent:
-		// the witness is the maintenance producer, never the suspended
-		// conversation request, and the Model is the effective compact model.
-		// The missing report stays missing; the recovery fabricates no Facts,
-		// evidence, or maintenance-provenance marker.
+		// the witness is the same maintainer identity bound by the running
+		// request, and the fact copies its model and materialized input.
+		// The missing report stays missing.
 		entries := recoverEntries(t, store, sessionID)
 		settlement := entries[len(entries)-1]
 		testassert.Equal(t, settlement.Kind, harness.EntryOperationSettlement)
@@ -6957,9 +7059,16 @@ func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T)
 			CompactionUsage bool            `json:"compaction_usage"`
 		}
 		testassert.NoError(t, json.Unmarshal(settlement.Payload, &wire))
-		testassert.Require(t, wire.RequestID == "maintainer-live", "recovered settlement witness = %q, want the maintenance producer identity, not the suspended conversation request", wire.RequestID)
-		testassert.Require(t, string(wire.Model) == `{"provider":"cprov","model":"compact-x"}`, "recovered settlement model = %s, want the effective compact model named from the maintenance intent", wire.Model)
-		testassert.Require(t, wire.Usage == nil && wire.Facts == nil && wire.Evidence == nil && !wire.CompactionUsage, "recovered settlement = %s, want no usage report, no Facts, no evidence, no maintenance provenance marker", settlement.Payload)
+		testassert.Require(t, wire.RequestID == "maintainer-live", "recovered settlement witness = %q, want the maintenance producer identity", wire.RequestID)
+		testassert.Require(t, wire.Model == nil && wire.Usage == nil && wire.Evidence == nil && !wire.CompactionUsage, "settlement = %s, want no conversation evidence or usage", settlement.Payload)
+		var facts []struct {
+			RequestID string              `json:"request_id"`
+			Model     json.RawMessage     `json:"model"`
+			Input     json.RawMessage     `json:"input"`
+			Usage     *harness.UsageCount `json:"usage"`
+		}
+		testassert.NoError(t, json.Unmarshal(wire.Facts, &facts))
+		testassert.Require(t, len(facts) == 1 && facts[0].RequestID == "maintainer-live" && string(facts[0].Model) == `{"provider":"cprov","model":"compact-x"}` && facts[0].Usage == nil && bytes.Contains(facts[0].Input, []byte(`"draft summary input"`)), "recovered facts = %s, want the active summary input without usage", wire.Facts)
 
 		// The integer token totals are unchanged and no estimate is persisted
 		// anywhere in the durable state.
@@ -6984,116 +7093,5 @@ func TestPublicRecoverRunningAutomaticMaintenanceWitnessesProducer(t *testing.T)
 			testassert.Require(t, maintainerEstimate == nil, "recovered maintenance Operation estimate = %s, want absent: the unreported live producer stays unknown", estimateText(maintainerEstimate))
 			testassert.Require(t, view.EstimatedCostUSD == nil, "recovered Session estimate = %s, want absent", estimateText(view.EstimatedCostUSD))
 		}
-	})
-}
-
-// publicBindingMutator is the accepted conversation-execution policy: its
-// first Plan incurs one model pass, rewrites the Strategy field of the
-// caller's own supplied binding to the touched marker, and folds the output
-// into one checkpoint; every later Plan returns none. publicTouchedStrategy
-// records any dispatch through the rewritten field.
-type publicBindingMutator struct {
-	binding  *harness.StrategyBinding
-	touched  *publicTouchedStrategy
-	plans    atomic.Int64
-	consumes atomic.Int64
-}
-
-func (s *publicBindingMutator) Plan(in harness.PlanInput) (harness.PlanOutput, error) {
-	if s.plans.Add(1) == 1 {
-		s.binding.Strategy = s.touched // the caller rewrites its own supplied binding mid-Execution
-		return harness.PlanOutput{Kind: harness.PlanModel, Model: &harness.ModelPlan{
-			Request: model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "binding snapshot pass"}}}}},
-		}}, nil
-	}
-	return harness.PlanOutput{Kind: harness.PlanNone}, nil
-}
-
-func (s *publicBindingMutator) Consume(in harness.ConsumeInput) (harness.PlanOutput, error) {
-	s.consumes.Add(1)
-	zero := 0
-	authored, err := model.NewMessage(model.Message{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "snapshot checkpoint"}}})
-	if err != nil {
-		return harness.PlanOutput{}, err
-	}
-	return harness.PlanOutput{Kind: harness.PlanCheckpoint, Checkpoint: &harness.CheckpointPlan{
-		BoundaryEntryID: in.Input.BoundaryEntryID,
-		Items:           []harness.CheckpointItem{{Retain: &zero}, {Context: &authored}},
-	}}, nil
-}
-
-type publicTouchedStrategy struct{ calls atomic.Int64 }
-
-func (s *publicTouchedStrategy) Plan(in harness.PlanInput) (harness.PlanOutput, error) {
-	s.calls.Add(1)
-	return harness.PlanOutput{Kind: harness.PlanNone}, nil
-}
-
-func (s *publicTouchedStrategy) Consume(in harness.ConsumeInput) (harness.PlanOutput, error) {
-	s.calls.Add(1)
-	return harness.PlanOutput{Kind: harness.PlanNone}, nil
-}
-
-// TestPublicExecutionOwnsTheAcceptedBindingValue proves the opened Execution's
-// binding snapshot through the public submit flow: the admitted Execution
-// copies the resolved StrategyBinding value before any callback, so a policy
-// that rewrites the caller's own supplied binding during the first automatic
-// procedure still faces its accepted implementation at Consume and at the
-// same Execution's later procedure — never the replacement and never a panic
-// — and the checkpoint keeps the original captured provenance.
-func TestPublicExecutionOwnsTheAcceptedBindingValue(t *testing.T) {
-	eachStore(t, func(t *testing.T, store harness.Storage) {
-		// attempt 1: the first procedure's maintenance model pass;
-		// attempt 2: the conversation turn with one tool call (the
-		// continuation round); attempt 3: the continuation turn's answer.
-		script := newScriptModel(
-			publicAttempt{stream: publicUsageTurnStream(model.Usage{InputTokens: 1, OutputTokens: 1})},
-			publicTurn("call-1"),
-			publicTurn(),
-		)
-		f := newPublicFixture(t, store, script, nil)
-		defer f.close()
-		mutator := &publicBindingMutator{}
-		touched := &publicTouchedStrategy{}
-		mutator.touched = touched
-		binding := &harness.StrategyBinding{ID: "test.strategy/v1", Strategy: mutator}
-		mutator.binding = binding
-		f.defaultPrep.Capture = publicCapture()
-		f.defaultPrep.Capture.Strategy = harness.StrategyCapture{ID: "test.strategy/v1"}
-		open := f.defaultPrep.Open
-		f.defaultPrep.Open = func(ctx context.Context, admission harness.OperationAdmission) (harness.Execution, error) {
-			exec, err := open(ctx, admission)
-			if err != nil {
-				return exec, err
-			}
-			exec.Strategy = binding
-			return exec, nil
-		}
-		session := createSession(t, f.h)
-		{
-			_, err := submit(t, f.h, session, "op-1", harness.MessageModeRegular, "hello")
-			testassert.NoError(t, err)
-		}
-		awaitTerminal(t, f.h, session, "op-1")
-		{
-			err := converge(t, f)
-			testassert.NoError(t, err)
-		}
-		testassert.Equal(t, mutator.plans.Load(), int64(2)) // the accepted implementation runs every procedure of this Execution
-		testassert.Equal(t, mutator.consumes.Load(), int64(1))
-		testassert.Equal(t, touched.calls.Load(), int64(0)) // the rewritten field is never dispatched
-		entries, err := store.ReadEntries(context.Background(), session, 0)
-		testassert.NoError(t, err)
-		owned := 0
-		for _, entry := range entries {
-			if entry.Kind != harness.EntryCompaction || entry.OperationID != "op-1" {
-				continue
-			}
-			owned++
-			payload := string(entry.Payload)
-			testassert.Require(t, strings.Contains(payload, `"strategy_id":"test.strategy/v1"`), "checkpoint payload %s, want the accepted binding provenance", payload)
-			testassert.Require(t, strings.Contains(payload, "snapshot checkpoint"), "checkpoint payload %s, want the accepted implementation's authored message", payload)
-		}
-		testassert.Equal(t, owned, 1)
 	})
 }

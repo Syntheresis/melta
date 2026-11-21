@@ -73,15 +73,14 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 	var stream *liveCheckStream
 	var closeOrder []string
 	exec := Execution{
-		Strategy: &StrategyBinding{ID: "test.callback/v1", Strategy: callbackStrategy{}},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.callback/v1", Strategy: callbackStrategy{}}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				return InvocationExecution{
-					Model: func(context.Context, model.Request) (model.Stream, error) {
+					Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return summaryStream("bound summary", model.Usage{InputTokens: 1}), nil
 					},
-					Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-					NormalizeTool: objectNormalize,
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 					Close: func() error {
 						closeOrder = append(closeOrder, "maintenance-close")
 						return nil
@@ -89,7 +88,7 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 				}, nil
 			}
 			return InvocationExecution{
-				Model: func(ctx context.Context, _ model.Request) (model.Stream, error) {
+				Model: func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 					closeOrder = append(closeOrder, "conversation-dispatch")
 					conversationRounds++
 					if conversationRounds == 1 {
@@ -100,12 +99,11 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 					}
 					return completedTurnStream(), nil
 				},
-				Tool: func(ctx context.Context, call model.ToolCall) PreparedTool {
+				LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
 					return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
 						return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}, Evidence: ExecutionObserved}
 					}}
-				},
-				NormalizeTool: objectNormalize,
+				}, objectNormalize),
 				Close: func() error {
 					closeOrder = append(closeOrder, "conversation-close")
 					return nil
@@ -141,9 +139,9 @@ func executing(callID string, status model.ToolResultStatus, content string, evi
 // result's shape, and that a supplied immediate plan's evidence is ignored in
 // favour of the fixed success/other-status derivation.
 func TestToolPlanEvidence(t *testing.T) {
-	modelFn := func() func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func() func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		rounds := 0
-		return func(context.Context, model.Request) (model.Stream, error) {
+		return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -325,14 +323,13 @@ func TestExecuteDirectOwnsCancellableChildContext(t *testing.T) {
 	var ctxDuringStream context.Context
 	exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
-			Model: func(ctx context.Context, _ model.Request) (model.Stream, error) {
+			Model: func(ctx context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
 				callbackCtx = ctx
 				testassert.Equal(t, ctx.Value(contextParentKey{}), "parent-value")
 				ctxDuringStream = ctx
 				return &checkingStream{ctx: ctx, inner: streamOf(turnDelta("stop", "done")), onRead: func(live bool) { streamLive = live }}, nil
 			},
-			Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 		}, nil
 	}}
 	testassert.NoError(t, executeDirect(h, c, parent, testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
@@ -379,16 +376,15 @@ func TestManualMaintenanceDisposalFollowsCompletionPublication(t *testing.T) {
 			h, store, c, sessionID := newCompactOperationFixture(t, capture)
 			var events []string
 			settledAtClose, failureAtClose := false, false
-			modelFn := func(context.Context, model.Request) (model.Stream, error) {
+			modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return summaryStream("manual summary", model.Usage{InputTokens: 2}), nil
 			}
 			exec := Execution{
-				Strategy: &StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}},
+				ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}}),
 				OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 					return InvocationExecution{
-						Model:         modelFn,
-						Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-						NormalizeTool: objectNormalize,
+						Model:      modelFn,
+						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 						Close: func() error {
 							events = append(events, "maintenance-close")
 							rec, err := h.ReadOperation(context.Background(), sessionID, "compact-op")
@@ -459,7 +455,7 @@ func TestQuietCompletionSettlesUnmarkedStorageCallbackError(t *testing.T) {
 		hook := RequestHook{ID: "req.storage", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{}, hookErr
 		}}
-		exec := requestHookFixtureExecution(func(context.Context, model.Request) (model.Stream, error) {
+		exec := requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			t.Error("a failed request hook dispatched a conversation request")
 			return nil, nil
 		}, nil, hook)
@@ -488,9 +484,9 @@ func TestQuietCompletionSettlesUnmarkedStorageCallbackError(t *testing.T) {
 		capture := testCapture()
 		capture.Strategy = StrategyCapture{ID: "test.storage/v1"}
 		exec := Execution{
-			Strategy: &StrategyBinding{ID: "test.storage/v1", Strategy: &errStrategy{cause: planErr}},
+			ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.storage/v1", Strategy: &errStrategy{cause: planErr}}),
 			OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-				return invocationExecution(func(context.Context, model.Request) (model.Stream, error) {
+				return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return completedTurnStream(), nil
 				}, nil), nil
 			},
@@ -565,11 +561,11 @@ func newWaitPublicationRace(t *testing.T, store *graphStorage, aSessionID string
 	})
 	testassert.NoError(t, err)
 	if aSessionID == "" {
-		sessionA, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		sessionA, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, err)
 		aSessionID = sessionA.Identity.SessionID
 	}
-	sessionBRecord, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	sessionBRecord, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	sessionB = sessionBRecord.Identity.SessionID
 	return waitPublicationRace{
@@ -739,7 +735,7 @@ func (c *testCause) Error() string { return c.text }
 // text base while the stored knowledge stays the producer's declared unknown.
 func TestToolOutputShapingCannotChangeKnowledge(t *testing.T) {
 	rounds := 0
-	modelFn := func(context.Context, model.Request) (model.Stream, error) {
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		rounds++
 		if rounds == 1 {
 			return completedTurnStream(testToolCall("call-1")), nil
@@ -811,12 +807,11 @@ func TestExecutionAdoptsCommittedCapture(t *testing.T) {
 	mutated := false
 	exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
-			Model: func(_ context.Context, request model.Request) (model.Stream, error) {
+			Model: func(_ context.Context, request model.Request, _ model.Extra) (model.Stream, error) {
 				sent = request
 				return completedTurnStream(), nil
 			},
-			Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-			NormalizeTool: objectNormalize,
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 		}, nil
 	}}
 	prepared := preparedExecutionFor(capture, func(_ context.Context, admission OperationAdmission) (Execution, error) {
@@ -841,7 +836,7 @@ func TestExecutionAdoptsCommittedCapture(t *testing.T) {
 	h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
 		return prepared, nil
 	})
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	c := leaseCoordinator(t, h, session.Identity.SessionID)
 	rec, adopted := admitPrepared(t, h, c, session.Identity.SessionID, testOpID, prepared)
@@ -874,7 +869,7 @@ func assertOwnedCaptureProvenance(t *testing.T, capture ExecutionCapture) {
 func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
 	t.Run("permission pairs are frozen before evaluation", func(t *testing.T) {
 		rounds := 0
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -900,7 +895,7 @@ func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
 		h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
 			return prepared, nil
 		})
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, err)
 		c := leaseCoordinator(t, h, session.Identity.SessionID)
 		rec, adopted := admitPrepared(t, h, c, session.Identity.SessionID, testOpID, prepared)
@@ -911,7 +906,7 @@ func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
 
 	t.Run("immediate content and metadata are frozen at acceptance", func(t *testing.T) {
 		rounds := 0
-		modelFn := func(context.Context, model.Request) (model.Stream, error) {
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -936,7 +931,7 @@ func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
 		h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
 			return prepared, nil
 		})
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 		testassert.NoError(t, err)
 		c := leaseCoordinator(t, h, session.Identity.SessionID)
 		rec, adopted := admitPrepared(t, h, c, session.Identity.SessionID, testOpID, prepared)
@@ -1000,7 +995,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 	// The reported conversation measurement that triggers automatic
 	// maintenance.
 	{
-		seedPrepared := preparedExecuting(effectExecution(func(context.Context, model.Request) (model.Stream, error) {
+		seedPrepared := preparedExecuting(effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return streamOf(turnDelta("stop", "seed"), usageDelta(model.Usage{InputTokens: 10, CachedInputTokens: 2, OutputTokens: 1})), nil
 		}, nil))
 		testassert.NoError(t, executeDirect(h, c, h.ctx, testOpID, seedPrepared))
@@ -1010,7 +1005,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 	maintenanceCalls := 0
 	var events []string
 	exec := Execution{
-		Strategy: &StrategyBinding{ID: "test.multipass/v1", Strategy: strategy},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.multipass/v1", Strategy: strategy}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				maintenanceCalls++
@@ -1020,14 +1015,13 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 					usage = &model.Usage{InputTokens: 5}
 				}
 				return InvocationExecution{
-					Model: func(context.Context, model.Request) (model.Stream, error) {
+					Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						if usage != nil {
 							return streamOf(turnDelta("stop", fmt.Sprintf("pass %d", pass)), usageDelta(*usage)), nil
 						}
 						return streamOf(turnDelta("stop", fmt.Sprintf("pass %d", pass))), nil
 					},
-					Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-					NormalizeTool: objectNormalize,
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 					Close: func() error {
 						events = append(events, fmt.Sprintf("maintenance-close-%d", pass))
 						return nil
@@ -1035,12 +1029,11 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 				}, nil
 			}
 			return InvocationExecution{
-				Model: func(context.Context, model.Request) (model.Stream, error) {
+				Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					events = append(events, "conversation-dispatch")
 					return streamOf(turnDelta("stop", "final answer"), usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1})), nil
 				},
-				Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-				NormalizeTool: objectNormalize,
+				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 			}, nil
 		},
 	}
@@ -1125,14 +1118,13 @@ func TestWaitRetainsManualPublicationBeforeLaterExecution(t *testing.T) {
 	cA := leaseCoordinator(t, race.h, testSessionID)
 	aClosed := make(chan struct{}, 1)
 	execA := Execution{
-		Strategy: &StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.manual/v1", Strategy: callbackStrategy{}}),
 		OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 			return InvocationExecution{
-				Model: func(context.Context, model.Request) (model.Stream, error) {
+				Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return summaryStream("manual summary", model.Usage{InputTokens: 1}), nil
 				},
-				Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-				NormalizeTool: objectNormalize,
+				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 				Close: func() error {
 					race.aCloseArrived <- struct{}{}
 					<-race.aCloseGate
@@ -1182,15 +1174,14 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 	var race waitPublicationRace
 	race = newWaitPublicationRace(t, store, "", func(context.Context, PreparationRequest) (PreparedExecution, error) {
 		execA := Execution{
-			Strategy: &StrategyBinding{ID: "test.automatic/v1", Strategy: callbackStrategy{}},
+			ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: "test.automatic/v1", Strategy: callbackStrategy{}}),
 			OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 				if request.Purpose == InvocationPurposeMaintenance {
 					return InvocationExecution{
-						Model: func(context.Context, model.Request) (model.Stream, error) {
+						Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 							return summaryStream("automatic summary", model.Usage{InputTokens: 1}), nil
 						},
-						Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-						NormalizeTool: objectNormalize,
+						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 						Close: func() error {
 							race.aCloseArrived <- struct{}{}
 							<-race.aCloseGate
@@ -1199,9 +1190,10 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 					}, nil
 				}
 				return InvocationExecution{
-					Model:         func(context.Context, model.Request) (model.Stream, error) { return completedTurnStream(), nil },
-					Tool:          func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} },
-					NormalizeTool: objectNormalize,
+					Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+						return completedTurnStream(), nil
+					},
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
 				}, nil
 			},
 		}

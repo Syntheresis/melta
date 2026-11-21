@@ -8,7 +8,9 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -99,7 +101,7 @@ func newGapHarness(t *testing.T) (*Harness, *graphStorage, *coordinator, string)
 	h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
 		return prepared, nil
 	})
-	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", AgentSelection: testSelection("coder")})
+	session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
 	testassert.NoError(t, err)
 	{
 		_, disposition := mustAdmitWithoutExecution(t, h, session.Identity.SessionID, testOpID, admissionContent("hello"))
@@ -111,10 +113,10 @@ func newGapHarness(t *testing.T) (*Harness, *graphStorage, *coordinator, string)
 
 // gapExecution opens the conversation and maintenance invocations the gap
 // fixtures drive, under the given strategy binding.
-func gapExecution(t *testing.T, strategy ContextStrategy, compact func(context.Context, model.Request) (model.Stream, error), conversation func(context.Context, model.Request) (model.Stream, error), tool func(context.Context, model.ToolCall) PreparedTool) Execution {
+func gapExecution(t *testing.T, strategy ContextStrategy, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), conversation func(context.Context, model.Request, model.Extra) (model.Stream, error), tool func(context.Context, model.ToolCall) PreparedTool) Execution {
 	noop := func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
 	return Execution{
-		Strategy: &StrategyBinding{ID: gapStrategyID, Strategy: strategy},
+		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: gapStrategyID, Strategy: strategy}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
 			if request.Purpose == InvocationPurposeConversation {
 				return invocationExecution(conversation, tool), nil
@@ -126,8 +128,8 @@ func gapExecution(t *testing.T, strategy ContextStrategy, compact func(context.C
 
 // gapCompactFn answers the maintenance model with the completed summary pass;
 // a nil usage reports no usage at all on the accepted stream.
-func gapCompactFn(passes *int, usage *model.Usage) func(context.Context, model.Request) (model.Stream, error) {
-	return func(context.Context, model.Request) (model.Stream, error) {
+func gapCompactFn(passes *int, usage *model.Usage) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		*passes++
 		if usage == nil {
 			return streamOf(turnDelta("stop", "gap summary")), nil
@@ -139,8 +141,8 @@ func gapCompactFn(passes *int, usage *model.Usage) func(context.Context, model.R
 // zeroUsageConversation answers the conversation model with a completed turn
 // that reports an all-zero usage: the provider report is present, so it is a
 // known priced-out zero and never leaves the estimate unknown.
-func zeroUsageConversation() func(context.Context, model.Request) (model.Stream, error) {
-	return func(context.Context, model.Request) (model.Stream, error) {
+func zeroUsageConversation() func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+	return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		return streamOf(turnDelta("stop", "quiet"), usageDelta(model.Usage{})), nil
 	}
 }
@@ -239,7 +241,7 @@ func TestMaintenanceGapAcrossTransitionsAndRecovery(t *testing.T) {
 		}
 		strategy := &gapOnceStrategy{t: t, atConsume: atConsume, atSecondPlan: atSecondPlan}
 		rounds := 0
-		conversation := func(context.Context, model.Request) (model.Stream, error) {
+		conversation := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			rounds++
 			if rounds == 1 {
 				return completedTurnStream(testToolCall("call-1")), nil
@@ -361,4 +363,42 @@ func TestMaintenanceGapAcrossTransitionsAndRecovery(t *testing.T) {
 		reader := newTestHarness(t, store, nil)
 		assertEstimatesUnknown(t, reader, sessionID)
 	})
+}
+
+func TestMaintenanceFactsRecoveryRetainsSecondIntentWithoutChargingEither(t *testing.T) {
+	exec, calls := twoPassExecution(t, model.Usage{InputTokens: 3}, fixtureStrategyBinding(&fixtureStrategy{}))
+	secondID := recordSecondMaintenanceInvocation(&exec)
+	opened := exec.OpenInvocation
+	var sent model.Request
+	exec.OpenInvocation = func(ctx context.Context, request InvocationRequest) (InvocationExecution, error) {
+		inv, err := opened(ctx, request)
+		if err == nil && request.ID == *secondID {
+			inv.ModelParameters = model.Extra{"attempt": json.RawMessage(`2`)}
+			modelFn := inv.Model
+			inv.Model = func(ctx context.Context, req model.Request, parameters model.Extra) (model.Stream, error) {
+				sent = req
+				return modelFn(ctx, req, parameters)
+			}
+		}
+		return inv, err
+	}
+	h, store, c, sessionID := strategyHarness(t, exec)
+	cause := fmt.Errorf("%w: second model result could not commit", ErrStorage)
+	failEffectRegister(store, func(effect *ActiveEffect) bool {
+		return effect.Kind == EffectModel && effect.RequestID == *secondID
+	}, true, cause, nil)
+	testassert.Require(t, errors.Is(runAutomaticMaintenance(t, h, c, exec), cause), "second result did not fail publication")
+	testassert.Equal(t, *calls, 2)
+	store.replaceHook = nil
+	testassert.NoError(t, Recover(context.Background(), store))
+	graph, err := validateFixture(t, store, sessionID)
+	testassert.NoError(t, err)
+	settlement := settlementEntryOf(t, graph)
+	testassert.Require(t, len(settlement.Facts) == 1 && settlement.Facts[0].RequestID == *secondID, "facts: %+v", settlement.Facts)
+	fact := settlement.Facts[0]
+	requireAuthoredMessages(t, fact.Input, sent.Messages)
+	testassert.Require(t, fact.Usage == nil && string(fact.Parameters["attempt"]) == "2", "fact: %+v", fact)
+	state := operationStateOf(t, graph, testOpID)
+	testassert.Require(t, state.UnreportedMaintenance && len(state.Usage.ByModel) == 0, "state: %+v", state)
+	assertMaintenanceRecoverIdempotent(t, store, sessionID, testOpID)
 }

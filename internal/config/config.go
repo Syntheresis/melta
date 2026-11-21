@@ -1,6 +1,6 @@
 // Package config loads the Melta config file and resolves process-level
-// settings. Provider/model metadata is owned by internal/catalog and
-// extensions/agents; this package keeps only non-model runtime sections.
+// settings. Provider/model metadata is owned by internal/catalog; this package
+// parses the baseline model reference and other runtime settings.
 //
 // Secrets are env vars. They are loaded at startup from ~/.melta/.env (if
 // present) or inherited from the shell. They are never written to config.json
@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Syntheresis/melta/model"
 )
 
 // ErrMissingEnvVar is returned (wrapped) when a provider's API key environment
@@ -64,6 +66,7 @@ type ToolsConfig struct {
 // data so config consumers can round-trip the section, but catalog.Loader is
 // the only code that interprets provider/model metadata.
 type Config struct {
+	Model      model.ModelRef             `json:"model,omitzero"`
 	Providers  map[string]any             `json:"providers,omitempty"`
 	Sessions   SessionConfig              `json:"sessions"`
 	Extensions map[string]json.RawMessage `json:"extensions,omitempty"`
@@ -156,11 +159,16 @@ func checkSweepDays(days int, field string) error {
 // propagated. Provider raw shape is validated at the catalog, not here.
 func Parse(data []byte) (*Config, error) {
 	var doc struct {
+		Model      *string                    `json:"model"`
 		Providers  map[string]any             `json:"providers"`
 		Sessions   json.RawMessage            `json:"sessions"`
 		Extensions map[string]json.RawMessage `json:"extensions"`
 	}
 	if err := decodeJSONUseNumber(data, &doc); err != nil {
+		return nil, err
+	}
+	ref, err := ParseOptionalModel(doc.Model)
+	if err != nil {
 		return nil, err
 	}
 	sessions, err := ParseSessions(doc.Sessions)
@@ -170,7 +178,19 @@ func Parse(data []byte) (*Config, error) {
 	if doc.Providers == nil {
 		doc.Providers = map[string]any{}
 	}
-	return &Config{Providers: doc.Providers, Sessions: sessions, Extensions: doc.Extensions}, nil
+	return &Config{Model: ref, Providers: doc.Providers, Sessions: sessions, Extensions: doc.Extensions}, nil
+}
+
+// ParseOptionalModel parses the optional baseline model identity.
+func ParseOptionalModel(value *string) (model.ModelRef, error) {
+	if value == nil || *value == "" {
+		return model.ModelRef{}, nil
+	}
+	ref, err := model.Parse(*value)
+	if err != nil {
+		return model.ModelRef{}, fmt.Errorf("model: %w", err)
+	}
+	return ref, nil
 }
 
 func decodeJSONUseNumber(data []byte, target any) error {

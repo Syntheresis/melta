@@ -2,7 +2,6 @@ package extension
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -54,44 +53,27 @@ func TestSecretNameResolvesJSONPointerValues(t *testing.T) {
 	}
 }
 
-func TestSecretRefPointerGrammarAtCompilation(t *testing.T) {
-	valid := testNative("valid", LifetimeHarness, nil, nil, nil)
-	valid.Declaration.Secrets = []SecretRef{
+func TestSecretRefPointerGrammarAtManifestValidation(t *testing.T) {
+	valid := Manifest{ID: "valid", Version: "1", APIVersion: APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`), Secrets: []SecretRef{
 		{Field: "/unresolved", Lifetime: SecretActivation},
 		{Field: "/array/0", Lifetime: SecretOperation},
 		{Field: "/object/-1", Lifetime: SecretActivation},
-	}
-	if _, err := Compile([]Native{valid}); err != nil {
-		t.Fatalf("Compile valid unresolved SecretRef fields: %v", err)
+	}}
+	if err := ValidateManifest(valid); err != nil {
+		t.Fatalf("ValidateManifest valid unresolved SecretRef fields: %v", err)
 	}
 	for _, field := range []string{"/bad~2", "/bad~", "no-slash", ""} {
-		native := testNative("malformed", LifetimeHarness, nil, nil, nil)
-		native.Declaration.Secrets = []SecretRef{{Field: field, Lifetime: SecretActivation}}
-		if _, err := Compile([]Native{native}); err == nil || !strings.Contains(err.Error(), "not a JSON pointer") {
-			t.Fatalf("Compile SecretRef field %q = %v, want the pointer grammar refusal", field, err)
+		malformed := valid
+		malformed.Secrets = []SecretRef{{Field: field, Lifetime: SecretActivation}}
+		if err := ValidateManifest(malformed); err == nil {
+			t.Fatalf("ValidateManifest SecretRef field %q accepted", field)
 		}
 	}
 }
 
-func TestCredentialsHostContractBinding(t *testing.T) {
-	host, ok := HostCapability(ContractCredentials)
-	if !ok || host.ContractID != ContractCredentials || host.ContractVersion != ContractVersion || host.Kind != KindService {
-		t.Fatalf("host credentials capability = (%+v, %v), want the fixed service contract", host, ok)
-	}
-	if len(host.Methods) != 1 || host.Methods[0].Name != "get" || host.Methods[0].Mode != ModeServiceIO {
-		t.Fatalf("host credentials methods = %+v, want the one service_io get method", host.Methods)
-	}
-	bound := testNative("bound", LifetimeHarness, []Capability{ServiceCapability("caller", "test.caller", PureMethod("call", `{}`, `{}`))}, []Binding{{Name: "credentials", Provider: HostProvider, CapabilityID: ContractCredentials, Definition: host}}, nil)
-	compiled, err := Compile([]Native{bound})
-	if err != nil {
-		t.Fatalf("Compile with the credentials host binding: %v", err)
-	}
-	if binding := compiled.Components(LifetimeHarness)[0].Requires[0]; !binding.Host {
-		t.Fatalf("credentials binding = %+v, want the host provider", binding)
-	}
-
-	mismatch := testNative("bound", LifetimeHarness, []Capability{ServiceCapability("caller", "test.caller", PureMethod("call", `{}`, `{}`))}, []Binding{{Name: "credentials", Provider: HostProvider, CapabilityID: ContractCredentials, Definition: CapabilityDefinition{ContractID: ContractCredentials, ContractVersion: ContractVersion, Kind: KindService, Methods: []Method{PureMethod("get", `{}`, `{}`)}}}}, nil)
-	if _, err := Compile([]Native{mismatch}); err == nil || !strings.Contains(err.Error(), "expected host contract differs") {
-		t.Fatalf("Compile with a forged credentials definition = %v, want the host contract mismatch", err)
+func TestCredentialsHostContract(t *testing.T) {
+	methods, ok := HostService(ContractCredentials)
+	if !ok || len(methods) != 1 || methods[0].Name != "get" || methods[0].Mode != ModeServiceIO {
+		t.Fatalf("host credentials methods = %+v, want the one service_io get method", methods)
 	}
 }

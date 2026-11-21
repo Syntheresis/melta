@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,12 +28,12 @@ func spawnRecord(calls *[]string, err error) func(context.Context, string) error
 func launchRequest() LaunchChildRequest {
 	return LaunchChildRequest{
 		ParentSessionID: testSessionID,
-		AgentSelection:  testSelection("child-agent"),
+		Inputs:          testInputs("child-agent"),
 		Content:         admissionContent("child task"),
 		OperationID:     "child-op-1",
 		ExtensionID:     "test.extension",
-		MaxConcurrent:   2,
 		OutputLimit:     1024,
+		Report:          true,
 	}
 }
 
@@ -50,6 +51,28 @@ func advanceSessionRevision(t *testing.T, store *graphStorage, sessionID string)
 		return err
 	})
 	testassert.NoError(t, err)
+}
+
+// stopLaunchOnChildInput installs the rejected-handoff stimulus on one launch's
+// exact child input entry: the stop lands between the launch commit and its
+// handoff. The entry hook runs for every transaction, so the stop is taken only
+// for that Session and Operation identity — never inside a transaction that
+// already holds the coordinator mutex — and the hook stays installed for the
+// fixture's lifetime instead of being removed under a running execution. An
+// existing entry hook is preserved and called afterwards.
+func stopLaunchOnChildInput(store *graphStorage, c *coordinator, parentID, operationID string) {
+	previous := store.entryHook
+	store.entryHook = func(draft EntryDraft) error {
+		if draft.Kind == EntryInput && draft.OperationID == operationID && draft.SessionID != parentID {
+			c.mu.Lock()
+			c.stop = &stopInterval{done: make(chan struct{})}
+			c.mu.Unlock()
+		}
+		if previous != nil {
+			return previous(draft)
+		}
+		return nil
+	}
 }
 
 // TestStartJobRejectsBeforeSpawn proves every StartJob rejection happens
@@ -111,7 +134,7 @@ func TestStartJobRejectsBeforeSpawn(t *testing.T) {
 		h.deps.Jobs = stubJobStopper{}
 		c := leaseCoordinator(t, h, testSessionID)
 		c.mu.Lock()
-		c.bgState = bgStopping
+		c.stop = &stopInterval{done: make(chan struct{})}
 		c.mu.Unlock()
 		{
 			err := h.StartJob(context.Background(), testSessionID, jobFixtureID, spawn)
@@ -158,6 +181,151 @@ func TestStartJobRejectsBeforeSpawn(t *testing.T) {
 	})
 }
 
+func TestMemberStopRejectsBackgroundAdmission(t *testing.T) {
+	store := freshSessionStore(t)
+	stub := newPrepareStub(modelPrepared(newModelScript().model))
+	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
+	defer cancel()
+	h.deps.Jobs = stubJobStopper{}
+	var jobInvalidations atomic.Int32
+	h.deps.Observe = func(f HarnessFact) {
+		if f.JobID == jobFixtureID {
+			jobInvalidations.Add(1)
+		}
+	}
+	c := leaseCoordinator(t, h, testSessionID)
+	c.mu.Lock()
+	c.memberStop = &backgroundMember{done: make(chan struct{})}
+	c.mu.Unlock()
+	spawns := 0
+	spawn := func(context.Context, string) error { spawns++; return nil }
+	err := h.StartJob(context.Background(), testSessionID, jobFixtureID, spawn)
+	testassert.Require(t, errors.Is(err, ErrInvalid), "member-stop job admission = %v", err)
+	testassert.Equal(t, jobInvalidations.Load(), int32(0))
+	result, err := h.LaunchChildSession(context.Background(), launchRequest())
+	testassert.Require(t, errors.Is(err, ErrInvalid) && result.ChildSessionID == "", "member-stop Session admission = %+v, %v", result, err)
+	testassert.Equal(t, spawns, 0)
+	testassert.Equal(t, durableRegisterCount(store), 1)
+	c.mu.Lock()
+	testassert.Require(t, !liveBackground(c), "refused starts left a member")
+	c.memberStop = nil
+	c.mu.Unlock()
+	var completion string
+	testassert.NoError(t, h.StartJob(context.Background(), testSessionID, jobFixtureID, func(_ context.Context, id string) error {
+		spawns++
+		completion = id
+		return nil
+	}))
+	testassert.Equal(t, spawns, 1)
+	h.claimFinishBackgroundMember(c, completion)
+}
+
+func TestMemberStopRejectsJobHandoff(t *testing.T) {
+	for _, stopped := range []bool{true, false} {
+		name := "open"
+		if stopped {
+			name = "member-stopping"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newTestHarness(t, freshSessionStore(t), nil)
+			h.deps.Jobs = stubJobStopper{}
+			c := leaseCoordinator(t, h, testSessionID)
+			arrived, release := make(chan struct{}), make(chan struct{})
+			var held atomic.Bool
+			h.deps.Observe = func(f HarnessFact) {
+				if f.JobID == jobFixtureID && held.CompareAndSwap(false, true) {
+					close(arrived)
+					<-release
+				}
+			}
+			done := make(chan error, 1)
+			spawned := make(chan string, 1)
+			go func() {
+				done <- h.StartJob(context.Background(), testSessionID, jobFixtureID, func(_ context.Context, id string) error {
+					spawned <- id
+					return nil
+				})
+			}()
+			<-arrived
+			if stopped {
+				c.mu.Lock()
+				c.memberStop = &backgroundMember{done: make(chan struct{})}
+				c.mu.Unlock()
+			}
+			close(release)
+			err := <-done
+			if stopped {
+				testassert.Require(t, errors.Is(err, ErrInvalid), "member-stop handoff = %v", err)
+				select {
+				case <-spawned:
+					t.Fatal("spawn ran after member stop")
+				default:
+				}
+			} else {
+				testassert.NoError(t, err)
+				h.claimFinishBackgroundMember(c, <-spawned)
+			}
+			c.mu.Lock()
+			empty := !liveBackground(c)
+			c.mu.Unlock()
+			testassert.Require(t, empty, "handoff left a member")
+		})
+	}
+}
+
+func TestMemberStopRejectsSessionHandoff(t *testing.T) {
+	for _, report := range []bool{true, false} {
+		name := "report-free"
+		if report {
+			name = "report"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := freshSessionStore(t)
+			var opened atomic.Int32
+			stub := newPrepareStub(PreparedExecution{
+				Capture: testCapture(),
+				Open: func(context.Context, OperationAdmission) (Execution, error) {
+					opened.Add(1)
+					return effectExecution(quickModel(), nil), nil
+				},
+			})
+			h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
+			defer cancel()
+			c := leaseCoordinator(t, h, testSessionID)
+			var stopped atomic.Bool
+			store.txHook = func(string) error {
+				if stopped.CompareAndSwap(false, true) {
+					c.mu.Lock()
+					c.memberStop = &backgroundMember{done: make(chan struct{})}
+					c.mu.Unlock()
+				}
+				return nil
+			}
+			request := launchRequest()
+			request.Report = report
+			result, err := h.LaunchChildSession(context.Background(), request)
+			store.txHook = nil
+			testassert.NoError(t, err)
+			testassert.Require(t, result.ChildSessionID != "", "committed Session receipt missing")
+			rec := settledOperation(t, store, result.ChildSessionID, "child-op-1")
+			testassert.Require(t, rec.State.Status == OperationInterruption && rec.State.Terminal != nil && rec.State.Terminal.Detail == executionInterruptedDetail, "operation = %+v", rec.State)
+			testassert.Equal(t, opened.Load(), int32(0))
+			c.mu.Lock()
+			empty := !liveBackground(c)
+			c.mu.Unlock()
+			testassert.Require(t, empty, "rejected handoff left a member")
+			signals := storedSignals(t, store, testSessionID)
+			if report { // the pre-open interruption reports through the same settled-content path as a normal retirement
+				want := "Session " + result.ChildSessionID + ": interruption"
+				testassert.Require(t, len(signals) == 1 && signals[0].Content == want, "completion = %+v, want %q", signals, want)
+			} else {
+				testassert.Require(t, len(signals) == 0, "the report-free interruption delivered %+v", signals)
+				testassert.Require(t, storedEntryCount(store, testSessionID) == 0, "the report-free interruption committed %d parent entries", storedEntryCount(store, testSessionID))
+			}
+		})
+	}
+}
+
 // TestStartJobHandoffLossFinishesMemberOnce proves the handoff failure
 // capture: every state outside the valid handoff set fails uniformly — the
 // raw harness error when the Harness is closed, the closed-or-stopping
@@ -166,10 +334,10 @@ func TestStartJobHandoffLossFinishesMemberOnce(t *testing.T) {
 	t.Run("closed group rejects with the closed-or-stopping text", func(t *testing.T) {
 		h := newTestHarness(t, freshSessionStore(t), nil)
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberJob, jobFixtureID, 0)
+		member, err := admitLocked(h, c, memberJob, jobFixtureID)
 		testassert.NoError(t, err)
 		c.mu.Lock()
-		c.bgState = bgStopping
+		c.stop = &stopInterval{done: make(chan struct{})}
 		c.mu.Unlock()
 		{
 			err := h.backgroundHandoffFailure(c, member)
@@ -194,7 +362,7 @@ func TestStartJobHandoffLossFinishesMemberOnce(t *testing.T) {
 		})
 		testassert.NoError(t, err)
 		c := leaseCoordinator(t, h, testSessionID)
-		member, err := admitLocked(h, c, memberJob, jobFixtureID, 0)
+		member, err := admitLocked(h, c, memberJob, jobFixtureID)
 		testassert.NoError(t, err)
 		cancel() // the Harness closes after the admission, before the handoff
 		{
@@ -258,9 +426,7 @@ func TestLaunchChildSessionRejectsInvalidRequests(t *testing.T) {
 		name string
 		mut  func(r *LaunchChildRequest)
 	}{
-		{"zero cap", func(r *LaunchChildRequest) { r.MaxConcurrent = 0 }},
-		{"cap above 20", func(r *LaunchChildRequest) { r.MaxConcurrent = 21 }},
-		{"output limit below 1024", func(r *LaunchChildRequest) { r.OutputLimit = 1023 }},
+		{"negative output limit", func(r *LaunchChildRequest) { r.OutputLimit = -1 }},
 		{"output limit above 1048576", func(r *LaunchChildRequest) { r.OutputLimit = 1048577 }},
 		{"non-hex parent", func(r *LaunchChildRequest) { r.ParentSessionID = "parent" }},
 		{"empty operation id", func(r *LaunchChildRequest) { r.OperationID = "" }},
@@ -283,21 +449,21 @@ func TestLaunchChildSessionRejectsInvalidRequests(t *testing.T) {
 
 // TestLaunchChildSessionRefusesChildParent proves the recursion rule: a child
 // Session cannot launch a child.
-func TestLaunchChildSessionRefusesChildParent(t *testing.T) {
+func TestLaunchChildSessionAllowsChildParent(t *testing.T) {
 	childParent := validSessionRecord()
-	childParent.Identity.ParentSessionID = hexID(2)
+	childParent.Identity.OwnerSessionID = hexID(2)
 	stub := newPrepareStub(validPrepared())
-	h := newTestHarness(t, (&testGraph{session: childParent}).storage(t), stub.prepare)
+	h, cancel := newCancelableHarness(t, (&testGraph{session: childParent}).storage(t), PreparedExecution{}, stub.prepare)
+	defer cancel()
 	c := leaseCoordinator(t, h, testSessionID)
-	{
-		_, err := h.LaunchChildSession(context.Background(), launchRequest())
-		testassert.Require(t, errors.Is(err, ErrInvalid) && strings.Contains(err.Error(), "child sessions cannot launch child sessions"), "child-parent launch = %v, want the refusal", err)
-	}
-	testassert.Equal(t, stub.callCount(), 0)
+	result, err := h.LaunchChildSession(context.Background(), launchRequest())
+	testassert.NoError(t, err)
+	testassert.Require(t, result.ChildSessionID != "", "nested start returned no ID")
+	testassert.Equal(t, stub.callCount(), 1)
 	c.mu.Lock()
 	hasGroup := c.group != nil
 	c.mu.Unlock()
-	testassert.Require(t, !hasGroup, "the refused launch created a member")
+	testassert.Require(t, hasGroup, "nested launch created no member")
 }
 
 // TestLaunchChildSessionArchivedParent proves the archived-parent rejection:
@@ -347,37 +513,48 @@ func durableRegisterCount(store *graphStorage) int {
 // requested cap the launch is rejected before any member or child exists, and
 // once the live member completes a later launch succeeds with a freshly
 // generated child identity.
-func TestLaunchChildSessionCapRejection(t *testing.T) {
+func TestLaunchChildSessionAllowsOtherMembers(t *testing.T) {
 	stub := newPrepareStub(validPrepared())
 	h, cancel := newCancelableHarness(t, freshSessionStore(t), PreparedExecution{}, stub.prepare)
 	defer cancel()
 	c := leaseCoordinator(t, h, testSessionID)
-	member, err := admitLocked(h, c, memberChild, "existing-child", 0)
+	member, err := admitLocked(h, c, memberSession, "existing-child")
 	testassert.NoError(t, err)
 	req := launchRequest()
-	req.MaxConcurrent = 1
-	_, err = h.LaunchChildSession(context.Background(), req)
-	want := "harness: invalid storage request: background group is full (1/1). Wait for a background member to complete, then retry"
-	testassert.Require(t, err != nil && err.Error() == want, "capped launch = %v, want %q", err, want)
+	res, err := h.LaunchChildSession(context.Background(), req)
+	testassert.NoError(t, err)
 	c.mu.Lock()
 	members := len(c.group.members)
 	c.mu.Unlock()
-	testassert.Equal(t, members, 1)
+	testassert.Equal(t, members, 2)
 	{
 		n := durableRegisterCount(fixtureStore(t, h))
-		testassert.Equal(t, n, 1)
+		testassert.Equal(t, n, 3)
 	}
 
-	// Completing the live member frees the cap: the next public launch
-	// succeeds and publishes a fresh child identity.
 	h.finishBackgroundMember(c, member)
-	res, err := h.LaunchChildSession(context.Background(), req)
-	testassert.NoError(t, err)
 	testassert.Require(t, completionIDShape.MatchString(res.ChildSessionID) && res.ChildSessionID != testSessionID, "launched child session id %q, want a fresh generated identity", res.ChildSessionID)
 	{
 		_, err := fixtureStore(t, h).ReadRegister(context.Background(), RegisterKey{SessionID: res.ChildSessionID, Kind: RegisterSession})
 		testassert.NoError(t, err)
 	}
+}
+
+func TestSessionMembersIncludeStarter(t *testing.T) {
+	h := newTestHarness(t, freshSessionStore(t), nil)
+	c := leaseCoordinator(t, h, testSessionID)
+	member, err := admitLocked(h, c, memberSession, "child")
+	testassert.NoError(t, err)
+	c.mu.Lock()
+	member.starter = "other-extension"
+	c.mu.Unlock()
+	members, err := h.SessionMembers(context.Background(), testSessionID)
+	testassert.NoError(t, err)
+	testassert.Require(t, reflect.DeepEqual(members, []SessionMember{{Kind: "session", ID: "child", Starter: "other-extension"}}), "members = %+v", members)
+	h.finishBackgroundMember(c, member)
+	members, err = h.SessionMembers(context.Background(), testSessionID)
+	testassert.NoError(t, err)
+	testassert.Equal(t, len(members), 0)
 }
 
 // TestLaunchChildSessionPrepareFailure proves a preparation failure publishes
@@ -467,14 +644,14 @@ func TestLaunchChildSessionRevisionDrift(t *testing.T) {
 		h, store, stub, _ := newDriftHarness(t)
 		err := runLaunch(t, h, stub, func() {
 			{
-				_, err := h.ChangeAgentType(context.Background(), testSessionID, testSelection("other"))
+				_, err := h.SetSessionInputs(context.Background(), testSessionID, testInputs("other"))
 				testassert.Check(t, err == nil, "ChangeAgentType: %v", err)
 			}
 		})
 		testassert.Require(t, errors.Is(err, ErrConflict), "drifted launch = %v, want the conflict class", err)
 		rec, err := h.ReadSessionHeader(context.Background(), testSessionID)
 		testassert.NoError(t, err)
-		testassert.Require(t, rec.Revision.DurableRevision == 2 && rec.AgentSelection.Definition.DefinitionID == "other", "subsequent read = revision %d agent %q, want the rematerialized register", rec.Revision.DurableRevision, rec.AgentSelection.Definition.DefinitionID)
+		testassert.Require(t, rec.Revision.DurableRevision == 2 && reflect.DeepEqual(rec.Inputs, testInputs("other")), "subsequent read = revision %d inputs %+v, want the rematerialized register", rec.Revision.DurableRevision, rec.Inputs)
 		{
 			n := durableRegisterCount(store)
 			testassert.Equal(t, n, 1)
@@ -530,32 +707,31 @@ func TestLaunchChildSessionRevisionDrift(t *testing.T) {
 
 // TestLaunchChildSessionSettlesRejectedHandoff proves a committed child whose
 // handoff was rejected settles its Operation as interruption without starting
-// the child execution and without delivering a completion: the parent member
-// finishes and the parent records nothing.
+// the child execution, then delivers the existing completion to its owner.
 func TestLaunchChildSessionSettlesRejectedHandoff(t *testing.T) {
 	store := freshSessionStore(t)
 	script := newModelScript()
+	script.gate = make(chan struct{})
+	defer script.releaseGate()
 	stub := newPrepareStub(modelPrepared(script.model))
 	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
 	defer cancel()
 	c := leaseCoordinator(t, h, testSessionID)
-	store.txHook = func(string) error { // the stop lands between admission and handoff
-		c.mu.Lock()
-		c.bgState = bgStopping
-		c.mu.Unlock()
-		return nil
-	}
-	_, err := h.LaunchChildSession(context.Background(), launchRequest())
-	store.txHook = nil
-	testassert.Require(t, err != nil && err.Error() == "harness: invalid storage request: background group is closed or stopping", "rejected launch = %v, want the closed-or-stopping rejection", err)
+	request := launchRequest()
+	stopLaunchOnChildInput(store, c, request.ParentSessionID, request.OperationID)
+	result, err := h.LaunchChildSession(context.Background(), request)
+	testassert.NoError(t, err)
 
+	ids, err := store.ListSessionIDs(context.Background())
+	testassert.NoError(t, err)
 	var childID string
-	for id := range store.registers {
+	for _, id := range ids {
 		if id != testSessionID {
 			childID = id
 		}
 	}
 	testassert.Require(t, childID != "", "the committed child register is missing")
+	testassert.Equal(t, result.ChildSessionID, childID)
 	rec := settledOperation(t, store, childID, "child-op-1")
 	testassert.Equal(t, rec.State.Status, OperationInterruption)
 	childRec, err := h.ReadSessionHeader(context.Background(), childID)
@@ -566,10 +742,7 @@ func TestLaunchChildSessionSettlesRejectedHandoff(t *testing.T) {
 		n := storedEntryCount(store, childID)
 		testassert.Equal(t, n, 3)
 	}
-	{
-		n := storedEntryCount(store, testSessionID)
-		testassert.Equal(t, n, 0)
-	}
+	testassert.Equal(t, runtimeInputTextRaw(t, store, testSessionID), "Session "+childID+": interruption")
 	{
 		signals := storedSignals(t, store, testSessionID)
 		testassert.Require(t, len(signals) == 0, "the rejected launch delivered %+v, want no completion", signals)
@@ -578,10 +751,34 @@ func TestLaunchChildSessionSettlesRejectedHandoff(t *testing.T) {
 	empty := c.group == nil || len(c.group.members) == 0
 	c.mu.Unlock()
 	testassert.Require(t, empty, "the rejected launch left its member live")
-	{
-		n := len(script.seen())
-		testassert.Equal(t, n, 0)
+}
+
+func TestRejectedHandoffCompletionStorageFailureKeepsReceipt(t *testing.T) {
+	store := freshSessionStore(t)
+	stub := newPrepareStub(modelPrepared(newModelScript().model))
+	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
+	defer cancel()
+	owner := leaseCoordinator(t, h, testSessionID)
+	store.entryHook = func(d EntryDraft) error {
+		if d.SessionID == testSessionID && d.Kind == EntryInput {
+			return fmt.Errorf("%w: completion unavailable", ErrStorage)
+		}
+		return nil
 	}
+	request := launchRequest()
+	stopLaunchOnChildInput(store, owner, request.ParentSessionID, request.OperationID)
+	result, err := h.LaunchChildSession(context.Background(), request)
+	testassert.Require(t, errors.Is(err, ErrStorage) && result.ChildSessionID != "", "result = %+v, error = %v", result, err)
+	testassert.Equal(t, settledOperation(t, store, result.ChildSessionID, "child-op-1").State.Status, OperationInterruption)
+	testassert.Equal(t, storedEntryCount(store, testSessionID), 0)
+	testassert.Equal(t, len(storedSignals(t, store, testSessionID)), 0)
+	owner.mu.Lock()
+	empty := !liveBackground(owner)
+	owner.mu.Unlock()
+	h.mu.Lock()
+	latched := errors.Is(h.storageFailure, ErrStorage)
+	h.mu.Unlock()
+	testassert.Require(t, empty && latched, "completion failure: member released=%v storage latched=%v", empty, latched)
 }
 
 // TestLaunchChildSessionStartFailureLeavesChildForRecovery proves the
@@ -590,7 +787,7 @@ func TestLaunchChildSessionSettlesRejectedHandoff(t *testing.T) {
 // for recovery, close the parent member without delivery, and latch the
 // storage class.
 func TestLaunchChildSessionStartFailureLeavesChildForRecovery(t *testing.T) {
-	assertRecoveryState := func(t *testing.T, h *Harness, store *graphStorage, c *coordinator, script *modelScript) {
+	assertRecoveryState := func(t *testing.T, h *Harness, store *graphStorage, c *coordinator, script *modelScript, result LaunchChildResult) {
 		t.Helper()
 		var childID string
 		for id := range store.registers {
@@ -599,6 +796,7 @@ func TestLaunchChildSessionStartFailureLeavesChildForRecovery(t *testing.T) {
 			}
 		}
 		testassert.Require(t, childID != "", "the committed child register is missing")
+		testassert.Equal(t, result.ChildSessionID, childID)
 		{
 			rec := settledOperation(t, store, childID, "child-op-1")
 			testassert.Equal(t, rec.State.Status, OperationRunning)
@@ -635,10 +833,10 @@ func TestLaunchChildSessionStartFailureLeavesChildForRecovery(t *testing.T) {
 		c := leaseCoordinator(t, h, testSessionID)
 
 		store.registersErr = fmt.Errorf("%w: storage down", ErrStorage) // the child materialization read fails
-		_, err := h.LaunchChildSession(context.Background(), launchRequest())
+		result, err := h.LaunchChildSession(context.Background(), launchRequest())
 		store.registersErr = nil
 		testassert.Require(t, errors.Is(err, ErrStorage), "materialization failure = %v, want the storage class", err)
-		assertRecoveryState(t, h, store, c, script)
+		assertRecoveryState(t, h, store, c, script, result)
 	})
 
 	t.Run("terminal-commit failure after a rejected handoff", func(t *testing.T) {
@@ -659,7 +857,7 @@ func TestLaunchChildSessionStartFailureLeavesChildForRecovery(t *testing.T) {
 			calls++
 			if calls == 1 {
 				c.mu.Lock()
-				c.bgState = bgStopping
+				c.stop = &stopInterval{done: make(chan struct{})}
 				c.mu.Unlock()
 			}
 			if calls > 4 {
@@ -667,10 +865,10 @@ func TestLaunchChildSessionStartFailureLeavesChildForRecovery(t *testing.T) {
 			}
 			return nil
 		}
-		_, err := h.LaunchChildSession(context.Background(), launchRequest())
+		result, err := h.LaunchChildSession(context.Background(), launchRequest())
 		store.txHook = nil
 		testassert.Require(t, errors.Is(err, ErrStorage), "settlement failure = %v, want the storage class", err)
-		assertRecoveryState(t, h, store, c, script)
+		assertRecoveryState(t, h, store, c, script, result)
 	})
 }
 
@@ -694,14 +892,14 @@ func TestLaunchChildSessionStartsChild(t *testing.T) {
 	call := stub.lastCall()
 	testassert.Equal(t, call.req.RequestKind, RequestKindMessage)
 	ident := call.req.Session.Identity
-	testassert.Require(t, ident.SessionID == res.ChildSessionID && ident.ParentSessionID == testSessionID && ident.Workspace == "/tmp/works" && !ident.CreatedAt.IsZero() && ident.SourceSessionID == "" && ident.SourceBoundaryEntryID == "", "prepared identity = %+v, want the complete child lineage", ident)
-	testassert.Equal(t, call.req.Session.AgentSelection.Definition.DefinitionID, "child-agent")
+	testassert.Require(t, ident.SessionID == res.ChildSessionID && ident.OwnerSessionID == testSessionID && ident.Workspace == "/tmp/works" && !ident.CreatedAt.IsZero() && ident.SourceSessionID == "" && ident.SourceBoundaryEntryID == "", "prepared identity = %+v, want the complete child lineage", ident)
+	testassert.Require(t, reflect.DeepEqual(call.req.Session.Inputs, testInputs("child-agent")), "prepared inputs = %+v", call.req.Session.Inputs)
 
 	childRec, err := h.ReadSessionHeader(context.Background(), res.ChildSessionID)
 	testassert.NoError(t, err)
-	testassert.Require(t, childRec.Identity.ParentSessionID == testSessionID && childRec.Identity.Workspace == "/tmp/works" && childRec.Identity.CreatedAt.Equal(ident.CreatedAt) && childRec.Identity.SourceSessionID == "" && (childRec.Lifecycle == LifecycleOpen && childRec.AgentSelection.Definition.DefinitionID == "child-agent" && childRec.CurrentOperationID == "child-op-1" && childRec.ArchivedAt == nil), "durable child identity = %+v, want the prepared identity; durable child state = %+v, want the initial launch state", childRec.Identity, childRec)
+	testassert.Require(t, childRec.Identity.OwnerSessionID == testSessionID && childRec.Identity.Workspace == "/tmp/works" && childRec.Identity.CreatedAt.Equal(ident.CreatedAt) && childRec.Identity.SourceSessionID == "" && (childRec.Lifecycle == LifecycleOpen && reflect.DeepEqual(childRec.Inputs, testInputs("child-agent")) && childRec.CurrentOperationID == "child-op-1" && childRec.ArchivedAt == nil), "durable child identity = %+v, want the prepared identity; durable child state = %+v, want the initial launch state", childRec.Identity, childRec)
 	op := settledOperation(t, store, res.ChildSessionID, "child-op-1")
-	testassert.Require(t, op.State.Status == OperationRunning && op.Admission.RequestKind == RequestKindMessage && op.Admission.AgentSelection.Definition.DefinitionID == "child-agent", "durable child operation = %+v, want the running plugin admission", op)
+	testassert.Require(t, op.State.Status == OperationRunning && op.Admission.RequestKind == RequestKindMessage && reflect.DeepEqual(op.Admission.Inputs, testInputs("child-agent")), "durable child operation = %+v, want the running plugin admission", op)
 	capture := op.Admission.Execution
 	want := testCapture()
 	want.InitialToolNames = []string{"echo"} // the accepted nil default materializes to every captured eligible tool
@@ -717,7 +915,7 @@ func TestLaunchChildSessionStartsChild(t *testing.T) {
 		member = m
 	}
 	c.mu.Unlock()
-	testassert.Require(t, members == 1 && member != nil && member.kind == memberChild && member.id == res.ChildSessionID && !member.claimed, "parent members = %d (%+v), want the unclaimed child member", members, member)
+	testassert.Require(t, members == 1 && member != nil && member.kind == memberSession && member.id == res.ChildSessionID && member.starter == "test.extension" && !member.claimed, "parent members = %d (%+v), want the attributed unclaimed child member", members, member)
 	child := cachedCoordinator(t, h, res.ChildSessionID)
 	child.mu.Lock()
 	pending := child.pendingCompletion
@@ -744,7 +942,7 @@ func TestLaunchChildSessionStartsChild(t *testing.T) {
 }
 
 func TestLaunchChildPrepareOwnsSelection(t *testing.T) {
-	for _, form := range []string{"resolved", "definition"} {
+	for _, form := range []string{"tools", "instructions"} {
 		t.Run(form, func(t *testing.T) {
 			store := freshSessionStore(t)
 			script := newModelScript()
@@ -753,37 +951,49 @@ func TestLaunchChildPrepareOwnsSelection(t *testing.T) {
 			settings := json.RawMessage(`{"setting":1}`)
 			prepared.Capture.Strategy.Settings = settings
 			h, cancel := newCancelableHarness(t, store, PreparedExecution{}, func(_ context.Context, req PreparationRequest) (PreparedExecution, error) {
-				if req.Session.AgentSelection.Inputs != nil {
-					i := req.Session.AgentSelection.Inputs
-					i.Tools[0], i.Capabilities[0], i.Strategy.Settings[2] = "changed", "changed", 'X'
+				testassert.Require(t, len(req.Content) == 1 && req.Content[0].Text == "child task", "child preparation input = %+v", req.Content)
+				if form == "tools" {
+					i := req.Session.Inputs
+					i.Tools[0], i.Strategy.Settings[2] = "changed", 'X'
 				} else {
-					req.Session.AgentSelection.Definition.DefinitionID = "changed"
+					*req.Session.Inputs.Instructions = "changed"
 				}
+				req.Session.ExtensionState["owner"][0] = 'x'
 				return prepared, nil
 			})
 			defer cancel()
 			req := launchRequest()
-			if form == "resolved" {
-				req.AgentSelection = AgentSelection{Inputs: &AgentInputs{AssemblyMode: "full", Tools: []string{"read_file"}, Capabilities: []string{"cap"}, Strategy: StrategySelection{Settings: json.RawMessage(`{"selection":1}`)}}}
+			req.ExtensionState = map[string]SessionStateValue{"owner": []byte(`{"v":1}`)}
+			if form == "tools" {
+				req.Inputs = SessionInputs{Tools: []string{"read_file"}, Strategy: &StrategySelection{ID: "strategy", Settings: json.RawMessage(`{"selection":1}`)}}
 			}
-			want := ownAgentSelection(req.AgentSelection)
+			want := req.Inputs.Owned()
 			result, err := h.LaunchChildSession(context.Background(), req)
 			testassert.NoError(t, err)
-			if req.AgentSelection.Inputs != nil {
-				req.AgentSelection.Inputs.Tools[0], req.AgentSelection.Inputs.Capabilities[0], req.AgentSelection.Inputs.Strategy.Settings[2] = "caller", "caller", 'Y'
+			if form == "tools" {
+				req.Inputs.Tools[0], req.Inputs.Strategy.Settings[2] = "caller", 'Y'
 			} else {
-				req.AgentSelection.Definition.DefinitionID = "caller"
+				*req.Inputs.Instructions = "caller"
 			}
+			req.ExtensionState["owner"][0] = 'y'
 			settings[2] = 'Z'
 			cold := newTestHarness(t, store, nil)
 			for name, reader := range map[string]*Harness{"warm": h, "cold": cold} {
 				header, err := reader.ReadSessionHeader(context.Background(), result.ChildSessionID)
 				testassert.NoError(t, err)
-				testassert.Require(t, reflect.DeepEqual(header.AgentSelection, want), "%s child selection = %+v, want %+v", name, header.AgentSelection, want)
+				testassert.Require(t, reflect.DeepEqual(header.Inputs, want), "%s child inputs = %+v, want %+v", name, header.Inputs, want)
 				op, err := reader.ReadOperation(context.Background(), result.ChildSessionID, req.OperationID)
 				testassert.NoError(t, err)
-				testassert.Require(t, reflect.DeepEqual(op.Admission.AgentSelection, want), "%s operation selection = %+v, want %+v", name, op.Admission.AgentSelection, want)
+				testassert.Require(t, reflect.DeepEqual(op.Admission.Inputs, want), "%s operation inputs = %+v, want %+v", name, op.Admission.Inputs, want)
 				testassert.Equal(t, string(op.Admission.Execution.Strategy.Settings), `{"setting":1}`)
+			}
+			_, regs := storedSessionState(store, result.ChildSessionID)
+			for _, reg := range regs {
+				if reg.Key.Kind == RegisterSession {
+					session, err := decodeSessionRegister(reg)
+					testassert.NoError(t, err)
+					testassert.Equal(t, string(session.State.ExtensionState["owner"]), `{"v":1}`)
+				}
 			}
 		})
 	}

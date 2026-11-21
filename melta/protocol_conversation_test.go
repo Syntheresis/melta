@@ -109,8 +109,8 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 			Refusal: "no",
 			Extra:   model.Extra{"model_extra": json.RawMessage(`{"k":1}`)},
 			ToolCalls: []harness.ToolCallRecord{
-				{ID: "call-1", Ordinal: 0, Name: "read", ArgumentsBase64: convArgs(`{"n":9007199254740993}`), Extra: model.Extra{"tool_extra": json.RawMessage(`{"tool_n":9007199254740993}`)}, NormalizedArguments: json.RawMessage(`{"x":1e1000}`), ResultEntryID: resultID},
-				{ID: "call-2", Ordinal: 1, Name: "grep", ArgumentsBase64: convArgs(`[]`), ResultEntryID: "cccccccccccccccccccccccccccccc04"},
+				{ID: "call-1", Ordinal: 0, Name: "read", ArgumentsBase64: convArgs(`{"n":9007199254740993}`), Extra: model.Extra{"tool_extra": json.RawMessage(`{"tool_n":9007199254740993}`)}, ResultEntryID: resultID},
+				{ID: "call-2", Ordinal: 1, Name: "grep", ArgumentsBase64: convArgs(`{"pending":1}`), ResultEntryID: "cccccccccccccccccccccccccccccc04"},
 			},
 		}),
 		convResultFact(resultID, assistantID, "call-1", "success", "", `{"rows":1e1000,"zero":0}`),
@@ -122,7 +122,7 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 			EntryID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa06", Sequence: 5, CommittedAt: convTime, Kind: harness.EntrySignal,
 			Signal: &harness.SignalEntry{
 				SessionID: convSessionID, EntryID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa06", Signal: harness.SignalBackgroundCompletion,
-				RelatedMember: &harness.RelatedMember{Kind: "child", ID: "dddddddddddddddddddddddddddddd07"},
+				RelatedMember: &harness.RelatedMember{Kind: "session", ID: "dddddddddddddddddddddddddddddd07"},
 				Content:       "the child finished",
 			},
 		},
@@ -159,6 +159,7 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 			},
 		},
 	}
+	facts[2].ToolResult.NormalizedArguments = json.RawMessage(`{"x":1e1000}`)
 	items, err := projectConversation(convSessionID, facts)
 	testassert.NoError(t, err)
 	// the tool result stays absorbed
@@ -189,7 +190,7 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 	// content-part extras, with the same raw-number fidelity.
 	testassert.Require(t, call1.Extra != nil && string((*call1.Extra)["tool_extra"]) == `{"tool_n":9007199254740993}` && call1.NormalizedArguments != nil && string((*call1.NormalizedArguments)["x"]) == `1e1000` && call1.Status != nil && *call1.Status == protocol.ToolCallStatusSuccess && call1.Content != nil && *call1.Content == "" && call1.Metadata != nil && string(*call1.Metadata) == `{"rows":1e1000,"zero":0}`, "call-1 extra = %v, want the call-level extra with its raw number; call-1 normalized arguments = %v, want the raw object; call-1 terminal outcome = (%v, %v), want success with a present empty content; call-1 metadata = %v, want the raw value preserved", call1.Extra, call1.NormalizedArguments, call1.Status, call1.Content, call1.Metadata)
 	call2 := assistant.ToolCalls[1]
-	testassert.Require(t, call2.Status == nil && call2.Content == nil && call2.Metadata == nil && call2.NormalizedArguments == nil && call2.Arguments == `[]`, "pending call-2 = %+v, want every terminal member omitted; got %v, want %v", call2, call2.Arguments, `[]`)
+	testassert.Require(t, call2.Status == nil && call2.Content == nil && call2.Metadata == nil && call2.NormalizedArguments == nil && call2.Arguments == `{"pending":1}`, "pending call-2 = %+v, want only original arguments", call2)
 
 	// The signals carry their typed subtypes; the background completion names
 	// its related member and no operation. Every kind's item identity is the
@@ -198,7 +199,7 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 	testassert.Require(t, err == nil && interruption.Subtype == protocol.SignalItemSubtypeInterruption && interruption.Content == "Operation interrupted." && interruption.OperationId != nil, "interruption item = %+v err %v, want the typed interruption signal", interruption, err)
 	testassert.Require(t, interruption.ItemId == projectItemID(convSessionID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa05"), "interruption item_id = %q, want the fixture entry's namespace identity", interruption.ItemId)
 	completion, err := items[3].AsSignalItem()
-	testassert.Require(t, err == nil && completion.Subtype == protocol.SignalItemSubtypeBackgroundCompletion && completion.Content == "the child finished" && completion.OperationId == nil && completion.RelatedMember != nil && completion.RelatedMember.Kind == protocol.BackgroundMemberKindChild && completion.RelatedMember.Id == "dddddddddddddddddddddddddddddd07", "background completion item = %+v err %v, want the operationless typed signal with its member", completion, err)
+	testassert.Require(t, err == nil && completion.Subtype == protocol.SignalItemSubtypeBackgroundCompletion && completion.Content == "the child finished" && completion.OperationId == nil && completion.RelatedMember != nil && completion.RelatedMember.Kind == protocol.BackgroundMemberKindSession && completion.RelatedMember.Id == "dddddddddddddddddddddddddddddd07", "background completion item = %+v err %v, want the operationless typed signal with its member", completion, err)
 	testassert.Require(t, completion.ItemId == projectItemID(convSessionID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa06"), "completion item_id = %q, want the fixture entry's namespace identity", completion.ItemId)
 
 	// The compaction and terminal outcomes, each at its own entry's identity.
@@ -474,13 +475,13 @@ func TestConversationProjectionToolCallLifecycle(t *testing.T) {
 				return textTurnEvents("done")
 			case strings.Contains(body, `"second"`):
 				return []string{
-					`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-3","type":"function","function":{"name":"read","arguments":"{\"third\":1}"}},{"index":1,"id":"call-4","type":"function","function":{"name":"read","arguments":"{\"fourth\":2}"}}]},"finish_reason":null}]}`,
+					`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-3","type":"function","function":{"name":"bg_read","arguments":"{\"third\":1}"}},{"index":1,"id":"call-4","type":"function","function":{"name":"bg_read","arguments":"{\"fourth\":2}"}}]},"finish_reason":null}]}`,
 					`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 				}
 			case strings.Contains(body, `"first"`):
-				return toolCallTurnEvents("call-2", "grep", `{"q":"late"}`)
+				return toolCallTurnEvents("call-2", "bg_grep", `{"q":"late"}`)
 			default:
-				return toolCallTurnEvents("call-1", "read", `{}`)
+				return toolCallTurnEvents("call-1", "bg_read", `{}`)
 			}
 		})
 		// The declared tools' prepared outcomes: the first result carries its
@@ -604,7 +605,7 @@ func TestConversationProjectionSyntheticToolResult(t *testing.T) {
 			if lastMessageRole(body) == "tool" {
 				return nil // the default completed text turn
 			}
-			return toolCallTurnEvents("call-1", "read", `{}`)
+			return toolCallTurnEvents("call-1", "bg_read", `{}`)
 		})
 		// The declared read tool fails its prepared call immediately: the
 		// synthetic error outcome settles the published call.
@@ -628,7 +629,7 @@ func TestConversationProjectionSyntheticToolResult(t *testing.T) {
 // publishing read calls call-1 and call-2 indivisibly.
 func twoReadCallTurnEvents() []string {
 	return []string{
-		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read","arguments":"{}"}},{"index":1,"id":"call-2","type":"function","function":{"name":"read","arguments":"{}"}}]},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bg_read","arguments":"{}"}},{"index":1,"id":"call-2","type":"function","function":{"name":"bg_read","arguments":"{}"}}]},"finish_reason":null}]}`,
 		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 	}
 }
@@ -858,7 +859,7 @@ func TestConversationProjectionForkPrefixIsIndependent(t *testing.T) {
 				return nil // the closing turn: the default completed text turn
 			}
 			if lastUserText(body) == "hello fork" {
-				return toolCallTurnEvents("call-1", "read", `{"n":9007199254740993}`)
+				return toolCallTurnEvents("call-1", "bg_read", `{"n":9007199254740993}`)
 			}
 			return nil // later user turns close with the default turn
 		})
@@ -958,27 +959,19 @@ func TestConversationProjectionChildAndBackgroundCompletion(t *testing.T) {
 		})
 		child := launchChildThroughRuntime(t, bg.r, root, "child-op-1")
 		awaitOperation(t, bg.r, child, "child-op-1", harness.OperationSuccess)
+		eventually(t, "child ownership handoff", func() bool {
+			view, err := bg.r.harness.ReadSessionView(context.Background(), root)
+			return err == nil && len(view.Background) == 0
+		})
 
 		completionID := bg.startJob(child, "cc000003")
 		stopper.addDelivery(child, completionID, "job report")
 		testassert.NoError(t, bg.r.StopSession(context.Background(), testCaller(bg.r), child))
 
-		// The child's conversation: its own turn plus the typed completion
-		// signal naming the job member.
+		// After handoff, a direct group-only stop leaves the Session able to
+		// receive the job completion through ordinary runtime input.
 		childItems := projectSessionItems(t, bg.r, child)
-		var sawSignal bool
-		for _, item := range childItems {
-			if itemKind(t, item) != "signal" {
-				continue
-			}
-			signal, err := item.AsSignalItem()
-			testassert.NoError(t, err)
-			testassert.Require(t, signal.Subtype == protocol.SignalItemSubtypeBackgroundCompletion && signal.Content == "job report" && signal.RelatedMember != nil && signal.RelatedMember.Kind == protocol.BackgroundMemberKindJob && signal.RelatedMember.Id == "cc000003", "completion signal = %+v, want the job member's typed record", signal)
-			sawSignal = true
-		}
-		if !sawSignal {
-			t.Fatalf("child items = %s, want the background_completion signal item", itemKinds(t, childItems))
-		}
+		testassert.Require(t, hasRuntimeOriginInput(t, childItems, "job report"), "child items = %s, want the job report as runtime input", itemKinds(t, childItems))
 
 		// The parent's conversation gains the child's completion as a
 		// runtime-origin input under the completion identity; the delivery

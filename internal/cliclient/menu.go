@@ -3,9 +3,9 @@ package cliclient
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 
+	"github.com/Syntheresis/melta/internal/clientops"
 	"github.com/Syntheresis/melta/internal/terminal"
 	"github.com/Syntheresis/melta/protocol"
 )
@@ -80,7 +80,7 @@ func (c *CLI) childrenMenu(s stamp) {
 			return
 		}
 		for _, child := range list {
-			if child.ParentSessionId != nil && *child.ParentSessionId == s.root {
+			if child.OwnerSessionId != nil && *child.OwnerSessionId == s.root {
 				children = append(children, child)
 			}
 		}
@@ -98,7 +98,7 @@ func (c *CLI) childrenMenu(s stamp) {
 	}
 	if c.root != nil && c.root.hydration != nil {
 		for _, member := range c.root.hydration.Background {
-			if member.Kind == protocol.BackgroundMemberKindChild && !seen[member.Id] {
+			if member.Kind == protocol.BackgroundMemberKindSession && !seen[member.Id] {
 				items = append(items, terminal.MenuItem{Label: member.Id, Detail: "live child — inspect only", Selectable: true, Extra: member.Id})
 			}
 			if member.Kind == protocol.BackgroundMemberKindJob {
@@ -111,16 +111,6 @@ func (c *CLI) childrenMenu(s stamp) {
 	c.mu.Unlock()
 }
 
-// agentSourceDetail always exposes the full source tuple beside the display
-// name using the existing menu detail text; names are not globally unique.
-func agentSourceDetail(agent protocol.Agent) string {
-	source := agent.Definition.ExtensionId + "/" + agent.Definition.CapabilityId
-	if agent.Description == "" {
-		return source
-	}
-	return source + " — " + agent.Description
-}
-
 func (c *CLI) selectionMenu(s stamp, name, arg string) {
 	if arg != "" {
 		c.setSelection(s, name, arg)
@@ -128,17 +118,24 @@ func (c *CLI) selectionMenu(s stamp, name, arg string) {
 	}
 	var items []terminal.MenuItem
 	if name == "/agent" {
-		var configuration protocol.ConfigurationView
-		_, err := call(s, "GetConfiguration", "", nil, nil, &configuration)
+		raw, err := clientops.InvokeExtension(s.ctx, s.conn, "agents", "list", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, json.RawMessage(`{}`))
 		if err != nil {
 			c.report(s, terminal.RenderErrorMsg(err.Error()), false)
 			return
 		}
-		if len(configuration.Agents) == 0 {
+		var agents []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal(raw, &agents); err != nil {
+			c.report(s, terminal.RenderErrorMsg(err.Error()), false)
 			return
 		}
-		for _, agent := range configuration.Agents {
-			items = append(items, terminal.MenuItem{Label: agent.Name, Detail: agentSourceDetail(agent), Selectable: true, Extra: agent.Definition})
+		if len(agents) == 0 {
+			return
+		}
+		for _, agent := range agents {
+			items = append(items, terminal.MenuItem{Label: agent.Name, Detail: agent.Description, Selectable: true, Extra: agent.Name})
 		}
 	} else {
 		var models protocol.ModelList
@@ -155,45 +152,9 @@ func (c *CLI) selectionMenu(s stamp, name, arg string) {
 	}
 	title := "This Session's future Agent type"
 	if name == "/model" {
-		c.mu.Lock()
-		resolved := c.currentLocked(s) && c.root != nil && c.root.hydration != nil && c.root.hydration.Session.AgentSelection.Inputs != nil
-		c.mu.Unlock()
-		if resolved {
-			title = "This Session's future model"
-		} else {
-			title = "Type-wide future model — all Sessions using this type"
-		}
+		title = "Model choice"
 	}
 	c.showMenu(s, name, title, items)
-}
-
-// definitionByName resolves one CLI name shorthand against the complete
-// source-qualified roster: exactly one match sends its full reference, while
-// zero matches report the definition as unavailable and several report the
-// ambiguity. Neither failure sends a selection.
-func (c *CLI) definitionByName(s stamp, name string) (protocol.DefinitionRef, bool) {
-	var configuration protocol.ConfigurationView
-	_, err := call(s, "GetConfiguration", "", nil, nil, &configuration)
-	if err != nil {
-		c.report(s, terminal.RenderErrorMsg(err.Error()), false)
-		return protocol.DefinitionRef{}, false
-	}
-	matches := make([]protocol.DefinitionRef, 0, 1)
-	for _, agent := range configuration.Agents {
-		if agent.Name == name {
-			matches = append(matches, agent.Definition)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		c.report(s, terminal.RenderErrorMsg(fmt.Sprintf("agent definition %q is unavailable", name)), false)
-		return protocol.DefinitionRef{}, false
-	case 1:
-		return matches[0], true
-	default:
-		c.report(s, terminal.RenderErrorMsg(fmt.Sprintf("agent definition %q is ambiguous across %d providers", name, len(matches))), false)
-		return protocol.DefinitionRef{}, false
-	}
 }
 
 func (c *CLI) setSelection(s stamp, name string, value any) {
@@ -202,55 +163,50 @@ func (c *CLI) setSelection(s stamp, name string, value any) {
 		c.mu.Unlock()
 		return
 	}
-	selection := c.root.hydration.Session.AgentSelection
 	c.mu.Unlock()
 	var raw []byte
 	var err error
+	sharedEdit := false
 	if name == "/agent" {
-		var definition protocol.DefinitionRef
-		switch typed := value.(type) {
-		case protocol.DefinitionRef:
-			definition = typed
-		case string:
-			resolved, ok := c.definitionByName(s, typed)
-			if !ok {
-				return
-			}
-			definition = resolved
-		default:
+		agent, ok := value.(string)
+		if !ok {
 			return
 		}
-		raw, err = call(s, "SetSessionAgentType", s.root, protocol.SetSessionAgentTypeRequest{AgentSelection: protocol.AgentSelection{Definition: &definition}}, nil, nil)
+		args, _ := json.Marshal(map[string]string{"agent": agent})
+		raw, err = clientops.InvokeExtension(s.ctx, s.conn, "agents", "select", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindSession, SessionId: &s.root}, args)
 	} else if modelRef, ok := value.(string); !ok {
 		return
-	} else if selection.Inputs != nil {
-		raw, err = call(s, "SetSessionModel", s.root, protocol.SetSessionModelRequest{Model: modelRef}, nil, nil)
-	} else if selection.Definition != nil && selection.Definition.ExtensionId == "agents" && selection.Definition.CapabilityId == "agents.definitions" {
-		arguments, marshalErr := json.Marshal(struct {
-			DefinitionID string `json:"definition_id"`
-			Model        string `json:"model"`
-		}{DefinitionID: selection.Definition.DefinitionId, Model: modelRef})
-		if marshalErr != nil {
-			c.report(s, terminal.RenderErrorMsg(marshalErr.Error()), false)
-			return
-		}
-		raw, err = call(s, "UpdateConfigurationSettings", "", protocol.UpdateSettingsRequest{ExtensionEdit: &protocol.ExtensionEdit{
-			ExtensionId: "agents",
-			EditId:      "set_model",
-			Arguments:   string(arguments),
-		}}, nil, nil)
-	} else if selection.Definition != nil {
-		// A read-only or foreign named resolver offers no supplied model edit.
-		// Report the same meaning as the desktop refusal and send nothing.
-		c.report(s, terminal.RenderErrorMsg("This definition does not offer a model edit."), false)
-		return
 	} else {
-		return
+		var found bool
+		found, err = clientops.HasExtensionOperation(s.ctx, s.conn, "agents", "current", protocol.RegisteredExtensionOperationTargetSession)
+		if err == nil && found {
+			var current []byte
+			current, err = clientops.InvokeExtension(s.ctx, s.conn, "agents", "current", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindSession, SessionId: &s.root}, json.RawMessage(`{}`))
+			if err == nil {
+				var selected struct {
+					Agent string `json:"agent"`
+				}
+				err = json.Unmarshal(current, &selected)
+				if err == nil && selected.Agent != "" {
+					arguments, _ := json.Marshal(map[string]string{"definition_id": selected.Agent, "model": modelRef})
+					raw, err = clientops.InvokeExtension(s.ctx, s.conn, "agents", "set_model", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, arguments)
+					sharedEdit = true
+				}
+			}
+		}
+		if err == nil && !sharedEdit {
+			raw, err = call(s, "SetSessionModel", s.root, protocol.SetSessionModelRequest{Model: modelRef}, nil, nil)
+		}
 	}
 	c.report(s, resultText(raw, err), true)
 	c.mu.Lock()
 	if c.currentLocked(s) {
-		if name != "/model" || selection.Inputs == nil {
+		if name == "/agent" && err == nil {
+			if agent, ok := value.(string); ok {
+				c.agentCurrent, c.agentSession = agent, s.root
+			}
+		}
+		if name != "/model" || sharedEdit {
 			c.globalsDirty = true
 			c.kickGlobalsLocked()
 		}

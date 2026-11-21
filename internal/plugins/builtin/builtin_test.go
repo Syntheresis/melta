@@ -16,7 +16,7 @@ func TestShippedRegistrationHoldsTwoInOrder(t *testing.T) {
 	testassert.Equal(t, len(plugins), 2)
 	want := []string{"adaptation", "agents"}
 	for i, p := range plugins {
-		testassert.Check(t, p.Declaration.ID == want[i], "plugin %d ID = %q, want %q", i, p.Declaration.ID, want[i])
-		testassert.Check(t, p.Open != nil, "plugin %q has no Open factory", p.Declaration.ID)
+		testassert.Check(t, p.Manifest.ID == want[i], "plugin %d ID = %q, want %q", i, p.Manifest.ID, want[i])
+		testassert.Check(t, p.Activate != nil, "plugin %q has no activation entry", p.Manifest.ID)
 	}
 }

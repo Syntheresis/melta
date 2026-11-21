@@ -1,61 +1,67 @@
 {
   "ArchiveSession": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "CompactSession": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "ConnectProvider": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "required",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "provider_id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "CreateProvider": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "CreateSession": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "DeleteProviderDetail": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "provider_id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "DeleteProviderModel": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "model_id": {
         "required": true,
@@ -65,183 +71,212 @@
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "DeleteSession": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "DisconnectProvider": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "provider_id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "DiscoverProviderCandidates": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "DiscoverProviderModelCandidates": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "provider_id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "ForkSession": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "GetConfiguration": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "GetHealth": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "GetProviderDetail": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "provider_id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "GetSessionCodeSnapshots": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "GetSessionHistory": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "optional",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "optional",
     "query_members": {
       "cursor": {
         "required": false,
         "type": "string"
       }
-    }
+    },
+    "session_id": "required"
   },
   "GetSessionHydration": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
+  },
+  "GetSessionOperation": {
+    "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "required",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "GetWarnings": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "InstallExtensionPackage": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "InterruptSession": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "InvokeExtension": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
-  },
-  "ListExtensionCapabilities": {
-    "session_id": "forbidden",
     "field": "forbidden",
+    "operation_id": "forbidden",
     "query": "forbidden",
-    "body": "forbidden",
-    "query_members": {}
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "ListExtensionPackages": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
+  },
+  "ListExtensions": {
+    "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "ListModels": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "all": {
         "required": true,
         "type": "boolean"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "ListProviderModels": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "provider_id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "ListProviders": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "ListSessions": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "lifecycle": {
         "required": true,
@@ -251,65 +286,72 @@
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "ListWorkspaces": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "ReadWorkspaceFile": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "ReloadConfiguration": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "RemoveExtensionPackage": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "ReopenSession": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "ResetProviderField": {
-    "session_id": "forbidden",
-    "field": "required",
-    "query": "required",
     "body": "forbidden",
+    "field": "required",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "provider_id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "ResetProviderModelField": {
-    "session_id": "forbidden",
-    "field": "required",
-    "query": "required",
     "body": "forbidden",
+    "field": "required",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "model_id": {
         "required": true,
@@ -319,67 +361,75 @@
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "RevertSessionCode": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
-  "SetSessionAgentType": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
+  "SetSessionInputs": {
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "SetSessionModel": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "StopSession": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "forbidden",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "SubmitSession": {
-    "session_id": "required",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
   },
   "UpdateConfigurationSettings": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "forbidden",
     "body": "required",
-    "query_members": {}
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "forbidden"
   },
   "UpdateProviderDetail": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "required",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "provider_id": {
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   },
   "UpdateProviderModel": {
-    "session_id": "forbidden",
-    "field": "forbidden",
-    "query": "required",
     "body": "required",
+    "field": "forbidden",
+    "operation_id": "forbidden",
+    "query": "required",
     "query_members": {
       "model_id": {
         "required": true,
@@ -389,6 +439,7 @@
         "required": true,
         "type": "string"
       }
-    }
+    },
+    "session_id": "forbidden"
   }
 }
