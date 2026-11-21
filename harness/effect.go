@@ -813,6 +813,9 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 	c.mu.Unlock()
 	h.observeInvalidation(c) // every result/terminal Session register replacement advances
 	h.emitToolResultFacts(newEntries, sessionID, operationID)
+	if res.terminal != "" {
+		h.observeOperationSettled(sessionID, operationID, res.terminal)
+	}
 	return committedOp, nil
 }
 

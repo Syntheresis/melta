@@ -511,11 +511,26 @@ func TestNativeNormalizeFollowsInvocationCancellation(t *testing.T) {
 // ownedStartProbe prepares one frozen SessionStart and requests it through the
 // host session service at Execute, after mutating the plan it received.
 type ownedStartProbe struct {
-	target    string
-	content   string
-	executes  atomic.Int64
+	target   string
+	content  string
+	executes atomic.Int64
+
+	mu        sync.Mutex
 	launchErr error
 	childID   string
+}
+
+// outcome reads the probe's one launch result under its mutex.
+func (p *ownedStartProbe) outcome() (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.childID, p.launchErr
+}
+
+func (p *ownedStartProbe) record(childID string, err error) {
+	p.mu.Lock()
+	p.childID, p.launchErr = childID, err
+	p.mu.Unlock()
 }
 
 func (p *ownedStartProbe) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
@@ -544,17 +559,17 @@ func (p *ownedStartProbe) Execute(ctx context.Context, call extension.AuthorCont
 	plan.Start.Inputs.Model = &model.ModelRef{Provider: "substituted", Model: "substituted"}
 	result, err := call.Call(ctx, "melta.session", "start", json.RawMessage(`{}`))
 	if err != nil {
-		p.launchErr = err
+		p.record("", err)
 		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
 	}
 	var launched struct {
 		SessionID string `json:"session_id"`
 	}
 	if err := json.Unmarshal(result.Value, &launched); err != nil {
-		p.launchErr = err
+		p.record("", err)
 		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
 	}
-	p.childID = launched.SessionID
+	p.record(launched.SessionID, nil)
 	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: "launched " + launched.SessionID}}
 }
 
@@ -612,9 +627,10 @@ func TestNativeOwnedStartIgnoresPlanMutation(t *testing.T) {
 	testassert.NoError(t, err)
 	submitThroughRuntime(t, r, session.Identity.SessionID, "op-start", "run")
 	awaitOperation(t, r, session.Identity.SessionID, "op-start", harness.OperationSuccess)
-	testassert.NoError(t, probe.launchErr)
-	testassert.Require(t, len(probe.childID) == 32 && probe.executes.Load() == 1, "child id = %q (executes %d), want one admitted start", probe.childID, probe.executes.Load())
-	header, err := r.harness.ReadSessionHeader(ctx, probe.childID)
+	childID, launchErr := probe.outcome()
+	testassert.NoError(t, launchErr)
+	testassert.Require(t, len(childID) == 32 && probe.executes.Load() == 1, "child id = %q (executes %d), want one admitted start", childID, probe.executes.Load())
+	header, err := r.harness.ReadSessionHeader(ctx, childID)
 	testassert.NoError(t, err)
 	testassert.Equal(t, header.Identity.OwnerSessionID, session.Identity.SessionID)
 	ids, err := store.ListSessionIDs(ctx)
@@ -695,13 +711,16 @@ func TestNativeOwnedStartAllowsAnotherExtensionToNest(t *testing.T) {
 	submitThroughRuntime(t, r, session.Identity.SessionID, "op-nest", "run")
 	awaitOperation(t, r, session.Identity.SessionID, "op-nest", harness.OperationSuccess)
 	for name, probe := range map[string]*ownedStartProbe{"alpha": alpha, "beta": beta} {
-		testassert.NoError(t, probe.launchErr)
-		testassert.Require(t, len(probe.childID) == 32 && probe.executes.Load() == 1, "%s child id = %q (executes %d), want one admitted start", name, probe.childID, probe.executes.Load())
-		header, err := r.harness.ReadSessionHeader(ctx, probe.childID)
+		childID, launchErr := probe.outcome()
+		testassert.NoError(t, launchErr)
+		testassert.Require(t, len(childID) == 32 && probe.executes.Load() == 1, "%s child id = %q (executes %d), want one admitted start", name, childID, probe.executes.Load())
+		header, err := r.harness.ReadSessionHeader(ctx, childID)
 		testassert.NoError(t, err)
 		testassert.Equal(t, header.Identity.OwnerSessionID, session.Identity.SessionID)
 	}
-	testassert.Require(t, alpha.childID != beta.childID, "both extensions nested the same Session %q", alpha.childID)
+	alphaID, _ := alpha.outcome()
+	betaID, _ := beta.outcome()
+	testassert.Require(t, alphaID != betaID, "both extensions nested the same Session %q", alphaID)
 	awaitBody(t, e, func(body string) bool { return lastUserText(body) == "alpha work" })
 	awaitBody(t, e, func(body string) bool { return lastUserText(body) == "beta work" })
 	ids, err := store.ListSessionIDs(ctx)

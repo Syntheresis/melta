@@ -510,6 +510,9 @@ func (a *executableActivation) handleFrame(frame worker.Frame) error {
 		if frame.Method == "register" || frame.Method == "remove" {
 			return a.authorRegistration(frame)
 		}
+		if frame.Method == worker.MethodCommand {
+			return a.command(frame)
+		}
 		if frame.Method != worker.MethodHostcall {
 			return fmt.Errorf("worker: request method %q is not a hostcall", frame.Method)
 		}
@@ -562,6 +565,44 @@ func (a *executableActivation) response(frame worker.Frame) error {
 	return nil
 }
 
+// beginCall registers one bounded live worker->host call: the live cap, the
+// duplicate identity guard, and its cancellable context.
+func (a *executableActivation) beginCall(id string) (context.Context, context.CancelFunc, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.hostcalls) >= executableLiveCalls {
+		return nil, nil, fmt.Errorf("worker: more than %d live hostcalls", executableLiveCalls)
+	}
+	if _, duplicate := a.hostcalls[id]; duplicate {
+		return nil, nil, fmt.Errorf("worker: duplicate hostcall id %q", id)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.hostcalls[id] = cancel
+	return ctx, cancel, nil
+}
+
+// launchCall runs one registered call concurrently and responds with the
+// hostcall result/error frame shapes.
+func (a *executableActivation) launchCall(id string, run func(context.Context) (extension.Result, error)) error {
+	ctx, cancel, err := a.beginCall(id)
+	if err != nil {
+		return err
+	}
+	go func() {
+		result, err := run(ctx)
+		a.mu.Lock()
+		delete(a.hostcalls, id)
+		a.mu.Unlock()
+		cancel()
+		if err != nil {
+			a.respondError(id, executableFailure(err))
+			return
+		}
+		a.respondResult(id, result)
+	}()
+	return nil
+}
+
 // hostcall resolves one worker callback through its token and queues its
 // response through the bounded writer.
 func (a *executableActivation) hostcall(frame worker.Frame) error {
@@ -580,36 +621,42 @@ func (a *executableActivation) hostcall(frame worker.Frame) error {
 	}
 	a.mu.Lock()
 	call := a.tokens[params.Token]
+	a.mu.Unlock()
 	if call == nil {
-		a.mu.Unlock()
 		a.respondError(frame.ID, &worker.Error{Class: worker.ClassClosed, Message: "hostcall token is closed"})
 		return nil
 	}
-	if len(a.hostcalls) >= executableLiveCalls {
-		a.mu.Unlock()
-		return fmt.Errorf("worker: more than %d live hostcalls", executableLiveCalls)
-	}
-	if _, duplicate := a.hostcalls[frame.ID]; duplicate {
-		a.mu.Unlock()
-		return fmt.Errorf("worker: duplicate hostcall id %q", frame.ID)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	a.hostcalls[frame.ID] = cancel
-	a.mu.Unlock()
+	return a.launchCall(frame.ID, func(ctx context.Context) (extension.Result, error) {
+		return call(ctx, params.Service, params.Method, append(json.RawMessage(nil), params.Arguments...))
+	})
+}
 
-	go func() {
-		result, err := call(ctx, params.Service, params.Method, append(json.RawMessage(nil), params.Arguments...))
-		a.mu.Lock()
-		delete(a.hostcalls, frame.ID)
-		a.mu.Unlock()
-		cancel()
-		if err != nil {
-			a.respondError(frame.ID, executableFailure(err))
-			return
-		}
-		a.respondResult(frame.ID, result)
-	}()
-	return nil
+// command resolves one worker->host independent command against the
+// activation of this worker process and queues its response through the
+// bounded writer, using exactly the hostcall result/error frame shapes.
+func (a *executableActivation) command(frame worker.Frame) error {
+	if frame.ID == "" {
+		return errors.New("worker: command without an id")
+	}
+	var params worker.AuthorCommandParams
+	if err := json.Unmarshal(frame.Params, &params); err != nil {
+		return fmt.Errorf("worker: command params: %w", err)
+	}
+	if params.Method == "" {
+		return errors.New("worker: command without a method")
+	}
+	a.mu.Lock()
+	var api extension.API
+	if a.author != nil {
+		api = a.author.api
+	}
+	a.mu.Unlock()
+	if api == nil {
+		return errors.New("worker: command before activation")
+	}
+	return a.launchCall(frame.ID, func(ctx context.Context) (extension.Result, error) {
+		return api.Command(ctx, params.Target, params.Method, append(json.RawMessage(nil), params.Arguments...))
+	})
 }
 
 // respondResult queues one hostcall success response.

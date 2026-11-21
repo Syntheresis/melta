@@ -219,21 +219,28 @@ func (s *server) hostcall(ctx context.Context, scope context.Context, token, bin
 	if err := scope.Err(); err != nil {
 		return extension.Result{}, extension.ErrClosed
 	}
+	encoded, err := json.Marshal(AuthorHostcallParams{Token: token, Service: binding, Method: method, Arguments: JSONBytes(arguments)})
+	if err != nil {
+		return extension.Result{}, err
+	}
+	return s.requestHost(ctx, scope, "hostcall", MethodHostcall, encoded)
+}
+
+// requestHost is the one worker->host request routine: it registers the
+// pending terminal, writes the bounded frame, and waits through cancellation
+// or server shutdown. scope optionally bounds the call in addition to ctx.
+func (s *server) requestHost(ctx, scope context.Context, label, method string, params []byte) (extension.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return extension.Result{}, err
 	}
 	combined, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(scope, cancel)
-	defer func() {
-		stop()
-		cancel()
-	}()
-	if err := combined.Err(); err != nil {
-		return extension.Result{}, err
-	}
-	encoded, err := json.Marshal(AuthorHostcallParams{Token: token, Service: binding, Method: method, Arguments: JSONBytes(arguments)})
-	if err != nil {
-		return extension.Result{}, err
+	defer cancel()
+	if scope != nil {
+		stop := context.AfterFunc(scope, cancel)
+		defer stop()
 	}
 	id := s.nextRequestID()
 	outcomes := make(chan hostcallOutcome, 1)
@@ -244,12 +251,12 @@ func (s *server) hostcall(ctx context.Context, scope context.Context, token, bin
 	}
 	s.pending[id] = outcomes
 	s.mu.Unlock()
-	if err := s.write(Frame{Kind: KindRequest, ID: id, Method: MethodHostcall, Params: encoded}); err != nil {
+	if err := s.write(Frame{Kind: KindRequest, ID: id, Method: method, Params: params}); err != nil {
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
 		if errors.Is(err, ErrFrameTooLarge) {
-			return extension.Result{}, &Error{Class: ClassInternal, Message: "hostcall exceeds the frame limit"}
+			return extension.Result{}, &Error{Class: ClassInternal, Message: label + " exceeds the frame limit"}
 		}
 		return extension.Result{}, err
 	}

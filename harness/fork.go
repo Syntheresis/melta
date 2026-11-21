@@ -129,7 +129,8 @@ func (h *Harness) Fork(ctx context.Context, req ForkRequest) (ForkResult, error)
 	h.sessions[destID] = dest
 	h.mu.Unlock()
 	defer h.releaseUse(dest)
-	h.observeInvalidation(dest)                       // the durable fork destination creation
+	h.observeInvalidation(dest) // the durable fork destination creation
+	h.observeOperationAdmitted(commit.operation.Admission.SessionID, commit.operation.Admission.OperationID)
 	h.startExecution(dest, req.OperationID, prepared) // destination execution starts after commit
 	return ForkResult{Session: ownSessionRecord(commit.session), Operation: ownOperationRecord(commit.operation)}, nil
 }

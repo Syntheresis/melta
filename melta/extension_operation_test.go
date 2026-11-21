@@ -104,6 +104,12 @@ func decodeEnvelope(arguments json.RawMessage) (commandEnvelope, error) {
 // and Session-target operations the rows address. Every handler records one
 // attribution line carrying the host-issued Session and request identity.
 func operationFixtureExtension(events *traceLog) extension.Extension {
+	return operationFixtureExtensionDeferred(events, nil)
+}
+
+// operationFixtureExtensionDeferred is the fixture with an optional sink for
+// an independent command issued from a timer after its callback returned.
+func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extension.Result) extension.Extension {
 	manifest := registrarManifest(fixtureExtensionID)
 	manifest.Services = []string{extension.ContractCommands}
 	commandMethod := func(name string) extension.Method {
@@ -183,6 +189,33 @@ func operationFixtureExtension(events *traceLog) extension.Extension {
 			return nil, err
 		}
 		if _, err := api.RegisterOperation(extension.Operation{Target: extension.ExposedTargetHarness, Method: commandMethod("command_harness"), Handler: runCommand(true)}, nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.RegisterOperation(extension.Operation{Target: extension.ExposedTargetSession, Method: commandMethod("independent_command"), Handler: func(ctx context.Context, call extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
+			envelope, err := decodeEnvelope(arguments)
+			if err != nil {
+				return extension.Result{}, err
+			}
+			sessionID := call.Session.SessionID
+			payload := append(json.RawMessage(nil), envelope.Arguments...)
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				result, err := api.Command(context.Background(), extension.CommandTarget{Kind: extension.ExposedTargetSession, SessionID: sessionID}, envelope.Method, payload)
+				var callErr *extension.CallError
+				if errors.As(err, &callErr) && len(callErr.Partial) != 0 {
+					events.add("api-command:revert-call-error;class=" + string(ErrorCode(err)) + ";partial=" + fixtureHash(string(callErr.Partial)))
+					result = extension.Result{Failure: &extension.Failure{Code: string(ErrorCode(err)), Message: err.Error(), Partial: append(json.RawMessage(nil), callErr.Partial...)}}
+					err = nil
+				}
+				if err != nil {
+					result = extension.Result{Failure: &extension.Failure{Code: string(ErrorCode(err)), Message: err.Error()}}
+				}
+				if deferred != nil {
+					deferred <- result
+				}
+			}()
+			return extension.Result{Value: json.RawMessage(`{}`)}, nil
+		}}, nil); err != nil {
 			return nil, err
 		}
 		if _, err := api.RegisterOperation(extension.Operation{
@@ -267,12 +300,19 @@ func operationFixtureExtension(events *traceLog) extension.Extension {
 // extension enabled, over the memory store.
 func openOperationFixture(t *testing.T) (*Melta, *ownerEnv, *traceLog) {
 	t.Helper()
+	return openOperationFixtureDeferred(t, nil)
+}
+
+// openOperationFixtureDeferred is openOperationFixture with the deferred
+// independent-command result sink.
+func openOperationFixtureDeferred(t *testing.T, deferred chan<- extension.Result) (*Melta, *ownerEnv, *traceLog) {
+	t.Helper()
 	e := newOwnerEnv(t)
 	writeAgentDefinitions(t, e.configPath, projectionAgentsDocument)
 	enableFixturePlugin(t, e.configPath, fixtureExtensionID)
 	e.fixtureStore(storage.NewMemory())
 	events := &traceLog{}
-	r, err := e.open(context.Background(), operationFixtureExtension(events))
+	r, err := e.open(context.Background(), operationFixtureExtensionDeferred(events, deferred))
 	testassert.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(context.Background()) })
 	return r, e, events
@@ -615,6 +655,51 @@ func TestExtensionRevertPartial(t *testing.T) {
 	testassert.Require(t, len(partial.Restored) == 1 && partial.Restored[0] == target && partial.Skipped != nil && partial.Error != nil && partial.Error.Code == protocol.ErrorCodeInternal, "revert partial = %+v, want the parked group's accumulated restore and the traversal error", partial)
 	wantPartial := "command:revert-call-error;class=internal;partial=" + fixtureHash(string(out.result.Failure.Partial))
 	testassert.Require(t, slices.Contains(events.all(), wantPartial), "fixture handler did not observe a nonnil CallError with the exact partial: %v", events.all())
+}
+
+// TestExtensionRevertPartialThroughAPICommand proves a revert_code CallError
+// partial survives the independent API.Command route as the declared failure's
+// exact partial.
+func TestExtensionRevertPartialThroughAPICommand(t *testing.T) {
+	deferred := make(chan extension.Result, 1)
+	r, e, events := openOperationFixtureDeferred(t, deferred)
+	ctx := context.Background()
+	workspace := filepath.Join(e.home, "revert-independent")
+	testassert.NoError(t, os.MkdirAll(workspace, 0o700))
+	session := projectionSession(t, r, workspace, "solo")
+	sessionID := session.Identity.SessionID
+	first := submitCodeOperation(t, r, sessionID, "op-first", "first")
+	second := submitCodeOperation(t, r, sessionID, "op-second", "second")
+	awaitRestorableSession(t, r, sessionID)
+
+	badEntryDir := filepath.Join(codeGroupRoot(r, sessionID, first.Admission.AdmittedEntry.EntryID), "snapshots", "1", "aaaaaaaaaaaaaaaa")
+	testassert.NoError(t, os.MkdirAll(badEntryDir, 0o700))
+	testassert.NoError(t, os.WriteFile(filepath.Join(badEntryDir, "meta.json"), []byte("{"), 0o600))
+	target := filepath.Join(workspace, "parked.txt")
+	testassert.NoError(t, os.WriteFile(target, []byte("current"), 0o600))
+	fifo := seedFIFOCodeEntry(t, codeGroupRoot(r, sessionID, second.Admission.AdmittedEntry.EntryID), target, "current")
+
+	sessionCaller := fixtureCaller(t, r, CallerScope{Kind: CallerScopeSession, SessionID: sessionID})
+	invoked, err := r.InvokeExtension(ctx, sessionCaller, fixtureRequest(fixtureExtensionID, "independent_command", sessionTarget(sessionID), `{"method":"revert_code","arguments":{"boundary_operation_id":"op-first"}}`, "req-independent-revert"))
+	testassert.Require(t, err == nil && invoked.Failure == nil, "independent command invocation = (%+v, %v), want the deferred success", invoked, err)
+	outcomes := make(chan extensionOutcome, 1)
+	go func() { outcomes <- extensionOutcome{result: <-deferred} }()
+	park := parkOrOutcome(t, fifo, outcomes)
+	defer park.flush()
+	park.release("restored")
+	var out extensionOutcome
+	select {
+	case out = <-outcomes:
+	case <-time.After(10 * time.Second):
+		t.Fatal("independent revert command never returned")
+	}
+	testassert.Require(t, out.err == nil, "independent revert call = %v, want a declared failure", out.err)
+	testassert.Require(t, out.result.Failure != nil && out.result.Failure.Code == "internal" && out.result.Value == nil, "independent revert result = %+v, want the declared internal failure", out.result)
+	var partial protocol.CodeRevertResult
+	testassert.NoError(t, json.Unmarshal(out.result.Failure.Partial, &partial))
+	testassert.Require(t, len(partial.Restored) == 1 && partial.Restored[0] == target && partial.Skipped != nil && partial.Error != nil && partial.Error.Code == protocol.ErrorCodeInternal, "independent revert partial = %+v, want the accumulated restore and traversal error", partial)
+	wantPartial := "api-command:revert-call-error;class=internal;partial=" + fixtureHash(string(out.result.Failure.Partial))
+	testassert.Require(t, slices.Contains(events.all(), wantPartial), "API.Command did not preserve the CallError partial: %v", events.all())
 }
 
 // TestExtensionRevertUnmappedCallError proves a handler that forwards the

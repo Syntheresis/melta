@@ -19,7 +19,7 @@ import (
 // authorFixtureManifest matches the manifest of the shipped author worker
 // fixture's default entry.
 func authorFixtureManifest() extension.Manifest {
-	return extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	return extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`), Services: []string{extension.ContractCommands}}
 }
 
 // buildAuthorWorker builds the shipped author worker fixture and returns the

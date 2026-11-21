@@ -62,8 +62,24 @@ func TestOwnedSessionExtensionPoliciesBeforeAndAfterHandoff(t *testing.T) {
 
 	owned := awaitOwnedSession(t, r, leadID)
 	deadline := time.Now().Add(10 * time.Second)
-	for probe.childID == "" {
-		testassert.Require(t, time.Now().Before(deadline), "before-handoff alpha start returned no child (executes %d, launch err %v); requests=%v; advertised=%v parent=%v; tool=%.400q", probe.executes.Load(), probe.launchErr, requestUserTexts(e), advertisedTools(t, e.server.bodyAt(1)), advertisedTools(t, e.server.bodyAt(0)), lastToolContent(e.server.bodyAt(3)))
+	for {
+		childID, launchErr := probe.outcome()
+		if childID != "" {
+			break
+		}
+		requests := e.server.requests()
+		var first, second []string
+		lastTool := ""
+		if requests > 0 {
+			first = advertisedTools(t, e.server.bodyAt(0))
+		}
+		if requests > 1 {
+			second = advertisedTools(t, e.server.bodyAt(1))
+		}
+		if requests > 3 {
+			lastTool = lastToolContent(e.server.bodyAt(3))
+		}
+		testassert.Require(t, time.Now().Before(deadline), "before-handoff alpha start returned no child (executes %d, launch err %v); requests=%v; advertised=%v parent=%v; tool=%.400q", probe.executes.Load(), launchErr, requestUserTexts(e), second, first, lastTool)
 		time.Sleep(10 * time.Millisecond)
 	}
 	testassert.Require(t, probe.executes.Load() == 1, "before-handoff alpha executes = %d, want one", probe.executes.Load())

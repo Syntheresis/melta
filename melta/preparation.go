@@ -364,7 +364,9 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 				return p.open(openCtx, admission, workspace, runtimeScope, workspaceScope, sel, snapshot, warnings, opener, &releaseArtifacts)
 			},
 		}
+		p.passive.retainCapture(req.Session.Identity.SessionID, native)
 		prepared.Release = func() error {
+			p.passive.releaseCapture(req.Session.Identity.SessionID, native)
 			err := errors.Join(native.release(), snapshot.resources.release())
 			if releaseArtifacts != nil {
 				releaseArtifacts()
@@ -492,6 +494,7 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 			return nil, fmt.Errorf("strategy %q unavailable: %w", id, extension.ErrClosed)
 		}
 		binding := entry.value.(harness.StrategyBinding)
+		binding.Strategy = registeredStrategy{activation: entry.activation, inner: binding.Strategy}
 		binding.Release = func() { _ = stage.release() }
 		return &binding, nil
 	}
@@ -505,6 +508,25 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 			return err
 		},
 	}, nil
+}
+
+// registeredStrategy counts one extension strategy invocation as the
+// activation's outstanding host callback for its duration.
+type registeredStrategy struct {
+	activation *nativeActivation
+	inner      harness.ContextStrategy
+}
+
+func (s registeredStrategy) Plan(input harness.PlanInput) (harness.PlanOutput, error) {
+	s.activation.beginCallback()
+	defer s.activation.endCallback()
+	return s.inner.Plan(input)
+}
+
+func (s registeredStrategy) Consume(input harness.ConsumeInput) (harness.PlanOutput, error) {
+	s.activation.beginCallback()
+	defer s.activation.endCallback()
+	return s.inner.Consume(input)
 }
 
 func (p *preparation) bindModel(ctx context.Context, sel *selection) (*catalog.Model, preparedTransport, error) {

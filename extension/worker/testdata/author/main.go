@@ -73,11 +73,17 @@ func main() {
 		}
 		return
 	}
+	if os.Getenv("AUTHOR_FIXTURE_MODE") == "independent" {
+		if err := worker.Serve(context.Background(), independentFixture(), os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if os.Getenv("AUTHOR_FIXTURE_SECRET") != "" {
 		os.Exit(18)
 	}
 	e := extension.Extension{
-		Manifest: extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)},
+		Manifest: extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`), Services: []string{extension.ContractCommands}},
 		Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 			if string(api.Settings()) == `{"fail":true}` {
 				return nil, errors.New("activation refused")

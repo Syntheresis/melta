@@ -1154,10 +1154,14 @@ func (d *executionDriver) commitCheckpoint(execCtx context.Context, input PlanIn
 	c.mu.Unlock()
 	h.observeInvalidation(c) // every checkpoint commit replaces the Session register
 	if interrupted {
+		h.observeOperationSettled(sessionID, operationID, OperationInterruption)
 		// The interruption settlement already published: the waiting
 		// conversation never dispatches and no later interruption rewrites
 		// the committed terminal.
 		return errExecutionInterrupted
+	}
+	if manual {
+		h.observeOperationSettled(sessionID, operationID, OperationSuccess)
 	}
 	return nil
 }

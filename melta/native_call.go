@@ -90,6 +90,28 @@ func (v *nativeCallLifetime) end() {
 	v.wg.Wait()
 }
 
+// callbackScope marks one nativeCallScope as a host callback into an
+// activation: the activation's outstanding-callback count is held for the
+// scope's lifetime and released by end. A scope created for the extension's
+// own call into the host is not a callback into its activation.
+func callbackScope(scope *nativeCallScope) *nativeCallScope {
+	if scope.activation != nil {
+		scope.activation.beginCallback()
+		scope.countsCallback = true
+	}
+	return scope
+}
+
+// end releases this callback scope's activation count before joining the
+// lifetime.
+func (s *nativeCallScope) end() {
+	if s.countsCallback {
+		s.activation.endCallback()
+		s.countsCallback = false
+	}
+	s.nativeCallLifetime.end()
+}
+
 type grantContextKey struct{}
 
 func hostGrant(ctx context.Context) nativeGrant {

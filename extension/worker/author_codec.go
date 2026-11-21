@@ -2,11 +2,24 @@ package worker
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 )
+
+// DecodeAuthorFact reads one committed fact delivered to an observer.
+func DecodeAuthorFact(raw json.RawMessage) (extension.Fact, error) {
+	var fact extension.Fact
+	if err := unmarshalValue(raw, &fact); err != nil {
+		return extension.Fact{}, err
+	}
+	if fact.Kind != extension.FactOperationAdmitted && fact.Kind != extension.FactOperationSettled {
+		return extension.Fact{}, fmt.Errorf("worker: unknown fact kind %q", fact.Kind)
+	}
+	return fact, nil
+}
 
 // EncodeAuthorRequest keeps the author-only prompt fact separate from v4.
 func EncodeAuthorRequest(input extension.AuthorRequestInput) (json.RawMessage, error) {

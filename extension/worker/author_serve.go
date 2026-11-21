@@ -69,6 +69,15 @@ type AuthorHostcallParams struct {
 	Arguments JSONBytes `json:"arguments"`
 }
 
+// AuthorCommandParams is one independent command request: the fixed target,
+// the ordinary command method name and its generated argument bytes. It
+// carries no call context token.
+type AuthorCommandParams struct {
+	Target    extension.CommandTarget `json:"target"`
+	Method    string                  `json:"method"`
+	Arguments JSONBytes               `json:"arguments"`
+}
+
 type authorServer struct {
 	extension extension.Extension
 	started   bool
@@ -324,6 +333,19 @@ func (s *server) admitAuthorRequest(frame Frame, ctx context.Context, cancel con
 					return nil, badRoute("worker: invalid cleanup call")
 				}
 				return json.RawMessage("null"), handler(ctx, call, session)
+			case "observer":
+				handler := registration.value.(extension.Observer)
+				if params.Method != "observe" {
+					return nil, badRoute("worker: invalid observer method")
+				}
+				fact, err := DecodeAuthorFact(json.RawMessage(params.Arguments))
+				if err != nil {
+					return nil, err
+				}
+				if err := handler(ctx, fact); err != nil {
+					return nil, err
+				}
+				return json.RawMessage("null"), nil
 			case "operation":
 				handler := registration.value.(extension.Operation)
 				if handler.Method.Name != params.Method || handler.Handler == nil {
@@ -544,4 +566,25 @@ func (a *authorAPI) RegisterCleanup(h extension.CleanupHook, r extension.Registr
 		return nil, errors.New("missing cleanup")
 	}
 	return a.register("cleanup", struct{}{}, h, r)
+}
+
+func (a *authorAPI) AttachObserver(observer extension.Observer, r extension.Registration) (extension.Registration, error) {
+	if observer == nil {
+		return nil, errors.New("missing observer")
+	}
+	return a.register("observer", struct{}{}, observer, r)
+}
+
+// Command issues one independent command through the host-bound activation.
+// It carries no callback token: the host resolves the command against the
+// activation of this worker process.
+func (a *authorAPI) Command(ctx context.Context, target extension.CommandTarget, method string, args json.RawMessage) (extension.Result, error) {
+	if method == "" {
+		return extension.Result{}, errors.New("worker: command requires a method")
+	}
+	params, err := json.Marshal(AuthorCommandParams{Target: target, Method: method, Arguments: JSONBytes(args)})
+	if err != nil {
+		return extension.Result{}, err
+	}
+	return a.server.requestHost(ctx, nil, "command", MethodCommand, params)
 }

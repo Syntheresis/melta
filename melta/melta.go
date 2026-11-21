@@ -50,6 +50,13 @@ type Options struct {
 
 	Extensions []extension.Extension
 
+	// ExtensionAccess narrows one supplied or installed extension's host
+	// grants, keyed by extension ID. A missing entry keeps the default: every
+	// manifest-requested service and the whole-owner scope. Services nil keeps
+	// every requested service; a non-nil list intersects the manifest where an
+	// empty list grants none. Scope nil keeps the whole-owner scope.
+	ExtensionAccess map[string]ExtensionAccess
+
 	// OpenStore optionally replaces the included SQLite construction. The
 	// supplied factory owns exclusivity of its actual storage namespace; the
 	// acquired closer releases that namespace after durable access closes.
@@ -64,6 +71,14 @@ type Options struct {
 	BeforeRelease func() error
 }
 
+// ExtensionAccess is one embedder-supplied extension grant: the subset of the
+// manifest-requested host services allowed and the command/observation scope.
+// Zero members keep the default.
+type ExtensionAccess struct {
+	Services []string
+	Scope    *CallerScope
+}
+
 func cloneAuthorExtensions(values []extension.Extension) []extension.Extension {
 	out := slices.Clone(values)
 	for i := range out {
@@ -74,12 +89,58 @@ func cloneAuthorExtensions(values []extension.Extension) []extension.Extension {
 	return out
 }
 
+// cloneExtensionAccess validates and owns the embedder's per-extension grants.
+// A scope is checked by the same constructor every Caller grant uses; nothing
+// shares a caller-owned slice or pointer.
+func cloneExtensionAccess(values map[string]ExtensionAccess) (map[string]ExtensionAccess, error) {
+	if values == nil {
+		return nil, nil
+	}
+	out := make(map[string]ExtensionAccess, len(values))
+	for id, access := range values {
+		cloned := ExtensionAccess{Services: slices.Clone(access.Services)}
+		if access.Scope != nil {
+			scope := *access.Scope
+			if _, err := newCaller(CallerContext{Origin: harness.InputOriginPlugin, ExtensionID: id, Scope: scope}); err != nil {
+				return nil, fmt.Errorf("melta: options.ExtensionAccess[%q].Scope: %v: %w", id, err, harness.ErrInvalid)
+			}
+			cloned.Scope = &scope
+		}
+		out[id] = cloned
+	}
+	return out, nil
+}
+
+// applyExtensionAccess feeds one supplied or installed activation's effective
+// services and granted scope from the embedder's entry. A missing entry keeps
+// the all-requested, whole-owner default.
+func applyExtensionAccess(spec nativeActivationSpec, access map[string]ExtensionAccess) nativeActivationSpec {
+	if access == nil {
+		return spec
+	}
+	entry, ok := access[spec.extension.Manifest.ID]
+	if !ok {
+		return spec
+	}
+	if entry.Services != nil {
+		spec.approvedServices = slices.Clone(entry.Services)
+	}
+	if entry.Scope != nil {
+		spec.scope = *entry.Scope
+	}
+	return spec
+}
+
 // Open constructs the complete managed Melta with concrete production
 // preparation and returns the published owner. It delegates to the private
 // lifecycle implementation, which owns every retained property: explicit
 // sources and locations, ownership-before-I/O, config publication,
 // recovery-before-execution, one admitted-call gate, and the joined shutdown.
 func Open(ctx context.Context, opts Options) (*Melta, error) {
+	access, err := cloneExtensionAccess(opts.ExtensionAccess)
+	if err != nil {
+		return nil, err
+	}
 	return open(ctx, options{
 		DataDir:       opts.DataDir,
 		Configuration: opts.Configuration,
@@ -89,6 +150,7 @@ func Open(ctx context.Context, opts Options) (*Melta, error) {
 		Defaults:      opts.Defaults.Owned(),
 		Strategy:      opts.Strategy,
 		Extensions:    cloneAuthorExtensions(opts.Extensions),
+		Access:        access,
 		OpenStore:     opts.OpenStore,
 		NewEvaluator:  opts.NewEvaluator,
 		BeforeRelease: opts.BeforeRelease,
@@ -110,6 +172,7 @@ type options struct {
 	Defaults      harness.SessionInputs
 	Strategy      *harness.StrategyBinding
 	Extensions    []extension.Extension
+	Access        map[string]ExtensionAccess
 
 	OpenStore     func(context.Context, string) (harness.Storage, func() error, error)
 	NewEvaluator  func(PolicyInputs) (harness.PermissionEvaluator, error)
@@ -245,7 +308,10 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	configService.defaults = inputs
 	configService.dataDir = dataDir
 	for _, author := range options.Extensions {
-		configService.authors = append(configService.authors, nativeActivationSpec{extension: author})
+		configService.authors = append(configService.authors, applyExtensionAccess(nativeActivationSpec{extension: author}, options.Access))
+	}
+	for i := range installed {
+		installed[i] = applyExtensionAccess(installed[i], options.Access)
 	}
 	configService.authors = append(configService.authors, installed...)
 	configService.authorFailures = packages.authorFailures

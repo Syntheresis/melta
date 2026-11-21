@@ -39,12 +39,12 @@ func (t registeredExtensionTool) check() error {
 func (t registeredExtensionTool) authorScope(ctx context.Context, tc ToolContext, workspace *nativeWorkspace, bind, pure bool, permissions []harness.PermissionRequest) (*nativeCallScope, extension.AuthorContext) {
 	child, cancel := context.WithCancel(ctx)
 	activation := t.binding.entry.activation
-	scope := &nativeCallScope{
+	scope := callbackScope(&nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
 		candidate:          t.binding.candidate, activation: activation, pure: pure,
 		workspace: workspace, workspaceBind: bind, permissions: permissions,
 		session: tc.Session, states: t.states, host: t.host, lease: t.lease, operationSecrets: t.operationSecrets,
-	}
+	})
 	return scope, extension.AuthorContext{
 		ExtensionID: activation.id, Settings: bytes.Clone(activation.section),
 		Session: tc.Session, State: bytes.Clone(t.states[activation.id]), Call: scope.call,
@@ -66,8 +66,10 @@ func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, ca
 	}
 	workspace := newNativeWorkspace(tc.Workspace, t.dataDir, tc.AdmittedEntry, t.lease)
 	scope, author := t.authorScope(ctx, tc, workspace, true, true, nil)
-	plan := t.binding.entry.value.(nativeTool).tool.Prepare(scope.ctx, author, call).Owned()
-	scope.end()
+	plan := func() extension.ToolPlan {
+		defer scope.end()
+		return t.binding.entry.value.(nativeTool).tool.Prepare(scope.ctx, author, call).Owned()
+	}()
 	var start *nativeSessionStart
 	if plan.Start != nil {
 		if plan.Start.Target == "" {
@@ -109,11 +111,11 @@ func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]ha
 			workspace := newNativeWorkspace(tc.Workspace, "", harness.EntryRef{}, nil)
 			workspace.restrictionBind = bind
 			child, cancel := context.WithCancel(ctx)
-			scope := &nativeCallScope{
+			scope := callbackScope(&nativeCallScope{
 				nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
 				candidate:          s.candidate, activation: activation, pure: true,
 				workspace: workspace, workspaceBind: true, session: tc.Session, states: states, host: host, lease: lease, operationSecrets: secrets,
-			}
+			})
 			defer scope.end()
 			call := extension.AuthorContext{ExtensionID: activation.id, Settings: bytes.Clone(activation.section), Session: tc.Session, State: bytes.Clone(states[activation.id]), Call: scope.call}
 			input := extension.AuthorizationInput{ToolName: action.ToolName, Arguments: bytes.Clone(action.Arguments), CanonicalWorkspace: action.CanonicalWorkspace, ToolSettings: bytes.Clone(settings), Permissions: slices.Clone(action.Permissions)}
@@ -125,12 +127,12 @@ func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]ha
 
 func registeredHookScope(ctx context.Context, stage *nativeSnapshot, entry *nativeRegistration, sel selection, session harness.SessionIdentity, pure bool) (*nativeCallScope, extension.AuthorContext) {
 	child, cancel := context.WithCancel(ctx)
-	scope := &nativeCallScope{
+	scope := callbackScope(&nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
 		candidate:          stage.candidate, activation: entry.activation, pure: pure,
 		session: session, states: sel.states, host: sel.invocation.snapshot.composition,
 		lease: sel.lease, operationSecrets: sel.operationSecrets,
-	}
+	})
 	call := extension.AuthorContext{
 		ExtensionID: entry.activation.id, Settings: bytes.Clone(entry.activation.section),
 		Session: session, State: bytes.Clone(sel.states[entry.activation.id]), Call: scope.call,

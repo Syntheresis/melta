@@ -33,6 +33,7 @@ const (
 	MethodActivate = "activate"
 	MethodCall     = "call"
 	MethodHostcall = "hostcall"
+	MethodCommand  = "command"
 )
 
 // ErrFrameTooLarge marks a frame whose encoded envelope exceeds FrameLimit.

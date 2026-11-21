@@ -997,6 +997,7 @@ func (h *Harness) LaunchChildSession(ctx context.Context, req LaunchChildRequest
 	childCoordinator.pendingCompletion = &launchInfo{completionID: member.completionID, outputLimit: req.OutputLimit, report: req.Report}
 	childCoordinator.mu.Unlock()
 	h.observeInvalidation(childCoordinator) // the durable child creation
+	h.observeOperationAdmitted(childID, req.OperationID)
 	h.startExecution(childCoordinator, req.OperationID, prepared)
 	return LaunchChildResult{ChildSessionID: childID}, nil
 }

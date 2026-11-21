@@ -134,7 +134,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fixture: %v: %s", err, output)
 	}
-	manifest := extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	manifest := authorFixtureManifest()
 	for _, mismatch := range []bool{false, true} {
 		t.Run(map[bool]string{false: "service", true: "manifest mismatch"}[mismatch], func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "started")
@@ -498,7 +498,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 }
 
 func TestExecutableAuthorManifestInstallRejectsInvalid(t *testing.T) {
-	manifest := extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	manifest := authorFixtureManifest()
 	for _, test := range []struct {
 		name string
 		edit func(*worker.Manifest)
@@ -549,7 +549,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 		}}}, nil)
 		return nil, err
 	}}
-	manifest := extension.Manifest{ID: "author-fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	manifest := authorFixtureManifest()
 	guest := executableAuthorExtension(manifest, binary, func(context.Context, []string) ([]string, error) {
 		spawns++
 		return os.Environ(), nil

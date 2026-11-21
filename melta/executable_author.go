@@ -312,6 +312,15 @@ func (a *executableActivation) authorRegistration(frame worker.Frame) error {
 			_, err = a.authorCall(ctx, params.Handle, "cleanup", call, args, validateNull)
 			return err
 		}, replacement)
+	case "observer":
+		handle, err = a.author.api.AttachObserver(func(ctx context.Context, fact extension.Fact) error {
+			args, err := json.Marshal(fact)
+			if err != nil {
+				return err
+			}
+			_, err = a.authorCall(ctx, params.Handle, "observe", extension.AuthorContext{}, args, validateNull)
+			return err
+		}, replacement)
 	default:
 		err = fmt.Errorf("worker: unsupported registration kind %q", params.Kind)
 	}

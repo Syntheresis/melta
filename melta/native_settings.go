@@ -86,16 +86,18 @@ func (scope *nativeCallScope) updateSettings(ctx context.Context, args json.RawM
 			return 0, err
 		}
 		childCtx, cancel := context.WithCancel(ctx)
-		child := &nativeCallScope{
+		child := callbackScope(&nativeCallScope{
 			nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel},
 			candidate:          scope.candidate, activation: activation, pure: true,
 			workspace: scope.workspace, permissions: scope.permissions, session: scope.session, states: scope.states, requestID: scope.requestID,
-		}
-		result, err := executeNativeProvider(childCtx, extension.AuthorContext{
-			ExtensionID: activation.id, Settings: bytes.Clone(activation.section),
-			Session: scope.session, State: bytes.Clone(scope.states[activation.id]), Call: child.call, RequestID: scope.requestID,
-		}, method.contract, method.handler, "service", input.Service, transformArgs)
-		child.end()
+		})
+		result, err := func() (extension.Result, error) {
+			defer child.end()
+			return executeNativeProvider(childCtx, extension.AuthorContext{
+				ExtensionID: activation.id, Settings: bytes.Clone(activation.section),
+				Session: scope.session, State: bytes.Clone(scope.states[activation.id]), Call: child.call, RequestID: scope.requestID,
+			}, method.contract, method.handler, "service", input.Service, transformArgs)
+		}()
 		if err != nil {
 			return 0, err
 		}

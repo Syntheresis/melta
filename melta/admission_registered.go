@@ -20,11 +20,11 @@ func runRegisteredAdmission(ctx context.Context, stage *nativeSnapshot, input ex
 			return extension.AdmissionCandidate{}, err
 		}
 		callCtx, cancel := context.WithCancel(ctx)
-		scope := &nativeCallScope{
+		scope := callbackScope(&nativeCallScope{
 			nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel},
 			candidate:          stage.candidate, activation: entry.activation, pure: true,
 			session: input.Session, states: states, host: host,
-		}
+		})
 		call := extension.AuthorContext{
 			ExtensionID: entry.activation.id, Settings: bytes.Clone(entry.activation.section),
 			Session: input.Session, State: bytes.Clone(states[entry.activation.id]), Call: scope.call,
@@ -38,8 +38,10 @@ func runRegisteredAdmission(ctx context.Context, stage *nativeSnapshot, input ex
 		for i := range owned.Input {
 			owned.Input[i].Extra = owned.Input[i].Extra.Clone()
 		}
-		result, err := entry.value.(nativeHook).handler.(extension.AdmissionHook)(callCtx, call, owned)
-		scope.end()
+		result, err := func() (extension.AdmissionResult, error) {
+			defer scope.end()
+			return entry.value.(nativeHook).handler.(extension.AdmissionHook)(callCtx, call, owned)
+		}()
 		if err != nil {
 			return extension.AdmissionCandidate{}, err
 		}

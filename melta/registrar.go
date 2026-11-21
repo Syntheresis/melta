@@ -22,6 +22,7 @@ type nativeActivationSpec struct {
 	section          json.RawMessage
 	bindings         map[string]declaredBinding
 	approvedServices []string
+	scope            CallerScope
 	installed        bool
 }
 
@@ -37,22 +38,25 @@ type nativeCandidate struct {
 }
 
 type nativeActivation struct {
-	owner     *configurationService
-	id        string
-	version   string
-	manifest  extension.Manifest
-	section   json.RawMessage
-	bindings  map[string]declaredBinding
-	services  map[string]bool
-	warnings  *resourceSet
-	entries   []*nativeRegistration
-	close     func(context.Context) error
-	holds     int
-	closed    bool
-	construct *nativeCandidate
-	entry     nativeCallLifetime
-	lost      error
-	installed bool
+	owner        *configurationService
+	id           string
+	version      string
+	manifest     extension.Manifest
+	section      json.RawMessage
+	bindings     map[string]declaredBinding
+	services     map[string]bool
+	scope        CallerScope
+	warnings     *resourceSet
+	entries      []*nativeRegistration
+	close        func(context.Context) error
+	holds        int
+	closed       bool
+	callbacks    int
+	observerWait []*observerDelivery
+	construct    *nativeCandidate
+	entry        nativeCallLifetime
+	lost         error
+	installed    bool
 }
 
 type nativeRegistration struct {
@@ -64,6 +68,7 @@ type nativeRegistration struct {
 	current    bool
 	holds      int
 	release    func()
+	observer   *observerDelivery
 }
 
 type nativeAPI struct{ activation *nativeActivation }
@@ -81,27 +86,144 @@ func (a *nativeActivation) unavailable() error {
 	return a.unavailableLocked()
 }
 
+// beginCallback and endCallback maintain the activation's one outstanding
+// host-callback count. The count covers every callback the host makes into
+// the activation: tools, every hook kind, services, operations, cleanup,
+// strategies and observers. An independent command is refused while it is
+// nonzero rather than queued behind the callback.
+func (a *nativeActivation) beginCallback() {
+	if a == nil || a.owner == nil {
+		return
+	}
+	a.owner.nativeMu.Lock()
+	a.callbacks++
+	a.owner.nativeMu.Unlock()
+}
+
+func (a *nativeActivation) endCallback() {
+	if a == nil || a.owner == nil {
+		return
+	}
+	a.owner.nativeMu.Lock()
+	a.callbacks--
+	a.owner.nativeMu.Unlock()
+}
+
+// observerDeliveries returns the activation's current observer registrations.
+func (a *nativeActivation) observerDeliveries() []*observerDelivery {
+	if a == nil || a.owner == nil {
+		return nil
+	}
+	a.owner.nativeMu.Lock()
+	defer a.owner.nativeMu.Unlock()
+	if a.closed || a.lost != nil {
+		return nil
+	}
+	var deliveries []*observerDelivery
+	for _, entry := range a.entries {
+		if entry.kind == "observer" && entry.current && entry.observer != nil {
+			deliveries = append(deliveries, entry.observer)
+		}
+	}
+	return deliveries
+}
+
+// endRegistrationLocked stops one current registration: it removes the entry,
+// marks it non-current, ends an owned observer delivery and returns the
+// deferred release to run after nativeMu is released. It is the one end path
+// for Remove, replacement, activation close/loss, owner close and observer
+// self-end.
+func endRegistrationLocked(a *nativeActivation, r *nativeRegistration) func() {
+	if r == nil || !r.current {
+		return nil
+	}
+	for i, entry := range a.entries {
+		if entry == r {
+			a.entries = append(a.entries[:i], a.entries[i+1:]...)
+			break
+		}
+	}
+	r.current = false
+	if r.observer != nil {
+		r.observer.close()
+		r.observer = nil
+	}
+	return r.takeRelease()
+}
+
+// endObserversLocked ends every observer registration this activation owns and
+// records their deliveries for the close-side in-flight wait. The caller holds
+// nativeMu; releases run after it is released.
+func (a *nativeActivation) endObserversLocked() []func() {
+	var releases []func()
+	for _, entry := range append([]*nativeRegistration(nil), a.entries...) {
+		if entry.kind != "observer" {
+			continue
+		}
+		if entry.observer != nil {
+			a.observerWait = append(a.observerWait, entry.observer)
+		}
+		if release := endRegistrationLocked(a, entry); release != nil {
+			releases = append(releases, release)
+		}
+	}
+	return releases
+}
+
+// endObserver ends one delivery's registration through the one end path.
+func (a *nativeActivation) endObserver(d *observerDelivery) {
+	s := a.owner
+	s.nativeMu.Lock()
+	release := endRegistrationLocked(a, d.entry)
+	s.nativeMu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// waitObservers waits, bounded by nativeCloseDeadline, for every observer call
+// ended by activation close or loss to return.
+func (a *nativeActivation) waitObservers() {
+	s := a.owner
+	s.nativeMu.Lock()
+	deliveries := a.observerWait
+	a.observerWait = nil
+	s.nativeMu.Unlock()
+	if len(deliveries) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), nativeCloseDeadline)
+	defer cancel()
+	for _, delivery := range deliveries {
+		delivery.wait(ctx)
+	}
+}
+
 func (a *nativeActivation) markLost(cause error) {
 	s := a.owner
 	s.nativeMu.Lock()
-	defer s.nativeMu.Unlock()
 	if a.lost != nil || a.closed {
+		s.nativeMu.Unlock()
 		return
 	}
 	a.lost = cause
+	releases := a.endObserversLocked()
 	current := s.nativeCurrent
-	if current == nil {
-		return
-	}
-	for _, member := range current.activations {
-		if member == a && current.ready[a] {
-			if s.nativeFailures == nil {
-				s.nativeFailures = make(map[string]error)
+	if current != nil {
+		for _, member := range current.activations {
+			if member == a && current.ready[a] {
+				if s.nativeFailures == nil {
+					s.nativeFailures = make(map[string]error)
+				}
+				s.nativeFailures[a.id] = cause
+				current.inactive[a.id] = cause
+				break
 			}
-			s.nativeFailures[a.id] = cause
-			current.inactive[a.id] = cause
-			return
 		}
+	}
+	s.nativeMu.Unlock()
+	for _, release := range releases {
+		release()
 	}
 }
 
@@ -271,6 +393,10 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 				services[name] = true
 			}
 		}
+		scope := spec.scope
+		if scope.Kind == "" {
+			scope = harnessScope
+		}
 		err := extension.ValidateManifestSection(manifest, spec.section)
 		if err == nil && spec.extension.Activate == nil {
 			err = errors.New("missing extension entry point")
@@ -294,7 +420,7 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 			manifest.SettingsSchema = bytes.Clone(manifest.SettingsSchema)
 			manifest.Services = slices.Clone(manifest.Services)
 			manifest.Secrets = slices.Clone(manifest.Secrets)
-			activation = &nativeActivation{owner: s, id: id, version: manifest.Version, manifest: manifest, section: bytes.Clone(spec.section), bindings: maps.Clone(spec.bindings), services: services, warnings: &resourceSet{owner: s}, construct: c, installed: spec.installed}
+			activation = &nativeActivation{owner: s, id: id, version: manifest.Version, manifest: manifest, section: bytes.Clone(spec.section), bindings: maps.Clone(spec.bindings), services: services, scope: scope, warnings: &resourceSet{owner: s}, construct: c, installed: spec.installed}
 			activation.entry.ctx, activation.entry.cancel = context.WithCancel(ctx)
 		}
 		activation.holds++
@@ -331,10 +457,14 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 		c.activations[i] = nil
 		activation.holds--
 		activation.closed = true
+		releases := activation.endObserversLocked()
 		if activation.installed && err != nil {
 			c.attemptedFailures[activation.id] = err
 		}
 		s.nativeMu.Unlock()
+		for _, release := range releases {
+			release()
+		}
 		activation.close = closeFn
 		err = errors.Join(err, closeNativeActivation(activation))
 		if ctx.Err() != nil {
@@ -389,6 +519,7 @@ func closeNativeActivation(a *nativeActivation) error {
 	if a.entry.cancel != nil {
 		a.entry.end()
 	}
+	a.waitObservers()
 	if a.close == nil {
 		return nil
 	}
@@ -410,6 +541,7 @@ func (c *nativeCandidate) release() error {
 		s.nativeCurrent = nil
 	}
 	var closing []*nativeActivation
+	var releases []func()
 	for i := len(c.activations) - 1; i >= 0; i-- {
 		a := c.activations[i]
 		if a == nil {
@@ -418,10 +550,14 @@ func (c *nativeCandidate) release() error {
 		a.holds--
 		if a.holds == 0 {
 			a.closed = true
+			releases = append(releases, a.endObserversLocked()...)
 			closing = append(closing, a)
 		}
 	}
 	s.nativeMu.Unlock()
+	for _, release := range releases {
+		release()
+	}
 	var err error
 	for _, a := range closing {
 		err = errors.Join(err, closeNativeActivation(a))
@@ -477,6 +613,11 @@ func (c *nativeCandidate) snapshotLocked(activations []*nativeActivation) *nativ
 	out := &nativeSnapshot{nativeCaptureHold: nativeCaptureHold{candidate: c}, tools: make(map[string]*nativeRegistration), strategies: make(map[string]*nativeRegistration), services: make(map[string]*nativeRegistration), operations: make(map[nativeOperationKey]*nativeRegistration), hooks: make(map[string][]*nativeRegistration)}
 	for _, a := range activations {
 		for _, r := range a.entries {
+			if r.kind == "observer" {
+				// Observer delivery reads the activation's current registrations
+				// at fact enqueue time; an admission snapshot never captures them.
+				continue
+			}
 			r.holds++
 			out.nativeCaptureHold.entries = append(out.nativeCaptureHold.entries, r)
 			switch r.kind {
@@ -506,28 +647,25 @@ func (api nativeAPI) Remove(handle extension.Registration) error {
 			release()
 		}
 	}()
-	if a.closed {
-		return extension.ErrClosed
+	if err := a.unavailableLocked(); err != nil {
+		return err
 	}
 	r, ok := handle.(*nativeRegistration)
 	if !ok || r == nil || r.activation != a {
 		return errors.New("invalid registration handle")
 	}
-	if !r.current {
-		return nil
-	}
-	for i, entry := range a.entries {
-		if entry == r {
-			a.entries = append(a.entries[:i], a.entries[i+1:]...)
-			r.current = false
-			release = r.takeRelease()
-			break
-		}
-	}
+	release = endRegistrationLocked(a, r)
 	return nil
 }
 
 func (api nativeAPI) register(kind, name string, value any, replace extension.Registration) (extension.Registration, error) {
+	return api.registerWith(kind, name, value, replace, nil)
+}
+
+// registerWith is the one registration body. attach, when non-nil, runs under
+// the same owner hold that publishes the registration, so a dependent value
+// such as an observer delivery cannot outlive a closing activation.
+func (api nativeAPI) registerWith(kind, name string, value any, replace extension.Registration, attach func(*nativeRegistration)) (extension.Registration, error) {
 	id, err := newInstanceID()
 	if err != nil {
 		return nil, err
@@ -542,8 +680,8 @@ func (api nativeAPI) register(kind, name string, value any, replace extension.Re
 			release()
 		}
 	}()
-	if a.closed {
-		return nil, extension.ErrClosed
+	if err := a.unavailableLocked(); err != nil {
+		return nil, err
 	}
 	var old *nativeRegistration
 	if replace != nil {
@@ -589,16 +727,12 @@ func (api nativeAPI) register(kind, name string, value any, replace extension.Re
 	}
 	r := &nativeRegistration{id: id, activation: a, kind: kind, name: name, value: value, current: true}
 	if old != nil {
-		for i, entry := range a.entries {
-			if entry == old {
-				a.entries = append(a.entries[:i], a.entries[i+1:]...)
-				old.current = false
-				release = old.takeRelease()
-				break
-			}
-		}
+		release = endRegistrationLocked(a, old)
 	}
 	a.entries = append(a.entries, r)
+	if attach != nil {
+		attach(r)
+	}
 	return r, nil
 }
 
@@ -690,6 +824,97 @@ func (api nativeAPI) RegisterCleanup(h extension.CleanupHook, r extension.Regist
 	return api.register("cleanup", "", h, r)
 }
 
+// AttachObserver attaches one committed-fact observer to this activation. The
+// observer receives no AuthorContext and no Call, so observation grants no
+// command authority. Delivery is the Melta's bounded per-registration queue.
+func (api nativeAPI) AttachObserver(observer extension.Observer, r extension.Registration) (extension.Registration, error) {
+	if observer == nil {
+		return nil, errors.New("missing observer")
+	}
+	a := api.activation
+	return api.registerWith("observer", "", observer, r, func(entry *nativeRegistration) {
+		if a.owner.obs != nil {
+			entry.observer = a.owner.obs.attachObserver(a, observer, entry)
+		}
+	})
+}
+
+// CommandTargetScope maps one independent command target onto the Caller scope
+// union its containment check uses.
+func commandTargetScope(target extension.CommandTarget) CallerScope {
+	switch target.Kind {
+	case extension.ExposedTargetHarness:
+		return CallerScope{Kind: CallerScopeHarness}
+	case extension.ExposedTargetWorkspace:
+		return CallerScope{Kind: CallerScopeWorkspace, Workspace: target.Workspace}
+	case extension.ExposedTargetSession:
+		return CallerScope{Kind: CallerScopeSession, SessionID: target.SessionID}
+	}
+	return CallerScope{}
+}
+
+// Command issues one independent command as this activation after its host
+// callback returned. Every guard is checked under the activation mutex, in
+// order: current publication, the granted command service, the target inside
+// the granted scope, and no outstanding host callback. The command then runs
+// through the ordinary fixed producer with a fresh extension-origin Caller
+// bounded to the target; conflict is returned rather than queued.
+func (api nativeAPI) Command(ctx context.Context, target extension.CommandTarget, method string, args json.RawMessage) (extension.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a := api.activation
+	s := a.owner
+	if s.composition == nil || s.composition.hosts == nil || s.composition.hosts.owner == nil {
+		return extension.Result{}, extension.ErrClosed
+	}
+	targetScope := commandTargetScope(target)
+	// A Session's Workspace is immutable: resolve it before the activation
+	// guard so no Harness lock is taken under nativeMu.
+	scope := a.scope
+	var sessionWorkspace string
+	var scopeErr error
+	if target.Kind == extension.ExposedTargetSession && scope.Kind == CallerScopeWorkspace {
+		sessionWorkspace, scopeErr = resolveSessionWorkspace(ctx, s.composition.hosts.harness, targetScope)
+	}
+	s.nativeMu.Lock()
+	if current := s.nativeCurrent; current == nil || !current.ready[a] || a.closed || a.lost != nil {
+		s.nativeMu.Unlock()
+		return extension.Result{}, extension.ErrClosed
+	}
+	if !a.services[extension.ContractCommands] {
+		s.nativeMu.Unlock()
+		return extension.Result{}, ErrDenied
+	}
+	if scopeErr != nil {
+		s.nativeMu.Unlock()
+		return extension.Result{}, scopeErr
+	}
+	if err := authorizeResolvedScope(scope, targetScope, sessionWorkspace); err != nil {
+		s.nativeMu.Unlock()
+		return extension.Result{}, err
+	}
+	if a.callbacks != 0 {
+		s.nativeMu.Unlock()
+		return extension.Result{}, fmt.Errorf("extension callback is outstanding: %w", harness.ErrConflict)
+	}
+	extensionID := a.id
+	s.nativeMu.Unlock()
+
+	arguments := append(json.RawMessage(nil), args...)
+	if _, err := acceptHostMethod(extension.ContractCommands, method, arguments, false); err != nil {
+		return extension.Result{}, err
+	}
+	handler, ok := s.composition.commandsHandler(method)
+	if !ok {
+		return extension.Result{}, fmt.Errorf("command method %q: %w", method, harness.ErrNotFound)
+	}
+	// The fixed bridge mints the fresh extension-origin Caller bounded to the
+	// target scope exactly as the callback hostcall bridge does.
+	callCtx := context.WithValue(ctx, grantContextKey{}, nativeGrant{commands: true, commandScope: targetScope})
+	return handler(callCtx, hostCall{ExtensionID: extensionID, SessionID: targetScope.SessionID, Workspace: targetScope.Workspace}, arguments)
+}
+
 func (api nativeAPI) Call(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
 	a := api.activation
 	s := a.owner
@@ -759,6 +984,7 @@ type nativeCallScope struct {
 	commandScope     CallerScope
 	receipt          *nativeReceipt
 	start            *nativeSessionStart
+	countsCallback   bool
 }
 
 type nativeSessionStart struct {
@@ -1040,7 +1266,7 @@ func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method
 		return extension.Result{}, err
 	}
 	childCtx, cancel := context.WithCancel(ctx)
-	scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, pure: parent.pure || binding.contract.Mode == extension.ModePure, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, receipt: parent.receipt, start: parent.start, requestID: parent.requestID}
+	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, pure: parent.pure || binding.contract.Mode == extension.ModePure, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, receipt: parent.receipt, start: parent.start, requestID: parent.requestID})
 	return executeNativeProvider(childCtx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call, RequestID: scope.requestID}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 		defer scope.end()
 		return binding.handler(ctx, call, args)

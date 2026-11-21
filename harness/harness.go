@@ -1985,6 +1985,7 @@ func (h *Harness) publishAdmission(ctx context.Context, c *coordinator, view Ses
 	c.dropBufferedLocked(req.buffered)
 	c.mu.Unlock()
 	h.observeInvalidation(c) // the durable admission advance
+	h.observeOperationAdmitted(published.Admission.SessionID, published.Admission.OperationID)
 	return published, false, nil
 }
 

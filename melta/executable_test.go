@@ -249,6 +249,10 @@ func (peerAuthorAPI) Call(context.Context, string, string, json.RawMessage) (ext
 	return extension.Result{}, extension.ErrClosed
 }
 
+func (peerAuthorAPI) Command(context.Context, extension.CommandTarget, string, json.RawMessage) (extension.Result, error) {
+	return extension.Result{}, extension.ErrClosed
+}
+
 // activatePeer answers one worker's hello and activate handshake.
 func activatePeer(t *testing.T, peer *testExecutablePeer, manifest extension.Manifest) {
 	t.Helper()
@@ -407,6 +411,30 @@ func TestExecutableCallEvidence(t *testing.T) {
 	testassert.Equal(t, firstOutcome.Evidence, harness.ExecutionUnknown)
 	testassert.Equal(t, secondOutcome.Evidence, harness.ExecutionUnknown)
 	testassert.Equal(t, thirdOutcome.Evidence, harness.ExecutionNotStarted)
+}
+
+// TestExecutableCommandRequestBindsActivation proves the distinct worker
+// command request is bound to its process's activation: the host answers with
+// the ordinary typed error frame and the worker stays live.
+func TestExecutableCommandRequestBindsActivation(t *testing.T) {
+	manifest := executableTestManifest()
+	peer := newTestExecutablePeer(t, false, nil)
+	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
+	spawner.install()
+	activation := startPeerActivation(t, peer, manifest)
+	params, err := json.Marshal(worker.AuthorCommandParams{
+		Target: extension.CommandTarget{Kind: extension.ExposedTargetSession, SessionID: "session"},
+		Method: "submit", Arguments: worker.JSONBytes(`{"operation_id":"op-1"}`),
+	})
+	testassert.NoError(t, err)
+	peer.send(worker.Frame{Kind: worker.KindRequest, ID: "w-command", Method: worker.MethodCommand, Params: params})
+	reply := peer.next()
+	testassert.Require(t, reply.ID == "w-command" && reply.Error != nil && reply.Error.Class == worker.ClassClosed, "command reply = %#v, want the activation's closed class", reply)
+	activation.mu.Lock()
+	failed := activation.failed
+	activation.mu.Unlock()
+	testassert.Require(t, failed == nil, "a typed command error failed the activation: %v", failed)
+	peer.exit()
 }
 
 func TestExecutableLostResult(t *testing.T) {

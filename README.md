@@ -242,7 +242,7 @@ extensions are optional. Creating a Session requires a non-empty local Workspace
 listener is required.
 [`extension/`](extension/) is the activation-owned native contract (`extension.API`, typed callbacks and fixed host
 services), and [`extension/worker/`](extension/worker/) is the executable extension protocol. The running owner and
-the public worker entry both use the author `worker.Serve` protocol at API version 7. [`runtime/`](runtime/) is only
+the public worker entry both use the author `worker.Serve` protocol at API version 8. [`runtime/`](runtime/) is only
 the protocol host and first-run initialization; [`protocol/`](protocol/) is the generated contract and
 [`client/`](client/) the handwritten HTTP/SSE client.
 

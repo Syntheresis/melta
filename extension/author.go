@@ -11,7 +11,7 @@ import (
 )
 
 // APIVersion is the exact activation authoring contract version.
-const APIVersion = "7"
+const APIVersion = "8"
 
 // Manifest is the metadata available before an extension is activated.
 type Manifest struct {
@@ -98,7 +98,37 @@ type API interface {
 	AttachAuthorization(AuthorizationHook, Registration) (Registration, error)
 	AttachResult(ResultHook, Registration) (Registration, error)
 	RegisterCleanup(CleanupHook, Registration) (Registration, error)
+	AttachObserver(Observer, Registration) (Registration, error)
 	Call(context.Context, string, string, json.RawMessage) (Result, error)
+	Command(context.Context, CommandTarget, string, json.RawMessage) (Result, error)
+}
+
+// Observer receives one committed fact. It receives no AuthorContext and no
+// Call: observation grants no command or effect authority.
+type Observer func(context.Context, Fact) error
+
+// The closed committed fact kinds an observer receives.
+const (
+	FactOperationAdmitted = "operation_admitted"
+	FactOperationSettled  = "operation_settled"
+)
+
+// Fact is one committed passive observation carrying its Session and
+// Operation identity. Status is the closed terminal OperationState and is
+// present only for a settled Operation.
+type Fact struct {
+	Kind        string `json:"kind"`
+	SessionID   string `json:"session_id"`
+	OperationID string `json:"operation_id"`
+	Status      string `json:"status,omitempty"`
+}
+
+// CommandTarget is one independent command's bound target: the whole owner,
+// one Workspace, or one Session.
+type CommandTarget struct {
+	Kind      ExposedTargetKind `json:"kind"`
+	Workspace string            `json:"workspace,omitempty"`
+	SessionID string            `json:"session_id,omitempty"`
 }
 
 // AuthorContext supplies the values and scoped service calls of one callback.

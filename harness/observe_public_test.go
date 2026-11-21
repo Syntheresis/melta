@@ -406,6 +406,8 @@ func TestObservePublicBothStores(t *testing.T) {
 			deltas   int
 			started  int
 			finished int
+			admitted int
+			settled  int
 		)
 		for _, fact := range sink.snapshot() {
 			testassert.Require(t, fact.SessionID == session, "fact names a foreign session: %+v", fact)
@@ -420,6 +422,12 @@ func TestObservePublicBothStores(t *testing.T) {
 			case harness.FactToolFinished:
 				finished++
 				testassert.Require(t, fact.OperationID == "op-1" && fact.CallID == "call-1" && fact.Status == model.ResultSuccess, "tool finished fact = %+v", fact)
+			case harness.FactOperationAdmitted:
+				admitted++
+				testassert.Require(t, fact.OperationID == "op-1", "admitted fact = %+v", fact)
+			case harness.FactOperationSettled:
+				settled++
+				testassert.Require(t, fact.OperationID == "op-1" && fact.OperationStatus == harness.OperationSuccess, "settled fact = %+v", fact)
 			default:
 				t.Fatalf("fact kind %q is outside the closed set", fact.Kind)
 			}
@@ -432,7 +440,7 @@ func TestObservePublicBothStores(t *testing.T) {
 			_, pair, ok := h.ReadObservation(session)
 			testassert.Require(t, ok && pair == current, "cached publication read = %+v %v, quiet snapshot = %+v", pair, ok, current)
 		}
-		testassert.Require(t, deltas == 2 && started == 1 && finished == 1, "progress counts = deltas %d started %d finished %d", deltas, started, finished)
+		testassert.Require(t, deltas == 2 && started == 1 && finished == 1 && admitted == 1 && settled == 1, "progress counts = deltas %d started %d finished %d admitted %d settled %d", deltas, started, finished, admitted, settled)
 
 		// Restart: recovery and the new owner's reads replay nothing.
 		cancel()

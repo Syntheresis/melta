@@ -129,26 +129,30 @@ func TestObserveFactKinds(t *testing.T) {
 		deltas        int
 		started       int
 		finished      int
+		settled       int
 	)
 	for _, fact := range col.snapshot() {
 		switch fact.Kind {
 		case FactInvalidation:
 			invalidations++
-			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == "" && fact.JobID == "" && fact.Position == 0 && fact.Content == "" && fact.CallID == "" && fact.Ordinal == 0 && fact.Name == "" && fact.Status == "", "invalidation fact carries unrelated fields: %+v", fact)
+			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == "" && fact.JobID == "" && fact.Position == 0 && fact.Content == "" && fact.CallID == "" && fact.Ordinal == 0 && fact.Name == "" && fact.Status == "" && fact.OperationStatus == "", "invalidation fact carries unrelated fields: %+v", fact)
 		case FactTextDelta:
 			deltas++
-			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == testOpID && fact.Position == 0 && fact.Content == "done" && fact.JobID == "" && fact.CallID == "" && fact.Ordinal == 0 && fact.Name == "" && fact.Status == "", "text_delta fact carries unrelated fields: %+v", fact)
+			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == testOpID && fact.Position == 0 && fact.Content == "done" && fact.JobID == "" && fact.CallID == "" && fact.Ordinal == 0 && fact.Name == "" && fact.Status == "" && fact.OperationStatus == "", "text_delta fact carries unrelated fields: %+v", fact)
 		case FactToolStarted:
 			started++
-			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == testOpID && fact.CallID == "call-1" && fact.Ordinal == 0 && fact.Name == "echo" && fact.JobID == "" && fact.Position == 0 && fact.Content == "" && fact.Status == "", "tool_started fact carries unrelated fields: %+v", fact)
+			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == testOpID && fact.CallID == "call-1" && fact.Ordinal == 0 && fact.Name == "echo" && fact.JobID == "" && fact.Position == 0 && fact.Content == "" && fact.Status == "" && fact.OperationStatus == "", "tool_started fact carries unrelated fields: %+v", fact)
 		case FactToolFinished:
 			finished++
-			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == testOpID && fact.CallID == "call-1" && fact.Status == model.ResultSuccess && fact.JobID == "" && fact.Position == 0 && fact.Content == "" && fact.Ordinal == 0 && fact.Name == "", "tool_finished fact carries unrelated fields: %+v", fact)
+			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == testOpID && fact.CallID == "call-1" && fact.Status == model.ResultSuccess && fact.JobID == "" && fact.Position == 0 && fact.Content == "" && fact.Ordinal == 0 && fact.Name == "" && fact.OperationStatus == "", "tool_finished fact carries unrelated fields: %+v", fact)
+		case FactOperationSettled:
+			settled++
+			testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == testOpID && fact.OperationStatus == OperationSuccess && fact.JobID == "" && fact.Position == 0 && fact.Content == "" && fact.CallID == "" && fact.Ordinal == 0 && fact.Name == "" && fact.Status == "", "operation_settled fact carries unrelated fields: %+v", fact)
 		default:
 			t.Fatalf("fact kind %q is outside the closed set", fact.Kind)
 		}
 	}
-	testassert.Require(t, invalidations >= 2 && deltas == 2 && started == 1 && finished == 1, "fact counts = invalidations %d deltas %d started %d finished %d", invalidations, deltas, started, finished)
+	testassert.Require(t, invalidations >= 2 && deltas == 2 && started == 1 && finished == 1 && settled == 1, "fact counts = invalidations %d deltas %d started %d finished %d settled %d", invalidations, deltas, started, finished, settled)
 }
 
 // TestObserveReservationClocks proves each reservation acquisition and release
@@ -626,6 +630,14 @@ func TestObserveDurableAdvances(t *testing.T) {
 		})
 		testassert.NoError(t, err)
 		dest := res.Session.Identity.SessionID
+		admitted := 0
+		for _, fact := range col.snapshot() {
+			if fact.Kind == FactOperationAdmitted && fact.SessionID == dest {
+				admitted++
+				testassert.Require(t, fact.OperationID == "fork-op-1", "fork admitted fact = %+v", fact)
+			}
+		}
+		testassert.Require(t, admitted == 1, "fork admitted facts = %d, want exactly one", admitted)
 		destFacts := 0
 		for _, fact := range col.invalidations() {
 			if fact.SessionID == dest {
@@ -1380,7 +1392,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 						testassert.Require(t, finishedAt < 0, "the call finished more than once: %+v", facts)
 						finishedAt = i
 						testassert.Require(t, fact.CallID == "call-1" && fact.Status == tc.status && fact.OperationID == testOpID, "finished fact = %+v, want status %s", fact, tc.status)
-					case FactInvalidation, FactTextDelta:
+					case FactInvalidation, FactTextDelta, FactOperationSettled, FactOperationAdmitted:
 					default:
 						t.Fatalf("unexpected progress kind %q in %+v", fact.Kind, facts)
 					}
@@ -1501,6 +1513,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 			case FactInvalidation:
 				invalidations++
 			case FactTextDelta:
+			case FactOperationSettled, FactOperationAdmitted:
 			default:
 				t.Fatalf("hook flow emitted progress kind %q", fact.Kind)
 			}
@@ -1685,4 +1698,133 @@ func TestReadObservation(t *testing.T) {
 			testassert.Require(t, !ok, "%v", "ReadObservation on a corrupt Session reported available")
 		}
 	})
+}
+
+// TestObserveOperationSettlementFacts proves every terminal producer emits
+// exactly one settled fact with its actual status, after the commit.
+func TestObserveOperationSettlementFacts(t *testing.T) {
+	cases := []struct {
+		name  string
+		want  OperationState
+		model func(context.Context, context.CancelFunc) func(context.Context, model.Request, model.Extra) (model.Stream, error)
+	}{
+		{
+			name: "success", want: OperationSuccess,
+			model: func(context.Context, context.CancelFunc) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+				return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+					return completedTurnStream(), nil
+				}
+			},
+		},
+		{
+			name: "failure", want: OperationFailure,
+			model: func(context.Context, context.CancelFunc) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+				return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+					return nil, errors.New("model failure")
+				}
+			},
+		},
+		{
+			name: "interruption", want: OperationInterruption,
+			model: func(_ context.Context, cancel context.CancelFunc) func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+				return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+					return &cancelOnCloseStream{scriptStream: completedTurnStream(), cancel: cancel}, nil
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, c, sessionID := newEffectHarness(t, nil)
+			col := observeHarness(h)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			modelFn := tc.model(ctx, cancel)
+			_ = executeDirect(h, c, ctx, testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+				return effectExecution(modelFn, nil), nil
+			}))
+			var statuses []OperationState
+			for _, fact := range col.snapshot() {
+				if fact.Kind != FactOperationSettled {
+					continue
+				}
+				testassert.Require(t, fact.SessionID == sessionID && fact.OperationID == testOpID, "settled fact identity = %+v", fact)
+				statuses = append(statuses, fact.OperationStatus)
+			}
+			testassert.Require(t, len(statuses) == 1 && statuses[0] == tc.want, "settled facts = %v, want exactly one %s", statuses, tc.want)
+		})
+	}
+}
+
+// TestObserveBackgroundAdmissionFact proves one owned-start admission emits
+// exactly one admitted fact with its child Session and Operation identities.
+func TestObserveBackgroundAdmissionFact(t *testing.T) {
+	store := freshSessionStore(t)
+	script := newModelScript()
+	script.gate = make(chan struct{})
+	stub := newPrepareStub(modelPrepared(script.model))
+	h, cancel := newCancelableHarness(t, store, PreparedExecution{}, stub.prepare)
+	defer cancel()
+	defer script.releaseGate()
+	leaseCoordinator(t, h, testSessionID)
+	col := observeHarness(h)
+	res, err := h.LaunchChildSession(context.Background(), launchRequest())
+	testassert.NoError(t, err)
+	admitted := 0
+	for _, fact := range col.snapshot() {
+		if fact.Kind != FactOperationAdmitted {
+			continue
+		}
+		admitted++
+		testassert.Require(t, fact.SessionID == res.ChildSessionID && fact.OperationID == "child-op-1", "owned-start admitted fact = %+v", fact)
+	}
+	testassert.Require(t, admitted == 1, "owned-start admitted facts = %d, want exactly one", admitted)
+}
+
+// TestObserveCompactionSettlementFacts proves the compaction producers emit
+// their one settled fact: manual success and checkpoint interruption carry
+// their Session, Operation and terminal status.
+func TestObserveCompactionSettlementFacts(t *testing.T) {
+	run := func(t *testing.T, interrupt bool) (*factCollector, error) {
+		t.Helper()
+		store := idleFixture(t, validTestGraph(), hexID(20))
+		var c *coordinator
+		exec := compactionExecution(t, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+			if interrupt {
+				c.mu.Lock()
+				c.memberStop = &backgroundMember{done: make(chan struct{})}
+				c.mu.Unlock()
+			}
+			return summaryStream("summary", model.Usage{}), nil
+		}, nil)
+		h := newCompactHarness(t, store, compactPrepared(testCapture(), exec))
+		c = leaseCoordinator(t, h, testSessionID)
+		col := observeHarness(h)
+		return col, runManualCompact(t, h, c, testSessionID, "compact-1")
+	}
+	for _, tc := range []struct {
+		name      string
+		interrupt bool
+		want      OperationState
+		wantErr   error
+	}{
+		{name: "manual success", want: OperationSuccess},
+		{name: "checkpoint interruption", interrupt: true, want: OperationInterruption},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			col, err := run(t, tc.interrupt)
+			if !tc.interrupt {
+				testassert.NoError(t, err)
+			}
+			settled := 0
+			for _, fact := range col.snapshot() {
+				if fact.Kind != FactOperationSettled {
+					continue
+				}
+				settled++
+				testassert.Require(t, fact.SessionID == testSessionID && fact.OperationID == "compact-1" && fact.OperationStatus == tc.want, "compaction settled fact = %+v, want %s", fact, tc.want)
+			}
+			testassert.Require(t, settled == 1, "compaction settled facts = %d, want exactly one", settled)
+		})
+	}
 }

@@ -81,7 +81,7 @@ func shAuthorFixtureSource(t *testing.T, version string) (string, extension.Mani
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build author fixture: %v: %s", err, output)
 	}
-	manifest := extension.Manifest{ID: "author-fixture", Version: version, APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	manifest := extension.Manifest{ID: "author-fixture", Version: version, APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`), Services: []string{extension.ContractCommands}}
 	source := t.TempDir()
 	data, err := os.ReadFile(binary)
 	testassert.NoError(t, err)

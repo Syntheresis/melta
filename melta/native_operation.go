@@ -65,19 +65,21 @@ func (r *Melta) invokeRegisteredOperation(ctx context.Context, caller Caller, ex
 			lease = &artifactCallLease{intervals: r.artifacts, key: sessionArtifactDir(r.dataDir, session.SessionID)}
 			defer lease.end()
 		}
-		scope := &nativeCallScope{
+		scope := callbackScope(&nativeCallScope{
 			nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel},
 			candidate:          candidate, activation: entry.activation,
 			pure:    operation.method.contract.Mode == extension.ModePure,
 			session: session, states: states, host: r.config.composition,
 			commandScope: target, receipt: receipt, lease: lease, requestID: requestID,
-		}
+		})
 		author := extension.AuthorContext{
 			ExtensionID: entry.activation.id, Settings: bytes.Clone(entry.activation.section),
 			Session: session, State: bytes.Clone(states[entry.activation.id]), Call: scope.call, RequestID: requestID,
 		}
-		result, err = executeNativeProvider(callCtx, author, operation.method.contract, operation.method.handler, "operation", methodName, args)
-		scope.end()
+		result, err = func() (extension.Result, error) {
+			defer scope.end()
+			return executeNativeProvider(callCtx, author, operation.method.contract, operation.method.handler, "operation", methodName, args)
+		}()
 		if err != nil {
 			var declared *extension.CallError
 			if errors.As(err, &declared) && len(declared.Partial) != 0 {
