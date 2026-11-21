@@ -20,9 +20,6 @@ func (scope *nativeCallScope) updateSettings(ctx context.Context, args json.RawM
 	if err := scopedArguments(args, &input); err != nil {
 		return extension.Result{}, err
 	}
-	if input.Service == "" || input.Method == "" || !json.Valid(input.Arguments) {
-		return extension.Result{}, fmt.Errorf("invalid settings update: %w", harness.ErrInvalid)
-	}
 	activation := scope.activation
 	owner := activation.owner
 	owner.nativeMu.Lock()

@@ -5,7 +5,7 @@
 // services the Melta owner constructs directly, so they are not part of
 // this set. It is ordinary composition data with no configuration logic and
 // no additional Core authority; a custom build supplies its own native slice
-// through the same melta.Open and its own Agent constructor worlds.
+// through the same melta.Open.
 package builtin
 
 import (

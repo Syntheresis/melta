@@ -184,12 +184,12 @@ func TestOpaqueArgumentHookConsequences(t *testing.T) {
 	for _, raw := range [][]byte{nil, []byte("not json"), {0xff, 0xfe}, []byte(`[1,2]`)} {
 		t.Run(base64.StdEncoding.EncodeToString(raw), func(t *testing.T) {
 			hooks := []ToolArgumentsHook{
-				{ID: "keep", ExtensionID: "ext", Mode: HookModeEffectful, Run: func(_ context.Context, call model.ToolCall) (json.RawMessage, error) {
-					return model.CloneRaw(call.Arguments), nil
+				{ID: "keep", ExtensionID: "ext", Mode: HookModeEffectful, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+					return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 				}},
-				{ID: "repair", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, call model.ToolCall) (json.RawMessage, error) {
+				{ID: "repair", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 					testassert.Require(t, bytes.Equal(call.Arguments, raw), "repair input = %q, want %q", call.Arguments, raw)
-					return json.RawMessage(`{"fixed":true}`), nil
+					return ToolArgumentsResult{Arguments: json.RawMessage(`{"fixed":true}`)}, nil
 				}},
 			}
 			spy := &hookToolSpy{}
@@ -207,9 +207,9 @@ func TestOpaqueArgumentHookConsequences(t *testing.T) {
 func TestToolLookupAfterHooksKeepsBoundImplementation(t *testing.T) {
 	current := "before"
 	var prepared, executed string
-	hook := ToolArgumentsHook{ID: "replace", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, call model.ToolCall) (json.RawMessage, error) {
+	hook := ToolArgumentsHook{ID: "replace", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		current = "after"
-		return call.Arguments, nil
+		return ToolArgumentsResult{Arguments: call.Arguments}, nil
 	}}
 	inv := InvocationExecution{
 		ToolHooks: []ToolArgumentsHook{hook},

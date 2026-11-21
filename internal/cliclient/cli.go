@@ -62,6 +62,7 @@ type CLI struct {
 	connecting                 bool
 	selection                  uint64
 	workspace, rootID, childID string
+	agentCurrent, agentSession string
 	root, child                *sessionReader
 	listGeneration             uint64
 	sessions                   []protocol.Session

@@ -13,9 +13,9 @@ import (
 func TestAuthorizationRunsAfterRewriteAndPreparation(t *testing.T) {
 	var steps []string
 	inv := InvocationExecution{
-		ToolHooks: []ToolArgumentsHook{{ID: "rewrite", ExtensionID: "ext", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (json.RawMessage, error) {
+		ToolHooks: []ToolArgumentsHook{{ID: "rewrite", ExtensionID: "ext", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
 			steps = append(steps, "rewrite")
-			return json.RawMessage(`{"x":2}`), nil
+			return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":2}`)}, nil
 		}}},
 		LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) PreparedTool {
 			steps = append(steps, "prepare")

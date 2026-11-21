@@ -36,15 +36,15 @@ func (n *seqNormalizer) normalize(_ context.Context, call model.ToolCall) (json.
 }
 
 func passthroughHook(id string, received *json.RawMessage) ToolArgumentsHook {
-	return ToolArgumentsHook{ID: id, ExtensionID: "reuse-ext", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+	return ToolArgumentsHook{ID: id, ExtensionID: "reuse-ext", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		*received = model.CloneRaw(call.Arguments)
-		return model.CloneRaw(call.Arguments), nil
+		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
 }
 
 func changedHook(id string, replacement string) ToolArgumentsHook {
-	return ToolArgumentsHook{ID: id, ExtensionID: "reuse-ext", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (json.RawMessage, error) {
-		return json.RawMessage(replacement), nil
+	return ToolArgumentsHook{ID: id, ExtensionID: "reuse-ext", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+		return ToolArgumentsResult{Arguments: json.RawMessage(replacement)}, nil
 	}}
 }
 

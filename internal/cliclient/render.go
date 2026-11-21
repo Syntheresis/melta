@@ -294,6 +294,9 @@ func (c *CLI) frameLocked(content string) string {
 			model = *h.SelectedModel
 		}
 		status := fmt.Sprintf("Model choice: %s", model)
+		if c.agentSession == r.id && c.agentCurrent != "" {
+			status += fmt.Sprintf(" · Agent: %s", c.agentCurrent)
+		}
 		ran := ""
 		if h.ActiveOperation != nil {
 			op := h.ActiveOperation

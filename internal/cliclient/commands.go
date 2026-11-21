@@ -158,8 +158,17 @@ func (c *CLI) navigationReport(s stamp, text string) {
 // root reader and an empty child inspector. Adoption is a second navigation
 // step: every task, menu and Fork begun against the retained source during
 // resolution is superseded before the destination publishes, and a superseded
-// resolution never adopts.
+// resolution never adopts. The destination's selected Agent is read from the
+// advertised Agents current operation before adoption; an absent extension or
+// selection shows nothing.
 func (c *CLI) adoptRoot(s stamp, workspace, id string) {
+	c.mu.Lock()
+	current := c.currentLocked(s)
+	c.mu.Unlock()
+	if !current {
+		return
+	}
+	agent := c.rootAgent(s, id)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.currentLocked(s) {
@@ -172,9 +181,33 @@ func (c *CLI) adoptRoot(s stamp, workspace, id string) {
 	}
 	c.rootID = id
 	c.childID = ""
+	c.agentCurrent, c.agentSession = agent, id
 	c.root = c.newReaderLocked(id)
 	c.kickReaderLocked(c.root)
 	c.notifyLocked()
+}
+
+// rootAgent reads one root's selected Agent from the advertised Agents current
+// operation. Every failure, absence and empty selection shows nothing.
+func (c *CLI) rootAgent(s stamp, id string) string {
+	if id == "" {
+		return ""
+	}
+	found, err := clientops.HasExtensionOperation(s.ctx, s.conn, "agents", "current", protocol.RegisteredExtensionOperationTargetSession)
+	if err != nil || !found {
+		return ""
+	}
+	raw, err := clientops.InvokeExtension(s.ctx, s.conn, "agents", "current", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindSession, SessionId: &id}, json.RawMessage(`{}`))
+	if err != nil {
+		return ""
+	}
+	var selected struct {
+		Agent string `json:"agent"`
+	}
+	if json.Unmarshal(raw, &selected) != nil {
+		return ""
+	}
+	return selected.Agent
 }
 
 // selectRoot begins one named root navigation.

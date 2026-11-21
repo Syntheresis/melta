@@ -458,7 +458,7 @@ func (s *configurationService) prepareNativeCandidate(ctx context.Context, specs
 		activation.holds--
 		activation.closed = true
 		releases := activation.endObserversLocked()
-		if activation.installed && err != nil {
+		if err != nil {
 			c.attemptedFailures[activation.id] = err
 		}
 		s.nativeMu.Unlock()
@@ -933,36 +933,9 @@ func (api nativeAPI) Call(ctx context.Context, service, method string, args json
 		return extension.Result{}, err
 	}
 	defer finish()
-	if service == "melta.warnings" {
-		if !a.services[service] {
-			return extension.Result{}, ErrDenied
-		}
-		args, err = acceptHostMethod(service, method, args, false)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		return a.reportWarning(callCtx, method, args)
-	}
-	if service == extension.ContractCredentials {
-		if !a.services[service] {
-			return extension.Result{}, ErrDenied
-		}
-		args, err = acceptHostMethod(service, method, args, false)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		var input struct {
-			Field string `json:"field"`
-		}
-		if err := json.Unmarshal(args, &input); err != nil {
-			return extension.Result{}, err
-		}
-		values := make(map[string]string, len(a.bindings))
-		for field, binding := range a.bindings {
-			values[field] = binding.value
-		}
-		callCtx = context.WithValue(callCtx, secretValuesKey{}, secretValues{activation: values})
-		return declaredCredentialHandler(callCtx, hostCall{ExtensionID: a.id}, input.Field, a.manifest.Secrets)
+	scope := &nativeCallScope{candidate: c, activation: a, host: s.composition}
+	if resulting, handled, err := scope.callHostService(callCtx, service, method, args); handled {
+		return resulting, err
 	}
 	return c.callServiceScoped(callCtx, service, method, args, &nativeCallScope{candidate: c, activation: a})
 }
@@ -1056,6 +1029,9 @@ func (scope *nativeCallScope) call(ctx context.Context, service, method string, 
 		if err := scope.activation.unavailable(); err != nil {
 			return extension.Result{}, err
 		}
+	}
+	if result, handled, err := scope.callHostService(callCtx, service, method, args); handled {
+		return result, err
 	}
 	if service == extension.ContractSession {
 		if scope.activation == nil || !scope.activation.services[service] || scope.session.SessionID == "" {
@@ -1177,25 +1153,16 @@ func (scope *nativeCallScope) call(ctx context.Context, service, method string, 
 		}
 		return result, err
 	}
-	if service == "melta.warnings" {
-		if scope.activation == nil {
-			return extension.Result{}, extension.ErrClosed
-		}
-		if !scope.activation.services[service] {
-			return extension.Result{}, ErrDenied
-		}
-		args, err = acceptHostMethod(service, method, args, scope.pure)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		return scope.activation.reportWarning(callCtx, method, args)
-	}
 	if service == extension.ContractCommands {
 		if scope.activation == nil || !scope.activation.services[service] || scope.pure || scope.commandScope.Kind == "" {
 			return extension.Result{}, ErrDenied
 		}
 		if scope.host == nil {
 			return extension.Result{}, extension.ErrClosed
+		}
+		args, err = acceptHostMethod(service, method, args, false)
+		if err != nil {
+			return extension.Result{}, err
 		}
 		handler, ok := scope.host.commandsHandler(method)
 		if !ok {
@@ -1205,9 +1172,6 @@ func (scope *nativeCallScope) call(ctx context.Context, service, method string, 
 		result, err := handler(callCtx, hostCall{ExtensionID: scope.activation.id, SessionID: scope.session.SessionID, Workspace: scope.session.Workspace}, args)
 		scope.receipt.command(result, err)
 		return result, err
-	}
-	if service == extension.ContractData || service == extension.ContractCredentials {
-		return scope.callGuardedHost(callCtx, service, method, args)
 	}
 	return scope.candidate.callServiceScoped(callCtx, service, method, args, scope)
 }

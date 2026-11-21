@@ -9,7 +9,6 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/toolargs"
 	"github.com/Syntheresis/melta/model"
 )
 
@@ -18,7 +17,7 @@ func (s authorInstance) arguments(_ context.Context, call extension.AuthorContex
 	if err != nil || !definition.Readonly || input.Name != "run_command" {
 		return extension.ArgumentsResult{}, nil
 	}
-	args, err := toolargs.Decode(input.Arguments)
+	args, err := decodeArguments(input.Arguments)
 	if err != nil {
 		return extension.ArgumentsResult{}, nil
 	}
@@ -46,7 +45,7 @@ func (s authorInstance) authorize(ctx context.Context, call extension.AuthorCont
 	}
 	refuse := func(message string) (*string, error) { return &message, nil }
 	if definition.Readonly && input.ToolName == "run_command" {
-		args, err := toolargs.Decode(input.Arguments)
+		args, err := decodeArguments(input.Arguments)
 		if err != nil {
 			return refuse(ReadOnlyRunCommandRejected)
 		}

@@ -2485,7 +2485,8 @@ describe('session picker tasks', () => {
     (target.querySelector('[aria-label="New session"]') as HTMLElement).click();
     await settle();
     await settle();
-    expect(JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls.at(-1)?.[0] as string).body).toMatchObject({ extension_id: 'agents', operation: 'create', target: { kind: 'workspace', workspace: '/ws' } });
+    const creates = vi.mocked(sdk.InvokeExtension).mock.calls.filter(([value]) => (JSON.parse(value as string) as { body: { operation: string } }).body.operation === 'create');
+    expect(JSON.parse(creates.at(-1)?.[0] as string).body).toMatchObject({ extension_id: 'agents', operation: 'create', target: { kind: 'workspace', workspace: '/ws' } });
     expect(vi.mocked(sdk.CreateSession)).not.toHaveBeenCalled();
     expect(vi.mocked(sdk.GetSessionHydration).mock.calls.at(-1)?.[0]).toEqual('{"session_id":"root-new"}');
   });
@@ -5044,6 +5045,37 @@ describe('global snapshot adoption', () => {
   });
 });
 
+describe('session toolbar agent', () => {
+  it('shows the active session selected agent from the advertised current operation', async () => {
+    const connection = fakeConnection();
+    basicMocks(connection);
+    const { target } = await mountApp(connection);
+    await settle();
+    await settle();
+    expect(target.querySelector('.toolbar .agent')?.textContent).toBe('primary');
+  });
+
+  it('shows nothing when the current operation is not advertised', async () => {
+    const connection = fakeConnection();
+    basicMocks(connection);
+    vi.mocked(sdk.ListExtensions).mockResolvedValue(json(200, []));
+    const { target } = await mountApp(connection);
+    await settle();
+    await settle();
+    expect(target.querySelector('.toolbar .agent')).toBeNull();
+  });
+
+  it('shows nothing when the advertised current operation has no selection', async () => {
+    const connection = fakeConnection();
+    basicMocks(connection);
+    vi.mocked(sdk.InvokeExtension).mockResolvedValue(json(200, { kind: 'success', result: {} }));
+    const { target } = await mountApp(connection);
+    await settle();
+    await settle();
+    expect(target.querySelector('.toolbar .agent')).toBeNull();
+  });
+});
+
 describe('cost whole-member replacement', () => {
   async function costEditor(model: Record<string, unknown>) {
     const connection = fakeConnection();
@@ -5180,7 +5212,7 @@ describe('composition failure outcomes', () => {
       await settle();
       await settle();
       (target.querySelector('[aria-label="New session"]') as HTMLElement).click();
-      await vi.waitFor(() => expect(vi.mocked(sdk.InvokeExtension)).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(vi.mocked(sdk.InvokeExtension)).toHaveBeenCalledTimes(3));
       await settle();
       await settle();
       expect(vi.mocked(sdk.GetSessionHydration)).toHaveBeenCalledWith('{"session_id":"created-1"}');
@@ -5227,9 +5259,9 @@ describe('composition failure outcomes', () => {
       expect(target.textContent).not.toContain('stale-1');
       expect(target.querySelector('.note.outcome')).toBeNull();
       expect(target.querySelector('.note.error')).toBeNull();
-      const workspaces = vi.mocked(sdk.InvokeExtension).mock.calls.map(
-        (call) => (JSON.parse(call[0] as string) as { body: { target: { workspace: string } } }).body.target.workspace,
-      );
+      const workspaces = vi.mocked(sdk.InvokeExtension).mock.calls
+        .map((call) => (JSON.parse(call[0] as string) as { body: { target: { workspace?: string } } }).body.target.workspace)
+        .filter((workspace) => workspace !== undefined);
       expect(workspaces).toEqual(['/ws', '/ws', '/wsB']);
       expect(target.textContent).toContain('b-1');
       // The stale picker outcome reports against its captured address and never

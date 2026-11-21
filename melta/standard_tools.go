@@ -24,11 +24,11 @@ import (
 	"github.com/Syntheresis/melta/internal/editpreview"
 	"github.com/Syntheresis/melta/internal/jobs"
 	"github.com/Syntheresis/melta/internal/pathutil"
-	"github.com/Syntheresis/melta/internal/shellparse"
 	"github.com/Syntheresis/melta/internal/snapshot"
 	"github.com/Syntheresis/melta/internal/tool"
 	"github.com/Syntheresis/melta/internal/toolargs"
 	"github.com/Syntheresis/melta/model"
+	"github.com/Syntheresis/melta/shellparse"
 )
 
 // maxDiagnosticBytes is the durable diagnostic bound for the

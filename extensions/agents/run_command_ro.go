@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/Syntheresis/melta/internal/shellparse"
+	"github.com/Syntheresis/melta/shellparse"
 )
 
 // ReadOnlyPreparedCommand checks the exact canonical script emitted by

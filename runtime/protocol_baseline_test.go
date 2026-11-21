@@ -22,13 +22,15 @@ import (
 )
 
 // baselineModel is the supplied-Runtime fixture's local OpenAI-compatible
-// endpoint: it records the resolved request model and answers every turn with
-// plain text.
+// endpoint: it records the resolved request model and every request body, and
+// answers each turn with plain text unless a scenario installs a responder.
 type baselineModel struct {
 	*httptest.Server
 
-	mu     sync.Mutex
-	models []string
+	mu      sync.Mutex
+	models  []string
+	bodies  []string
+	respond func(w http.ResponseWriter, body string)
 }
 
 func newBaselineModel(t *testing.T) *baselineModel {
@@ -41,13 +43,20 @@ func newBaselineModel(t *testing.T) *baselineModel {
 
 func (s *baselineModel) serve(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
-	var body struct {
+	body := string(raw)
+	var request struct {
 		Model string `json:"model"`
 	}
-	_ = json.Unmarshal(raw, &body)
+	_ = json.Unmarshal(raw, &request)
 	s.mu.Lock()
-	s.models = append(s.models, body.Model)
+	s.models = append(s.models, request.Model)
+	s.bodies = append(s.bodies, body)
+	respond := s.respond
 	s.mu.Unlock()
+	if respond != nil {
+		respond(w, body)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"role":"assistant","content":"runtime done"},"finish_reason":null}]}`)
 	fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}]}`)
@@ -60,25 +69,36 @@ func (s *baselineModel) requested() []string {
 	return append([]string(nil), s.models...)
 }
 
-// baselineConfigDocument points the configured provider at the scripted local
-// endpoint and optionally carries the installed extensions' inactive sections.
-func baselineConfigDocument(endpoint string, extensionsDisabled bool) []byte {
+func (s *baselineModel) setRespond(respond func(w http.ResponseWriter, body string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.respond = respond
+}
+
+func (s *baselineModel) recorded() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.bodies...)
+}
+
+// baselineConfigDocument composes the provider endpoint and model rows and,
+// when given, the installed extensions' sections.
+func baselineConfigDocument(endpoint string, models map[string]string, extensions map[string]any) []byte {
+	rows := make(map[string]any, len(models))
+	for id, name := range models {
+		rows[id] = map[string]any{"name": name, "context_window": 65536}
+	}
 	document := map[string]any{
 		"providers": map[string]any{
 			"prov": map[string]any{
 				"transport": map[string]any{"base_url": endpoint, "api_key_env": ""},
 				"discovery": false,
-				"models": map[string]any{"m": map[string]any{
-					"name": "M", "context_window": 65536,
-				}},
+				"models":    rows,
 			},
 		},
 	}
-	if extensionsDisabled {
-		document["extensions"] = map[string]any{
-			"agents":     map[string]any{"enabled": false},
-			"adaptation": map[string]any{"enabled": false},
-		}
+	if extensions != nil {
+		document["extensions"] = extensions
 	}
 	encoded, err := json.Marshal(document)
 	if err != nil {
@@ -145,9 +165,16 @@ func TestProtocolSuppliedRuntimeBaselineControls(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			modelEndpoint := newBaselineModel(t)
 			dataDir := t.TempDir()
+			var sections map[string]any
+			if row.disabled {
+				sections = map[string]any{
+					"agents":     map[string]any{"enabled": false},
+					"adaptation": map[string]any{"enabled": false},
+				}
+			}
 			options := melta.Options{
 				DataDir:       dataDir,
-				Configuration: melta.NewValueConfigurationSource(baselineConfigDocument(modelEndpoint.URL, row.disabled)),
+				Configuration: melta.NewValueConfigurationSource(baselineConfigDocument(modelEndpoint.URL, map[string]string{"m": "M"}, sections)),
 				Credentials:   melta.NewEnvironmentCredentialSource(filepath.Join(dataDir, ".env")),
 				Extensions:    row.extensions,
 			}
@@ -223,7 +250,7 @@ func TestProtocolMountedSessionOperationRead(t *testing.T) {
 	dataDir := t.TempDir()
 	options := melta.Options{
 		DataDir:       dataDir,
-		Configuration: melta.NewValueConfigurationSource(baselineConfigDocument(modelEndpoint.URL, false)),
+		Configuration: melta.NewValueConfigurationSource(baselineConfigDocument(modelEndpoint.URL, map[string]string{"m": "M"}, nil)),
 		Credentials:   melta.NewEnvironmentCredentialSource(filepath.Join(dataDir, ".env")),
 	}
 	ctx, cancel := context.WithCancel(context.Background())

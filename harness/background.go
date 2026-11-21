@@ -880,8 +880,8 @@ type LaunchChildResult struct {
 }
 
 // LaunchChildSession launches one child Session as an ordinary Session
-// through the shared admission path: it validates the request, refuses child
-// parents, prepares the child through the one preparation callback with the
+// through the shared admission path: it validates the request, requires an
+// open parent, prepares the child through the one preparation callback with the
 // complete child identity, admits the child member, publishes child and
 // admission in one transaction against the re-read parent register, performs
 // the common handoff, materializes the child, installs the pending completion

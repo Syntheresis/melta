@@ -334,6 +334,7 @@
         rootReader = makeReader(rootID, 'root');
         rootReader.markDirty();
         tasks.push(rootReader.currentChain());
+        void refreshAgentCurrent();
       }
       if (childID) {
         childReader = makeReader(childID, 'child');
@@ -508,6 +509,27 @@
     resetRoot(created.data.session_id);
   }
 
+  // refreshAgentCurrent reads the active Session's selected Agent from the
+  // advertised Agents current operation; an absent extension or selection
+  // shows nothing.
+  async function refreshAgentCurrent() {
+    const cap = stampFor(rootID, 'root')();
+    const addressed = rootID;
+    agentCurrent = '';
+    agentCurrentSession = addressed;
+    if (!addressed) return;
+    const discovery = await invoke('extensions', 'ListExtensions', '{}', JSON.parse);
+    if (!sameStamp(cap, stampFor(rootID, 'root')())) return;
+    if (discovery.kind !== 'ok' || !validExtensions(discovery.data)) return;
+    const agents = discovery.data.find((entry) => entry.extension_id === 'agents' && !entry.inactive_reason);
+    if (!agents?.operations?.some((entry) => entry.method?.name === 'current' && entry.target === 'session')) return;
+    const current = await invokeAgent('current', { kind: 'session', session_id: addressed }, {});
+    if (!sameStamp(cap, stampFor(rootID, 'root')())) return;
+    if (current.kind !== 'ok') return;
+    agentCurrent = current.data?.agent || '';
+    agentCurrentSession = addressed;
+  }
+
   // ONE selected-root reset; adoption, Workspace change and removal reuse it.
   function resetRoot(id) {
     rootSelection += 1;
@@ -520,9 +542,12 @@
     childReader = null;
     rootActivity.clear();
     childActivity.clear();
+    agentCurrent = '';
+    agentCurrentSession = id;
     if (id === '') return;
     rootReader = makeReader(id, 'root');
     rootReader.markDirty();
+    void refreshAgentCurrent();
   }
 
   // The inspector resets independently and never invalidates the root generation.
@@ -835,7 +860,7 @@
         outcomeNote = lists.error;
         return;
       }
-      const row = (session) => ({ id: session.session_id, agentType: '', lastActivity: session.last_activity });
+      const row = (session) => ({ id: session.session_id, lastActivity: session.last_activity });
       pickerOpen = sortSessions(lists.open).map(row);
       pickerArchived = sortSessions(lists.archived).map(row);
     } finally {
@@ -1094,7 +1119,6 @@
       }
       byId.set(header.session_id, {
         id: header.session_id,
-        agentType: '',
         lifecycle: header.lifecycle,
         lastActivity: header.last_activity,
         live: false,
@@ -1107,7 +1131,7 @@
       if (existing) {
         existing.live = true;
       } else {
-        byId.set(member.id, { id: member.id, agentType: '', lifecycle: 'live', lastActivity: '', live: true, unknownHeader: true });
+        byId.set(member.id, { id: member.id, lifecycle: 'live', lastActivity: '', live: true, unknownHeader: true });
       }
     }
     backgroundChildren = [...byId.values()];

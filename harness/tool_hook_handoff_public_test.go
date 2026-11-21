@@ -10,7 +10,6 @@ package harness_test
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -112,9 +111,9 @@ func TestPublicExecutionCancellationAtHookIntentHandoff(t *testing.T) {
 								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 							}}
 						}, publicNormalize),
-						ToolHooks: []harness.ToolArgumentsHook{{ID: "hook.handoff", ExtensionID: "handoff-ext", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+						ToolHooks: []harness.ToolArgumentsHook{{ID: "hook.handoff", ExtensionID: "handoff-ext", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (harness.ToolArgumentsResult, error) {
 							hookRan++
-							return model.CloneRaw(call.Arguments), nil
+							return harness.ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 						}}},
 					}, nil
 				}}, nil

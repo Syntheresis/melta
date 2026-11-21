@@ -549,12 +549,6 @@ func FormatToolArgs(name, args string) string {
 			return seconds + "s"
 		}
 		return FormatHeaderArg(args, 80)
-	case "task":
-		prompt := extractJSONString(args, "prompt")
-		if prompt != "" {
-			return FormatHeaderArg(prompt, 80)
-		}
-		return FormatHeaderArg(args, 80)
 	default:
 		return FormatHeaderArg(args, 80)
 	}

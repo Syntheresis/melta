@@ -359,8 +359,8 @@ func cloneMessageValue(m model.Message) model.Message {
 // conversation boundary — when steering waits it returns errSteeringBoundary
 // instead of supplying another request, leaving every head buffered for the
 // ordinary post-terminal drain. Selection consumes no head and performs no
-// cancellation or observation. Physical retries and the compact Agent's own
-// request callback never reach this boundary. The invocation's owned frame
+// cancellation or observation. Physical retries and the maintenance request
+// callback never reach this boundary. The invocation's owned frame
 // carries the built identity and evidence to the model effect of the same
 // execution.
 func (d *executionDriver) requestSource() agent.RequestSource {

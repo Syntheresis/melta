@@ -8,7 +8,6 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/toolargs"
 	"github.com/Syntheresis/melta/model"
 )
 
@@ -25,7 +24,7 @@ func (t authorTask) Prepare(ctx context.Context, call extension.AuthorContext, t
 	if call.Session.OwnerSessionID != "" {
 		return immediateError(toolCall.ID, errors.New("task is unavailable in an owned session"))
 	}
-	args, err := toolargs.Decode(toolCall.Arguments)
+	args, err := decodeArguments(toolCall.Arguments)
 	if err != nil {
 		return immediateError(toolCall.ID, err)
 	}

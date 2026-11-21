@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -165,23 +164,23 @@ func registeredArgumentHooks(stage *nativeSnapshot, sel selection, session harne
 		hook := entry.value.(nativeHook)
 		hooks = append(hooks, harness.ToolArgumentsHook{
 			ID: entry.id, ExtensionID: entry.activation.id, Mode: harness.HookMode(hook.mode),
-			Run: func(ctx context.Context, input model.ToolCall) (json.RawMessage, error) {
+			Run: func(ctx context.Context, input model.ToolCall) (harness.ToolArgumentsResult, error) {
 				if err := entry.activation.unavailable(); err != nil {
-					return nil, err
+					return harness.ToolArgumentsResult{}, err
 				}
 				scope, call := registeredHookScope(ctx, stage, entry, sel, session, hook.mode == extension.HookModePure)
 				defer scope.end()
 				result, err := hook.handler.(extension.ArgumentsHook)(scope.ctx, call, input)
 				if err != nil {
-					return nil, err
+					return harness.ToolArgumentsResult{}, err
 				}
 				if result.Refusal != nil {
-					return nil, errors.New(*result.Refusal)
+					return harness.ToolArgumentsResult{Refusal: result.Refusal}, nil
 				}
 				if result.Arguments == nil {
-					return input.Arguments, nil
+					return harness.ToolArgumentsResult{Arguments: input.Arguments}, nil
 				}
-				return result.Arguments, nil
+				return harness.ToolArgumentsResult{Arguments: result.Arguments}, nil
 			},
 		})
 	}

@@ -1353,3 +1353,54 @@ func (s *countingConfigurationSource) Read(ctx context.Context) ([]byte, error) 
 func (s *countingConfigurationSource) Write(ctx context.Context, data []byte) error {
 	return s.inner.Write(ctx, data)
 }
+
+// TestNativeActivationFailureStickyUntilReenable proves a failed enabled
+// native entry stays inactive with its reason across unrelated section edits,
+// a discarded disable, and a credential rotation, and runs again only after a
+// published disable/re-enable.
+func TestNativeActivationFailureStickyUntilReenable(t *testing.T) {
+	owner := &configurationService{}
+	manifest := extension.Manifest{ID: "native-failure", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+	attempts := 0
+	plugin := extension.Extension{Manifest: manifest, Activate: func(context.Context, extension.API) (func(context.Context) error, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("activation unavailable")
+		}
+		return nil, nil
+	}}
+	build := func(section string, enabled bool) *nativeCandidate {
+		t.Helper()
+		var specs []nativeActivationSpec
+		if enabled {
+			specs = append(specs, nativeActivationSpec{extension: plugin, section: json.RawMessage(section), bindings: map[string]declaredBinding{"/secret": {name: "NATIVE_FAILURE_SECRET"}}})
+		}
+		candidate, err := owner.prepareNativeCandidate(context.Background(), specs)
+		testassert.NoError(t, err)
+		return candidate
+	}
+
+	failed := build(`{}`, true)
+	defer failed.release()
+	testassert.Require(t, failed.inactive[manifest.ID] != nil && attempts == 1, "first activation = inactive %v, attempts %d, want the reason recorded once", failed.inactive, attempts)
+	testassert.NoError(t, failed.publishForTest())
+
+	changed := build(`{"changed":true}`, true)
+	defer changed.release()
+	testassert.Require(t, changed.inactive[manifest.ID] != nil && attempts == 1, "unrelated section edit = inactive %v, attempts %d, want the retained reason without a new attempt", changed.inactive, attempts)
+	testassert.NoError(t, changed.publishForTest())
+
+	discarded := build(`{}`, false)
+	discarded.release()
+	stillFailed := build(`{}`, true)
+	defer stillFailed.release()
+	testassert.Require(t, stillFailed.inactive[manifest.ID] != nil && attempts == 1, "discarded disable = inactive %v, attempts %d, want the failure retained", stillFailed.inactive, attempts)
+
+	disabled := build(`{}`, false)
+	defer disabled.release()
+	testassert.NoError(t, disabled.publishForTest())
+
+	reenabled := build(`{}`, true)
+	defer reenabled.release()
+	testassert.Require(t, reenabled.inactive[manifest.ID] == nil && attempts == 2, "published re-enable = inactive %v, attempts %d, want a fresh activation", reenabled.inactive, attempts)
+}

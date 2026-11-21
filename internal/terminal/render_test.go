@@ -156,6 +156,14 @@ func TestExtractJSONNumber(t *testing.T) {
 	}
 }
 
+// TestFormatToolArgsTaskIsGeneric proves a tool name with no specific header
+// rule, including an extension-registered one named task, renders generically.
+func TestFormatToolArgsTaskIsGeneric(t *testing.T) {
+	args := `{"prompt":"do the work","subagent_type":"secondary"}`
+	got := FormatToolArgs("task", args)
+	testassert.Check(t, got == FormatHeaderArg(args, 80), "FormatToolArgs task = %q, want the generic header", got)
+}
+
 func TestFormatToolArgsSleepQuotedNumberFallback(t *testing.T) {
 	got := FormatToolArgs("sleep", `{"seconds":"5"}`)
 	testassert.Check(t, got == `{"seconds":"5"}`, "FormatToolArgs sleep with quoted number = %q, want raw args fallback", got)

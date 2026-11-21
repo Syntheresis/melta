@@ -512,9 +512,10 @@ const (
 // never both. Every entry carries the extension and hook identities, the
 // consumed input evidence the hook actually received before I/O, and the
 // execution knowledge independently of status. A successful tool-bound result
-// carries its raw consequence bytes; a successful request-bound
-// result carries the closed consequence (an empty consequence is a valid
-// no-op); every other status carries a non-empty error and no consequence.
+// carries its raw consequence bytes or the refusal that denied the call; a
+// successful request-bound result carries the closed consequence (an empty
+// consequence is a valid no-op); every other status carries a non-empty error
+// and no consequence.
 type hookResultEntry struct {
 	SessionID   string            `json:"session_id"`
 	EntryID     string            `json:"entry_id"`
@@ -527,6 +528,7 @@ type hookResultEntry struct {
 	Status      hookResultStatus  `json:"status"`
 	Evidence    ExecutionEvidence `json:"evidence"`
 	Arguments   json.RawMessage   `json:"arguments,omitempty"`
+	Refusal     string            `json:"refusal,omitempty"`
 	Error       string            `json:"error,omitempty"`
 
 	InputArgumentsBase64 string              `json:"input_arguments_base64,omitempty"`

@@ -149,8 +149,8 @@ func projectSession(header harness.SessionHeader, instance string) protocol.Sess
 }
 
 // projectOperation maps one owned Operation register to its generated header:
-// admission identity, the captured Agent type and model ref, the terminal
-// status and detail, and the canonical register totals as decimal strings.
+// admission identity, the captured model ref, the terminal status and detail,
+// and the canonical register totals as decimal strings.
 func projectOperation(record harness.OperationRecord) protocol.Operation {
 	summary := harness.OperationSummary{
 		OperationID: record.Admission.OperationID,

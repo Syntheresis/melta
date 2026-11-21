@@ -501,6 +501,52 @@ func TestExtensionSessionCommands(t *testing.T) {
 	testassert.Require(t, countEvent(events.all(), "command:submit") == submitReached+2, "the refused pure attempt reached the command bridge: %v", events.all())
 }
 
+// TestExtensionCommandContractParity proves both melta.commands entry points
+// use the same declared contract: the callback path and an independent
+// API.Command accept a declared method's arguments and refuse an undeclared
+// method with the same not-found class.
+func TestExtensionCommandContractParity(t *testing.T) {
+	deferred := make(chan extension.Result, 1)
+	r, e, events := openOperationFixtureDeferred(t, deferred)
+	ctx := context.Background()
+	session := projectionSession(t, r, filepath.Join(e.home, "command-parity"), "solo")
+	sessionID := session.Identity.SessionID
+	sessionCaller := fixtureCaller(t, r, CallerScope{Kind: CallerScopeSession, SessionID: sessionID})
+	invoke := func(operation, method string, arguments string, requestID string) (extension.Result, error) {
+		return r.InvokeExtension(ctx, sessionCaller, fixtureRequest(fixtureExtensionID, operation, sessionTarget(sessionID), `{"method":"`+method+`","arguments":`+arguments+`}`, requestID))
+	}
+	awaitDeferred := func(t *testing.T) extensionOutcome {
+		t.Helper()
+		outcomes := make(chan extensionOutcome, 1)
+		go func() { outcomes <- extensionOutcome{result: <-deferred} }()
+		select {
+		case out := <-outcomes:
+			return out
+		case <-time.After(10 * time.Second):
+			t.Fatal("independent command never returned")
+			return extensionOutcome{}
+		}
+	}
+
+	invoked, err := invoke("independent_command", "set_inputs", `{"inputs":{"model":"prov/m","instructions":"","tools":[]}}`, "req-set-inputs-api")
+	testassert.Require(t, err == nil && invoked.Failure == nil, "independent set_inputs invocation = (%+v, %v)", invoked, err)
+	out := awaitDeferred(t)
+	testassert.Require(t, out.err == nil && out.result.Failure == nil, "API.Command set_inputs = (%+v, %v), want the value receipt", out.result, out.err)
+
+	_, err = invoke("independent_command", "missing", `{}`, "req-missing-api")
+	testassert.NoError(t, err)
+	out = awaitDeferred(t)
+	testassert.Require(t, out.err == nil && out.result.Failure != nil && out.result.Failure.Code == "not_found", "API.Command undeclared method = (%+v, %v), want a declared not-found failure", out.result, out.err)
+	apiClass := out.result.Failure.Code
+
+	_, err = invoke("command", "missing", `{}`, "req-missing-callback")
+	testassert.Require(t, err != nil && string(ErrorCode(err)) == apiClass && errors.Is(err, harness.ErrNotFound), "callback undeclared method = %v, want the same %q class", err, apiClass)
+
+	_, err = invoke("command", "set_inputs", `{"inputs":{"model":"prov/m","instructions":"","tools":[]}}`, "req-set-inputs-callback")
+	testassert.NoError(t, err)
+	testassert.Require(t, countEvent(events.all(), "command:set_inputs") == 1, "declared set_inputs did not reach the callback bridge: %v", events.all())
+}
+
 func firstItemID(t *testing.T, r *Melta, sessionID string) string {
 	t.Helper()
 	page, err := r.GetHistory(context.Background(), fixtureCaller(t, r, harnessScope), sessionID, nil)

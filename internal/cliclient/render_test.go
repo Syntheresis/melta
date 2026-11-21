@@ -520,3 +520,44 @@ func TestCheckpointRendererInspectsAdmittedFields(t *testing.T) {
 	testassert.Require(t, strings.Contains(result, "source: prov/model") && strings.Contains(result, "source: prov/compact"), "per-message source not inspectable: %s", result)
 	c.requestExit(nil)
 }
+
+// TestStatusLineShowsSelectedAgent proves the root status line shows the
+// Session's selected Agent from the advertised Agents current operation and
+// shows nothing when the operation is absent or carries no selection.
+func TestStatusLineShowsSelectedAgent(t *testing.T) {
+	for _, row := range []struct {
+		name      string
+		discovery json.RawMessage
+		current   string
+		want      string
+	}{
+		{"advertised selection", agentsCurrentDiscovery(), `{"kind":"success","result":{"agent":"planner"}}`, "Agent: planner"},
+		{"advertised without selection", agentsCurrentDiscovery(), `{"kind":"success","result":{}}`, ""},
+		{"not advertised", json.RawMessage(`[]`), "", ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			c, transport := fixture(t)
+			c.selectRoot(rootA)
+			receive(t, transport.requests).respond(hydration(rootA, "1", inputs(1, 1), nil))
+			receive(t, transport.requests).respond(row.discovery)
+			if row.current != "" {
+				receive(t, transport.requests).respond(json.RawMessage(row.current))
+			}
+			receive(t, transport.requests).respond(hydration(rootA, "1", inputs(1, 1), nil))
+			settleTasks(t, c)
+			screen := newScreen(100)
+			go c.writer(screen)
+			c.mu.Lock()
+			c.width = 100
+			c.notifyLocked()
+			c.mu.Unlock()
+			frameContaining(t, screen, "Model choice:")
+			shown := strings.Contains(screen.text(), "Agent:")
+			testassert.Require(t, shown == (row.want != ""), "status line agent display = %v, want %v: %s", shown, row.want != "", screen.text())
+			if row.want != "" {
+				testassert.Require(t, strings.Contains(screen.text(), row.want), "status line = %s, want %q", screen.text(), row.want)
+			}
+			c.requestExit(nil)
+		})
+	}
+}

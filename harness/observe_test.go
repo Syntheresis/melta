@@ -1487,8 +1487,8 @@ func TestObserveToolLifecycle(t *testing.T) {
 		toolFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 		}
-		hooks := []ToolArgumentsHook{{ID: "h1", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (json.RawMessage, error) {
-			return nil, errors.New("hook boom")
+		hooks := []ToolArgumentsHook{{ID: "h1", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+			return ToolArgumentsResult{}, errors.New("hook boom")
 		}}}
 		exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 			return InvocationExecution{Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {

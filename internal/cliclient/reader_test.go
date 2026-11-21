@@ -317,6 +317,7 @@ func TestReaderNavigationSupersedesSuccessAndError(t *testing.T) {
 			parked := receive(t, transport.requests)
 			c.selectRoot(rootB)
 			receive(t, transport.requests).respond(hydration(rootB, "1", nil, nil))
+			receive(t, transport.requests).respond(json.RawMessage(`[]`))
 			fresh := receive(t, transport.requests)
 			c.mu.Lock()
 			selected := c.root
@@ -394,6 +395,7 @@ func TestRootResetDisposesInspectorAndSameRootIntent(t *testing.T) {
 	}
 	c.selectRoot(rootA)
 	receive(t, transport.requests).respond(hydration(rootA, "1", nil, nil))
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	fresh := receive(t, transport.requests)
 	c.mu.Lock()
 	newRoot := c.root

@@ -4,7 +4,7 @@
   // archive-first delete sequence is owned by the App; this component dispatches
   // intents and renders the presented lists.
   import { createEventDispatcher } from 'svelte';
-  export let openRoots = []; // [{ id, agentType, lastActivity }]
+  export let openRoots = []; // [{ id, lastActivity }]
   export let archivedRoots = [];
   export let current = '';
   export let workspace = '';
@@ -59,7 +59,6 @@
             }}
             aria-label={`${tab === 'open' ? 'Select' : 'Resume'} session ${s.id}`}>
             <span class="id">{s.id}</span>
-            <span class="type">{s.agentType}</span>
             <span class="ts">{fmtTs(s.lastActivity)}</span>
             {#if tab === 'open'}
               <button class="act" on:click|stopPropagation={() => dispatch('archive', s.id)} aria-label={`Archive session ${s.id}`}>Archive</button>
@@ -87,7 +86,6 @@
   .row:hover { background:var(--accent-soft); }
   .row.cur { color:var(--accent); }
   .id { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .type { color:var(--text-dim); }
   .ts { color:var(--text-dim); }
   .act { background:none; border:1px solid var(--border-button); border-radius:var(--radius); color:var(--text-dim); font-family:var(--font-ui); font-size:11px; padding:2px 8px; cursor:pointer; flex-shrink:0; }
   .act:hover { color:var(--accent); border-color:var(--accent); }

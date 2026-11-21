@@ -1564,6 +1564,12 @@ func permissionDeniedToolResult(callID string) model.ToolResult {
 	return model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: PermissionDeniedContent}
 }
 
+// refusedToolResult is the deliberate before-tool refusal result: the settled
+// call is denied with the hook's model-facing reason, and no effect began.
+func refusedToolResult(callID, reason string) model.ToolResult {
+	return model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: reason}
+}
+
 // validationToolResult is the immediate validation-error result for an invalid
 // model argument: status error carrying the callback's own bounded useful
 // diagnostic. An empty diagnostic still carries the internal-validation text.
@@ -2265,8 +2271,10 @@ func (h *Harness) commitToolResult(ctx context.Context, c *coordinator, operatio
 	return settled, nil
 }
 
-// runArgumentHooks passes raw or replaced bytes through the ordered chain.
-// Effectful hooks retain their consumed input and consequence before dispatch.
+// runArgumentHooks passes raw or replaced bytes through the ordered chain. A
+// deliberate refusal stops this call's chain and settles the call denied with
+// the refusal text; later calls in the batch stay eligible. Effectful hooks
+// retain their consumed input and consequence before dispatch.
 func (d *executionDriver) runArgumentHooks(ctx, settleCtx context.Context, resolved pendingToolCall, hooks []ToolArgumentsHook, raw []byte) (toolSelection, *model.ToolResult, error) {
 	pending := resolved.pending
 	current := raw
@@ -2287,7 +2295,7 @@ func (d *executionDriver) runArgumentHooks(ctx, settleCtx context.Context, resol
 		if hook.Mode == HookModePure {
 			// A pure hook reserves no effect identity.
 			hookCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: pending.CallID})
-			changed, failure, _ := d.evaluateArgumentHook(hookCtx, resolved, hook, current)
+			consequence, failure, _ := d.evaluateArgumentHook(hookCtx, resolved, hook, current)
 			if failure != nil { // a pure callback cannot create external-effect uncertainty
 				settled, cerr := d.harness.commitToolResult(settleCtx, d.coordinator, d.operationID, pending, ToolOutcome{Result: *failure, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
 				if cerr != nil {
@@ -2295,7 +2303,14 @@ func (d *executionDriver) runArgumentHooks(ctx, settleCtx context.Context, resol
 				}
 				return toolSelection{}, &settled, nil
 			}
-			accept(changed, hook)
+			if consequence.Refusal != nil {
+				settled, cerr := d.harness.commitToolResult(settleCtx, d.coordinator, d.operationID, pending, ToolOutcome{Result: refusedToolResult(pending.CallID, *consequence.Refusal), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+				if cerr != nil {
+					return toolSelection{}, nil, cerr
+				}
+				return toolSelection{}, &settled, nil
+			}
+			accept(consequence.Arguments, hook)
 			continue
 		}
 		committed, settled, hookErr := d.runOneHook(ctx, settleCtx, resolved, hook, current)
@@ -2307,45 +2322,56 @@ func (d *executionDriver) runArgumentHooks(ctx, settleCtx context.Context, resol
 	return toolSelection{arguments: current, hooks: contributions}, nil, nil
 }
 
-// evaluateArgumentHook accepts unchanged bytes verbatim; a changed value must
-// be a JSON object. The bound tool normalizes after the entire chain.
-func (d *executionDriver) evaluateArgumentHook(ctx context.Context, resolved pendingToolCall, hook ToolArgumentsHook, current json.RawMessage) (json.RawMessage, *model.ToolResult, ExecutionEvidence) {
+// evaluateArgumentHook accepts unchanged bytes verbatim and a refusal as the
+// deliberate denial of this call; a changed value must be a JSON object. A
+// refusal without text is not a valid denial under the model result contract
+// and stays a processing failure. The bound tool normalizes after the entire
+// chain.
+func (d *executionDriver) evaluateArgumentHook(ctx context.Context, resolved pendingToolCall, hook ToolArgumentsHook, current json.RawMessage) (ToolArgumentsResult, *model.ToolResult, ExecutionEvidence) {
 	record := resolved.record
 	owned, err := model.NewToolCall(model.ToolCall{ID: record.ID, Name: record.Name, Arguments: current, Extra: record.Extra})
 	if err != nil { // the committed record's identity fields are validated; never reachable for a valid graph
 		failure := invalidToolResult(record.ID)
-		return nil, &failure, ExecutionNotStarted
+		return ToolArgumentsResult{}, &failure, ExecutionNotStarted
 	}
 	if ctx.Err() != nil {
 		failure := interruptedToolResult(record.ID)
-		return nil, &failure, ExecutionNotStarted
+		return ToolArgumentsResult{}, &failure, ExecutionNotStarted
 	}
-	replacement, runErr := hook.Run(ctx, owned)
+	consequence, runErr := hook.Run(ctx, owned)
 	if runErr != nil {
 		failure := validationToolResult(record.ID, runErr)
 		if EffectInterrupted(runErr) {
 			failure = interruptedToolResult(record.ID)
 		}
-		return nil, &failure, DeclaredExecutionKnowledge(runErr)
+		return ToolArgumentsResult{}, &failure, DeclaredExecutionKnowledge(runErr)
 	}
-	if bytes.Equal(replacement, current) {
-		return model.CloneRaw(replacement), nil, ExecutionObserved
+	if consequence.Refusal != nil {
+		if *consequence.Refusal == "" {
+			failure := invalidToolResult(record.ID)
+			return ToolArgumentsResult{}, &failure, ExecutionObserved
+		}
+		return ToolArgumentsResult{Refusal: consequence.Refusal}, nil, ExecutionObserved
 	}
-	if _, err := decodePayloadObject(replacement); err != nil { // an invalid returned value is the malformed-class validation failure
+	if bytes.Equal(consequence.Arguments, current) {
+		return ToolArgumentsResult{Arguments: model.CloneRaw(consequence.Arguments)}, nil, ExecutionObserved
+	}
+	if _, err := decodePayloadObject(consequence.Arguments); err != nil { // an invalid returned value is the malformed-class validation failure
 		failure := invalidToolResult(record.ID)
-		return nil, &failure, ExecutionObserved
+		return ToolArgumentsResult{}, &failure, ExecutionObserved
 	}
-	return model.CloneRaw(replacement), nil, ExecutionObserved
+	return ToolArgumentsResult{Arguments: model.CloneRaw(consequence.Arguments)}, nil, ExecutionObserved
 }
 
 // runOneHook settles one effectful argument hook as its own Operation effect:
 // it commits the hook active-effect intent carrying the extension identity and
 // the consumed input bytes before I/O with a fresh reserved result identity,
 // runs the hook outside locks and transactions, and commits the validated
-// consequence — a successful replacement (a real result even when
+// consequence — a successful replacement or refusal (a real result even when
 // cancellation arrives before its commit), a hook error, or an interruption
-// under the classification fixed for every hook. The continuation consumes
-// the codec-adopted committed consequence.
+// under the classification fixed for every hook. A refusal settles the call
+// itself as denied with the refusal text; later calls in the batch stay
+// eligible. The continuation consumes the codec-adopted committed consequence.
 func (d *executionDriver) runOneHook(ctx, settleCtx context.Context, resolved pendingToolCall, hook ToolArgumentsHook, current json.RawMessage) (hookResultEntry, *model.ToolResult, error) {
 	h := d.harness
 	c := d.coordinator
@@ -2390,9 +2416,20 @@ func (d *executionDriver) runOneHook(ctx, settleCtx context.Context, resolved pe
 	// The successful output is a real result even if cancellation
 	// arrives before its commit: the settlement transaction runs without
 	// cancellation.
-	committed, cerr := h.commitHookResult(settleCtx, c, operationID, hookEffectBinding{hookID: hook.ID, callID: pending.CallID}, resultID, hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Arguments: consequence})
+	result := hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Arguments: consequence.Arguments}
+	if consequence.Refusal != nil {
+		result = hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Refusal: *consequence.Refusal}
+	}
+	committed, cerr := h.commitHookResult(settleCtx, c, operationID, hookEffectBinding{hookID: hook.ID, callID: pending.CallID}, resultID, result)
 	if cerr != nil {
 		return hookResultEntry{}, nil, cerr
+	}
+	if consequence.Refusal != nil {
+		settled, serr := h.commitToolResult(settleCtx, c, operationID, pending, ToolOutcome{Result: refusedToolResult(pending.CallID, *consequence.Refusal), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+		if serr != nil {
+			return hookResultEntry{}, nil, serr
+		}
+		return hookResultEntry{}, &settled, nil
 	}
 	return committed, nil, nil
 }

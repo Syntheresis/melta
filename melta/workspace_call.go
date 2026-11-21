@@ -42,20 +42,17 @@ func scopedArguments(args json.RawMessage, value any) error {
 
 func (w *nativeWorkspace) bind(args json.RawMessage) (extension.Result, error) {
 	var input struct {
-		Path *string `json:"path"`
+		Path string `json:"path"`
 	}
 	if err := scopedArguments(args, &input); err != nil {
 		return extension.Result{}, err
 	}
-	if input.Path == nil || *input.Path == "" {
-		return extension.Result{}, fmt.Errorf("workspace path is required: %w", harness.ErrInvalid)
-	}
-	bound, canonical, exists, err := tool.BindWorkspace(w.root, *input.Path)
+	bound, canonical, exists, err := tool.BindWorkspace(w.root, input.Path)
 	if err != nil {
 		return extension.Result{}, err
 	}
 	if w.restrictionBind != nil {
-		witness, err := w.restrictionBind(*input.Path)
+		witness, err := w.restrictionBind(input.Path)
 		if err != nil {
 			return extension.Result{}, err
 		}
@@ -79,9 +76,6 @@ func (w *nativeWorkspace) bind(args json.RawMessage) (extension.Result, error) {
 }
 
 func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.RawMessage, permissions []harness.PermissionRequest) (extension.Result, error) {
-	if method != "read" && method != "write" && method != "delete" {
-		return extension.Result{}, fmt.Errorf("workspace method %q: %w", method, harness.ErrNotFound)
-	}
 	var input struct {
 		Binding    string            `json:"binding"`
 		Bytes      *worker.JSONBytes `json:"bytes"`
@@ -89,10 +83,6 @@ func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.
 	}
 	if err := scopedArguments(args, &input); err != nil {
 		return extension.Result{}, err
-	}
-	if input.Binding == "" || (method == "write") != (input.Bytes != nil && input.CreateOnly != nil) ||
-		(method != "write" && (input.Bytes != nil || input.CreateOnly != nil)) {
-		return extension.Result{}, fmt.Errorf("invalid workspace arguments: %w", harness.ErrInvalid)
 	}
 	w.mu.Lock()
 	target, ok := w.bindings[input.Binding]

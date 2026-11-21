@@ -43,17 +43,17 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 			prepared []string // argument bytes the concrete tool received
 		)
 		hooks := []harness.ToolArgumentsHook{
-			{ID: "cap.hook.one", ExtensionID: "cap-a", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+			{ID: "cap.hook.one", ExtensionID: "cap-a", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (harness.ToolArgumentsResult, error) {
 				mu.Lock()
 				hookSeen = append(hookSeen, string(call.Arguments))
 				mu.Unlock()
-				return json.RawMessage(`{ "x": "<" }`), nil
+				return harness.ToolArgumentsResult{Arguments: json.RawMessage(`{ "x": "<" }`)}, nil
 			}},
-			{ID: "cap.hook.two", ExtensionID: "cap-a", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+			{ID: "cap.hook.two", ExtensionID: "cap-a", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (harness.ToolArgumentsResult, error) {
 				mu.Lock()
 				hookSeen = append(hookSeen, string(call.Arguments))
 				mu.Unlock()
-				return json.RawMessage(`{"y":"&>"}`), nil
+				return harness.ToolArgumentsResult{Arguments: json.RawMessage(`{"y":"&>"}`)}, nil
 			}},
 		}
 		script := newScriptModel(

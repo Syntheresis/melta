@@ -140,18 +140,27 @@ type EffectError struct {
 func (e *EffectError) Error() string { return e.Err.Error() }
 func (e *EffectError) Unwrap() error { return e.Err }
 
+// ToolArgumentsResult is one argument hook's consequence: replacement bytes or
+// a deliberate refusal with its model-facing reason. Arguments is the
+// replacement; Refusal is present instead of a replacement when the hook
+// denies the call.
+type ToolArgumentsResult struct {
+	Arguments json.RawMessage
+	Refusal   *string
+}
+
 // ToolArgumentsHook is one argument hook: before a concrete tool call
-// prepares, it may rewrite the call's raw argument bytes. Its successful
-// unchanged output passes through verbatim; a changed output must be one JSON
-// object. The bound tool normalizes after the hook chain. Hooks cannot replace
-// the call identity, tool name, or another call's arguments. An effectful hook
-// is a Harness-settled Operation effect; a pure hook runs in memory. Run
-// receives owned call data.
+// prepares, it may rewrite the call's raw argument bytes or refuse the call
+// with a reason. Its successful unchanged output passes through verbatim; a
+// changed output must be one JSON object. The bound tool normalizes after the
+// hook chain. Hooks cannot replace the call identity, tool name, or another
+// call's arguments. An effectful hook is a Harness-settled Operation effect; a
+// pure hook runs in memory. Run receives owned call data.
 type ToolArgumentsHook struct {
 	ID          string
 	ExtensionID string
 	Mode        HookMode
-	Run         func(context.Context, model.ToolCall) (json.RawMessage, error)
+	Run         func(context.Context, model.ToolCall) (ToolArgumentsResult, error)
 }
 
 // RequestHookInput is one request hook's owned input: the bound request
@@ -459,9 +468,10 @@ type SweepPolicy struct {
 }
 
 // Harness is the public durable state machine over one Storage. It owns
-// Session materialization, reads, root creation, Agent-type change, the shared
-// admission producer, public Submit with its two process-local buffers, the
-// Session lifecycle (reopen, archive, delete, and explicit-time sweep), and
+// Session materialization, reads, root creation, Session extension-state
+// change, the shared admission producer, public Submit with its two
+// process-local buffers, the Session lifecycle (reopen, archive, delete, and
+// explicit-time sweep), and
 // execution; it owns neither storage close nor Runtime shutdown policy.
 type Harness struct {
 	ctx  context.Context
@@ -713,8 +723,8 @@ func (h *Harness) ClearSessionExtensionState(ctx context.Context, sessionID, ext
 
 // ClaimExternalData durably records one installed extension as an owner of
 // external data for one open Session before that data is created. It follows
-// the Agent-type mutation rule: any open Session qualifies, including one with
-// an active Operation, and a repeated claim is a no-op that writes nothing. A
+// the ordinary open-Session mutation rule, and a repeated claim is a no-op
+// that writes nothing. A
 // refused claim leaves the register unchanged.
 func (h *Harness) ClaimExternalData(ctx context.Context, sessionID, extensionID string) error {
 	if extensionID == "" {
@@ -1652,8 +1662,8 @@ type admissionRequest struct {
 // same-Session Operation has been read; it never escapes the reserved admission body.
 var errAdmissionExisting = errors.New("harness: operation already admitted in this session")
 
-// errRevisionRace marks the revision-guard conflict of an admission,
-// agent-type, or effect transaction: durable state changed under the
+// errRevisionRace marks the revision-guard conflict of a Session mutation,
+// admission, or effect transaction: durable state changed under the
 // coordinator's validated view. It keeps the landed conflict class reachable.
 var errRevisionRace = fmt.Errorf("harness: session changed concurrently: %w", ErrConflict)
 

@@ -141,7 +141,7 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 		atomicfsPkg         = publicModule + "/internal/atomicfs"
 		promptPkg           = publicModule + "/prompt"
 		pluginsPkg          = publicModule + "/internal/plugins"
-		shellparsePkg       = publicModule + "/internal/shellparse"
+		shellparsePkg       = publicModule + "/shellparse"
 		cmdoutputPkg        = publicModule + "/internal/cmdoutput"
 		jobsPkg             = publicModule + "/internal/jobs"
 		toolargsPkg         = publicModule + "/internal/toolargs"
@@ -268,8 +268,8 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 				problems = append(problems, rel+": internal/config imports "+imp+"; configuration may import only the standard library, "+atomicfsPkg+", and "+modelPkg)
 			}
 		case "extensions/agents":
-			if imp != modelPkg && imp != promptPkg && imp != harnessPkg && imp != extensionPkg && imp != protocolPkg && imp != toolargsPkg && imp != shellparsePkg && imp != publicModule+"/internal/tool" && !std[imp] {
-				problems = append(problems, rel+": extensions/agents imports "+imp+"; the supplied Agents extension may import only the standard library, public contracts, and the retained tool, tool-argument and shell-parse helpers, never the Runtime owner")
+			if imp != modelPkg && imp != promptPkg && imp != harnessPkg && imp != extensionPkg && imp != protocolPkg && imp != shellparsePkg && !std[imp] {
+				problems = append(problems, rel+": extensions/agents imports "+imp+"; the supplied Agents extension may import only the standard library and public contracts, never an internal package, the Runtime owner, or a concrete implementation package")
 			}
 		case "internal/storage":
 			if imp != harnessPkg && imp != sqliteDriverPkg && !std[imp] {
@@ -467,7 +467,7 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 	}
 	for _, imp := range []string{
 		publicModule + "/runtime", publicModule + "/internal/process", publicModule + "/internal/tool",
-		publicModule + "/internal/toolargs", publicModule + "/internal/shellparse", publicModule + "/model",
+		publicModule + "/internal/toolargs", publicModule + "/shellparse", publicModule + "/model",
 		publicModule + "/agent", publicModule + "/internal/agent", publicModule + "/internal/storage",
 		sqliteDriverPkg, publicModule + "/internal/plugins/sqlite", publicModule + "/internal/plugins",
 		publicModule + "/internal/plugins/tasks",
@@ -484,8 +484,7 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 		problems := checkTrackedGoFile("extensions/agents/x.go", []string{
 			"encoding/json", "fmt",
 			publicModule + "/model", publicModule + "/harness", publicModule + "/prompt", publicModule + "/protocol",
-			publicModule + "/extension", publicModule + "/internal/toolargs", publicModule + "/internal/tool",
-			publicModule + "/internal/shellparse",
+			publicModule + "/extension", publicModule + "/shellparse",
 		}, std)
 		testassert.Check(t, len(problems) == 0, "allowed extensions/agents imports flagged: %v", problems)
 	}
@@ -495,6 +494,7 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 		publicModule + "/internal/storage", sqliteDriverPkg,
 		publicModule + "/internal/plugins/sqlite", publicModule + "/internal/plugins",
 		publicModule + "/plugins/jobs",
+		publicModule + "/internal/toolargs", publicModule + "/internal/shellparse", publicModule + "/internal/tool", publicModule + "/internal/anything",
 	} {
 		{
 			problems := checkTrackedGoFile("extensions/agents/x.go", []string{imp}, std)
@@ -504,8 +504,8 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 	// The shared tool-argument decoder is the strict JSON-object data-domain
 	// helper over the standard library only; the foundation contracts, the
 	// target runtime and harness, the plugin tree, its sibling helpers, and
-	// durable storage never enter it, and its only consumers are the tools
-	// and tasks plugins.
+	// durable storage never enter it, and the Runtime owner is its only
+	// consumer.
 	{
 		problems := checkTrackedGoFile("internal/toolargs/x.go", []string{"bytes", "encoding/json", "errors", "fmt", "io"}, std)
 		testassert.Check(t, len(problems) == 0, "allowed internal/toolargs imports flagged: %v", problems)
@@ -556,7 +556,7 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 		testassert.Check(t, len(problems) == 0, "allowed internal/catalog imports flagged: %v", problems)
 	}
 	{
-		problems := checkTrackedGoFile("extensions/agents/x.go", []string{"fmt", "encoding/json", publicModule + "/model", publicModule + "/prompt", publicModule + "/harness", publicModule + "/extension", publicModule + "/protocol", publicModule + "/internal/toolargs", publicModule + "/internal/shellparse"}, std)
+		problems := checkTrackedGoFile("extensions/agents/x.go", []string{"fmt", "encoding/json", publicModule + "/model", publicModule + "/prompt", publicModule + "/harness", publicModule + "/extension", publicModule + "/protocol", publicModule + "/shellparse"}, std)
 		testassert.Check(t, len(problems) == 0, "allowed extensions/agents imports flagged: %v", problems)
 	}
 	for _, imp := range []string{publicModule + "/agent", publicModule + "/harness", publicModule + "/runtime", publicModule + "/internal/storage", sqliteDriverPkg, publicModule + "/internal/plugins"} {
@@ -620,7 +620,7 @@ func TestDependencyRulesRejectNonStdlibDotlessImports(t *testing.T) {
 	// the supplied registration set, the HTTP protocol host, and the SQLite
 	// driver never enter it.
 	{
-		problems := checkTrackedGoFile("melta/x.go", []string{"fmt", "encoding/json", publicModule + "/model", publicModule + "/harness", publicModule + "/protocol", publicModule + "/extension", publicModule + "/prompt", publicModule + "/internal/config", publicModule + "/internal/catalog", publicModule + "/internal/atomicfs", publicModule + "/internal/snapshot", publicModule + "/internal/safefs", publicModule + "/internal/pathutil", publicModule + "/internal/storage", publicModule + "/internal/tool", publicModule + "/internal/editpreview", publicModule + "/internal/shellparse", publicModule + "/internal/toolargs", publicModule + "/internal/jobs"}, std)
+		problems := checkTrackedGoFile("melta/x.go", []string{"fmt", "encoding/json", publicModule + "/model", publicModule + "/harness", publicModule + "/protocol", publicModule + "/extension", publicModule + "/prompt", publicModule + "/internal/config", publicModule + "/internal/catalog", publicModule + "/internal/atomicfs", publicModule + "/internal/snapshot", publicModule + "/internal/safefs", publicModule + "/internal/pathutil", publicModule + "/internal/storage", publicModule + "/internal/tool", publicModule + "/internal/editpreview", publicModule + "/shellparse", publicModule + "/internal/toolargs", publicModule + "/internal/jobs"}, std)
 		testassert.Check(t, len(problems) == 0, "allowed melta imports flagged: %v", problems)
 	}
 	for _, imp := range []string{publicModule + "/agent", publicModule + "/internal/agent", publicModule + "/runtime", sqliteDriverPkg, publicModule + "/internal/plugins/sqlite", publicModule + "/internal/plugins/tools", publicModule + "/internal/plugins/tasks", publicModule + "/extensions/agents", publicModule + "/extensions/adaptation", publicModule + "/internal/plugins/builtin", publicModule + "/plugins/jobs", publicModule + "/plugins"} {

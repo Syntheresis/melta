@@ -256,7 +256,7 @@ func formatWarningRevision(revision uint64) string {
 }
 
 // setupWarningKinds are the retained setup diagnostics: no provider is
-// connected, the primary type configures no model, or its model is
+// connected, the baseline model is unset, or the baseline model is
 // unavailable because its provider is not connected or the model is
 // incomplete. The connection samples come from the candidate's own capture,
 // never a second catalog or a live environment read.

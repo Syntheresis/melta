@@ -139,6 +139,7 @@ func TestQueuedTaskMenuAndErrorCannotPublishAfterNavigation(t *testing.T) {
 			settleTasks(t, c)
 			c.selectRoot(rootB)
 			receive(t, transport.requests).respond(hydration(rootB, "1", nil, nil))
+			receive(t, transport.requests).respond(json.RawMessage(`[]`))
 			fresh := receive(t, transport.requests)
 			fresh.respond(hydration(rootB, "1", nil, nil))
 			settleTasks(t, c)
@@ -167,6 +168,7 @@ func TestRuntimeFileSuccessAndErrorAreStampedAndUseGeneratedAddress(t *testing.T
 			testassert.Require(t, strings.Contains(string(old.body), `"workspace":"/workspace"`) && strings.Contains(string(old.body), `"path":"file.go"`), "file read omitted explicit address")
 			c.selectRoot(rootB)
 			receive(t, transport.requests).respond(hydration(rootB, "1", nil, nil))
+			receive(t, transport.requests).respond(json.RawMessage(`[]`))
 			receive(t, transport.requests).respond(hydration(rootB, "1", nil, nil))
 			if fail {
 				old.reject(400, protocol.Error{Code: "invalid", Message: "stale file error"})
@@ -467,6 +469,7 @@ func TestCreateFailureCapturedAddressAndExplicitWorkspaceIntent(t *testing.T) {
 		testassert.Require(t, err == nil && sent.Workspace == "/different", "explicit Workspace composition create = %s (%v)", newCreate.body, err)
 	}
 	newCreate.reject(201, protocol.Session{SessionId: rootB, Workspace: "/different", Inputs: protocol.SessionInputs{}})
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	fresh := hydration(rootB, "1", nil, nil)
 	fresh.Session.Workspace = "/different"
 	receive(t, transport.requests).respond(fresh)
@@ -493,6 +496,7 @@ func TestExplicitResumeAdoptsOwnedSession(t *testing.T) {
 	child := hydration(childA, "1", nil, nil)
 	child.Session.OwnerSessionId = pointer(rootA)
 	destination.respond(child)
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	fresh := receive(t, transport.requests)
 	testassert.Require(t, strings.Contains(fresh.req.URL.Path, childA+"/hydration"), "adopted reader addressed %s", fresh.req.URL.Path)
 	fresh.respond(child)
@@ -518,6 +522,7 @@ func TestNamedResumeAdoptsCrossWorkspaceRootAndReopensArchived(t *testing.T) {
 	destination := hydration(rootB, "1", nil, nil)
 	destination.Session.Workspace = "/different"
 	receive(t, transport.requests).respond(destination)
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	receive(t, transport.requests).respond(destination)
 	settleTasks(t, c)
 	c.mu.Lock()
@@ -531,6 +536,7 @@ func TestNamedResumeAdoptsCrossWorkspaceRootAndReopensArchived(t *testing.T) {
 	reopen := receive(t, transport.requests)
 	testassert.Require(t, strings.HasSuffix(reopen.req.URL.Path, "/reopen"), "archived destination did not reopen before work")
 	reopen.respond(protocol.Session{SessionId: childA, Lifecycle: protocol.Open})
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	// The adopted reader owns the one fresh hydration after the reopen.
 	fresh := receive(t, transport.requests)
 	testassert.Require(t, strings.HasSuffix(fresh.req.URL.Path, "/hydration"), "reopen did not precede the fresh destination read")
@@ -551,6 +557,7 @@ func TestBareResumeSelectsNewestOpenRootAndKeepsSelectionWithoutAny(t *testing.T
 		{SessionId: rootA, Workspace: "/workspace", LastActivity: time.Unix(1, 0)},
 		{SessionId: rootB, Workspace: "/workspace", LastActivity: time.Unix(5, 0)},
 	})
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	receive(t, transport.requests).respond(hydration(rootB, "2", nil, nil))
 	settleTasks(t, c)
 	c.mu.Lock()
@@ -632,6 +639,7 @@ func TestFailedRootNavigationKeepsTheAcceptedSelection(t *testing.T) {
 		c.command("/resume " + rootB)
 		destination := receive(t, transport.requests)
 		destination.respond(hydration(rootB, "1", nil, nil))
+		receive(t, transport.requests).respond(json.RawMessage(`[]`))
 		receive(t, transport.requests).respond(hydration(rootB, "2", nil, nil))
 		parkedCreate.reject(201, protocol.Session{SessionId: childA, Workspace: "/workspace", Inputs: protocol.SessionInputs{}})
 		parkedError.reject(404, protocol.Error{Code: "not_found", Message: "stale destination error"})
@@ -654,11 +662,15 @@ func TestSourceAgentMenuCannotPublishAfterDestinationAdoption(t *testing.T) {
 	c.command("/resume " + rootB)
 	destination := receive(t, transport.requests)
 	c.command("/agent")
+	catalog := receive(t, transport.requests)
+	testassert.Equal(t, catalog.req.URL.Path, "/v1/extensions")
+	catalog.respond(agentsListDiscovery())
 	menuRead := receive(t, transport.requests)
 	testassert.Equal(t, menuRead.req.URL.Path, "/v1/extensions/invoke")
 	// The adopted reader's own read proves the destination published, then the
 	// menu task completes afterwards.
 	destination.respond(hydration(rootB, "2", nil, nil))
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	adopted := receive(t, transport.requests)
 	menuRead.respond(json.RawMessage(`{"kind":"success","result":[{"name":"planner","description":"Planner","subagent":false,"model":""}]}`))
 	adopted.respond(hydration(rootB, "2", nil, nil))
@@ -685,6 +697,7 @@ func TestSourceForkCompletionCannotReplaceAdoptedDestination(t *testing.T) {
 	// The adopted reader's own read proves the destination published, then the
 	// source Fork completes afterwards.
 	destination.respond(hydration(rootB, "2", nil, nil))
+	receive(t, transport.requests).respond(json.RawMessage(`[]`))
 	adopted := receive(t, transport.requests)
 	fork.respond(protocol.ForkResult{Session: protocol.Session{SessionId: childA}, Operation: protocol.Operation{OperationId: a.id}})
 	adopted.respond(hydration(rootB, "2", nil, nil))
@@ -770,6 +783,9 @@ func TestAgentMenuDispatchesSelectedName(t *testing.T) {
 	transport.globals = true
 	transport.mu.Unlock()
 	c.command("/agent")
+	catalog := receive(t, transport.requests)
+	testassert.Equal(t, catalog.req.URL.Path, "/v1/extensions")
+	catalog.respond(agentsListDiscovery())
 	menuRead := receive(t, transport.requests)
 	testassert.Equal(t, menuRead.req.URL.Path, "/v1/extensions/invoke")
 	menuRead.respond(json.RawMessage(`{"kind":"success","result":[{"name":"first","description":"first description","subagent":false,"model":""},{"name":"second","description":"second description","subagent":true,"model":""}]}`))

@@ -37,9 +37,11 @@ const (
 	// 20 renames Session ownership lineage and member kinds; 21 removes the
 	// maintenance conversation-source association and requires the running
 	// request purpose; 22 records positional request edits, advertised tool
-	// definitions, body parameters, and materialized summary inputs. The SQL
-	// tables are unchanged.
-	sqliteSchemaVersion = 23
+	// definitions, body parameters, and materialized summary inputs; 23
+	// replaces the durable Agent selection with per-extension Session state;
+	// 24 adds the before-tool refusal consequence to successful hook results.
+	// The SQL tables are unchanged.
+	sqliteSchemaVersion = 24
 
 	// sqlitePoolDSN configures every physical connection of the long-lived
 	// pool: write-ahead logging, full synchronous durability, immediate

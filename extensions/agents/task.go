@@ -13,7 +13,6 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/toolargs"
 	"github.com/Syntheresis/melta/model"
 )
 
@@ -131,7 +130,7 @@ func normalizeTaskArgs(args map[string]any) (map[string]any, error) {
 
 // normalizeCallArguments is the one shared Normalize body.
 func normalizeCallArguments(call model.ToolCall, normalize func(map[string]any) (map[string]any, error)) (json.RawMessage, error) {
-	args, err := toolargs.Decode(call.Arguments)
+	args, err := decodeArguments(call.Arguments)
 	if err != nil {
 		return nil, err
 	}

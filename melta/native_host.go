@@ -25,12 +25,41 @@ func acceptHostMethod(service, method string, args json.RawMessage, pure bool) (
 	return nil, fmt.Errorf("host method %q: %w", method, harness.ErrNotFound)
 }
 
+// callHostService is the one dispatch for the fixed host services that do not
+// depend on a Session stage: warnings and the guarded data/credentials
+// services. It reports whether the service was one of them.
+func (scope *nativeCallScope) callHostService(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, bool, error) {
+	switch service {
+	case extension.ContractWarnings:
+		if scope.activation == nil {
+			return extension.Result{}, true, extension.ErrClosed
+		}
+		if !scope.activation.services[service] {
+			return extension.Result{}, true, ErrDenied
+		}
+		accepted, err := acceptHostMethod(service, method, args, scope.pure)
+		if err != nil {
+			return extension.Result{}, true, err
+		}
+		result, err := scope.activation.reportWarning(ctx, method, accepted)
+		return result, true, err
+	case extension.ContractData, extension.ContractCredentials:
+		result, err := scope.callGuardedHost(ctx, service, method, args)
+		return result, true, err
+	}
+	return extension.Result{}, false, nil
+}
+
 func (scope *nativeCallScope) callGuardedHost(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
 	if scope.activation == nil || !scope.activation.services[service] || scope.pure {
 		return extension.Result{}, ErrDenied
 	}
 	if scope.host == nil {
 		return extension.Result{}, extension.ErrClosed
+	}
+	args, err := acceptHostMethod(service, method, args, scope.pure)
+	if err != nil {
+		return extension.Result{}, err
 	}
 	definitions, ok := extension.HostService(service)
 	if !ok {
@@ -39,7 +68,6 @@ func (scope *nativeCallScope) callGuardedHost(ctx context.Context, service, meth
 	var contract *extension.CompiledMethod
 	for _, m := range definitions {
 		if m.Name == method {
-			var err error
 			contract, err = extension.CompileMethod(m)
 			if err != nil {
 				return extension.Result{}, err
@@ -49,10 +77,6 @@ func (scope *nativeCallScope) callGuardedHost(ctx context.Context, service, meth
 	}
 	if contract == nil {
 		return extension.Result{}, fmt.Errorf("host method %q: %w", method, harness.ErrNotFound)
-	}
-	args, err := acceptNativeMethod(contract, args, scope.pure)
-	if err != nil {
-		return extension.Result{}, err
 	}
 	call := hostCall{ExtensionID: scope.activation.id, SessionID: scope.session.SessionID, Workspace: scope.session.Workspace}
 	if scope.lease != nil {

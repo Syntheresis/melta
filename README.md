@@ -253,7 +253,9 @@ adding an extension needs no protocol regeneration. A declared success returns t
 raw result; a validated declared failure returns HTTP 422 with the extension's own code/message and optional
 data/partial, not a baseline error code; predispatch and host failures use the normal typed error codes and statuses.
 The CLI (`/runtime ...`), ACP (`runtime/...`) and desktop bridge all forward these operations through the shared
-generated invocation table. There is no specialized extension UI.
+generated invocation table. There is no specialized extension UI. After its callback returns, an activation can
+issue an independent attributed Session command through `extension.API.Command`; `Command` returns
+`harness.ErrConflict` while any host callback into the same activation is in flight and is never queued.
 
 Local executable extensions are installed as a directory containing `manifest.json` and a contained entry point;
 install and remove change next-start selection only and edit neither configuration nor Session data. The loaded code

@@ -13,7 +13,7 @@ import (
 
 // BackgroundServices is the baseline background-work surface one standard tool
 // call carries: job start and completion delivery over the Melta's public
-// Harness methods. Extension child launch is a declared native host service,
+// Harness methods. An owned Session start is a declared native host service,
 // never a Go callback on this interface.
 type BackgroundServices interface {
 	StartJob(jobID string, spawn func(ctx context.Context, deliver func(content string) error) error) error

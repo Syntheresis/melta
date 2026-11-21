@@ -100,6 +100,9 @@ type API interface {
 	RegisterCleanup(CleanupHook, Registration) (Registration, error)
 	AttachObserver(Observer, Registration) (Registration, error)
 	Call(context.Context, string, string, json.RawMessage) (Result, error)
+	// Command issues one independent attributed command after a callback
+	// returned. While any host callback into the same activation is in flight
+	// it returns harness.ErrConflict and is never queued.
 	Command(context.Context, CommandTarget, string, json.RawMessage) (Result, error)
 }
 

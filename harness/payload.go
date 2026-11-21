@@ -876,9 +876,14 @@ func encodeHookResultEntry(v hookResultEntry) (json.RawMessage, error) {
 	}
 	if v.Status == hookSucceeded {
 		// A successful effectful execution always carries its binding-owned
-		// consequence record.
+		// consequence: a refusal or replacement for a tool binding, the closed
+		// record for a request binding.
 		if v.ToolCallID != "" {
-			obj["arguments_base64"] = frame(v.Arguments)
+			if v.Refusal != "" {
+				obj["refusal"] = mustMarshal(v.Refusal)
+			} else {
+				obj["arguments_base64"] = frame(v.Arguments)
+			}
 		} else {
 			raw, err := encodeRequestConsequence(*v.Consequence)
 			if err != nil {
@@ -913,7 +918,7 @@ func decodeHookResultEntry(env Entry) (hookResultEntry, error) {
 	if err != nil {
 		return hookResultEntry{}, err
 	}
-	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "hook_id", "extension_id", "tool_call_id", "request_id", "purpose", "status", "evidence", "arguments_base64", "error", "input_arguments_base64", "input_evidence", "consequence"); err != nil {
+	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "hook_id", "extension_id", "tool_call_id", "request_id", "purpose", "status", "evidence", "arguments_base64", "refusal", "error", "input_arguments_base64", "input_evidence", "consequence"); err != nil {
 		return hookResultEntry{}, err
 	}
 	sessionID, err := stringMember(obj, "session_id", true)
@@ -956,8 +961,12 @@ func decodeHookResultEntry(env Entry) (hookResultEntry, error) {
 	if err != nil {
 		return hookResultEntry{}, err
 	}
+	refusal, err := optionalNonEmptyString(obj, "refusal")
+	if err != nil {
+		return hookResultEntry{}, err
+	}
 	_, hasArguments := obj["arguments_base64"]
-	if hasArguments != (toolCallID != "" && hookResultStatus(status) == hookSucceeded) {
+	if hasArguments != (toolCallID != "" && hookResultStatus(status) == hookSucceeded && refusal == "") {
 		return hookResultEntry{}, errors.New("hook result argument consequence membership does not match its binding and status")
 	}
 	var arguments json.RawMessage
@@ -1029,6 +1038,7 @@ func decodeHookResultEntry(env Entry) (hookResultEntry, error) {
 		Status:               hookResultStatus(status),
 		Evidence:             ExecutionEvidence(evidence),
 		Arguments:            arguments,
+		Refusal:              refusal,
 		Error:                errorText,
 		InputArgumentsBase64: inputArgumentsBase64,
 		InputEvidence:        inputEvidence,
@@ -1061,12 +1071,12 @@ func optionalStoredBase64(obj map[string]json.RawMessage, key string) (string, e
 // identities with a required owning Operation, non-empty hook and extension
 // identities, exactly one binding (tool call or request), the closed status
 // and knowledge enums, and the binding-owned member rules — a success carries
-// observed knowledge and its binding consequence (opaque bytes for a tool
-// binding, the closed record for a request binding) and no error,
-// while every other status carries a non-empty error and no consequence. The
-// consumed input member is binding-owned and unconditional: canonical base64
-// bytes (empty allowed) for a tool binding, the closed evidence record for a
-// request binding.
+// observed knowledge and its binding consequence (opaque bytes or the
+// refusal for a tool binding, the closed record for a request binding) and no
+// error, while every other status carries a non-empty error and no
+// consequence. The consumed input member is binding-owned and unconditional:
+// canonical base64 bytes (empty allowed) for a tool binding, the closed
+// evidence record for a request binding.
 func validateHookResultEntry(v hookResultEntry) error {
 	if err := validateHexID(v.SessionID, "session id"); err != nil {
 		return err
@@ -1102,6 +1112,9 @@ func validateHookResultEntry(v hookResultEntry) error {
 		if v.Consequence != nil {
 			return errors.New("tool-bound hook result carries no request consequence")
 		}
+		if v.Refusal != "" && len(v.Arguments) > 0 {
+			return errors.New("tool-bound hook result carries a refusal or arguments, never both")
+		}
 	} else {
 		switch v.Purpose {
 		case InvocationPurposeConversation, InvocationPurposeMaintenance:
@@ -1126,6 +1139,9 @@ func validateHookResultEntry(v hookResultEntry) error {
 		if len(v.Arguments) > 0 {
 			return errors.New("request-bound hook result carries no arguments")
 		}
+		if v.Refusal != "" {
+			return errors.New("request-bound hook result carries no refusal")
+		}
 	}
 	switch v.Status {
 	case hookSucceeded:
@@ -1136,10 +1152,12 @@ func validateHookResultEntry(v hookResultEntry) error {
 			return errors.New("successful hook result must not carry an error")
 		}
 		if v.ToolCallID != "" {
-			input, _ := base64.StdEncoding.Strict().DecodeString(v.InputArgumentsBase64)
-			if !bytes.Equal(input, v.Arguments) {
-				if _, err := decodePayloadObject(v.Arguments); err != nil {
-					return fmt.Errorf("changed hook result arguments must be one complete JSON object: %v", err)
+			if v.Refusal == "" {
+				input, _ := base64.StdEncoding.Strict().DecodeString(v.InputArgumentsBase64)
+				if !bytes.Equal(input, v.Arguments) {
+					if _, err := decodePayloadObject(v.Arguments); err != nil {
+						return fmt.Errorf("changed hook result arguments must be one complete JSON object: %v", err)
+					}
 				}
 			}
 		} else if v.Consequence == nil {
@@ -1156,6 +1174,9 @@ func validateHookResultEntry(v hookResultEntry) error {
 		}
 		if len(v.Arguments) > 0 {
 			return fmt.Errorf("%s hook result must not carry arguments", v.Status)
+		}
+		if v.Refusal != "" {
+			return fmt.Errorf("%s hook result must not carry a refusal", v.Status)
 		}
 		if v.Consequence != nil {
 			return fmt.Errorf("%s hook result must not carry a consequence", v.Status)

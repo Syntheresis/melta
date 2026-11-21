@@ -178,8 +178,8 @@ func TestHookFamiliesDisjointForSameIdentity(t *testing.T) {
 			RequestStage: fixtureRequestStage([]RequestHook{{ID: sharedID, ExtensionID: sharedExt, Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 				return RequestConsequence{Prompt: &prompt}, nil
 			}}}...),
-			ToolHooks: []ToolArgumentsHook{{ID: sharedID, ExtensionID: sharedExt, Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-				return json.RawMessage(`{"x":2}`), nil
+			ToolHooks: []ToolArgumentsHook{{ID: sharedID, ExtensionID: sharedExt, Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+				return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":2}`)}, nil
 			}}},
 		}, nil
 	}}
@@ -219,14 +219,14 @@ func TestArgumentHookChainPureRestoreKeepsAcceptedIdentities(t *testing.T) {
 	original := json.RawMessage(`{"x":1}`)
 	spy := &hookToolSpy{}
 	exec := hookFixtureExecution(spy.tool, objectNormalize,
-		ToolArgumentsHook{ID: "cap.pure.one", ExtensionID: "cap-a", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-			return json.RawMessage(`{"x":9}`), nil
+		ToolArgumentsHook{ID: "cap.pure.one", ExtensionID: "cap-a", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+			return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":9}`)}, nil
 		}},
-		ToolArgumentsHook{ID: "cap.pure.two", ExtensionID: "cap-a", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-			return model.CloneRaw(original), nil // restore the original, not the preceding hook's replacement
+		ToolArgumentsHook{ID: "cap.pure.two", ExtensionID: "cap-a", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+			return ToolArgumentsResult{Arguments: model.CloneRaw(original)}, nil // restore the original, not the preceding hook's replacement
 		}},
-		ToolArgumentsHook{ID: "cap.effectful", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-			return json.RawMessage(`{"x":7}`), nil
+		ToolArgumentsHook{ID: "cap.effectful", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+			return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":7}`)}, nil
 		}},
 	)
 	call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: original}
@@ -683,11 +683,11 @@ func TestArgumentRefusalDoesNotAcceptInvalidOriginal(t *testing.T) {
 		}
 		return objectNormalize(ctx, call)
 	}
-	hook := ToolArgumentsHook{ID: "pure.refuse", ExtensionID: "ext.test", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+	hook := ToolArgumentsHook{ID: "pure.refuse", ExtensionID: "ext.test", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		if call.ID == "call-1" {
-			return nil, errors.New("refused")
+			return ToolArgumentsResult{}, errors.New("refused")
 		}
-		return model.CloneRaw(call.Arguments), nil
+		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
 	exec := hookFixtureExecution(spy.tool, normalize, hook)
 	first, second := testToolCall("call-1"), testToolCall("call-2")
@@ -710,9 +710,9 @@ func TestFinalArgumentHookCancellationPreventsPreparation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	spy := &hookToolSpy{}
-	hook := ToolArgumentsHook{ID: "pure.cancel", ExtensionID: "ext.test", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (json.RawMessage, error) {
+	hook := ToolArgumentsHook{ID: "pure.cancel", ExtensionID: "ext.test", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
 		cancel()
-		return json.RawMessage(`{"x":9}`), nil
+		return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":9}`)}, nil
 	}}
 	exec := hookFixtureExecution(spy.tool, objectNormalize, hook)
 	call := testToolCall("call-1")
@@ -731,11 +731,11 @@ func TestFinalArgumentHookCancellationPreventsPreparation(t *testing.T) {
 
 func TestEffectfulNoopKeepsSurvivingPureArgumentIdentity(t *testing.T) {
 	spy := &hookToolSpy{}
-	pure := ToolArgumentsHook{ID: "pure.repair", ExtensionID: "ext.test", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (json.RawMessage, error) {
-		return json.RawMessage(`{"x":9}`), nil
+	pure := ToolArgumentsHook{ID: "pure.repair", ExtensionID: "ext.test", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+		return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":9}`)}, nil
 	}}
-	effect := ToolArgumentsHook{ID: "effect.noop", ExtensionID: "ext.test", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-		return model.CloneRaw(call.Arguments), nil
+	effect := ToolArgumentsHook{ID: "effect.noop", ExtensionID: "ext.test", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
 	exec := hookFixtureExecution(spy.tool, objectNormalize, pure, effect)
 	call := testToolCall("call-1")

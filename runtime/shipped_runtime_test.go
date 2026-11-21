@@ -11,11 +11,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,51 +31,6 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
-// shippedModelServer is the scripted OpenAI-compatible endpoint of the
-// shipped compositions: every request body is recorded in arrival order
-// and each scenario decides the streamed turn.
-type shippedModelServer struct {
-	*httptest.Server
-
-	mu      sync.Mutex
-	bodies  []string
-	respond func(w http.ResponseWriter, body string)
-}
-
-func newShippedModelServer(t *testing.T) *shippedModelServer {
-	t.Helper()
-	server := &shippedModelServer{}
-	server.Server = httptest.NewServer(http.HandlerFunc(server.serve))
-	t.Cleanup(server.Close)
-	return server
-}
-
-func (s *shippedModelServer) serve(w http.ResponseWriter, r *http.Request) {
-	raw, _ := io.ReadAll(r.Body)
-	body := string(raw)
-	s.mu.Lock()
-	s.bodies = append(s.bodies, body)
-	respond := s.respond
-	s.mu.Unlock()
-	if respond != nil {
-		respond(w, body)
-		return
-	}
-	shippedTextTurn(w, "done")
-}
-
-func (s *shippedModelServer) setRespond(respond func(w http.ResponseWriter, body string)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.respond = respond
-}
-
-func (s *shippedModelServer) recorded() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.bodies...)
-}
-
 // shippedPlugins selects one composition of the shipped distribution list.
 func shippedPlugins(ids ...string) []extension.Extension {
 	selected := make(map[string]bool, len(ids))
@@ -90,32 +44,6 @@ func shippedPlugins(ids ...string) []extension.Extension {
 		}
 	}
 	return plugins
-}
-
-// shippedDocument composes the provider endpoint and, when given, the
-// installed extensions' sections.
-func shippedDocument(endpoint string, models map[string]string, extensions map[string]any) []byte {
-	rows := make(map[string]any, len(models))
-	for id, name := range models {
-		rows[id] = map[string]any{"name": name, "context_window": 65536}
-	}
-	document := map[string]any{
-		"providers": map[string]any{
-			"prov": map[string]any{
-				"transport": map[string]any{"base_url": endpoint, "api_key_env": ""},
-				"discovery": false,
-				"models":    rows,
-			},
-		},
-	}
-	if extensions != nil {
-		document["extensions"] = extensions
-	}
-	encoded, err := json.Marshal(document)
-	if err != nil {
-		panic(err)
-	}
-	return encoded
 }
 
 // shippedMount opens one real owner with its mounted authenticated HTTP
@@ -505,7 +433,7 @@ func (shippedExternalTool) Execute(ctx context.Context, author extension.AuthorC
 // wire model, standard file mutations are captured and restored through
 // public code reversion, and manual compaction commits a context checkpoint.
 func TestShippedRuntimeNeitherExtension(t *testing.T) {
-	modelServer := newShippedModelServer(t)
+	modelServer := newBaselineModel(t)
 	modelServer.setRespond(func(w http.ResponseWriter, body string) {
 		switch {
 		case shippedWireRole(body) == "tool":
@@ -520,7 +448,7 @@ func TestShippedRuntimeNeitherExtension(t *testing.T) {
 	})
 	ctx := context.Background()
 	workspace := t.TempDir()
-	document := shippedDocument(modelServer.URL, map[string]string{"m": "M"}, nil)
+	document := baselineConfigDocument(modelServer.URL, map[string]string{"m": "M"}, nil)
 	_, client := shippedMount(t, ctx, t.TempDir(), document, nil)
 	sessionID := shippedCreateSession(t, ctx, client, workspace)
 	shippedSelectModel(t, ctx, client, sessionID, "prov/m")
@@ -561,7 +489,7 @@ func TestShippedRuntimeAgentsOnly(t *testing.T) {
 	release := sync.OnceFunc(func() { close(gate) })
 	defer release()
 
-	modelServer := newShippedModelServer(t)
+	modelServer := newBaselineModel(t)
 	modelServer.setRespond(func(w http.ResponseWriter, body string) {
 		switch {
 		case shippedWireUserText(body) == "child work":
@@ -574,7 +502,7 @@ func TestShippedRuntimeAgentsOnly(t *testing.T) {
 		}
 	})
 	ctx := context.Background()
-	document := shippedDocument(modelServer.URL, map[string]string{"m": "M"}, map[string]any{
+	document := baselineConfigDocument(modelServer.URL, map[string]string{"m": "M"}, map[string]any{
 		"agents": map[string]any{
 			"enabled":     true,
 			"definitions": map[string]any{"primary": map[string]any{"model": "prov/m"}},
@@ -640,9 +568,9 @@ func TestShippedRuntimeAgentsOnly(t *testing.T) {
 // the prompt and the advertised tools, including keeping apply_patch for an
 // offer_patch row, while a non-matching model receives none of those changes.
 func TestShippedRuntimeAdaptationOnly(t *testing.T) {
-	modelServer := newShippedModelServer(t)
+	modelServer := newBaselineModel(t)
 	ctx := context.Background()
-	document := shippedDocument(modelServer.URL, map[string]string{"match-1": "Match One", "other": "Other"}, map[string]any{
+	document := baselineConfigDocument(modelServer.URL, map[string]string{"match-1": "Match One", "other": "Other"}, map[string]any{
 		"adaptation": map[string]any{
 			"enabled": true,
 			"entries": []any{map[string]any{
@@ -667,13 +595,13 @@ func TestShippedRuntimeAdaptationOnly(t *testing.T) {
 	matching := shippedRequestWithUser(t, requests, "matching turn")
 	matchingTools := shippedWireToolNames(matching)
 	testassert.Require(t, strings.Contains(shippedWireSystemText(matching), "ADAPTATION-ONLY-MARK"), "matching request system text = %q, want the configured appended prompt", shippedWireSystemText(matching))
-	testassert.Require(t, containsString(matchingTools, "apply_patch"), "matching request tools = %v, want apply_patch advertised for the offer_patch row", matchingTools)
-	testassert.Require(t, !containsString(matchingTools, "write_file") && containsString(matchingTools, "read_file"), "matching request tools = %v, want write_file excluded with read_file retained", matchingTools)
+	testassert.Require(t, slices.Contains(matchingTools, "apply_patch"), "matching request tools = %v, want apply_patch advertised for the offer_patch row", matchingTools)
+	testassert.Require(t, !slices.Contains(matchingTools, "write_file") && slices.Contains(matchingTools, "read_file"), "matching request tools = %v, want write_file excluded with read_file retained", matchingTools)
 
 	plain := shippedRequestWithUser(t, requests, "plain turn")
 	plainTools := shippedWireToolNames(plain)
 	testassert.Require(t, !strings.Contains(shippedWireSystemText(plain), "ADAPTATION-ONLY-MARK"), "non-matching request system text = %q, want no appended prompt", shippedWireSystemText(plain))
-	testassert.Require(t, !containsString(plainTools, "apply_patch") && containsString(plainTools, "write_file"), "non-matching request tools = %v, want apply_patch filtered out with write_file retained", plainTools)
+	testassert.Require(t, !slices.Contains(plainTools, "apply_patch") && slices.Contains(plainTools, "write_file"), "non-matching request tools = %v, want apply_patch filtered out with write_file retained", plainTools)
 }
 
 // TestShippedRuntimeBothExtensions proves the shipped Agents and Adaptation
@@ -681,9 +609,9 @@ func TestShippedRuntimeAdaptationOnly(t *testing.T) {
 // Agent profile's instructions and Adaptation's configured prompt change both
 // appear in the same provider request.
 func TestShippedRuntimeBothExtensions(t *testing.T) {
-	modelServer := newShippedModelServer(t)
+	modelServer := newBaselineModel(t)
 	ctx := context.Background()
-	document := shippedDocument(modelServer.URL, map[string]string{"m": "M"}, map[string]any{
+	document := baselineConfigDocument(modelServer.URL, map[string]string{"m": "M"}, map[string]any{
 		"agents": map[string]any{
 			"enabled": true,
 			"definitions": map[string]any{
@@ -726,7 +654,7 @@ func TestShippedRuntimeBothExtensions(t *testing.T) {
 // retirement leaves the Session history with the recorded call and result
 // readable without the provider.
 func TestShippedRuntimeExternalExtension(t *testing.T) {
-	modelServer := newShippedModelServer(t)
+	modelServer := newBaselineModel(t)
 	modelServer.setRespond(func(w http.ResponseWriter, body string) {
 		switch {
 		case shippedWireRole(body) == "tool":
@@ -739,7 +667,7 @@ func TestShippedRuntimeExternalExtension(t *testing.T) {
 	})
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	document := shippedDocument(modelServer.URL, map[string]string{"m": "M"}, map[string]any{
+	document := baselineConfigDocument(modelServer.URL, map[string]string{"m": "M"}, map[string]any{
 		"external-shipped": map[string]any{"enabled": true},
 	})
 	owner, client := shippedMount(t, ctx, dataDir, document, []extension.Extension{shippedExternalExtension()})
@@ -751,7 +679,7 @@ func TestShippedRuntimeExternalExtension(t *testing.T) {
 		if registered.ExtensionId != "external-shipped" {
 			continue
 		}
-		found = containsString(registered.Tools, "external_read")
+		found = slices.Contains(registered.Tools, "external_read")
 	}
 	testassert.Require(t, found, "the catalog omits the external extension's registered tool: %+v", catalog.JSON200)
 
@@ -776,13 +704,4 @@ func TestShippedRuntimeExternalExtension(t *testing.T) {
 	recorded := shippedToolCall(t, shippedAssistant(t, history.JSON200.Items, "op-external"), "shipped-external")
 	testassert.Require(t, recorded.Name == "external_read" && recorded.Status != nil && *recorded.Status == protocol.ToolCallStatusSuccess && recorded.Content != nil && *recorded.Content == "external result: external input", "reopened recorded call = %+v, want the call and result readable without the extension", recorded)
 	testassert.Equal(t, len(modelServer.recorded()), requestsBefore)
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }

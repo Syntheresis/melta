@@ -181,6 +181,7 @@ func hostCommandsMethods() []Method {
 		ServiceIOMethod("submit", request, value),
 		ServiceIOMethod("fork", request, value),
 		ServiceIOMethod("compact", request, value),
+		ServiceIOMethod("set_inputs", request, value),
 		ServiceIOMethod("set_model", request, value),
 		ServiceIOMethod("interrupt", control, null),
 		ServiceIOMethod("stop", control, null),

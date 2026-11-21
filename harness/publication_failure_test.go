@@ -55,8 +55,8 @@ func executorTurnFixture(t *testing.T, hook bool) (*Harness, *graphStorage, *coo
 		h, store, c, sessionID, prepared, cancel := newExecutionHarness(t, modelFn, planFn)
 		return h, store, c, sessionID, prepared, cancel, &rounds, &preparedCalls, &executed
 	}
-	argHook := ToolArgumentsHook{ID: "cap.hook.one", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-		return model.CloneRaw(call.Arguments), nil
+	argHook := ToolArgumentsHook{ID: "cap.hook.one", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
 	h, store, c, sessionID, prepared, cancel := newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
 		return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
@@ -412,8 +412,8 @@ func TestEffectHookInvalidDeclaredKnowledgeRejects(t *testing.T) {
 	call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{"x":1}`)}
 	exec := hookFixtureExecution(func(context.Context, model.ToolCall) PreparedTool {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}}}
-	}, objectNormalize, ToolArgumentsHook{ID: "cap.hook.bogus", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (json.RawMessage, error) {
-		return nil, &EffectError{Evidence: ExecutionEvidence("bogus"), Err: errors.New("binding down")}
+	}, objectNormalize, ToolArgumentsHook{ID: "cap.hook.bogus", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+		return ToolArgumentsResult{}, &EffectError{Evidence: ExecutionEvidence("bogus"), Err: errors.New("binding down")}
 	}})
 	h, store, _, sessionID, err := freshExecutionRunConfig(t, context.Background(), testCapture(), exec, nil, call)
 	testassert.Require(t, err != nil, "the invalid declaration settled without rejection")
@@ -465,8 +465,8 @@ func TestWaitRetainsPublicationFailureAtPendingCallBoundaries(t *testing.T) {
 		h, store, c, sessionID, prepared, cancel := newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
 			return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 				inv := invocationExecution(modelFn, planFn)
-				inv.ToolHooks = []ToolArgumentsHook{{ID: "cap.hook.domain", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (json.RawMessage, error) {
-					return nil, domainErr
+				inv.ToolHooks = []ToolArgumentsHook{{ID: "cap.hook.domain", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+					return ToolArgumentsResult{}, domainErr
 				}}}
 				return inv, nil
 			}}, nil
