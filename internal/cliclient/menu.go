@@ -118,15 +118,6 @@ func (c *CLI) selectionMenu(s stamp, name, arg string) {
 	}
 	var items []terminal.MenuItem
 	if name == "/agent" {
-		found, err := clientops.HasExtensionOperation(s.ctx, s.conn, "agents", "list", protocol.RegisteredExtensionOperationTargetHarness)
-		if err != nil {
-			c.report(s, terminal.RenderErrorMsg(err.Error()), false)
-			return
-		}
-		if !found {
-			c.report(s, terminal.RenderErrorMsg("agents list operation is unavailable"), false)
-			return
-		}
 		raw, err := clientops.InvokeExtension(s.ctx, s.conn, "agents", "list", protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, json.RawMessage(`{}`))
 		if err != nil {
 			c.report(s, terminal.RenderErrorMsg(err.Error()), false)

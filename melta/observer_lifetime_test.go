@@ -288,35 +288,6 @@ func TestObserverActivationCloseWaitsForInFlightCall(t *testing.T) {
 	testassert.Require(t, len(got) == 2 && got[0] == "observer-return" && got[1] == "close", "close order = %v, want the observer call before the extension close", got)
 }
 
-// TestObserverCancelledDeliveryReleasesCallbackCount proves the activation's
-// callback count returns to zero after a cancelled delivery.
-func TestObserverCancelledDeliveryReleasesCallbackCount(t *testing.T) {
-	entered := make(chan struct{})
-	fixture := newObserverLifetimeFixture(t, func(ctx context.Context, _ extension.Fact) error {
-		close(entered)
-		<-ctx.Done()
-		return ctx.Err()
-	}, nil)
-	fixture.owner.composition = newComposition()
-	fixture.owner.composition.hosts.owner = &Melta{}
-	testassert.NoError(t, fixture.candidate.publishForTest())
-	fixture.delivery.enqueue(extension.Fact{Kind: extension.FactOperationAdmitted, SessionID: "s", OperationID: "op"})
-	select {
-	case <-entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the observer call never started")
-	}
-	_, err := fixture.api.Command(context.Background(), extension.CommandTarget{Kind: extension.ExposedTargetHarness}, "interrupt", []byte(`{}`))
-	testassert.Require(t, errors.Is(err, harness.ErrConflict), "command while the observer call is in flight = %v, want conflict", err)
-	testassert.NoError(t, fixture.api.Remove(fixture.handle))
-	<-fixture.delivery.runDone
-	fixture.activation.owner.nativeMu.Lock()
-	callbacks := fixture.activation.callbacks
-	fixture.activation.owner.nativeMu.Unlock()
-	testassert.Equal(t, callbacks, 0)
-	fixture.candidate.release()
-}
-
 // TestCommandUnavailablePrecedesSessionReadError proves the check order: a
 // retired activation answers closed, and an unapproved command service answers
 // denied, before either pre-guard Session read error is surfaced.

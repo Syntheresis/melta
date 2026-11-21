@@ -197,7 +197,6 @@ func hostCommandsMethods() []Method {
 func hostStateMethods() []Method {
 	return []Method{
 		ServiceIOMethod("set", `{"type":"object","required":["value"],"properties":{"value":{}},"additionalProperties":false}`, `{"type":"null"}`),
-		ServiceIOMethod("clear", `{"type":"object","additionalProperties":false}`, `{"type":"null"}`),
 	}
 }
 

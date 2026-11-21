@@ -6,25 +6,8 @@ import (
 	"strings"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 )
-
-func (s authorInstance) describeTask(_ context.Context, call extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
-	if input.Purpose == harness.InvocationPurposeMaintenance {
-		return harness.RequestConsequence{}, nil
-	}
-	for _, tool := range input.Tools {
-		if tool.Name != TaskCapabilityID {
-			continue
-		}
-		if call.Session.OwnerSessionID != "" {
-			return harness.RequestConsequence{Tools: withoutTools(input.Tools, TaskCapabilityID)}, nil
-		}
-		return harness.RequestConsequence{}, nil
-	}
-	return harness.RequestConsequence{}, nil
-}
 
 func (s authorInstance) admit(_ context.Context, call extension.AuthorContext, input extension.AdmissionInput) (extension.AdmissionResult, error) {
 	candidate := input.Candidate
@@ -32,28 +15,26 @@ func (s authorInstance) admit(_ context.Context, call extension.AuthorContext, i
 	definition, err := s.definitions.Resolve(selected(call.State))
 	if err == nil {
 		changed = true
-		if input.Choices.Model == nil && definition.Model != "" {
+		if definition.Model != "" {
 			if ref, err := model.Parse(definition.Model); err == nil {
 				candidate.Model = ref
 			}
 		}
-		if input.Choices.Prompt == nil && input.Choices.Instructions == nil {
-			switch definition.SystemPrompt {
-			case SystemPromptNone:
-				text := strings.TrimSpace(definition.Prompt)
-				candidate.Prompt = &text
-			case SystemPromptSimple:
-				text, err := simplePrompt(input.Prompt, definition.Prompt)
-				if err != nil {
-					return extension.AdmissionResult{}, err
-				}
-				candidate.Prompt = &text
-			default:
-				candidate.Instructions = formatInstructions(definition.Prompt)
-				candidate.Prompt = nil
+		switch definition.SystemPrompt {
+		case SystemPromptNone:
+			text := strings.TrimSpace(definition.Prompt)
+			candidate.Prompt = &text
+		case SystemPromptSimple:
+			text, err := simplePrompt(input.Prompt, definition.Prompt)
+			if err != nil {
+				return extension.AdmissionResult{}, err
 			}
+			candidate.Prompt = &text
+		default:
+			candidate.Instructions = formatInstructions(definition.Prompt)
+			candidate.Prompt = nil
 		}
-		if input.Choices.Tools == nil {
+		if definition.Tools != nil {
 			candidate.Tools = make([]model.ToolDefinition, 0, len(definition.Tools))
 			for _, name := range definition.Tools {
 				for _, tool := range input.ToolCatalog {
@@ -65,7 +46,7 @@ func (s authorInstance) admit(_ context.Context, call extension.AuthorContext, i
 			}
 		}
 		if definition.Readonly && strings.TrimSpace(definition.WriteDir) == "" {
-			candidate.Tools = withoutTools(candidate.Tools, "write_file", "edit_file", "apply_patch")
+			candidate.Tools = withoutTools(candidate.Tools, "write_file", "edit_file")
 		}
 		if definition.Readonly {
 			candidate.Tools = slices.Clone(candidate.Tools)

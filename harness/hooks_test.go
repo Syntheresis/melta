@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
@@ -2449,6 +2450,48 @@ func TestArgumentHookRefusalSettlesDenied(t *testing.T) {
 			_, err = h.Fork(context.Background(), ForkRequest{Origin: InputOriginUser, SourceSessionID: sessionID, BoundaryEntryID: boundary, OperationID: "fork-refusal", Content: []model.ContentPart{{Kind: model.PartText, Text: "fork"}}})
 			testassert.NoError(t, err)
 		})
+	}
+}
+
+// TestArgumentHookRefusalMatchesAuthorizationDenial proves a before-tool
+// refusal settles with the same bounded, repaired content an authorization-hook
+// denial produces, and an effectful hook_result stores that same text.
+func TestArgumentHookRefusalMatchesAuthorizationDenial(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		reason string
+	}{
+		{"long", strings.Repeat("é", 300) + "\xff"},
+		{"invalid utf8", "\xff\xfe"},
+	} {
+		for _, mode := range []HookMode{HookModePure, HookModeEffectful} {
+			t.Run(row.name+"/"+string(mode), func(t *testing.T) {
+				reason := row.reason
+				inv := InvocationExecution{
+					LookupTool:   fixtureToolLookup((&hookToolSpy{}).tool, objectNormalize),
+					BindLocation: func(string) (string, func() error, error) { return "/w", func() error { return nil }, nil },
+					AuthorizationHooks: []AuthorizationHook{{Run: func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) {
+						return &reason, nil
+					}}},
+				}
+				_, _, _, _, authorized, err := freshExecutionToolCalls(t, testCapture(), executionForInvocation(inv), testToolCall("call-1"))
+				testassert.NoError(t, err)
+
+				hook := ToolArgumentsHook{ID: "cap.hook.refuse", ExtensionID: "cap-a", Mode: mode, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+					return ToolArgumentsResult{Refusal: &reason}, nil
+				}}
+				_, store, _, sessionID, results, err := freshExecutionToolCalls(t, testCapture(), hookFixtureExecution((&hookToolSpy{}).tool, objectNormalize, hook), testToolCall("call-1"))
+				testassert.NoError(t, err)
+				got := results[0]
+				testassert.Require(t, authorized[0].Status == model.ResultDenied, "authorization denial = %+v, want denied", authorized[0])
+				testassert.Require(t, got.Status == model.ResultDenied && got.Content == authorized[0].Content, "hook refusal = %+v, want the authorization denial's content %q", got, authorized[0].Content)
+				testassert.Require(t, utf8.ValidString(got.Content) && len(got.Content) <= maxToolDiagnosticBytes, "refusal content = %q, want valid UTF-8 within %d bytes", got.Content, maxToolDiagnosticBytes)
+				if mode == HookModeEffectful {
+					committed := hookGraphHookResults(t, store, sessionID)
+					testassert.Require(t, len(committed) == 1 && committed[0].Refusal == got.Content, "committed hook results = %+v, want the same refusal text", committed)
+				}
+			})
+		}
 	}
 }
 

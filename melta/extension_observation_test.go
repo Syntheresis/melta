@@ -160,8 +160,7 @@ func independentToolPhase(raw json.RawMessage) independentToolArgs {
 }
 
 // independentCommandAfterSettled issues one command after the named parent's
-// settled record, retrying only while the observing callback itself is still
-// unwinding (its own callback count is about to clear).
+// settled record, retrying only while an unrelated conflict class clears.
 func independentCommandAfterSettled(api extension.API, target extension.CommandTarget, operationID string) (extension.Result, error) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -282,14 +281,22 @@ func nativeIndependentFixture() extension.Extension {
 		nativeIndependentReport(api, "activate", extension.Result{}, activateErr)
 
 		settled := make(chan string)
+		issuedCommand := false
 		observerHandle, err := api.AttachObserver(func(ctx context.Context, fact extension.Fact) error {
-			if independentSettingsOf(api).Observe == "block" {
-				appendIndependentReport(independentSettingsOf(api).Report, "observe-started", "", "", fact.SessionID, fact.OperationID, fact.Status, independentSettingsOf(api).Version)
+			settings := independentSettingsOf(api)
+			if settings.Observe == "block" {
+				appendIndependentReport(settings.Report, "observe-started", "", "", fact.SessionID, fact.OperationID, fact.Status, settings.Version)
 				<-ctx.Done()
-				appendIndependentReport(independentSettingsOf(api).Report, "observe-canceled", "", "", fact.SessionID, fact.OperationID, fact.Status, independentSettingsOf(api).Version)
+				appendIndependentReport(settings.Report, "observe-canceled", "", "", fact.SessionID, fact.OperationID, fact.Status, settings.Version)
 				return ctx.Err()
 			}
 			nativeIndependentReportFact(api, fact)
+			if settings.Observe == "command" && fact.Kind == extension.FactOperationAdmitted && !issuedCommand {
+				issuedCommand = true
+				arguments, _ := json.Marshal(map[string]string{"workspace": filepath.Dir(settings.Report)})
+				result, err := api.Command(ctx, extension.CommandTarget{Kind: extension.ExposedTargetHarness}, "create_session", arguments)
+				appendIndependentReport(settings.Report, "observer-command", independentNativeClass(err), string(result.Value), fact.SessionID, fact.OperationID, fact.Status, settings.Version)
+			}
 			if fact.Kind == extension.FactOperationSettled {
 				select {
 				case settled <- fact.OperationID:
@@ -312,10 +319,34 @@ func nativeIndependentFixture() extension.Extension {
 		}
 
 		if _, err := api.RegisterOperation(nativeIndependentOperation("nil_command", func(_ context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
-			_, err := api.Command(nil, nativeSessionTarget(call.Session.SessionID), "interrupt", json.RawMessage(`{}`))
-			nativeIndependentReport(api, "nil-command", extension.Result{}, err)
+			sessionID := call.Session.SessionID
+			settings := independentSettingsOf(api)
+			go func() {
+				result, err := api.Command(nil, nativeSessionTarget(sessionID), "submit", json.RawMessage(`{"operation_id":"op-nil-context","mode":"regular","content":[{"kind":"text","text":"nil context"}]}`))
+				appendIndependentReport(settings.Report, "nil-command", independentNativeClass(err), string(result.Value), sessionID, "", "", settings.Version)
+			}()
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
 		}), nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.AttachRequest(extension.HookModePure, func(_ context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			settings := independentSettingsOf(api)
+			if settings.Observe != "request-block" {
+				return harness.RequestConsequence{}, nil
+			}
+			appendIndependentReport(settings.Report, "request-entered", "", "", call.Session.SessionID, "", "", settings.Version)
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if _, err := os.Stat(settings.Report + ".release"); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					return harness.RequestConsequence{}, errors.New("request hook release timed out")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			return harness.RequestConsequence{}, nil
+		}, nil); err != nil {
 			return nil, err
 		}
 		var saved func(context.Context, string, string, json.RawMessage) (extension.Result, error)
@@ -332,9 +363,25 @@ func nativeIndependentFixture() extension.Extension {
 		}), nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.RegisterOperation(nativeIndependentOperation("conflict", func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
-			result, err := api.Command(ctx, nativeSessionTarget(call.Session.SessionID), "submit", args)
-			nativeIndependentReport(api, "conflict", result, err)
+		if _, err := api.RegisterOperation(nativeIndependentOperation("in_callback", func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+			var request struct {
+				Independent bool            `json:"independent"`
+				Arguments   json.RawMessage `json:"arguments"`
+			}
+			if err := json.Unmarshal(args, &request); err != nil {
+				return extension.Result{}, err
+			}
+			sessionID := call.Session.SessionID
+			settings := independentSettingsOf(api)
+			if request.Independent {
+				go func() {
+					result, err := api.Command(context.Background(), nativeSessionTarget(sessionID), "submit", request.Arguments)
+					appendIndependentReport(settings.Report, "in-callback", independentNativeClass(err), string(result.Value), sessionID, "", "", settings.Version)
+				}()
+				return extension.Result{Value: json.RawMessage(`{}`)}, nil
+			}
+			result, err := api.Command(ctx, nativeSessionTarget(sessionID), "submit", request.Arguments)
+			nativeIndependentReport(api, "in-callback", result, err)
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
 		}), nil); err != nil {
 			return nil, err
@@ -364,7 +411,7 @@ func nativeIndependentFixture() extension.Extension {
 		}), nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.RegisterOperation(nativeIndependentOperation("cross", func(ctx context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+		if _, err := api.RegisterOperation(nativeIndependentOperation("cross", func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 			var request struct {
 				SessionID string          `json:"session_id"`
 				Method    string          `json:"method"`
@@ -373,8 +420,11 @@ func nativeIndependentFixture() extension.Extension {
 			if err := json.Unmarshal(args, &request); err != nil {
 				return extension.Result{}, err
 			}
-			result, err := api.Command(ctx, nativeSessionTarget(request.SessionID), request.Method, request.Arguments)
-			nativeIndependentReport(api, "cross", result, err)
+			settings := independentSettingsOf(api)
+			go func() {
+				result, err := api.Command(context.Background(), nativeSessionTarget(request.SessionID), request.Method, request.Arguments)
+				appendIndependentReport(settings.Report, "cross", independentNativeClass(err), string(result.Value), request.SessionID, "", "", settings.Version)
+			}()
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
 		}), nil); err != nil {
 			return nil, err
@@ -526,15 +576,17 @@ func TestAuthorIndependentCommand(t *testing.T) {
 			}
 			testassert.Require(t, admitted == 1 && settled == 1, "observer facts for op-timer = admitted %d settled %d", admitted, settled)
 
-			// A command issued inside its own callback is refused as a conflict
-			// and performs no admission.
-			conflictSubmit := commandSubmitRequest(t, "op-conflict", "inside")
-			rawConflict, err := json.Marshal(conflictSubmit)
+			// A command issued with its own operation callback's context is
+			// denied and performs no admission.
+			inCallbackSubmit := commandSubmitRequest(t, "op-in-callback", "inside")
+			rawInCallback, err := json.Marshal(inCallbackSubmit)
 			testassert.NoError(t, err)
-			invokeFixtureOperation(t, r, sessionID, "conflict", string(rawConflict), "req-conflict")
-			conflict := log.awaitKind(t, "conflict")
-			testassert.Require(t, conflict["class"] == "conflict", "in-callback command = %+v, want conflict", conflict)
-			requireNoOperation(t, r, sessionID, "op-conflict")
+			inCallbackArguments, err := json.Marshal(map[string]json.RawMessage{"arguments": rawInCallback})
+			testassert.NoError(t, err)
+			invokeFixtureOperation(t, r, sessionID, "in_callback", string(inCallbackArguments), "req-in-callback")
+			inCallback := log.awaitKind(t, "in-callback")
+			testassert.Require(t, inCallback["class"] == "denied", "in-callback command = %+v, want denied", inCallback)
+			requireNoOperation(t, r, sessionID, "op-in-callback")
 
 			// A saved callback belongs to the returned call and stays closed.
 			invokeFixtureOperation(t, r, sessionID, "save", `{}`, "req-save")
@@ -547,6 +599,65 @@ func TestAuthorIndependentCommand(t *testing.T) {
 			replay := log.awaitKind(t, "replay")
 			testassert.Require(t, replay["class"] == "closed", "saved callback reuse = %+v, want closed", replay)
 			requireNoOperation(t, r, sessionID, "op-replay")
+		})
+	}
+}
+
+// TestAuthorObserverCommand proves a command issued from an observer's
+// delivery context is independent and succeeds.
+func TestAuthorObserverCommand(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		worker bool
+	}{{name: "native"}, {name: "worker", worker: true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			r, log, _ := independentOwnerAt(t, mode.worker, nil, filepath.Join(t.TempDir(), "reports.jsonl"), "", "command")
+			caller := testCaller(r)
+			session := projectionSession(t, r, filepath.Join(t.TempDir(), "ws"), "")
+			_, err := r.SubmitSession(context.Background(), caller, session.Identity.SessionID, protocol.SubmitRequest{
+				OperationId: "op-observer-command", Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{textContentPart(t, "observed", nil)},
+			})
+			testassert.NoError(t, err)
+			report := log.awaitKind(t, "observer-command")
+			testassert.Require(t, report["class"] == "", "observer command = %+v, want an independent success", report)
+			testassert.Require(t, strings.Contains(report["value"], `"session_id"`), "observer command value = %q, want a newly created Session", report["value"])
+			awaitOperation(t, r, session.Identity.SessionID, "op-observer-command", harness.OperationSuccess)
+		})
+	}
+}
+
+// TestAuthorCommandIndependentOfRequestHook proves an independent command for
+// one Session succeeds while a request hook of the same activation is parked
+// in another Session. The hook issues no command itself.
+func TestAuthorCommandIndependentOfRequestHook(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		worker bool
+	}{{name: "native"}, {name: "worker", worker: true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			reportPath := filepath.Join(t.TempDir(), "reports.jsonl")
+			r, log, _ := independentOwnerAt(t, mode.worker, nil, reportPath, "", "request-block")
+			caller := testCaller(r)
+			parked := projectionSession(t, r, filepath.Join(t.TempDir(), "ws"), "")
+			_, err := r.SubmitSession(context.Background(), caller, parked.Identity.SessionID, protocol.SubmitRequest{
+				OperationId: "op-request-hook", Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{textContentPart(t, "park", nil)},
+			})
+			testassert.NoError(t, err)
+			log.awaitKind(t, "request-entered")
+
+			// The independent command runs for another Session while the
+			// first Session's request hook is still in flight.
+			other := projectionSession(t, r, filepath.Join(t.TempDir(), "ws"), "")
+			submit := commandSubmitRequest(t, "op-independent", "independent")
+			rawSubmit, err := json.Marshal(submit)
+			testassert.NoError(t, err)
+			invokeFixtureOperation(t, r, other.Identity.SessionID, "timer", string(rawSubmit), "req-independent")
+			report := log.awaitKind(t, "timer")
+			testassert.Require(t, report["class"] == "", "independent command = %+v, want success", report)
+
+			testassert.NoError(t, os.WriteFile(reportPath+".release", []byte("release"), 0o600))
+			awaitOperation(t, r, other.Identity.SessionID, "op-independent", harness.OperationSuccess)
+			awaitOperation(t, r, parked.Identity.SessionID, "op-request-hook", harness.OperationSuccess)
 		})
 	}
 }
@@ -688,10 +799,9 @@ func TestCommandSessionReadDoesNotHoldNativeMu(t *testing.T) {
 	}
 }
 
-// TestAuthorToolCallbackCommand proves the outstanding-callback count is
-// owned by the tool callback scope: API.Command issued in Prepare or Execute
-// is a conflict and performs no admission; the same issued from a timer after
-// the callback returned succeeds.
+// TestAuthorToolCallbackCommand proves a command issued with a live tool
+// callback's context is denied and performs no admission; the same issued from
+// a timer after the callback returned succeeds.
 func TestAuthorToolCallbackCommand(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
@@ -733,7 +843,7 @@ func TestAuthorToolCallbackCommand(t *testing.T) {
 
 			submit("op-parent-prepare", "prepare")
 			report := log.awaitKind(t, "tool-prepare")
-			testassert.Require(t, report["class"] == "conflict", "Prepare command = %+v, want conflict", report)
+			testassert.Require(t, report["class"] == "denied", "Prepare command = %+v, want denied", report)
 			requireNoOperation(t, r, sessionID, "op-tool-prepare")
 
 			submit("op-parent-prepare-after", "prepare_after")
@@ -743,7 +853,7 @@ func TestAuthorToolCallbackCommand(t *testing.T) {
 
 			submit("op-parent-execute", "execute")
 			report = log.awaitKind(t, "tool-execute")
-			testassert.Require(t, report["class"] == "conflict", "Execute command = %+v, want conflict", report)
+			testassert.Require(t, report["class"] == "denied", "Execute command = %+v, want denied", report)
 			requireNoOperation(t, r, sessionID, "op-tool-execute")
 
 			submit("op-parent-execute-after", "execute_after")
@@ -843,8 +953,10 @@ func TestAuthorIndependentCommandUnapproved(t *testing.T) {
 			submit := commandSubmitRequest(t, "op-denied", "denied")
 			rawSubmit, err := json.Marshal(submit)
 			testassert.NoError(t, err)
-			invokeFixtureOperation(t, r, session.SessionId, "conflict", string(rawSubmit), "req-denied")
-			denied := log.awaitKind(t, "conflict")
+			arguments, err := json.Marshal(map[string]json.RawMessage{"independent": json.RawMessage(`true`), "arguments": rawSubmit})
+			testassert.NoError(t, err)
+			invokeFixtureOperation(t, r, session.SessionId, "in_callback", string(arguments), "req-denied")
+			denied := log.awaitKind(t, "in-callback")
 			testassert.Require(t, denied["class"] == "denied", "unapproved command = %+v, want denied", denied)
 			requireNoOperation(t, r, session.SessionId, "op-denied")
 
@@ -922,8 +1034,61 @@ func TestActivationCommandRefusedAfterRetirement(t *testing.T) {
 	testassert.Require(t, errors.Is(err, extension.ErrClosed), "retired activation command = %v, want closed", err)
 }
 
-// TestNilContextCommandParity proves a nil command context is treated as
-// context.Background() by the native API and the worker request path alike.
+// TestCallbackContextCommandDeniedBeforeActivationAndTarget proves any context
+// Melta handed to a host callback is denied before publication and target
+// checks: a retired activation and an unknown Session both answer denied.
+func TestCallbackContextCommandDeniedBeforeActivationAndTarget(t *testing.T) {
+	e := newOwnerEnv(t)
+	const (
+		idA     = "callback-context-a"
+		idB     = "callback-context-b"
+		unknown = "0123456789abcdef0123456789abcdef"
+	)
+	enableFixturePlugin(t, e.configPath, idA)
+	enableFixturePlugin(t, e.configPath, idB)
+	manifestA := registrarManifest(idA)
+	manifestA.Services = []string{extension.ContractCommands}
+	manifestB := registrarManifest(idB)
+	manifestB.Services = []string{extension.ContractCommands}
+	var apiA extension.API
+	a := extension.Extension{Manifest: manifestA, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		apiA = api
+		return nil, nil
+	}}
+	b := extension.Extension{Manifest: manifestB, Activate: func(context.Context, extension.API) (func(context.Context) error, error) { return nil, nil }}
+	opts := e.options(a, b)
+	sessionScope := CallerScope{Kind: CallerScopeSession, SessionID: unknown}
+	opts.Access = map[string]ExtensionAccess{
+		idA: {Services: []string{extension.ContractCommands}, Scope: &sessionScope},
+		idB: {Services: []string{extension.ContractCommands}},
+	}
+	r, err := open(context.Background(), opts)
+	testassert.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close(context.Background()) })
+	testassert.Require(t, apiA != nil, "activation A captured no API")
+	var activationB *nativeActivation
+	for _, activation := range r.config.current().native.activations {
+		if activation != nil && activation.id == idB {
+			activationB = activation
+		}
+	}
+	testassert.Require(t, activationB != nil, "activation B was not published")
+	callCtx, cancel := context.WithCancel(context.Background())
+	marked := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel}, activation: activationB})
+	defer marked.end()
+
+	_, err = apiA.Command(marked.ctx, extension.CommandTarget{Kind: extension.ExposedTargetSession, SessionID: unknown}, "interrupt", json.RawMessage(`{}`))
+	testassert.Require(t, errors.Is(err, ErrDenied), "unknown-Session callback command = %v, want denied before the target", err)
+
+	setExtensionSection(t, e.configPath, idA, `{"enabled":true,"v":2}`)
+	_, err = r.Reload(context.Background(), testCaller(r))
+	testassert.NoError(t, err)
+	_, err = apiA.Command(marked.ctx, extension.CommandTarget{Kind: extension.ExposedTargetHarness}, "interrupt", json.RawMessage(`{}`))
+	testassert.Require(t, errors.Is(err, ErrDenied), "retired-activation callback command = %v, want denied before publication", err)
+}
+
+// TestNilContextCommandParity proves a nil command context is independent by
+// the native API and the worker request path alike.
 func TestNilContextCommandParity(t *testing.T) {
 	classes := make(map[string]string, 2)
 	for _, mode := range []struct {
@@ -939,7 +1104,8 @@ func TestNilContextCommandParity(t *testing.T) {
 			session := projectionSession(t, r, workspace, "")
 			invokeFixtureOperation(t, r, session.Identity.SessionID, "nil_command", `{}`, "req-nil-command")
 			report := log.awaitKind(t, "nil-command")
-			testassert.Require(t, report["class"] == "conflict", "nil-context command = %+v, want the ordinary in-callback conflict", report)
+			testassert.Require(t, report["class"] == "", "nil-context command = %+v, want an independent success", report)
+			awaitOperation(t, r, session.Identity.SessionID, "op-nil-context", harness.OperationSuccess)
 			classes[mode.name] = report["class"]
 		})
 	}

@@ -1,4 +1,4 @@
-package sessionstate_test
+package harness_test
 
 import (
 	"context"

@@ -51,7 +51,6 @@ type nativeActivation struct {
 	close        func(context.Context) error
 	holds        int
 	closed       bool
-	callbacks    int
 	observerWait []*observerDelivery
 	construct    *nativeCandidate
 	entry        nativeCallLifetime
@@ -84,29 +83,6 @@ func (a *nativeActivation) unavailable() error {
 	a.owner.nativeMu.Lock()
 	defer a.owner.nativeMu.Unlock()
 	return a.unavailableLocked()
-}
-
-// beginCallback and endCallback maintain the activation's one outstanding
-// host-callback count. The count covers every callback the host makes into
-// the activation: tools, every hook kind, services, operations, cleanup,
-// strategies and observers. An independent command is refused while it is
-// nonzero rather than queued behind the callback.
-func (a *nativeActivation) beginCallback() {
-	if a == nil || a.owner == nil {
-		return
-	}
-	a.owner.nativeMu.Lock()
-	a.callbacks++
-	a.owner.nativeMu.Unlock()
-}
-
-func (a *nativeActivation) endCallback() {
-	if a == nil || a.owner == nil {
-		return
-	}
-	a.owner.nativeMu.Lock()
-	a.callbacks--
-	a.owner.nativeMu.Unlock()
 }
 
 // observerDeliveries returns the activation's current observer registrations.
@@ -758,6 +734,9 @@ func (api nativeAPI) RegisterService(service extension.Service, replace extensio
 	if service.Name == "" || len(service.Methods) == 0 {
 		return nil, errors.New("invalid service")
 	}
+	if _, meltaService := extension.HostService(service.Name); meltaService || service.Name == extension.ContractPrompt {
+		return nil, fmt.Errorf("service %q already registered", service.Name)
+	}
 	compiled := registeredService{methods: make(map[string]nativeServiceMethod, len(service.Methods))}
 	for _, method := range service.Methods {
 		if method.Handler == nil || compiled.methods[method.Method.Name].contract != nil {
@@ -853,15 +832,17 @@ func commandTargetScope(target extension.CommandTarget) CallerScope {
 	return CallerScope{}
 }
 
-// Command issues one independent command as this activation after its host
-// callback returned. Every guard is checked under the activation mutex, in
-// order: current publication, the granted command service, the target inside
-// the granted scope, and no outstanding host callback. The command then runs
-// through the ordinary fixed producer with a fresh extension-origin Caller
-// bounded to the target; conflict is returned rather than queued.
+// Command issues one independent command as this activation. A context Melta
+// handed to a host callback of any extension is refused first, before
+// publication, service, Session or scope checks and without taking the
+// activation lock. Otherwise the command runs through the ordinary fixed
+// producer with a fresh extension-origin Caller bounded to the target.
 func (api nativeAPI) Command(ctx context.Context, target extension.CommandTarget, method string, args json.RawMessage) (extension.Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if callbackContext(ctx) {
+		return extension.Result{}, fmt.Errorf("command issued from a host callback: %w", ErrDenied)
 	}
 	a := api.activation
 	s := a.owner
@@ -893,10 +874,6 @@ func (api nativeAPI) Command(ctx context.Context, target extension.CommandTarget
 	if err := authorizeResolvedScope(scope, targetScope, sessionWorkspace); err != nil {
 		s.nativeMu.Unlock()
 		return extension.Result{}, err
-	}
-	if a.callbacks != 0 {
-		s.nativeMu.Unlock()
-		return extension.Result{}, fmt.Errorf("extension callback is outstanding: %w", harness.ErrConflict)
 	}
 	extensionID := a.id
 	s.nativeMu.Unlock()
@@ -957,7 +934,6 @@ type nativeCallScope struct {
 	commandScope     CallerScope
 	receipt          *nativeReceipt
 	start            *nativeSessionStart
-	countsCallback   bool
 }
 
 type nativeSessionStart struct {
@@ -1101,21 +1077,14 @@ func (scope *nativeCallScope) call(ctx context.Context, service, method string, 
 			return extension.Result{}, err
 		}
 		h := scope.host.hosts.background.h
-		var callErr error
-		switch method {
-		case "set":
-			var input struct {
-				Value json.RawMessage `json:"value"`
-			}
-			if err := json.Unmarshal(args, &input); err != nil {
-				return extension.Result{}, fmt.Errorf("state value: %v: %w", err, harness.ErrInvalid)
-			}
-			_, callErr = h.SetSessionExtensionState(callCtx, scope.session.SessionID, scope.activation.id, harness.SessionStateValue(input.Value))
-		case "clear":
-			_, callErr = h.ClearSessionExtensionState(callCtx, scope.session.SessionID, scope.activation.id)
+		var input struct {
+			Value json.RawMessage `json:"value"`
 		}
-		if callErr != nil {
-			return extension.Result{}, callErr
+		if err := json.Unmarshal(args, &input); err != nil {
+			return extension.Result{}, fmt.Errorf("state value: %v: %w", err, harness.ErrInvalid)
+		}
+		if _, err := h.SetSessionExtensionState(callCtx, scope.session.SessionID, scope.activation.id, harness.SessionStateValue(input.Value)); err != nil {
+			return extension.Result{}, err
 		}
 		scope.receipt.mark()
 		return extension.Result{Value: json.RawMessage("null")}, nil
@@ -1231,7 +1200,7 @@ func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method
 	}
 	childCtx, cancel := context.WithCancel(ctx)
 	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, pure: parent.pure || binding.contract.Mode == extension.ModePure, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, receipt: parent.receipt, start: parent.start, requestID: parent.requestID})
-	return executeNativeProvider(childCtx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call, RequestID: scope.requestID}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+	return executeNativeProvider(scope.ctx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call, RequestID: scope.requestID}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 		defer scope.end()
 		return binding.handler(ctx, call, args)
 	}, "service", service, args)

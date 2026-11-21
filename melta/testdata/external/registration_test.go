@@ -810,7 +810,10 @@ func TestRequestHookReplacementKeepsRecordedRegistration(t *testing.T) {
 	}
 }
 
-func TestSessionChoicesRemainDistinctOnReusedActivation(t *testing.T) {
+// TestReusedActivationKeepsPerSessionCandidates proves one activation reused
+// across Sessions keeps each Session's own model, prompt and empty tool list in
+// its own candidate and stored admission, with a stable hook identity.
+func TestReusedActivationKeepsPerSessionCandidates(t *testing.T) {
 	ctx := context.Background()
 	server := newScriptedModel(t)
 	var config map[string]any
@@ -863,9 +866,8 @@ func TestSessionChoicesRemainDistinctOnReusedActivation(t *testing.T) {
 		}
 		submit(t, owner, bound, session.SessionId, "choices-"+name, "hello")
 		input := <-observed
-		if input.Choices.Model == nil || input.Choices.Model.Model != name || input.Choices.Prompt == nil || *input.Choices.Prompt != prompt ||
-			input.Candidate.Model.Model != name || input.Candidate.Prompt == nil || *input.Candidate.Prompt != prompt || len(input.Candidate.Tools) != 0 {
-			t.Fatalf("session %d inputs/candidate = %+v / %+v", i, input.Choices, input.Candidate)
+		if input.Candidate.Model.Model != name || input.Candidate.Prompt == nil || *input.Candidate.Prompt != prompt || len(input.Candidate.Tools) != 0 {
+			t.Fatalf("session %d candidate = %+v, want model %q, prompt %q and an empty tool list", i, input.Candidate, name, prompt)
 		}
 	}
 	if activations.Load() != 1 {
@@ -921,6 +923,101 @@ func TestSessionChoicesRemainDistinctOnReusedActivation(t *testing.T) {
 		}
 		hookID = record.Evidence.HookIDs[0].HookID
 	}
+}
+
+// TestSelectedFullDefinitionReplacesCompletePrompt proves a selected full-mode
+// Agents definition replaces a Session's complete prompt with the default
+// assembly plus the definition's instructions.
+func TestSelectedFullDefinitionReplacesCompletePrompt(t *testing.T) {
+	ctx := context.Background()
+	server := newScriptedModel(t)
+	var config map[string]any
+	if err := json.Unmarshal(configurationDocument(server.URL), &config); err != nil {
+		t.Fatal(err)
+	}
+	config["extensions"] = map[string]any{"agents": map[string]any{
+		"enabled": true,
+		"definitions": map[string]any{"author": map[string]any{
+			"system_prompt": "full",
+			"prompt":        "Follow the author instructions.",
+		}},
+	}}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := openOwner(t, melta.Options{
+		DataDir: t.TempDir(), Configuration: melta.NewValueConfigurationSource(raw),
+		Credentials: &memoryCredentials{values: map[string]melta.CredentialValue{externalKeyEnv: {Value: externalKey, Defined: true}}},
+		Identity:    "external full-mode identity",
+		Extensions:  []extension.Extension{agents.Author()},
+	})
+	defer owner.Close(ctx)
+	bound := caller(t, owner)
+	ref := protocol.ModelRef("prov/m")
+	complete := "session complete prompt"
+	tools := []string{}
+	session, err := owner.CreateSession(ctx, bound, t.TempDir(), &protocol.SessionInputs{Model: &ref, Prompt: &complete, Tools: &tools})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments, err := json.Marshal(map[string]string{"agent": "author"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawArguments := json.RawMessage(arguments)
+	_, err = owner.InvokeExtension(ctx, bound, protocol.ExtensionInvocationRequest{
+		ExtensionId: "agents", Operation: "select", RequestId: "full-prompt-select",
+		Target:    protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindSession, SessionId: &session.SessionId},
+		Arguments: &rawArguments,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit(t, owner, bound, session.SessionId, "op-full-prompt", "hello")
+	bodies, _ := server.requests()
+	if len(bodies) == 0 {
+		t.Fatal("the model received no request")
+	}
+	system := wireSystemText(bodies[0])
+	if !strings.Contains(system, "external full-mode identity") || !strings.Contains(system, "Follow the author instructions.") || !strings.Contains(system, "## Your Role and Instructions") {
+		t.Fatalf("system prompt = %q, want the default assembly plus the definition instructions", system)
+	}
+	if strings.Contains(system, "session complete prompt") {
+		t.Fatalf("system prompt = %q, want the Session's complete prompt replaced", system)
+	}
+}
+
+// wireSystemText returns the system message text of one chat body.
+func wireSystemText(body string) string {
+	var doc struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal([]byte(body), &doc) != nil {
+		return ""
+	}
+	for _, message := range doc.Messages {
+		if message.Role != "system" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(message.Content, &text) == nil {
+			return text
+		}
+		var parts []struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(message.Content, &parts) == nil {
+			for _, part := range parts {
+				text += part.Text
+			}
+			return text
+		}
+	}
+	return ""
 }
 
 func TestOrdinaryAndAgentsCreateUseDifferentModels(t *testing.T) {

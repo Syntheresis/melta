@@ -16,7 +16,7 @@
   on:close={() => dispatch('close')}>
   <div class="menu">
     <div id="agent-picker-title" class="hdr">
-      <span>Session agent type</span>
+      <span>Session agent</span>
       <button class="panel-close" on:click={() => dialog.close()} aria-label="Close agent picker">×</button>
     </div>
     <div class="list">
@@ -26,7 +26,7 @@
         {#each agents as agent (agent.name)}
           <button class="row" class:cur={agent.name === current} on:click={() => dispatch('select', agent.name)}
             data-ref={agent.name}
-            aria-label={`Set session agent type ${agent.name}`}>
+            aria-label={`Set session agent ${agent.name}`}>
             <span class="name">{agent.name}</span>
             {#if agent.description}<span class="desc">{agent.description}</span>{/if}
           </button>

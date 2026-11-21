@@ -46,7 +46,7 @@ func TestResolveBuiltinsInheritThroughPrimary(t *testing.T) {
 
 	review, err := cfg.Resolve("review")
 	testassert.NoError(t, err)
-	testassert.Require(t, reflect.DeepEqual(review.Tools, StandardTools) && review.Model == "test/secondary-model" && review.SystemPrompt == SystemPromptSimple, "review = model:%q system_prompt:%q tools:%v, want secondary's resolved values inherited unmodified", review.Model, review.SystemPrompt, review.Tools)
+	testassert.Require(t, reflect.DeepEqual(review.Tools, []string(nil)) && review.Model == "test/secondary-model" && review.SystemPrompt == SystemPromptSimple, "review = model:%q system_prompt:%q tools:%v, want secondary's resolved values inherited unmodified", review.Model, review.SystemPrompt, review.Tools)
 }
 
 func TestRetainedBuiltinRosterOrderAndResolution(t *testing.T) {
@@ -95,7 +95,7 @@ func TestBuiltinsExposeConcreteRootAndCodeOnlyCompact(t *testing.T) {
 
 	primary, err := cfg.Resolve("primary")
 	testassert.NoError(t, err)
-	testassert.Require(t, primary.SystemPrompt == SystemPromptFull && reflect.DeepEqual(primary.Tools, StandardTools) && !primary.Readonly && !primary.Subagent, "primary = %+v, want full prompt and standard tools; primary booleans = readonly:%v subagent:%v", primary, primary.Readonly, primary.Subagent)
+	testassert.Require(t, primary.SystemPrompt == SystemPromptFull && primary.Tools == nil && !primary.Readonly && !primary.Subagent, "primary = %+v, want full prompt and no tool list; primary booleans = readonly:%v subagent:%v", primary, primary.Readonly, primary.Subagent)
 
 	compactAgent, err := cfg.Resolve("compact")
 	testassert.NoError(t, err)
@@ -111,13 +111,13 @@ func TestToolsPresenceControlsInheritanceEmptyAndSubset(t *testing.T) {
 
 	empty, err := cfg.Resolve("empty")
 	testassert.NoError(t, err)
-	testassert.Require(t, len(empty.Tools) == 0, "empty tools = %v, want explicit empty set", empty.Tools)
+	testassert.Require(t, empty.Tools != nil && len(empty.Tools) == 0, "empty tools = %v, want an explicit non-nil empty set", empty.Tools)
 	reader, err := cfg.Resolve("reader")
 	testassert.NoError(t, err)
 	testassert.Require(t, reflect.DeepEqual(reader.Tools, []string{"read_file", "run_command"}), "reader tools = %v, want exact subset", reader.Tools)
 	review, err := cfg.Resolve("review")
 	testassert.NoError(t, err)
-	testassert.Require(t, reflect.DeepEqual(review.Tools, StandardTools), "review tools = %v, want inherited standard tools", review.Tools)
+	testassert.Require(t, review.Tools == nil, "review tools = %v, want the inherited absent list", review.Tools)
 }
 
 func TestBuiltinLockedFieldsIgnoredAndModelHonored(t *testing.T) {
@@ -231,7 +231,7 @@ func TestParseCapabilityAndToolSelection(t *testing.T) {
 	testassert.Require(t, emptyDef.Tools != nil && len(*emptyDef.Tools) == 0, "empty definition tools = %#v, want an explicit empty list", emptyDef.Tools)
 	primary, err := cfg.Resolve("primary")
 	testassert.NoError(t, err)
-	testassert.Require(t, reflect.DeepEqual(primary.Tools, StandardTools), "primary default tools = %q, want the standard roster", primary.Tools)
+	testassert.Require(t, primary.Tools == nil, "primary default tools = %q, want no tool list", primary.Tools)
 }
 
 func TestParseRejectsEmptyToolNames(t *testing.T) {

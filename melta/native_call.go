@@ -90,26 +90,27 @@ func (v *nativeCallLifetime) end() {
 	v.wg.Wait()
 }
 
-// callbackScope marks one nativeCallScope as a host callback into an
-// activation: the activation's outstanding-callback count is held for the
-// scope's lifetime and released by end. A scope created for the extension's
-// own call into the host is not a callback into its activation.
-func callbackScope(scope *nativeCallScope) *nativeCallScope {
-	if scope.activation != nil {
-		scope.activation.beginCallback()
-		scope.countsCallback = true
+type callbackContextKey struct{}
+
+// callbackContext reports whether ctx is a context Melta handed to a
+// host→extension callback. Every callback except observer delivery carries it.
+func callbackContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
 	}
-	return scope
+	_, ok := ctx.Value(callbackContextKey{}).(struct{})
+	return ok
 }
 
-// end releases this callback scope's activation count before joining the
-// lifetime.
-func (s *nativeCallScope) end() {
-	if s.countsCallback {
-		s.activation.endCallback()
-		s.countsCallback = false
+// callbackScope marks one nativeCallScope as a host callback into an
+// activation: every context Melta hands to the callback carries the marker, so
+// a command issued from it is refused. A scope created for the extension's own
+// call into the host carries no mark.
+func callbackScope(scope *nativeCallScope) *nativeCallScope {
+	if scope.activation != nil {
+		scope.ctx = context.WithValue(scope.ctx, callbackContextKey{}, struct{}{})
 	}
-	s.nativeCallLifetime.end()
+	return scope
 }
 
 type grantContextKey struct{}

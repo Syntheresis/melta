@@ -82,20 +82,22 @@ func TestChoiceChangeWhileOperationParked(t *testing.T) {
 	e := newOwnerEnv(t)
 	writeServiceFile(t, e.configPath, `{"providers":{"prov":`+nominalProvMember(e.server.URL, "",
 		`{"m":{"name":"M","context_window":262144},"m2":{"name":"M2","context_window":262144}}`)+`}}`)
-	writeAgentDefinitions(t, e.configPath, `{"solo":{"model":"prov/m","system_prompt":"simple"}}`)
+	writeAgentDefinitions(t, e.configPath, `{"solo":{"system_prompt":"simple"}}`)
 	e.fixtureStore(storage.NewMemory())
 	e.server.setScript(func(context.Context, string) []string { return textTurnEvents("done") })
 
+	first := model.ModelRef{Provider: "prov", Model: "m"}
+	second := model.ModelRef{Provider: "prov", Model: "m2"}
 	ctx := context.Background()
-	r, err := e.open(ctx)
+	opts := e.options()
+	opts.Defaults = harness.SessionInputs{Model: &first}
+	r, err := open(ctx, opts)
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, r.Close(ctx)) }()
 	session, err := r.createSession(ctx, e.dataDir, "solo")
 	testassert.NoError(t, err)
 	sessionID := session.Identity.SessionID
 
-	first := model.ModelRef{Provider: "prov", Model: "m"}
-	second := model.ModelRef{Provider: "prov", Model: "m2"}
 	gate := make(chan struct{})
 	e.server.setHold(gate)
 	release := sync.OnceFunc(func() { close(gate) })

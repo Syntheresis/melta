@@ -30,7 +30,6 @@ func runRegisteredAdmission(ctx context.Context, stage *nativeSnapshot, input ex
 			Session: input.Session, State: bytes.Clone(states[entry.activation.id]), Call: scope.call,
 		}
 		owned := input
-		owned.Choices = input.Choices.Owned()
 		owned.Candidate = ownAdmissionCandidate(candidate)
 		owned.ToolCatalog = ownToolDefinitions(input.ToolCatalog)
 		owned.ModelCatalog = slices.Clone(input.ModelCatalog)
@@ -40,7 +39,7 @@ func runRegisteredAdmission(ctx context.Context, stage *nativeSnapshot, input ex
 		}
 		result, err := func() (extension.AdmissionResult, error) {
 			defer scope.end()
-			return entry.value.(nativeHook).handler.(extension.AdmissionHook)(callCtx, call, owned)
+			return entry.value.(nativeHook).handler.(extension.AdmissionHook)(scope.ctx, call, owned)
 		}()
 		if err != nil {
 			return extension.AdmissionCandidate{}, err

@@ -8,18 +8,6 @@ const (
 	SystemPromptFull   = "full"
 )
 
-// StandardTools is the built-in primary's default tool set.
-var StandardTools = []string{
-	"read_file",
-	"write_file",
-	"edit_file",
-	"apply_patch",
-	"run_command",
-	"process",
-	"sleep",
-	"task",
-}
-
 // Definition is the on-disk agent type shape. Pointer fields distinguish
 // omitted fields from explicit zero values for inheritance.
 type Definition struct {

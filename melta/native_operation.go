@@ -78,7 +78,7 @@ func (r *Melta) invokeRegisteredOperation(ctx context.Context, caller Caller, ex
 		}
 		result, err = func() (extension.Result, error) {
 			defer scope.end()
-			return executeNativeProvider(callCtx, author, operation.method.contract, operation.method.handler, "operation", methodName, args)
+			return executeNativeProvider(scope.ctx, author, operation.method.contract, operation.method.handler, "operation", methodName, args)
 		}()
 		if err != nil {
 			var declared *extension.CallError

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,8 +15,35 @@ import (
 	"github.com/Syntheresis/melta/extensions/adaptation"
 	"github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/storage"
+	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
+	"github.com/Syntheresis/melta/prompt"
 )
+
+// TestBuiltinPrimaryKeepsRegisteredTools proves the built-in primary leaves
+// the candidate's tool set unchanged, so a tool registered by another
+// extension is advertised.
+func TestBuiltinPrimaryKeepsRegisteredTools(t *testing.T) {
+	e := newOwnerEnv(t)
+	writeAgentDefinitions(t, e.configPath, `{}`)
+	e.fixtureStore(storage.NewMemory())
+	e.server.setScript(func(_ context.Context, _ string) []string { return textTurnEvents("done") })
+	probe := extension.Extension{Manifest: registrarManifest("third-party"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterTool(testDescribeTool("third_party_tool"), testRegisteredTool{}, nil)
+		return nil, err
+	}}
+	enableFixturePlugin(t, e.configPath, "third-party")
+	ctx := context.Background()
+	r, err := e.open(ctx, probe)
+	testassert.NoError(t, err)
+	defer func() { _ = r.Close(ctx) }()
+	session, err := r.createSession(ctx, e.dataDir, "primary")
+	testassert.NoError(t, err)
+	submitThroughRuntime(t, r, session.Identity.SessionID, "op-third", "hello")
+	record := awaitOperation(t, r, session.Identity.SessionID, "op-third", harness.OperationSuccess)
+	testassert.Require(t, slices.Contains(record.Admission.Execution.InitialToolNames, "third_party_tool"), "admitted tools = %v, want the third-party tool", record.Admission.Execution.InitialToolNames)
+}
 
 func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "bundled")
@@ -106,13 +134,18 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 				catalog := []model.ToolDefinition{{Name: "run_command", Parameters: []byte(`{}`)}, {Name: "task", Parameters: []byte(`{}`)}}
 				admit := stage.hooks["admission"][0].value.(nativeHook).handler.(extension.AdmissionHook)
 				empty := ""
-				admitted, err := admit(context.Background(), call, extension.AdmissionInput{Choices: harness.SessionInputs{Prompt: &empty, Tools: []string{}}, Candidate: extension.AdmissionCandidate{Model: model.ModelRef{Provider: "p", Model: "m"}, Prompt: &empty, Tools: []model.ToolDefinition{}}, ToolCatalog: catalog})
-				if err != nil || admitted.Candidate == nil || admitted.Candidate.Prompt == nil || *admitted.Candidate.Prompt != "" || admitted.Candidate.Tools == nil || len(admitted.Candidate.Tools) != 0 {
-					t.Fatalf("empty choices: %#v %v", admitted, err)
+				access := extension.PromptAccess{
+					Sections:    func() []prompt.Section { return nil },
+					Environment: func() string { return "" },
+					Rules:       func() (string, []prompt.Section, error) { return "", nil, nil },
+				}
+				admitted, err := admit(context.Background(), call, extension.AdmissionInput{Candidate: extension.AdmissionCandidate{Model: model.ModelRef{Provider: "p", Model: "m"}, Prompt: &empty, Tools: []model.ToolDefinition{}}, ToolCatalog: catalog, Prompt: access})
+				if err != nil || admitted.Candidate == nil || admitted.Candidate.Prompt == nil || len(admitted.Candidate.Tools) != 2 || admitted.Candidate.Tools[0].Name != "run_command" || admitted.Candidate.Tools[1].Name != "task" {
+					t.Fatalf("explore admission: %#v %v", admitted, err)
 				}
 				arguments := stage.hooks["arguments"][0].value.(nativeHook).handler.(extension.ArgumentsHook)
 				call.State = []byte(`{"agent":"guard"}`)
-				guarded, err := admit(context.Background(), call, extension.AdmissionInput{Choices: harness.SessionInputs{Prompt: &empty}, Candidate: extension.AdmissionCandidate{Model: model.ModelRef{Provider: "p", Model: "m"}, Prompt: &empty}, ToolCatalog: catalog})
+				guarded, err := admit(context.Background(), call, extension.AdmissionInput{Candidate: extension.AdmissionCandidate{Model: model.ModelRef{Provider: "p", Model: "m"}, Prompt: &empty}, ToolCatalog: catalog, Prompt: access})
 				if err != nil || guarded.Candidate == nil || len(guarded.Candidate.Tools) != 1 || guarded.Candidate.Tools[0].Name != "run_command" {
 					t.Fatalf("missing tool admission: %#v %v", guarded, err)
 				}

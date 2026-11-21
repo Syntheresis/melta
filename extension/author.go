@@ -11,7 +11,7 @@ import (
 )
 
 // APIVersion is the exact activation authoring contract version.
-const APIVersion = "8"
+const APIVersion = "9"
 
 // Manifest is the metadata available before an extension is activated.
 type Manifest struct {
@@ -100,9 +100,10 @@ type API interface {
 	RegisterCleanup(CleanupHook, Registration) (Registration, error)
 	AttachObserver(Observer, Registration) (Registration, error)
 	Call(context.Context, string, string, json.RawMessage) (Result, error)
-	// Command issues one independent attributed command after a callback
-	// returned. While any host callback into the same activation is in flight
-	// it returns harness.ErrConflict and is never queued.
+	// Command issues one independent attributed command for work the extension
+	// does on its own. Work done for a client or Operation goes through that
+	// callback's own AuthorContext.Call, within its limits. A context Melta
+	// handed to a callback is denied; a nil context is independent.
 	Command(context.Context, CommandTarget, string, json.RawMessage) (Result, error)
 }
 
@@ -172,11 +173,10 @@ type Operation struct {
 
 type AuthorHandler func(context.Context, AuthorContext, json.RawMessage) (Result, error)
 
-// AdmissionInput is the captured input and candidate execution choices.
+// AdmissionInput is the captured input and candidate execution.
 type AdmissionInput struct {
 	Session      harness.SessionIdentity
 	Input        []model.ContentPart
-	Choices      harness.SessionInputs
 	Candidate    AdmissionCandidate
 	ModelCatalog []model.ModelRef
 	ToolCatalog  []model.ToolDefinition

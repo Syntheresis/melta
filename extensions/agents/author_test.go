@@ -55,26 +55,25 @@ func (a *authorAPI) AttachArguments(_ extension.HookMode, h extension.ArgumentsH
 	return nil, nil
 }
 
-func TestAuthorAdmissionChoices(t *testing.T) {
-	api := &authorAPI{operations: map[string]extension.Operation{}}
+func TestAuthorAdmissionAppliesDefinition(t *testing.T) {
+	api := &authorAPI{operations: map[string]extension.Operation{}, settings: []byte(`{"enabled":true,"definitions":{"writer":{"model":"profile/b","system_prompt":"none","prompt":"","tools":["read_file"]},"plain":{"system_prompt":"full"}}}`)}
 	if _, err := Author().Activate(context.Background(), api); err != nil {
 		t.Fatal(err)
 	}
-	empty := ""
-	base := extension.AdmissionCandidate{Model: model.ModelRef{Provider: "host", Model: "m"}, Instructions: "incoming", Tools: []model.ToolDefinition{{Name: "read_file"}}}
-	input := extension.AdmissionInput{Choices: harness.SessionInputs{Prompt: &empty, Tools: []string{}}, Candidate: base, ToolCatalog: base.Tools}
-	result, err := api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"explore"}`)}, input)
-	if err != nil || result.Candidate == nil || result.Candidate.Prompt != base.Prompt || result.Candidate.Instructions != "incoming" || len(result.Candidate.Tools) != 1 {
-		t.Fatalf("explicit choices lost: %#v, %v", result, err)
-	}
-	result, err = api.admission(context.Background(), extension.AuthorContext{}, input)
+	base := extension.AdmissionCandidate{Model: model.ModelRef{Provider: "host", Model: "m"}, Instructions: "incoming", Tools: []model.ToolDefinition{{Name: "read_file"}, {Name: "write_file"}}}
+	input := extension.AdmissionInput{Candidate: base, ToolCatalog: base.Tools}
+	result, err := api.admission(context.Background(), extension.AuthorContext{}, input)
 	if err != nil || result.Candidate != nil {
 		t.Fatalf("unselected changed candidate: %#v, %v", result, err)
 	}
-	input.Candidate.Tools = []model.ToolDefinition{}
-	result, err = api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"explore"}`)}, input)
-	if err != nil || result.Candidate == nil || result.Candidate.Tools == nil {
-		t.Fatalf("explicit empty advertisement became absent: %#v, %v", result, err)
+	result, err = api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"writer"}`)}, input)
+	if err != nil || result.Candidate == nil || result.Candidate.Model != (model.ModelRef{Provider: "profile", Model: "b"}) ||
+		result.Candidate.Prompt == nil || *result.Candidate.Prompt != "" || len(result.Candidate.Tools) != 1 || result.Candidate.Tools[0].Name != "read_file" {
+		t.Fatalf("definition over candidate: %#v, %v", result, err)
+	}
+	result, err = api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"plain"}`)}, input)
+	if err != nil || result.Candidate == nil || result.Candidate.Model != base.Model || len(result.Candidate.Tools) != len(base.Tools) {
+		t.Fatalf("definition without model or tools changed the candidate: %#v, %v", result, err)
 	}
 }
 
@@ -84,8 +83,11 @@ func TestAuthorAdmissionUnavailableToolKeepsRestrictions(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := extension.AuthorContext{State: []byte(`{"agent":"missing"}`)}
-	empty := ""
-	result, err := api.admission(context.Background(), call, extension.AdmissionInput{Choices: harness.SessionInputs{Prompt: &empty}, ToolCatalog: []model.ToolDefinition{{Name: "run_command"}}})
+	result, err := api.admission(context.Background(), call, extension.AdmissionInput{ToolCatalog: []model.ToolDefinition{{Name: "run_command"}}, Prompt: extension.PromptAccess{
+		Sections:    func() []prompt.Section { return nil },
+		Environment: func() string { return "" },
+		Rules:       func() (string, []prompt.Section, error) { return "", nil, nil },
+	}})
 	if err != nil || result.Candidate == nil || len(result.Candidate.Tools) != 1 || result.Candidate.Tools[0].Name != "run_command" {
 		t.Fatalf("available tools: %#v %v", result, err)
 	}
@@ -99,51 +101,26 @@ func TestAuthorAdmissionUnavailableToolKeepsRestrictions(t *testing.T) {
 	}
 }
 
-func TestAuthorAdmissionModelPrecedence(t *testing.T) {
-	api := &authorAPI{operations: map[string]extension.Operation{}, settings: []byte(`{"enabled":true,"definitions":{"primary":{"model":"profile/b"}}}`)}
-	if _, err := Author().Activate(context.Background(), api); err != nil {
-		t.Fatal(err)
-	}
-	host := model.ModelRef{Provider: "host", Model: "a"}
-	input := extension.AdmissionInput{Candidate: extension.AdmissionCandidate{Model: host}}
-	result, err := api.admission(context.Background(), extension.AuthorContext{}, input)
-	if err != nil || result.Candidate != nil {
-		t.Fatalf("unselected model: %#v %v", result, err)
-	}
-	call := extension.AuthorContext{State: []byte(`{"agent":"primary"}`)}
-	result, err = api.admission(context.Background(), call, input)
-	if err != nil || result.Candidate == nil || result.Candidate.Model != (model.ModelRef{Provider: "profile", Model: "b"}) {
-		t.Fatalf("profile model: %#v %v", result, err)
-	}
-	input.Choices.Model = &host
-	result, err = api.admission(context.Background(), call, input)
-	if err != nil || result.Candidate == nil || result.Candidate.Model != host {
-		t.Fatalf("explicit model: %#v %v", result, err)
-	}
-	complete := "previous hook"
-	input.Choices.Model = nil
-	input.Candidate.Prompt = &complete
-	result, err = api.admission(context.Background(), call, input)
-	if err != nil || result.Candidate == nil || result.Candidate.Prompt != nil {
-		t.Fatalf("profile must select default assembly: %#v %v", result, err)
-	}
-}
-
 func TestAuthorTaskReadvertisement(t *testing.T) {
-	api := &authorAPI{operations: map[string]extension.Operation{}, settings: []byte(`{"enabled":true,"definitions":{"worker":{"tools":["custom"],"subagent":true,"description":"custom worker"}}}`)}
+	api := &authorAPI{operations: map[string]extension.Operation{}, settings: []byte(`{"enabled":true}`)}
 	if _, err := Author().Activate(context.Background(), api); err != nil {
 		t.Fatal(err)
 	}
-	input := extension.AuthorRequestInput{RequestHookInput: harness.RequestHookInput{Purpose: harness.InvocationPurposeConversation, Tools: []model.ToolDefinition{{Name: "task", Description: "custom worker"}}}}
-	call := extension.AuthorContext{}
-	result, err := api.request(context.Background(), call, input)
-	if err != nil || result.Tools != nil {
-		t.Fatalf("advertised roster: %#v %v", result, err)
+	call := extension.AuthorContext{Session: harness.SessionIdentity{OwnerSessionID: "owner"}, Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+		t.Fatal("owned-session task started a Session")
+		return extension.Result{}, nil
+	}}
+	input := extension.AdmissionInput{Session: harness.SessionIdentity{OwnerSessionID: "owner"}, Candidate: extension.AdmissionCandidate{Tools: []model.ToolDefinition{{Name: TaskCapabilityID}}}, ToolCatalog: []model.ToolDefinition{{Name: TaskCapabilityID}}}
+	admitted, err := api.admission(context.Background(), call, input)
+	if err != nil || admitted.Candidate == nil || len(admitted.Candidate.Tools) != 0 {
+		t.Fatalf("owned-session admission = %#v, %v, want task removed", admitted, err)
 	}
-	call.Session.OwnerSessionID = "owner"
-	result, err = api.request(context.Background(), call, input)
-	if err != nil || result.Tools == nil || len(result.Tools) != 0 {
-		t.Fatalf("owned session: %#v %v", result, err)
+	plan := api.tool.Prepare(context.Background(), call, model.ToolCall{ID: "call", Name: TaskCapabilityID, Arguments: []byte(`{"prompt":"work","subagent_type":"secondary"}`)})
+	if plan.Immediate == nil || plan.Immediate.Result.Status != model.ResultError || !strings.Contains(plan.Immediate.Result.Content, "task is unavailable in an owned session") {
+		t.Fatalf("re-advertised task plan = %#v, want the owned-session refusal", plan)
+	}
+	if api.request != nil {
+		t.Fatal("Agents still rewrites the advertised tool list")
 	}
 }
 func (a *authorAPI) AttachAuthorization(h extension.AuthorizationHook, _ extension.Registration) (extension.Registration, error) {
@@ -225,7 +202,6 @@ func TestAuthorPromptModesAndWriteRoot(t *testing.T) {
 		},
 	}}
 	input.ToolCatalog = []model.ToolDefinition{{Name: "write_file"}, {Name: "run_command"}}
-	input.Choices.Tools = []string{"write_file", "run_command"}
 	input.Candidate.Tools = input.ToolCatalog
 	result, err := api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"writer"}`)}, input)
 	if err != nil || reads != 1 || result.Candidate == nil || result.Candidate.Prompt == nil || strings.Contains(*result.Candidate.Prompt, "omit") || !strings.Contains(*result.Candidate.Prompt, "## Your Role and Instructions\n\nwork") {
@@ -245,13 +221,6 @@ func TestAuthorPromptModesAndWriteRoot(t *testing.T) {
 	result, err = api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"headed"}`)}, input)
 	if err != nil || reads != 1 || result.Candidate.Prompt != nil || result.Candidate.Instructions != "# your-role-and-instructions\n\nalready headed" {
 		t.Fatalf("already-headed instructions: %#v %v reads=%d", result, err, reads)
-	}
-	explicit := ""
-	input.Choices.Instructions = &explicit
-	input.Candidate.Instructions = explicit
-	result, err = api.admission(context.Background(), extension.AuthorContext{State: []byte(`{"agent":"writer"}`)}, input)
-	if err != nil || reads != 1 || result.Candidate == nil || result.Candidate.Prompt != nil || result.Candidate.Instructions != "" {
-		t.Fatalf("explicit empty instructions: %#v %v reads=%d", result, err, reads)
 	}
 	call := extension.AuthorContext{State: []byte(`{"agent":"writer"}`), Call: func(_ context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
 		if service != "melta.workspace" || method != "bind" || string(args) != `{"path":"allowed"}` {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"reflect"
 	"sync/atomic"
@@ -135,6 +136,90 @@ func TestAuthorObserverAndIndependentCommand(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestAuthorCommandFromHostCallDenied proves the worker's Command refuses the
+// context of a host call it is serving: the refusal is local for every target
+// and no command frame reaches the host.
+func TestAuthorCommandFromHostCallDenied(t *testing.T) {
+	commandErr := make(chan error, 2)
+	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterCleanup(func(ctx context.Context, _ extension.AuthorContext, _ harness.SessionIdentity) error {
+			_, err := api.Command(ctx, extension.CommandTarget{Kind: extension.ExposedTargetHarness}, "interrupt", json.RawMessage(`{}`))
+			commandErr <- err
+			_, err = api.Command(ctx, extension.CommandTarget{Kind: extension.ExposedTargetSession, SessionID: "unknown"}, "interrupt", json.RawMessage(`{}`))
+			commandErr <- err
+			return nil
+		}, nil)
+		return nil, err
+	}})
+	p.hello(extension.APIVersion)
+	registered := p.activate()
+	p.send(worker.Frame{Kind: worker.KindRequest, ID: "call", Method: worker.MethodCall, Params: callParams(t, registered[0].Handle, "cleanup")})
+	reply := p.read()
+	if reply.ID != "call" || reply.Error != nil || string(reply.Result) != "null" {
+		t.Fatalf("host-call command reply = %+v, want the ordinary null result", reply)
+	}
+	for i := 0; i < 2; i++ {
+		var failure *worker.Error
+		if err := <-commandErr; !errors.As(err, &failure) || failure.Class != worker.ClassDenied {
+			t.Fatalf("command error = %v, want the local denied class", err)
+		}
+	}
+}
+
+// TestAuthorCommandFromObserverSucceeds proves observer delivery carries no
+// host-call mark: a command issued from an observe callback reaches the host
+// and returns its result.
+func TestAuthorCommandFromObserverSucceeds(t *testing.T) {
+	command := make(chan struct {
+		result extension.Result
+		err    error
+	}, 1)
+	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.AttachObserver(func(ctx context.Context, _ extension.Fact) error {
+			result, err := api.Command(ctx, extension.CommandTarget{Kind: extension.ExposedTargetHarness}, "create_session", json.RawMessage(`{"workspace":"/tmp/ws"}`))
+			command <- struct {
+				result extension.Result
+				err    error
+			}{result, err}
+			return nil
+		}, nil)
+		return nil, err
+	}})
+	p.hello(extension.APIVersion)
+	registered := p.activate()
+	fact, err := json.Marshal(extension.Fact{Kind: extension.FactOperationSettled, SessionID: "s", OperationID: "op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.send(worker.Frame{Kind: worker.KindRequest, ID: "observe", Method: worker.MethodCall, Params: callParamsWithArguments(t, registered[0].Handle, "observe", fact)})
+	frame := p.read()
+	if frame.Method != worker.MethodCommand || frame.ID == "" {
+		t.Fatalf("observer command frame = %+v, want the host command request", frame)
+	}
+	encoded, err := worker.EncodeServiceResult(extension.Result{Value: json.RawMessage(`{"session_id":"created"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.send(worker.Frame{Kind: worker.KindResponse, ID: frame.ID, Result: encoded})
+	if reply := p.read(); reply.ID != "observe" || reply.Error != nil || string(reply.Result) != "null" {
+		t.Fatalf("observe reply = %+v, want the ordinary null result", reply)
+	}
+	got := <-command
+	if got.err != nil || string(got.result.Value) != `{"session_id":"created"}` {
+		t.Fatalf("observer command = (%+v, %v), want the host result", got.result, got.err)
+	}
+}
+
+// callParamsWithArguments builds one author call carrying explicit arguments.
+func callParamsWithArguments(t *testing.T, handle, method string, arguments json.RawMessage) json.RawMessage {
+	t.Helper()
+	params, err := json.Marshal(worker.AuthorCallParams{Handle: handle, Method: method, Context: worker.AuthorCallContext{Token: "t"}, Arguments: worker.JSONBytes(arguments)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return params
 }
 
 // respondNull answers one host request with the protocol-level null result.

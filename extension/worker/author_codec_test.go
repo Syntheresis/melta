@@ -61,7 +61,6 @@ func TestAuthorAdmissionCodecsWireShape(t *testing.T) {
 		t.Fatalf("omitted tools = %s, %v", raw, err)
 	}
 	input := extension.AdmissionInput{
-		Choices: harness.SessionInputs{Tools: []string{}},
 		Candidate: extension.AdmissionCandidate{Model: model.ModelRef{Provider: "provider", Model: "model"},
 			Tools: []model.ToolDefinition{{Name: "tool", Parameters: json.RawMessage{0xff, '{'}}}},
 		ModelCatalog: []model.ModelRef{{Provider: "provider", Model: "model"}},
@@ -69,11 +68,11 @@ func TestAuthorAdmissionCodecsWireShape(t *testing.T) {
 	}
 	raw, err = worker.EncodeAuthorAdmission(input)
 	if err != nil || !bytes.Contains(raw, []byte(`"candidate":{"model":{"provider":"provider","model":"model"}`)) ||
-		!bytes.Contains(raw, []byte(`"choices":{"tools":[]}`)) || bytes.Contains(raw, []byte(`"Candidate"`)) {
+		bytes.Contains(raw, []byte(`"choices"`)) || bytes.Contains(raw, []byte(`"Candidate"`)) {
 		t.Fatalf("unstable admission shape: %s, %v", raw, err)
 	}
 	decoded, err := worker.DecodeAuthorAdmission(raw)
-	if err != nil || decoded.Choices.Tools == nil || !reflect.DeepEqual(decoded.Candidate, input.Candidate) ||
+	if err != nil || !reflect.DeepEqual(decoded.Candidate, input.Candidate) ||
 		!reflect.DeepEqual(decoded.ModelCatalog, input.ModelCatalog) || !reflect.DeepEqual(decoded.ToolCatalog, input.ToolCatalog) {
 		t.Fatalf("admission round trip: %+v, %v", decoded, err)
 	}

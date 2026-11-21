@@ -8,7 +8,6 @@ var builtins = map[string]Definition{
 	"primary": {
 		SystemPrompt: SystemPromptFull,
 		Prompt:       stringPtr(""),
-		Tools:        toolsPtr(StandardTools),
 		Readonly:     boolPtr(false),
 		WriteDir:     stringPtr(""),
 		Description:  stringPtr(""),
@@ -22,6 +21,7 @@ var builtins = map[string]Definition{
 		Subagent:     boolPtr(true),
 	},
 	"explore": {
+		Tools:       toolsPtr([]string{"read_file", "run_command", "process", "sleep", "task"}),
 		Prompt:      stringPtr(explorePrompt),
 		Readonly:    boolPtr(true),
 		Description: stringPtr(exploreDescription),

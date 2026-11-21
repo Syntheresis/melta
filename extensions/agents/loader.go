@@ -199,7 +199,7 @@ func applyDefinition(out *Resolved, def Definition) {
 		out.Prompt = *def.Prompt
 	}
 	if def.Tools != nil {
-		out.Tools = append([]string(nil), (*def.Tools)...)
+		out.Tools = append([]string{}, (*def.Tools)...)
 	}
 	if def.Capabilities != nil {
 		if len(*def.Capabilities) == 0 {

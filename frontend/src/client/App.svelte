@@ -951,7 +951,7 @@
     await refreshPicker();
   }
 
-  // --- Agent type ------------------------------------------------------------
+  // --- Agent ----------------------------------------------------------------
 
   // Selection is reported against its captured Session; the stamped refresh is gated.
   async function pickAgentType(agent) {
@@ -960,7 +960,7 @@
     if (!addressed || !agent) return;
     const cap = stampFor(addressed, 'root')();
     const classified = await invokeAgent('select', { kind: 'session', session_id: addressed }, { agent });
-    if (!reportAddressed(classified, 'Agent type change', `session ${addressed}`)) {
+    if (!reportAddressed(classified, 'Agent change', `session ${addressed}`)) {
       return;
     }
     if (sameStamp(cap, stampFor(addressed, 'root')())) {
@@ -1083,11 +1083,11 @@
     const classified = addressedType
       ? await invokeAgent('set_model', { kind: 'harness' }, { definition_id: addressedType, model: ref })
       : await invoke('model selection', 'SetSessionModel', JSON.stringify({ session_id: addressedSession, body: { model: ref } }), JSON.parse);
-    if (!reportAddressed(classified, 'Model selection', addressedType ? `agent type ${addressedType}` : `session ${addressedSession}`)) {
+    if (!reportAddressed(classified, 'Model selection', addressedType ? `agent ${addressedType}` : `session ${addressedSession}`)) {
       modelError = classified.message;
       return;
     }
-    outcomeNote = addressedType ? `Model selection applied for agent type ${addressedType}.` : 'Model selection applied for this session.';
+    outcomeNote = addressedType ? `Model selection applied for agent ${addressedType}.` : 'Model selection applied for this session.';
     if (!sameStamp(cap, stampFor(rootID, 'root')())) {
       if (addressedType) void refreshGlobal('configuration');
       return;

@@ -249,7 +249,7 @@
          this settings surface; these are that surface's own nav entries, not a
          toolbar strip. -->
     <div class="nav">
-      {#if hasAgents}<button class="navitem" on:click={() => dispatch('agent')} aria-label="Agent type">Agent type</button>{/if}
+      {#if hasAgents}<button class="navitem" on:click={() => dispatch('agent')} aria-label="Agents">Agents</button>{/if}
       <button class="navitem" on:click={() => dispatch('providers')} aria-label="Providers">Providers</button>
       <button class="navitem" on:click={() => dispatch('snapshots')} aria-label="Snapshots">Snapshots</button>
       <button class="navitem" on:click={() => dispatch('viewer')} aria-label="File viewer">File viewer</button>

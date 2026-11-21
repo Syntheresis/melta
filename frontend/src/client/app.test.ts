@@ -404,7 +404,7 @@ describe('initial composition', () => {
     const { target } = await mountApp(connection);
     expect(vi.mocked(sdk.CreateSession)).toHaveBeenCalledWith('{"body":{"workspace":"/ws"}}');
     await openSettings(target);
-    expect(target.querySelector('[aria-label="Agent type"]')).toBeNull();
+    expect(target.querySelector('[aria-label="Agents"]')).toBeNull();
   });
 
   it.each([
@@ -994,9 +994,9 @@ describe('keyboard pickers', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true }));
     await settle();
     expect(vi.mocked(sdk.ListModels)).toHaveBeenCalledWith('{"query":{"all":false}}');
-    expect(target.textContent).toContain('Model for agent type');
+    expect(target.textContent).toContain('Model for agent');
     expect(target.textContent).toContain('primary');
-    expect(target.textContent).toContain('all sessions using this agent type');
+    expect(target.textContent).toContain('all sessions using this agent');
     (target.querySelector('.mp-btn') as HTMLElement).click();
     await settle();
     (target.querySelector('.mp .item') as HTMLElement).click();
@@ -1882,7 +1882,7 @@ describe('repair projection ownership', () => {
     (target.querySelector('[aria-label="Select workspace"]') as HTMLElement).click();
     await settle();
     await openSettings(target);
-    (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Agents"]') as HTMLElement).click();
     await settle();
     await openSettings(target);
     (target.querySelector('[aria-label="Providers"]') as HTMLElement).click();
@@ -1944,7 +1944,7 @@ describe('repair projection ownership', () => {
     await settle();
     expect(target.querySelector('[aria-label="Show warnings"]')).not.toBeNull();
     await openSettings(target);
-    expect(target.querySelector('[aria-label="Agent type"]')).not.toBeNull();
+    expect(target.querySelector('[aria-label="Agents"]')).not.toBeNull();
     // The repair's own fresh global reads fail; no stale payload may survive.
     vi.mocked(sdk.GetConfiguration).mockRejectedValue(new Error('configuration down'));
     vi.mocked(sdk.GetWarnings).mockRejectedValue(new Error('warnings down'));
@@ -1953,7 +1953,7 @@ describe('repair projection ownership', () => {
     await repair(connection);
     expect(target.querySelector('[aria-label="Show warnings"]')).toBeNull();
     await openSettings(target);
-    expect(target.querySelector('[aria-label="Agent type"]')).toBeNull();
+    expect(target.querySelector('[aria-label="Agents"]')).toBeNull();
     expect(target.textContent).not.toContain('other-agent');
   });
 
@@ -2783,7 +2783,7 @@ describe('agent type ownership', () => {
     const { target } = await mountApp(connection);
     const openAgentPicker = async () => {
       await openSettings(target);
-      (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
+      (target.querySelector('[aria-label="Agents"]') as HTMLElement).click();
       await settle();
     };
     await openAgentPicker();
@@ -2791,23 +2791,23 @@ describe('agent type ownership', () => {
     expect(choices.some((text) => text?.includes('primary'))).toBe(true);
     expect(choices.some((text) => text?.includes('compact'))).toBe(true);
     expect(choices.some((text) => text?.includes('reviewer'))).toBe(true);
-    (target.querySelector('[aria-label="Set session agent type compact"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Set session agent compact"]') as HTMLElement).click();
     await settle();
     await settle();
     expect(JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls.at(-1)?.[0] as string).body).toMatchObject({ extension_id: 'agents', operation: 'select', target: { kind: 'session', session_id: 'root1' }, arguments: { agent: 'compact' } });
     // A second returned definition dispatches its own actual name as well.
     await openAgentPicker();
-    (target.querySelector('[aria-label="Set session agent type reviewer"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Set session agent reviewer"]') as HTMLElement).click();
     await settle();
     await settle();
     expect(JSON.parse(vi.mocked(sdk.InvokeExtension).mock.calls.at(-1)?.[0] as string).body).toMatchObject({ operation: 'select', arguments: { agent: 'reviewer' } });
     // The server stays the accepting owner: a generated rejection is displayed.
     rejectSelect = true;
     await openAgentPicker();
-    (target.querySelector('[aria-label="Set session agent type compact"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Set session agent compact"]') as HTMLElement).click();
     await settle();
     await settle();
-    expect(target.textContent).toContain('Agent type change failed');
+    expect(target.textContent).toContain('Agent change failed');
     expect(target.textContent).toContain('unknown agent type');
   });
 
@@ -2825,14 +2825,14 @@ describe('agent type ownership', () => {
     });
     const { target } = await mountApp(connection);
     await openSettings(target);
-    (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Agents"]') as HTMLElement).click();
     await settle();
     const twins = [...target.querySelectorAll('dialog .row')] as HTMLElement[];
     expect(twins.length).toBe(2);
     expect(twins[0].textContent).toContain('first');
     expect(twins[1].textContent).toContain('second');
-    expect(twins[0].getAttribute('aria-label')).toBe('Set session agent type first');
-    expect(twins[1].getAttribute('aria-label')).toBe('Set session agent type second');
+    expect(twins[0].getAttribute('aria-label')).toBe('Set session agent first');
+    expect(twins[1].getAttribute('aria-label')).toBe('Set session agent second');
     expect(twins[0].classList.contains('cur')).toBe(false);
     expect(twins[1].classList.contains('cur')).toBe(true);
     twins[1].click();
@@ -3017,9 +3017,9 @@ describe('settings editor', () => {
     // The actual compact Agent selection uses the Agents select operation,
     // and its type-wide model action uses the supplied set_model extension
     // edit; the edit never writes the baseline settings owner.
-    (target.querySelector('[aria-label="Agent type"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Agents"]') as HTMLElement).click();
     await settle();
-    (target.querySelector('[aria-label="Set session agent type compact"]') as HTMLElement).click();
+    (target.querySelector('[aria-label="Set session agent compact"]') as HTMLElement).click();
     await settle();
     await settle();
     const selectCall = vi.mocked(sdk.InvokeExtension).mock.calls.map(([value]) => JSON.parse(value)).find((value) => value.body.operation === 'select');

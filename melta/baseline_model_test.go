@@ -146,6 +146,47 @@ func TestHostAndDefinitionModelAdmission(t *testing.T) {
 	testassert.Require(t, record.Admission.Execution.Model.String() == "p/a", "reload changed prior capture: %+v", record.Admission.Execution)
 }
 
+// TestSelectedDefinitionModelOverridesSessionInput proves the selected
+// definition's model wins over the Session's input model, while a definition
+// without a model leaves the input model in place.
+func TestSelectedDefinitionModelOverridesSessionInput(t *testing.T) {
+	e := newOwnerEnv(t)
+	writeServiceFile(t, e.configPath, `{"model":"p/a","providers":{"p":{"transport":{"base_url":"`+e.server.URL+`","api_key_env":""},"discovery":false,"models":{"a":{"context_window":8192},"b":{"context_window":16384}}}}}`)
+	writeAgentDefinitions(t, e.configPath, `{"named":{"model":"p/b","system_prompt":"full"},"plain":{"system_prompt":"full"}}`)
+	e.fixtureStore(storage.NewMemory())
+	e.server.setScript(func(_ context.Context, _ string) []string { return textTurnEvents("done") })
+	opts := e.options()
+	opts.Extensions = []extension.Extension{agents.Author()}
+	ctx := context.Background()
+	r, err := open(ctx, opts)
+	testassert.NoError(t, err)
+	defer r.Close(ctx)
+
+	run := func(name, definition, want string) {
+		t.Helper()
+		chosen := protocol.ModelRef("p/a")
+		session, err := r.CreateSession(ctx, testCaller(r), e.dataDir, &protocol.SessionInputs{Model: &chosen})
+		testassert.NoError(t, err)
+		arguments, err := json.Marshal(map[string]string{"agent": definition})
+		testassert.NoError(t, err)
+		raw := json.RawMessage(arguments)
+		_, err = r.InvokeExtension(ctx, testCaller(r), protocol.ExtensionInvocationRequest{
+			ExtensionId: "agents", Operation: "select", RequestId: name + "-select",
+			Target:    protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindSession, SessionId: &session.SessionId},
+			Arguments: &raw,
+		})
+		testassert.NoError(t, err)
+		var part protocol.ContentPart
+		testassert.NoError(t, part.FromTextPart(protocol.TextPart{Kind: protocol.TextPartKindText, Text: "hello"}))
+		_, err = r.SubmitSession(ctx, testCaller(r), session.SessionId, protocol.SubmitRequest{OperationId: name, Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{part}})
+		testassert.NoError(t, err)
+		record := awaitOperation(t, r, session.SessionId, name, harness.OperationSuccess)
+		testassert.Require(t, record.Admission.Execution.Model.String() == want, "%s captured model %s, want %s", name, record.Admission.Execution.Model.String(), want)
+	}
+	run("definition-model", "named", "p/b")
+	run("input-model", "plain", "p/a")
+}
+
 func TestBaselineModelBinding(t *testing.T) {
 	for _, row := range []struct {
 		name, chosen, baseline, want string

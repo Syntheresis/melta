@@ -89,9 +89,6 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 	if _, err := api.AttachAdmission(s.admit, nil); err != nil {
 		return nil, err
 	}
-	if _, err := api.AttachRequest(extension.HookModePure, s.describeTask, nil); err != nil {
-		return nil, err
-	}
 	if _, err := api.AttachArguments(extension.HookModePure, s.arguments, nil); err != nil {
 		return nil, err
 	}

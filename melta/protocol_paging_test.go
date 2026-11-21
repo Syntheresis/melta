@@ -1061,7 +1061,7 @@ func TestHydrationSelectedModelFollowsNextAdmission(t *testing.T) {
 		defer releaseSecond()
 		submitThroughRuntime(t, r, active, "op-2", "running again")
 		awaitModelArrival(t, e)
-		writeServiceFile(t, e.configPath, `{"model":"prov/m","providers":{"prov":`+nominalProvMember(e.server.URL, "", `{"m":{"name":"M","context_window":4096,"max_output_tokens":1024},"m2":{"name":"M2","context_window":8192,"max_output_tokens":1024}}`)+`}}`)
+		writeServiceFile(t, e.configPath, `{"model":"prov/m2","providers":{"prov":`+nominalProvMember(e.server.URL, "", `{"m":{"name":"M","context_window":4096,"max_output_tokens":1024},"m2":{"name":"M2","context_window":8192,"max_output_tokens":1024}}`)+`}}`)
 		writeAgentDefinitions(t, e.configPath, `{"solo":{"model":"prov/m"},"alternate":{"model":"prov/m"}}`)
 		{
 			_, err := r.Reload(context.Background(), testCaller(r))
@@ -1071,13 +1071,13 @@ func TestHydrationSelectedModelFollowsNextAdmission(t *testing.T) {
 		testassert.NoError(t, err)
 		reloaded, err := r.GetHydration(context.Background(), testCaller(r), active)
 		testassert.NoError(t, err)
-		testassert.Require(t, reloaded.ActiveOperation != nil && reloaded.ActiveOperation.Model == "prov/m2" && reloaded.Usage.Context.ContextWindow == 8192 && reloaded.SelectedModel != nil && *reloaded.SelectedModel == "prov/m" && reloaded.ConfigurationRevision.Generation == "2", "reloaded active capture = active %+v window %d, want the captured prov/m2 under its captured 8192; reloaded selected model = %v, want the re-pointed prov/m; reloaded configuration revision = %+v, want generation 2", reloaded.ActiveOperation, reloaded.Usage.Context.ContextWindow, reloaded.SelectedModel, reloaded.ConfigurationRevision)
+		testassert.Require(t, reloaded.ActiveOperation != nil && reloaded.ActiveOperation.Model == "prov/m" && reloaded.Usage.Context.ContextWindow == 4096 && reloaded.SelectedModel != nil && *reloaded.SelectedModel == "prov/m2" && reloaded.ConfigurationRevision.Generation == "2", "reloaded active capture = active %+v window %d, want the captured prov/m under its captured 4096; reloaded selected model = %v, want the baseline prov/m2; reloaded configuration revision = %+v, want generation 2", reloaded.ActiveOperation, reloaded.Usage.Context.ContextWindow, reloaded.SelectedModel, reloaded.ConfigurationRevision)
 
 		releaseSecond()
 		awaitIdleSession(t, r, active)
 		afterReload, err := r.GetHydration(context.Background(), testCaller(r), active)
 		testassert.NoError(t, err)
-		testassert.Require(t, afterReload.SelectedModel != nil && *afterReload.SelectedModel == "prov/m" && afterReload.Usage.Context.ContextWindow == 4096, "after-reload selection = model %v window %d, want prov/m under 4096", afterReload.SelectedModel, afterReload.Usage.Context.ContextWindow)
+		testassert.Require(t, afterReload.SelectedModel != nil && *afterReload.SelectedModel == "prov/m2" && afterReload.Usage.Context.ContextWindow == 8192, "after-reload selection = model %v window %d, want prov/m2 under 8192", afterReload.SelectedModel, afterReload.Usage.Context.ContextWindow)
 	})
 }
 

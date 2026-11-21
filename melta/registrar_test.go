@@ -647,6 +647,36 @@ func TestRegistrarReenableDoesNotReuseRetiredActivation(t *testing.T) {
 	}
 }
 
+// TestRegisterServiceRejectsMeltaServiceNames proves a service name already
+// owned by a Melta host service is refused with the same error as a duplicate
+// registration.
+func TestRegisterServiceRejectsMeltaServiceNames(t *testing.T) {
+	owner := &configurationService{}
+	var duplicateErr, hostErr, promptErr error
+	e := extension.Extension{Manifest: registrarManifest("service-names"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		service := extension.Service{Name: "duplicate", Methods: []extension.RegisteredMethod{{
+			Method: extension.PureMethod("ping", `{"type":"object"}`, `{"type":"null"}`),
+			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+				return extension.Result{Value: json.RawMessage("null")}, nil
+			},
+		}}}
+		if _, err := api.RegisterService(service, nil); err != nil {
+			return nil, err
+		}
+		_, duplicateErr = api.RegisterService(service, nil)
+		service.Name = extension.ContractData
+		_, hostErr = api.RegisterService(service, nil)
+		service.Name = extension.ContractPrompt
+		_, promptErr = api.RegisterService(service, nil)
+		return nil, nil
+	}}
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})
+	testassert.NoError(t, err)
+	defer candidate.release()
+	testassert.Require(t, duplicateErr != nil && hostErr != nil && promptErr != nil && duplicateErr.Error() == `service "duplicate" already registered` && hostErr.Error() == `service "melta.data" already registered` && promptErr.Error() == `service "melta.prompt" already registered`,
+		"melta service errors = %v / %v, duplicate error = %v, want the same already-registered refusal", hostErr, promptErr, duplicateErr)
+}
+
 func TestRegistrarEntryServiceVisibility(t *testing.T) {
 	owner := &configurationService{}
 	manifest := registrarManifest

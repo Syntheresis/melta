@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -223,6 +224,7 @@ func independentFixture() extension.Extension {
 		independentReportOutcome(api, "activate", extension.Result{}, activateErr)
 
 		settled := make(chan string)
+		issuedCommand := false
 		observerHandle, err := api.AttachObserver(func(ctx context.Context, fact extension.Fact) error {
 			settings := api.Settings()
 			if independentSettingsOf(settings).Observe == "block" {
@@ -232,6 +234,12 @@ func independentFixture() extension.Extension {
 				return ctx.Err()
 			}
 			independentReportFile(settings, "fact", "", "", fact.SessionID, fact.OperationID, fact.Status)
+			if independentSettingsOf(settings).Observe == "command" && fact.Kind == extension.FactOperationAdmitted && !issuedCommand {
+				issuedCommand = true
+				arguments, _ := json.Marshal(map[string]string{"workspace": filepath.Dir(independentSettingsOf(settings).Report)})
+				result, err := api.Command(ctx, extension.CommandTarget{Kind: extension.ExposedTargetHarness}, "create_session", arguments)
+				independentReportFile(settings, "observer-command", independentClass(err), string(result.Value), fact.SessionID, fact.OperationID, fact.Status)
+			}
 			if fact.Kind == extension.FactOperationSettled {
 				select {
 				case settled <- fact.OperationID:
@@ -254,10 +262,34 @@ func independentFixture() extension.Extension {
 		}
 
 		if _, err := api.RegisterOperation(independentOperation("nil_command", func(_ context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
-			_, err := api.Command(nil, independentSessionTarget(call.Session.SessionID), "interrupt", json.RawMessage(`{}`))
-			independentReportOutcome(api, "nil-command", extension.Result{}, err)
+			sessionID := call.Session.SessionID
+			settings := api.Settings()
+			go func() { // #nosec G118 -- the nil-context command is independent of the callback.
+				result, err := api.Command(nil, independentSessionTarget(sessionID), "submit", independentSubmitRequest("op-nil-context"))
+				independentReportFile(settings, "nil-command", independentClass(err), string(result.Value), sessionID, "", "")
+			}()
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
 		}), nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.AttachRequest(extension.HookModePure, func(_ context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			settings := independentSettingsOf(api.Settings())
+			if settings.Observe != "request-block" {
+				return harness.RequestConsequence{}, nil
+			}
+			independentReportFile(api.Settings(), "request-entered", "", "", call.Session.SessionID, "", "")
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if _, err := os.Stat(settings.Report + ".release"); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					return harness.RequestConsequence{}, errors.New("request hook release timed out")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			return harness.RequestConsequence{}, nil
+		}, nil); err != nil {
 			return nil, err
 		}
 		var saved func(context.Context, string, string, json.RawMessage) (extension.Result, error)
@@ -274,9 +306,25 @@ func independentFixture() extension.Extension {
 		}), nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.RegisterOperation(independentOperation("conflict", func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
-			result, err := api.Command(ctx, independentSessionTarget(call.Session.SessionID), "submit", args)
-			independentReportOutcome(api, "conflict", result, err)
+		if _, err := api.RegisterOperation(independentOperation("in_callback", func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+			var request struct {
+				Independent bool            `json:"independent"`
+				Arguments   json.RawMessage `json:"arguments"`
+			}
+			if err := json.Unmarshal(args, &request); err != nil {
+				return extension.Result{}, err
+			}
+			sessionID := call.Session.SessionID
+			settings := api.Settings()
+			if request.Independent {
+				go func() { // #nosec G118 -- the independent command must outlive its callback.
+					result, err := api.Command(context.Background(), independentSessionTarget(sessionID), "submit", request.Arguments)
+					independentReportFile(settings, "in-callback", independentClass(err), string(result.Value), sessionID, "", "")
+				}()
+				return extension.Result{Value: json.RawMessage(`{}`)}, nil
+			}
+			result, err := api.Command(ctx, independentSessionTarget(sessionID), "submit", request.Arguments)
+			independentReportOutcome(api, "in-callback", result, err)
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
 		}), nil); err != nil {
 			return nil, err
@@ -305,7 +353,7 @@ func independentFixture() extension.Extension {
 		}), nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.RegisterOperation(independentOperation("cross", func(ctx context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+		if _, err := api.RegisterOperation(independentOperation("cross", func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 			var request struct {
 				SessionID string          `json:"session_id"`
 				Method    string          `json:"method"`
@@ -314,8 +362,11 @@ func independentFixture() extension.Extension {
 			if err := json.Unmarshal(args, &request); err != nil {
 				return extension.Result{}, err
 			}
-			result, err := api.Command(ctx, independentSessionTarget(request.SessionID), request.Method, request.Arguments)
-			independentReportOutcome(api, "cross", result, err)
+			settings := api.Settings()
+			go func() { // #nosec G118 -- the independent command must outlive its callback.
+				result, err := api.Command(context.Background(), independentSessionTarget(request.SessionID), request.Method, request.Arguments)
+				independentReportFile(settings, "cross", independentClass(err), string(result.Value), request.SessionID, "", "")
+			}()
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
 		}), nil); err != nil {
 			return nil, err

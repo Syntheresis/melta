@@ -242,7 +242,7 @@ extensions are optional; Adaptation also supplies the multi-file `apply_patch` t
 listener is required.
 [`extension/`](extension/) is the activation-owned native contract (`extension.API`, typed callbacks and fixed host
 services), and [`extension/worker/`](extension/worker/) is the executable extension protocol. The running owner and
-the public worker entry both use the author `worker.Serve` protocol at API version 8. [`runtime/`](runtime/) is only
+the public worker entry both use the author `worker.Serve` protocol at API version 9. [`runtime/`](runtime/) is only
 the protocol host and first-run initialization; [`protocol/`](protocol/) is the generated contract and
 [`client/`](client/) the handwritten HTTP/SSE client.
 
@@ -253,9 +253,11 @@ adding an extension needs no protocol regeneration. A declared success returns t
 raw result; a validated declared failure returns HTTP 422 with the extension's own code/message and optional
 data/partial, not a baseline error code; predispatch and host failures use the normal typed error codes and statuses.
 The CLI (`/runtime ...`), ACP (`runtime/...`) and desktop bridge all forward these operations through the shared
-generated invocation table. There is no specialized extension UI. After its callback returns, an activation can
-issue an independent attributed Session command through `extension.API.Command`; `Command` returns
-`harness.ErrConflict` while any host callback into the same activation is in flight and is never queued.
+generated invocation table. There is no specialized extension UI. Work done for a client or Operation goes through
+that callback's own `AuthorContext.Call`, within its limits. An activation can issue an independent attributed
+Session command through `extension.API.Command` for work it does on its own; a context Melta handed to a callback
+is denied, a nil context is treated as independent, and observer delivery carries no callback mark. The command
+runs the ordinary producer under the activation's granted services and scope.
 
 Local executable extensions are installed as a directory containing `manifest.json` and a contained entry point;
 install and remove change next-start selection only and edit neither configuration nor Session data. The loaded code

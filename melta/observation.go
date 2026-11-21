@@ -186,15 +186,11 @@ func (d *observerDelivery) beginCall() bool {
 	return true
 }
 
-// call runs one observer under its activation callback scope and the
-// delivery's own context; the context is cancelled when the delivery ends.
+// call runs one observer under the delivery's own context, which is cancelled
+// when the delivery ends. Observer delivery carries no callback mark: a
+// command issued from an observer is an independent command.
 func (d *observerDelivery) call(fact extension.Fact) (err error) {
 	defer d.calls.Done()
-	scope := callbackScope(&nativeCallScope{
-		nativeCallLifetime: nativeCallLifetime{ctx: d.ctx, cancel: func() {}},
-		activation:         d.activation,
-	})
-	defer scope.end()
 	defer func() {
 		if recover() != nil {
 			err = fmt.Errorf("melta: observer detached")

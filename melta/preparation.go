@@ -300,7 +300,7 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 			modelCatalog = append(modelCatalog, model.ModelRef{Provider: ref.Provider, Model: ref.Model})
 		}
 		admission := extension.AdmissionInput{
-			Session: req.Session.Identity, Input: req.Content, Choices: choices, Candidate: candidate,
+			Session: req.Session.Identity, Input: req.Content, Candidate: candidate,
 			ModelCatalog: modelCatalog, ToolCatalog: catalog,
 			Prompt: extension.PromptAccess{
 				Default:  func() (string, error) { result, err := promptProvider.defaultPrompt(); return result.Prompt, err },
@@ -494,7 +494,6 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 			return nil, fmt.Errorf("strategy %q unavailable: %w", id, extension.ErrClosed)
 		}
 		binding := entry.value.(harness.StrategyBinding)
-		binding.Strategy = registeredStrategy{activation: entry.activation, inner: binding.Strategy}
 		binding.Release = func() { _ = stage.release() }
 		return &binding, nil
 	}
@@ -508,25 +507,6 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 			return err
 		},
 	}, nil
-}
-
-// registeredStrategy counts one extension strategy invocation as the
-// activation's outstanding host callback for its duration.
-type registeredStrategy struct {
-	activation *nativeActivation
-	inner      harness.ContextStrategy
-}
-
-func (s registeredStrategy) Plan(input harness.PlanInput) (harness.PlanOutput, error) {
-	s.activation.beginCallback()
-	defer s.activation.endCallback()
-	return s.inner.Plan(input)
-}
-
-func (s registeredStrategy) Consume(input harness.ConsumeInput) (harness.PlanOutput, error) {
-	s.activation.beginCallback()
-	defer s.activation.endCallback()
-	return s.inner.Consume(input)
 }
 
 func (p *preparation) bindModel(ctx context.Context, sel *selection) (*catalog.Model, preparedTransport, error) {

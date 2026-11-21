@@ -345,7 +345,7 @@ func editPreviewRowCount(preview *editpreview.Preview) int {
 }
 
 // renderPreviewFiles renders one diff block per entry in the
-// edit_preview_files list (apply_patch). Each block has the op tag
+// edit_preview_files list. Each block has the op tag
 // (A/M/D) and the path on its first line, followed by the per-file
 // preview's hunks. Per-file expand / collapse is per-block; the outer
 // shape mirrors the GUI's outer per-file grouping.

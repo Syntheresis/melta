@@ -22,11 +22,6 @@ func configHint(n string) protocol.Event {
 	return event
 }
 
-// agentsListDiscovery advertises the shipped Agents list operation.
-func agentsListDiscovery() json.RawMessage {
-	return json.RawMessage(`[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"list","mode":"service_io","input":"{}","success":"{}"},"target":"harness"}]}]`)
-}
-
 // agentsCurrentDiscovery advertises the shipped Agents current operation.
 func agentsCurrentDiscovery() json.RawMessage {
 	return json.RawMessage(`[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"current","mode":"service_io","input":"{}","success":"{}"},"target":"session"}]}]`)
@@ -345,7 +340,6 @@ func TestGlobalsAndAgentMenuOpaqueOverflowConfiguration(t *testing.T) {
 		c, transport := fixture(t)
 		transport.globals = true
 		c.command("/agent")
-		receive(t, transport.requests).respond(agentsListDiscovery())
 		receive(t, transport.requests).respond(json.RawMessage(`{"kind":"success","result":[]}`))
 		settleTasks(t, c)
 		c.mu.Lock()
@@ -367,16 +361,16 @@ func TestGlobalsAndAgentMenuOpaqueOverflowConfiguration(t *testing.T) {
 		defer c.mu.Unlock()
 		testassert.Require(t, c.menu != nil && c.menu.kind == "/model", "empty model menu was suppressed")
 	})
-	t.Run("/agent unavailable operation reports without invoking", func(t *testing.T) {
+	t.Run("/agent unavailable operation reports its typed error", func(t *testing.T) {
 		c, transport := fixture(t)
 		transport.globals = true
 		c.command("/agent")
-		receive(t, transport.requests).respond(json.RawMessage(`[]`))
+		receive(t, transport.requests).reject(404, protocol.Error{Code: protocol.ErrorCodeNotFound, Message: "agents operation is unavailable"})
 		settleTasks(t, c)
-		testassert.Require(t, strings.Contains(outputs(c), "agents list operation is unavailable"), "unavailable list operation reported %q", outputs(c))
+		testassert.Require(t, strings.Contains(outputs(c), "agents operation is unavailable"), "unavailable list operation reported %q", outputs(c))
 		transport.mu.Lock()
 		defer transport.mu.Unlock()
-		testassert.Require(t, len(transport.calls) == 1 && strings.HasSuffix(transport.calls[0], "/v1/extensions"), "calls = %v, want only the discovery read", transport.calls)
+		testassert.Require(t, len(transport.calls) == 1 && strings.HasSuffix(transport.calls[0], "/v1/extensions/invoke"), "calls = %v, want only the invocation", transport.calls)
 	})
 	t.Run("/agent lists the registered operation without a repair loop", func(t *testing.T) {
 		c, transport := fixture(t)
@@ -386,7 +380,6 @@ func TestGlobalsAndAgentMenuOpaqueOverflowConfiguration(t *testing.T) {
 		oldConn := c.conn
 		c.mu.Unlock()
 		c.command("/agent")
-		receive(t, transport.requests).respond(agentsListDiscovery())
 		receive(t, transport.requests).respond(json.RawMessage(`{"kind":"success","result":[{"name":"primary","description":"primary agent","subagent":false,"model":""},{"name":"planner","description":"planning agent","subagent":false,"model":""}]}`))
 		settleTasks(t, c)
 		c.mu.Lock()
@@ -408,7 +401,6 @@ func TestGlobalsAndAgentMenuOpaqueOverflowConfiguration(t *testing.T) {
 		oldConn := c.conn
 		c.mu.Unlock()
 		c.command("/agent")
-		receive(t, transport.requests).respond(agentsListDiscovery())
 		receive(t, transport.requests).respondBody(`{"agents":`)
 		settleTasks(t, c)
 		c.mu.Lock()

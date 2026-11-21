@@ -1355,9 +1355,9 @@ func (s *countingConfigurationSource) Write(ctx context.Context, data []byte) er
 }
 
 // TestNativeActivationFailureStickyUntilReenable proves a failed enabled
-// native entry stays inactive with its reason across unrelated section edits,
-// a discarded disable, and a credential rotation, and runs again only after a
-// published disable/re-enable.
+// native entry stays inactive with its reason across unrelated section edits
+// and a discarded disable, and runs again only after a published
+// disable/re-enable.
 func TestNativeActivationFailureStickyUntilReenable(t *testing.T) {
 	owner := &configurationService{}
 	manifest := extension.Manifest{ID: "native-failure", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}

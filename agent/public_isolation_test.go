@@ -351,7 +351,7 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 			} else if imp == modelPkg || imp == agentPkg || imp == harnessPkg || imp == storagePkg || imp == sqliteDriverPkg ||
 				imp == runtimePkg || imp == pluginsPkg || strings.HasPrefix(imp, pluginsPkg+"/") ||
 				imp == toolargsPkg || imp == protocolPkg || imp == testassertPkg {
-				problems = append(problems, rel+": production file imports "+imp+"; no existing package may consume the public foundation before its cutover phase, no legacy, root, or adapter file may import the target runtime, its concrete plugins, or the protocol contracts, the SQLite driver is confined to "+storagePkg+", the shared tool-argument decoder is confined to the Runtime owner and the child-session tool plugin, and the shared test assertion helper is confined to test files")
+				problems = append(problems, rel+": production file imports "+imp+"; no existing package may consume the public foundation before its cutover phase, no legacy, root, or adapter file may import the target runtime, its concrete plugins, or the protocol contracts, the SQLite driver is confined to "+storagePkg+", the shared tool-argument decoder is confined to the Runtime owner, and the shared test assertion helper is confined to test files")
 			}
 		}
 	}

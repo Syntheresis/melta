@@ -118,7 +118,7 @@ func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]ha
 			defer scope.end()
 			call := extension.AuthorContext{ExtensionID: activation.id, Settings: bytes.Clone(activation.section), Session: tc.Session, State: bytes.Clone(states[activation.id]), Call: scope.call}
 			input := extension.AuthorizationInput{ToolName: action.ToolName, Arguments: bytes.Clone(action.Arguments), CanonicalWorkspace: action.CanonicalWorkspace, ToolSettings: bytes.Clone(settings), Permissions: slices.Clone(action.Permissions)}
-			return entry.value.(nativeHook).handler.(extension.AuthorizationHook)(child, call, input)
+			return entry.value.(nativeHook).handler.(extension.AuthorizationHook)(scope.ctx, call, input)
 		}})
 	}
 	return hooks

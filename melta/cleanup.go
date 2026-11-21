@@ -122,7 +122,7 @@ func (s *nativeSnapshot) cleanupOwner(ctx context.Context, sessionID, owner stri
 		call := extension.AuthorContext{ExtensionID: owner, Settings: append(json.RawMessage(nil), activation.section...), Call: scope.call}
 		err := func() error {
 			defer scope.end()
-			return registration.value.(extension.CleanupHook)(callCtx, call, harness.SessionIdentity{SessionID: sessionID})
+			return registration.value.(extension.CleanupHook)(scope.ctx, call, harness.SessionIdentity{SessionID: sessionID})
 		}()
 		if err != nil {
 			failed = true

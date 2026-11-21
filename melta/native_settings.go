@@ -90,7 +90,7 @@ func (scope *nativeCallScope) updateSettings(ctx context.Context, args json.RawM
 		})
 		result, err := func() (extension.Result, error) {
 			defer child.end()
-			return executeNativeProvider(childCtx, extension.AuthorContext{
+			return executeNativeProvider(child.ctx, extension.AuthorContext{
 				ExtensionID: activation.id, Settings: bytes.Clone(activation.section),
 				Session: scope.session, State: bytes.Clone(scope.states[activation.id]), Call: child.call, RequestID: scope.requestID,
 			}, method.contract, method.handler, "service", input.Service, transformArgs)

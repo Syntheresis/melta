@@ -219,6 +219,30 @@ func assertFileContent(t *testing.T, path, want string) {
 	testassert.Require(t, err == nil && string(data) == want, "%s = (%q, %v), want %q", path, data, err, want)
 }
 
+// TestAdaptationExplorePatchNotAdvertised proves the built-in explore
+// definition's explicit tool list excludes apply_patch even on an offering
+// model with Adaptation enabled.
+func TestAdaptationExplorePatchNotAdvertised(t *testing.T) {
+	ctx := context.Background()
+	e := newProductionEnv(t, storage.NewMemory())
+	document := adaptationConfigDocument(e.server.URL, `[]`)
+	document = strings.Replace(document, `{`, `{"model":"prov/gpt-5.5",`, 1)
+	writeServiceFile(t, e.configPath, document)
+	writeAgentDefinitions(t, e.configPath, `{}`)
+	e.server.setScript(func(_ context.Context, _ string) []string { return textTurnEvents("done") })
+	r, err := e.openPlugins(ctx, agentsTestNative(), adaptation.Author())
+	testassert.NoError(t, err)
+	defer func() { _ = r.Close(ctx) }()
+	workspace := adaptationWorkspace(t, e, "explore-patch")
+	session, err := r.createSession(ctx, workspace, "explore")
+	testassert.NoError(t, err)
+	submitThroughRuntime(t, r, session.Identity.SessionID, "op-explore", "look around")
+	record := awaitOperation(t, r, session.Identity.SessionID, "op-explore", harness.OperationSuccess)
+	testassert.Require(t, !slices.Contains(record.Admission.Execution.InitialToolNames, "apply_patch"), "admitted tools = %v, want no apply_patch", record.Admission.Execution.InitialToolNames)
+	wire := decodeWireChatBody(t, e.server.bodyAt(0))
+	testassert.Require(t, !slices.Contains(wireToolNames(wire), "apply_patch"), "wire tools = %v, want no apply_patch", wireToolNames(wire))
+}
+
 func assertPathMissing(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

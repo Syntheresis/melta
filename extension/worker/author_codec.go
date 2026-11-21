@@ -155,7 +155,6 @@ func authorCandidateValue(wire authorCandidateJSON) extension.AdmissionCandidate
 type authorAdmissionJSON struct {
 	Session      harness.SessionIdentity `json:"session"`
 	Input        []contentPartJSON       `json:"input"`
-	Choices      authorInputsJSON        `json:"choices"`
 	Candidate    authorCandidateJSON     `json:"candidate"`
 	ModelCatalog []modelRefJSON          `json:"model_catalog"`
 	ToolCatalog  []toolDefinitionJSON    `json:"tool_catalog"`
@@ -174,7 +173,7 @@ func EncodeAuthorAdmission(input extension.AdmissionInput) (json.RawMessage, err
 		}
 	}
 	return json.Marshal(authorAdmissionJSON{
-		Session: input.Session, Input: contentFrom(input.Input), Choices: authorInputsFrom(input.Choices),
+		Session: input.Session, Input: contentFrom(input.Input),
 		Candidate: candidate, ModelCatalog: models, ToolCatalog: toolDefinitionsFrom(input.ToolCatalog),
 	})
 }
@@ -188,7 +187,7 @@ func DecodeAuthorAdmission(raw json.RawMessage) (extension.AdmissionInput, error
 	for i, ref := range wire.ModelCatalog {
 		models[i] = modelRefValue(ref)
 	}
-	return extension.AdmissionInput{Session: wire.Session, Input: contentValue(wire.Input), Choices: authorInputsValue(wire.Choices),
+	return extension.AdmissionInput{Session: wire.Session, Input: contentValue(wire.Input),
 		Candidate: authorCandidateValue(wire.Candidate), ModelCatalog: models, ToolCatalog: toolDefinitionsValue(wire.ToolCatalog)}, nil
 }
 

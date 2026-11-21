@@ -1468,7 +1468,7 @@ func authorizeHooks(ctx context.Context, inv InvocationExecution, callID, name s
 				result := invalidToolResult(callID)
 				return nil, &result
 			}
-			content := boundedToolDiagnostic(errors.New(strings.ToValidUTF8(*reason, "\uFFFD")))
+			content := refusalDiagnostic(*reason)
 			result := model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: content}
 			return nil, &result
 		}
@@ -1565,9 +1565,18 @@ func permissionDeniedToolResult(callID string) model.ToolResult {
 }
 
 // refusedToolResult is the deliberate before-tool refusal result: the settled
-// call is denied with the hook's model-facing reason, and no effect began.
+// call is denied with the refusal produced by the same denied-content rule as
+// an authorization-hook denial, and no effect began.
 func refusedToolResult(callID, reason string) model.ToolResult {
-	return model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: reason}
+	return model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: refusalDiagnostic(reason)}
+}
+
+// refusalDiagnostic renders one before-tool refusal as the denied content an
+// authorization-hook denial produces: invalid UTF-8 is repaired and the text
+// is bounded to the durable diagnostic limit. An empty reason is invalid and
+// is rejected before this producer.
+func refusalDiagnostic(reason string) string {
+	return boundedToolDiagnostic(errors.New(strings.ToValidUTF8(reason, "\uFFFD")))
 }
 
 // validationToolResult is the immediate validation-error result for an invalid
@@ -2415,17 +2424,21 @@ func (d *executionDriver) runOneHook(ctx, settleCtx context.Context, resolved pe
 	}
 	// The successful output is a real result even if cancellation
 	// arrives before its commit: the settlement transaction runs without
-	// cancellation.
+	// cancellation. A refusal carries the same bounded denied content in the
+	// hook result and in the settled call.
 	result := hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Arguments: consequence.Arguments}
+	var refusal *model.ToolResult
 	if consequence.Refusal != nil {
-		result = hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Refusal: *consequence.Refusal}
+		settledRefusal := refusedToolResult(pending.CallID, *consequence.Refusal)
+		refusal = &settledRefusal
+		result = hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved, Refusal: settledRefusal.Content}
 	}
 	committed, cerr := h.commitHookResult(settleCtx, c, operationID, hookEffectBinding{hookID: hook.ID, callID: pending.CallID}, resultID, result)
 	if cerr != nil {
 		return hookResultEntry{}, nil, cerr
 	}
-	if consequence.Refusal != nil {
-		settled, serr := h.commitToolResult(settleCtx, c, operationID, pending, ToolOutcome{Result: refusedToolResult(pending.CallID, *consequence.Refusal), Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
+	if refusal != nil {
+		settled, serr := h.commitToolResult(settleCtx, c, operationID, pending, ToolOutcome{Result: *refusal, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, false)
 		if serr != nil {
 			return hookResultEntry{}, nil, serr
 		}

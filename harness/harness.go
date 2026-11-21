@@ -706,21 +706,6 @@ func (h *Harness) SetSessionExtensionState(ctx context.Context, sessionID, exten
 	})
 }
 
-// ClearSessionExtensionState removes one extension's state from an open Session.
-func (h *Harness) ClearSessionExtensionState(ctx context.Context, sessionID, extensionID string) (SessionRecord, error) {
-	if extensionID == "" {
-		return SessionRecord{}, invalidInput("extension ID must not be empty")
-	}
-	return h.updateOpenSession(ctx, sessionID, "extension state", func(state *SessionState) (bool, error) {
-		if _, ok := state.ExtensionState[extensionID]; !ok {
-			return false, nil
-		}
-		state.ExtensionState = ownSessionStateValues(state.ExtensionState)
-		delete(state.ExtensionState, extensionID)
-		return true, nil
-	})
-}
-
 // ClaimExternalData durably records one installed extension as an owner of
 // external data for one open Session before that data is created. It follows
 // the ordinary open-Session mutation rule, and a repeated claim is a no-op

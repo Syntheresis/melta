@@ -140,6 +140,33 @@ func sessionOwners(t *testing.T, store harness.Storage, sessionID string) []stri
 	return append([]string(nil), wire.State.Owners...)
 }
 
+// TestDataServiceActivationCallNamespaces proves the activation-level API.Call
+// data path: the cache namespace succeeds without a Session, and the Session
+// namespace requires a call-owned Session lease.
+func TestDataServiceActivationCallNamespaces(t *testing.T) {
+	e := newOwnerEnv(t)
+	enableFixturePlugin(t, e.configPath, "data-activation")
+	manifest := registrarManifest("data-activation")
+	manifest.Services = []string{extension.ContractData}
+	var cacheResult extension.Result
+	var cacheErr, sessionErr error
+	activation := extension.Extension{Manifest: manifest, Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+		cacheResult, cacheErr = api.Call(ctx, extension.ContractData, "cache_namespace", json.RawMessage(`{}`))
+		_, sessionErr = api.Call(ctx, extension.ContractData, "session_namespace", json.RawMessage(`{}`))
+		return nil, nil
+	}}
+	r, err := e.open(context.Background(), activation)
+	testassert.NoError(t, err)
+	defer func() { _ = r.Close(context.Background()) }()
+	testassert.NoError(t, cacheErr)
+	var cache struct {
+		Directory string `json:"directory"`
+	}
+	testassert.NoError(t, json.Unmarshal(cacheResult.Value, &cache))
+	testassert.Require(t, cache.Directory == filepath.Join(e.dataDir, "extensions", extensionDataHash("data-activation"), "cache"), "cache directory = %q, want the extension cache path", cache.Directory)
+	testassert.Require(t, errors.Is(sessionErr, ErrClosed), "session_namespace = %v, want closed without a call-owned Session", sessionErr)
+}
+
 // TestDataServiceAssignsExtensionOwnedDirectories proves the declared service
 // derives the hashed Session and cache paths from host identity alone, two
 // extensions stay separate, archived Sessions remain readable, cache and

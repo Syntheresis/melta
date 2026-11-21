@@ -1036,9 +1036,6 @@ func TestPreparationHooksAreOrderedAndValidated(t *testing.T) {
 			{"tool catalog entry", func(in extension.AdmissionInput) {
 				in.ToolCatalog[0].Description = "mutated description"
 			}},
-			{"choices", func(in extension.AdmissionInput) {
-				in.Choices.Tools = []string{"mutated"}
-			}},
 		}
 		for _, v := range violations {
 			t.Run(v.name, func(t *testing.T) {

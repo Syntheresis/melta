@@ -662,9 +662,6 @@ func TestSourceAgentMenuCannotPublishAfterDestinationAdoption(t *testing.T) {
 	c.command("/resume " + rootB)
 	destination := receive(t, transport.requests)
 	c.command("/agent")
-	catalog := receive(t, transport.requests)
-	testassert.Equal(t, catalog.req.URL.Path, "/v1/extensions")
-	catalog.respond(agentsListDiscovery())
 	menuRead := receive(t, transport.requests)
 	testassert.Equal(t, menuRead.req.URL.Path, "/v1/extensions/invoke")
 	// The adopted reader's own read proves the destination published, then the
@@ -783,9 +780,6 @@ func TestAgentMenuDispatchesSelectedName(t *testing.T) {
 	transport.globals = true
 	transport.mu.Unlock()
 	c.command("/agent")
-	catalog := receive(t, transport.requests)
-	testassert.Equal(t, catalog.req.URL.Path, "/v1/extensions")
-	catalog.respond(agentsListDiscovery())
 	menuRead := receive(t, transport.requests)
 	testassert.Equal(t, menuRead.req.URL.Path, "/v1/extensions/invoke")
 	menuRead.respond(json.RawMessage(`{"kind":"success","result":[{"name":"first","description":"first description","subagent":false,"model":""},{"name":"second","description":"second description","subagent":true,"model":""}]}`))

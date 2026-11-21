@@ -121,6 +121,11 @@ func (s *server) authorHello(frame Frame) error {
 	return s.write(Frame{Kind: KindResponse, ID: frame.ID, Result: result})
 }
 
+// authorHostCallKey marks the context of one host call the worker is serving.
+// The worker's independent command route refuses such a context, except for
+// observer delivery, which carries no call authority.
+type authorHostCallKey struct{}
+
 func (s *server) admitAuthorRequest(frame Frame, ctx context.Context, cancel context.CancelFunc) error {
 	if frame.Method == "release" && s.author.started {
 		var params struct {
@@ -155,6 +160,9 @@ func (s *server) admitAuthorRequest(frame Frame, ctx context.Context, cancel con
 			return badRoute("worker: unknown author registration")
 		}
 		s.launch(frame.ID, ctx, cancel, func(ctx context.Context) (json.RawMessage, error) {
+			if registration.kind != "observer" {
+				ctx = context.WithValue(ctx, authorHostCallKey{}, struct{}{})
+			}
 			call := extension.AuthorContext{
 				ExtensionID: params.Context.ExtensionID, Settings: bytes.Clone(params.Context.Settings),
 				RequestID: params.Context.RequestID,
@@ -577,10 +585,15 @@ func (a *authorAPI) AttachObserver(observer extension.Observer, r extension.Regi
 
 // Command issues one independent command through the host-bound activation.
 // It carries no callback token: the host resolves the command against the
-// activation of this worker process.
+// activation of this worker process. A command issued with the context of a
+// host call this worker is serving is refused locally; observer delivery
+// carries no such mark.
 func (a *authorAPI) Command(ctx context.Context, target extension.CommandTarget, method string, args json.RawMessage) (extension.Result, error) {
 	if method == "" {
 		return extension.Result{}, errors.New("worker: command requires a method")
+	}
+	if ctx != nil && ctx.Value(authorHostCallKey{}) != nil {
+		return extension.Result{}, &Error{Class: ClassDenied, Message: "worker: command issued from a host callback"}
 	}
 	params, err := json.Marshal(AuthorCommandParams{Target: target, Method: method, Arguments: JSONBytes(args)})
 	if err != nil {
