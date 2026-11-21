@@ -110,7 +110,7 @@ func TestValidateConfigSettings(t *testing.T) {
 // standard declarations arrive in order, each with its own name, a nonempty
 // description and a valid parameters schema.
 func TestStandardToolDeclarations(t *testing.T) {
-	want := []string{"read_file", "write_file", "edit_file", "apply_patch", "run_command", "process", "sleep"}
+	want := []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"}
 	declarations := standardToolDeclarations()
 	testassert.Equal(t, len(declarations), len(want))
 	for i, declaration := range declarations {
@@ -257,7 +257,6 @@ func TestNormalizeArguments(t *testing.T) {
 			"write_file2": `{"path":"a","content":5}`,
 			"edit_file":   `{"path":"a","old_string":"x","new_string":5}`,
 			"edit_file2":  `{"path":"a","old_string":"x","new_string":"y","replace_all":"yes"}`,
-			"apply_patch": `{"input":5}`,
 		} {
 			toolName := name
 			if strings.HasSuffix(toolName, "2") {
@@ -294,7 +293,7 @@ func TestNormalizeArguments(t *testing.T) {
 	})
 	t.Run("malformed, null and trailing argument bytes are validation errors", func(t *testing.T) {
 		for _, args := range []string{``, `not json`, `null`, `[1]`, `{"path":"a"} trailing`, `"str"`} {
-			for _, name := range []string{"read_file", "write_file", "edit_file", "apply_patch", "run_command", "process", "sleep"} {
+			for _, name := range []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"} {
 				{
 					_, err := normalize(t, byID[name], tc, name, args)
 					testassert.Check(t, err != nil, "%s normalized %q, want rejection", name, args)
@@ -302,15 +301,6 @@ func TestNormalizeArguments(t *testing.T) {
 			}
 		}
 	})
-}
-
-// bindingChangePatchInput builds one add-file patch call over the given path
-// for the binding-witness oracle.
-func bindingChangePatchInput(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]string{"input": "*** Begin Patch\n*** Add File: " + path + "\n+new\n*** End Patch"})
-	testassert.NoError(t, err)
-	return string(raw)
 }
 
 // TestPrepareBindingSurvivesCanonicalPathsRepoint proves the one-binding
@@ -329,7 +319,6 @@ func TestPrepareBindingSurvivesCanonicalPathsRepoint(t *testing.T) {
 		{"read_file revalidates the root witness", "read_file", `{"path":"target.txt"}`, "substituted\n"},
 		{"write_file revalidates the root witness", "write_file", `{"path":"target.txt","content":"after"}`, ""},
 		{"edit_file revalidates the root witness", "edit_file", `{"path":"target.txt","old_string":"beta","new_string":"BETA"}`, "beta\n"},
-		{"apply_patch revalidates the root witness", "apply_patch", bindingChangePatchInput(t, "target.txt"), ""},
 	}
 	for _, cell := range cells {
 		cell := cell

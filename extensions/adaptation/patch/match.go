@@ -1,4 +1,4 @@
-package tool
+package patch
 
 import (
 	"fmt"
@@ -51,8 +51,8 @@ func locateHunk(lines []string, h hunk, path string, cursor int) (hunkLocation, 
 		c = len(lines)
 	}
 
-	if h.anchor != "" {
-		idx, err := locateLine(lines, h.anchor, path, c)
+	if h.Anchor != "" {
+		idx, err := locateLine(lines, h.Anchor, path, c)
 		if err != nil {
 			return hunkLocation{}, err
 		}
@@ -69,8 +69,8 @@ func locateHunk(lines []string, h hunk, path string, cursor int) (hunkLocation, 
 }
 
 func patternFromHunk(h hunk) []hunkPatternLine {
-	out := make([]hunkPatternLine, 0, len(h.lines))
-	for _, hl := range h.lines {
+	out := make([]hunkPatternLine, 0, len(h.Lines))
+	for _, hl := range h.Lines {
 		if hl.Kind == lineContext || hl.Kind == lineRemove {
 			out = append(out, hunkPatternLine{kind: hl.Kind, text: hl.Text})
 		}

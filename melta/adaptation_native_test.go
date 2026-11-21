@@ -31,6 +31,8 @@ const adaptationRuntimeAgents = `{
   "bundledfull": {"model": "prov/gpt-5.5", "system_prompt": "full", "tools": ["read_file", "write_file", "edit_file", "apply_patch"]},
   "bundlednone": {"model": "prov/gpt-5.5", "system_prompt": "none", "tools": ["read_file", "write_file", "edit_file", "apply_patch"]},
   "readonly": {"model": "prov/adaptive", "system_prompt": "full", "tools": ["read_file", "write_file"], "readonly": true},
+  "plainpatch": {"model": "prov/adaptive", "system_prompt": "simple", "tools": ["read_file", "apply_patch"]},
+  "gptexcluded": {"model": "prov/gpt-5.5", "system_prompt": "simple", "tools": ["read_file"]},
   "reload": {"model": "prov/adaptive", "system_prompt": "full", "tools": ["read_file"]}
 }`
 
@@ -194,7 +196,7 @@ func TestAdaptationNativeToolSelectionFollowsPrepareVisibility(t *testing.T) {
 		entries string
 		want    []string
 	}{
-		{"prompt only", `[{"pattern":"*adaptive*","prompt":"ADAPTED"}]`, []string{"read_file", "apply_patch"}},
+		{"prompt only", `[{"pattern":"*adaptive*","prompt":"ADAPTED"}]`, []string{"read_file"}},
 		{"exclusion", `[{"pattern":"*adaptive*","exclude_tools":["apply_patch"]}]`, []string{"read_file"}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -209,7 +211,7 @@ func TestAdaptationNativeToolSelectionFollowsPrepareVisibility(t *testing.T) {
 }
 
 func TestAdaptationNativeConfiguredEntriesThroughRuntime(t *testing.T) {
-	const entries = `[{"pattern":"*adaptive*","prompt":"CONFIGURED","append":["TAIL"],"exclude_tools":["write_file"],"tool_description_replacements":{"edit_file":"apply_patch","apply_patch":"PATCH"}}]`
+	const entries = `[{"pattern":"*adaptive*","prompt":"CONFIGURED","append":["TAIL"],"exclude_tools":["write_file"],"tool_description_replacements":{"edit_file":"apply_patch","apply_patch":"PATCH"},"offer_patch":true}]`
 	ctx := context.Background()
 
 	// Attachment order decides: the hook before adaptation is overwritten,
@@ -271,6 +273,34 @@ func TestAdaptationNativeConfiguredEntriesThroughRuntime(t *testing.T) {
 	testassert.Require(t, slices.Equal(readonly.Admission.Execution.InitialToolNames, []string{"read_file"}), "readonly advertisement = %v, want the readable tool only", readonly.Admission.Execution.InitialToolNames)
 	testassert.NoError(t, orderedRuntime.Close(ctx))
 	testassert.NoError(t, reversedRuntime.Close(ctx))
+}
+
+// TestAdaptationPatchAdvertisement proves apply_patch reaches the wire only
+// when the matched row offers it and the incoming admission still contains
+// it; absence is never inferred from description text.
+func TestAdaptationPatchAdvertisement(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		entries string
+		agent   string
+		want    []string
+	}{
+		{"unmatched model", `[]`, "visible", []string{"read_file", "write_file"}},
+		{"row without offer_patch", `[{"pattern":"*adaptive*"}]`, "plainpatch", []string{"read_file"}},
+		{"row with offer_patch", `[{"pattern":"*adaptive*","offer_patch":true}]`, "plainpatch", []string{"read_file", "apply_patch"}},
+		{"bundled offer with admission exclusion", `[]`, "gptexcluded", []string{"read_file"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			e := newProductionEnv(t, storage.NewMemory())
+			r := openAdaptationRuntime(t, e, row.entries, agentsTestNative())
+			workspace := adaptationWorkspace(t, e, "patch-advertisement")
+			namedAdaptationOperation(t, r, workspace, row.agent, "op-patch-advertisement")
+			wire := decodeWireChatBody(t, e.server.bodyAt(0))
+			testassert.Require(t, slices.Equal(wireToolNames(wire), row.want), "wire tools = %v, want %v", wireToolNames(wire), row.want)
+			testassert.Require(t, slices.Contains(wireToolNames(wire), "apply_patch") == slices.Contains(row.want, "apply_patch"), "description text inferred apply_patch availability: %+v", wire.Tools)
+			testassert.NoError(t, r.Close(context.Background()))
+		})
+	}
 }
 
 func TestAdaptationReloadPriorCaptureKeepsEntries(t *testing.T) {

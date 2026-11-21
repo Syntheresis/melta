@@ -11,16 +11,11 @@ import (
 
 func TestAdditionalRecheckAtEveryMutationCapture(t *testing.T) {
 	for _, tc := range []struct {
-		name, patch string
-		flipAt      int
+		name   string
+		flipAt int
 	}{
-		{"write", "", 1},
-		{"edit", "", 1},
-		{"add", "*** Add File: new.txt\n+after", 1},
-		{"update", "*** Update File: old.txt\n@@\n-before\n+after", 1},
-		{"delete", "*** Delete File: old.txt", 1},
-		{"move destination", "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after", 1},
-		{"move source", "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after", 2},
+		{"write", 1},
+		{"edit", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -55,24 +50,12 @@ func TestAdditionalRecheckAtEveryMutationCapture(t *testing.T) {
 				if err == nil {
 					_, err = call.Execute(context.Background(), check)
 				}
-			default:
-				var call *PreparedPatchCall
-				call, err = PreparePatchCall(root, root, store, map[string]any{"input": applyPatchInput(t, tc.patch)})
-				if err == nil {
-					_, err = call.Execute(context.Background(), check)
-				}
 			}
 			if err == nil || !strings.Contains(err.Error(), "witness changed") || !changed {
 				t.Fatalf("err=%v changed=%v", err, changed)
 			}
 			assertFileContent(t, old, "before")
-			dst := filepath.Join(root, "new.txt")
-			if tc.name == "move source" {
-				assertFileContent(t, dst, "after")
-				if len(store.identityRecords) != 1 {
-					t.Fatalf("identity records: %+v", store.identityRecords)
-				}
-			} else if _, err := os.Stat(dst); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(root, "new.txt")); !os.IsNotExist(err) {
 				t.Fatalf("destination exists: %v", err)
 			}
 			if len(store.discards) != 1 {

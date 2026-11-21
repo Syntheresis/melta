@@ -7,28 +7,33 @@ import (
 	"fmt"
 
 	"github.com/Syntheresis/melta/extension"
+	"github.com/Syntheresis/melta/extensions/adaptation/patch"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 )
 
-const configSchema = `{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"},"entries":{"type":"array","items":{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string"},"prompt":{"type":"string"},"append":{"type":"array","items":{"type":"string"}},"exclude_tools":{"type":"array","items":{"type":"string"}},"tool_description_replacements":{"type":"object","propertyNames":{"minLength":1},"additionalProperties":{"type":"string"}}},"additionalProperties":true}}},"additionalProperties":true}`
+const configSchema = `{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"},"entries":{"type":"array","items":{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string"},"prompt":{"type":"string"},"append":{"type":"array","items":{"type":"string"}},"exclude_tools":{"type":"array","items":{"type":"string"}},"tool_description_replacements":{"type":"object","propertyNames":{"minLength":1},"additionalProperties":{"type":"string"}},"offer_patch":{"type":"boolean"}},"additionalProperties":true}}},"additionalProperties":true}`
 
-// Author registers request-local model adaptation.
+// Author registers request-local model adaptation and the multi-file patch
+// tool matching models may advertise.
 func Author() extension.Extension {
 	return extension.Extension{
-		Manifest: extension.Manifest{ID: "adaptation", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(configSchema)},
+		Manifest: extension.Manifest{ID: "adaptation", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(configSchema), Services: []string{"melta.workspace"}},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			entries, err := decodeEntries(api.Settings())
 			if err != nil {
+				return nil, err
+			}
+			if _, err := api.RegisterTool(patch.Definition(), patch.Tool{}, nil); err != nil {
 				return nil, err
 			}
 			_, err = api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				if input.Purpose != harness.InvocationPurposeConversation {
 					return harness.RequestConsequence{}, nil
 				}
-				matched := matchEntryIn(entries, input.Model.Model)
-				if matched == nil {
-					return harness.RequestConsequence{}, nil
+				matched := entry{}
+				if found := matchEntryIn(entries, input.Model.Model); found != nil {
+					matched = *found
 				}
 				result := harness.RequestConsequence{}
 				text := input.Prompt
@@ -49,10 +54,14 @@ func Author() extension.Extension {
 				replacer := newToolDescriptionReplacer(matched.adapt.ToolDescriptionReplacements)
 				result.Tools = make([]model.ToolDefinition, 0, len(input.Tools))
 				for _, tool := range input.Tools {
-					if !excluded[tool.Name] {
-						tool.Description = replacer.Replace(tool.Description)
-						result.Tools = append(result.Tools, tool)
+					if tool.Name == patch.ToolName && !matched.adapt.OfferPatch {
+						continue
 					}
+					if excluded[tool.Name] {
+						continue
+					}
+					tool.Description = replacer.Replace(tool.Description)
+					result.Tools = append(result.Tools, tool)
 				}
 				return result, nil
 			}, nil)
@@ -71,6 +80,7 @@ type configuredEntry struct {
 	Append                      []string          `json:"append"`
 	ExcludeTools                []string          `json:"exclude_tools"`
 	ToolDescriptionReplacements map[string]string `json:"tool_description_replacements"`
+	OfferPatch                  bool              `json:"offer_patch"`
 }
 
 // decodeEntries parses and owns the configured entries once from the captured
@@ -107,6 +117,7 @@ func decodeEntries(section json.RawMessage) ([]entry, error) {
 			{"append", &configured.Append},
 			{"exclude_tools", &configured.ExcludeTools},
 			{"tool_description_replacements", &configured.ToolDescriptionReplacements},
+			{"offer_patch", &configured.OfferPatch},
 		} {
 			if value, ok := fields[member.name]; ok {
 				if err := json.Unmarshal(value, member.target); err != nil {
@@ -121,6 +132,7 @@ func decodeEntries(section json.RawMessage) ([]entry, error) {
 				ExcludeTools:                append([]string(nil), configured.ExcludeTools...),
 				Append:                      append([]string(nil), configured.Append...),
 				ToolDescriptionReplacements: cloneStringMap(configured.ToolDescriptionReplacements),
+				OfferPatch:                  configured.OfferPatch,
 			},
 		})
 	}

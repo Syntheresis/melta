@@ -1,4 +1,4 @@
-package tool
+package patch
 
 import (
 	"errors"
@@ -39,8 +39,8 @@ func TestParsePatchAddFile(t *testing.T) {
 	testassert.Equal(t, len(p.ops), 1)
 	op := p.ops[0]
 	testassert.Require(t, op.kind == opAdd && op.path == "new.txt" && len(op.hunks) == 2, "got %v, want %v; got %v, want %v; got %v, want %v", op.kind, opAdd, op.path, "new.txt", len(op.hunks), 2)
-	testassert.Require(t, op.hunks[0].lines[0].Kind == lineAdd && op.hunks[0].lines[0].Text == "hello", "hunks[0] = %+v, want add/hello", op.hunks[0])
-	testassert.Require(t, op.hunks[1].lines[0].Kind == lineAdd && op.hunks[1].lines[0].Text == "world", "hunks[1] = %+v, want add/world", op.hunks[1])
+	testassert.Require(t, op.hunks[0].Lines[0].Kind == lineAdd && op.hunks[0].Lines[0].Text == "hello", "hunks[0] = %+v, want add/hello", op.hunks[0])
+	testassert.Require(t, op.hunks[1].Lines[0].Kind == lineAdd && op.hunks[1].Lines[0].Text == "world", "hunks[1] = %+v, want add/world", op.hunks[1])
 }
 
 func TestParsePatchAddFileEmptyContentLine(t *testing.T) {
@@ -49,7 +49,7 @@ func TestParsePatchAddFileEmptyContentLine(t *testing.T) {
 	testassert.NoError(t, err)
 	testassert.Equal(t, len(p.ops), 1)
 	testassert.Equal(t, len(p.ops[0].hunks), 3)
-	testassert.Equal(t, p.ops[0].hunks[1].lines[0].Text, "")
+	testassert.Equal(t, p.ops[0].hunks[1].Lines[0].Text, "")
 }
 
 func TestParsePatchUpdateFile(t *testing.T) {
@@ -60,15 +60,15 @@ func TestParsePatchUpdateFile(t *testing.T) {
 	op := p.ops[0]
 	testassert.Require(t, op.kind == opUpdate && op.path == "a.go" && op.movePath == "" && len(op.hunks) == 1, "got %v, want %v; got %v, want %v; got %v, want %v; got %v, want %v", op.kind, opUpdate, op.path, "a.go", op.movePath, "", len(op.hunks), 1)
 	h := op.hunks[0]
-	testassert.Equal(t, h.anchor, "func Foo")
+	testassert.Equal(t, h.Anchor, "func Foo")
 	want := []hunkLine{
 		{Kind: lineContext, Text: "ctx"},
 		{Kind: lineRemove, Text: "old"},
 		{Kind: lineAdd, Text: "new"},
 		{Kind: lineContext, Text: "ctx2"},
 	}
-	testassert.Equal(t, len(h.lines), len(want))
-	for i, l := range h.lines {
+	testassert.Equal(t, len(h.Lines), len(want))
+	for i, l := range h.Lines {
 		testassert.Require(t, l == want[i], "hunk lines[%d] = %+v, want %+v", i, l, want[i])
 	}
 }
@@ -77,7 +77,7 @@ func TestParsePatchUpdateFileNoAnchor(t *testing.T) {
 	input := "*** Begin Patch\n*** Update File: a.go\n@@\n-removed\n+added\n*** End Patch"
 	p, err := parsePatch(input)
 	testassert.NoError(t, err)
-	testassert.Equal(t, p.ops[0].hunks[0].anchor, "")
+	testassert.Equal(t, p.ops[0].hunks[0].Anchor, "")
 }
 
 func TestParsePatchDeleteFile(t *testing.T) {
@@ -113,7 +113,7 @@ func TestParsePatchMultipleHunksOneFile(t *testing.T) {
 	testassert.NoError(t, err)
 	op := p.ops[0]
 	testassert.Equal(t, len(op.hunks), 2)
-	testassert.Require(t, op.hunks[0].anchor == "first" && op.hunks[1].anchor == "second", "anchors = %q, %q, want first, second", op.hunks[0].anchor, op.hunks[1].anchor)
+	testassert.Require(t, op.hunks[0].Anchor == "first" && op.hunks[1].Anchor == "second", "anchors = %q, %q, want first, second", op.hunks[0].Anchor, op.hunks[1].Anchor)
 }
 
 func TestParsePatchPreservesPrefixCharactersInContent(t *testing.T) {
@@ -125,8 +125,8 @@ func TestParsePatchPreservesPrefixCharactersInContent(t *testing.T) {
 	testassert.Equal(t, len(p.ops[0].hunks), 3)
 	want := []string{"++counter", "--option", " indented"}
 	for i, h := range p.ops[0].hunks {
-		testassert.Require(t, h.lines[0].Kind == lineAdd, "hunks[%d] kind = %d, want lineAdd", i, h.lines[0].Kind)
-		testassert.Require(t, h.lines[0].Text == want[i], "hunks[%d] text = %q, want %q", i, h.lines[0].Text, want[i])
+		testassert.Require(t, h.Lines[0].Kind == lineAdd, "hunks[%d] kind = %d, want lineAdd", i, h.Lines[0].Kind)
+		testassert.Require(t, h.Lines[0].Text == want[i], "hunks[%d] text = %q, want %q", i, h.Lines[0].Text, want[i])
 	}
 }
 
@@ -135,8 +135,8 @@ func TestParsePatchPreservesRawCR(t *testing.T) {
 	p, err := parsePatch(input)
 	testassert.NoError(t, err)
 	testassert.Equal(t, len(p.ops[0].hunks), 2)
-	testassert.Equal(t, p.ops[0].hunks[0].lines[0].Text, "line1\r")
-	testassert.Equal(t, p.ops[0].hunks[1].lines[0].Text, "line2\r")
+	testassert.Equal(t, p.ops[0].hunks[0].Lines[0].Text, "line1\r")
+	testassert.Equal(t, p.ops[0].hunks[1].Lines[0].Text, "line2\r")
 }
 
 func TestParsePatchPreservesCRInUpdateHunk(t *testing.T) {
@@ -145,8 +145,8 @@ func TestParsePatchPreservesCRInUpdateHunk(t *testing.T) {
 	testassert.NoError(t, err)
 	h := p.ops[0].hunks[0]
 	want := []string{"ctx\r", "old\r", "new\r"}
-	testassert.Equal(t, len(h.lines), len(want))
-	for i, l := range h.lines {
+	testassert.Equal(t, len(h.Lines), len(want))
+	for i, l := range h.Lines {
 		testassert.Require(t, l.Text == want[i], "hunk lines[%d] text = %q, want %q", i, l.Text, want[i])
 	}
 }
@@ -228,5 +228,5 @@ func TestParsePatchAnchorsWithLeadingTrailingSpaces(t *testing.T) {
 	input := "*** Begin Patch\n*** Update File: a\n@@   spaced anchor  \n-x\n+y\n*** End Patch"
 	p, err := parsePatch(input)
 	testassert.NoError(t, err)
-	testassert.Equal(t, p.ops[0].hunks[0].anchor, "spaced anchor")
+	testassert.Equal(t, p.ops[0].hunks[0].Anchor, "spaced anchor")
 }

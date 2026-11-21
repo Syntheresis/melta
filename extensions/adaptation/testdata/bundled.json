@@ -13,7 +13,8 @@
       },
       "append": [
         "Use more tool calls when they can improve the response, provide useful context, or help plan or complete the task.\n\nIf you encounter a new or unexpected challenge before the active task is complete, try to resolve it yourself first. If a tool call fails or returns incomplete or unhelpful output, try another tool or a different approach."
-      ]
+      ],
+      "offer_patch": true
     },
     {
       "pattern": "*gpt-5.4*",
@@ -27,7 +28,8 @@
       },
       "append": [
         "Use more tool calls when they can improve the response, provide useful context, or help plan or complete the task.\n\nIf you encounter a new or unexpected challenge before the active task is complete, try to resolve it yourself first. If a tool call fails or returns incomplete or unhelpful output, try another tool or a different approach."
-      ]
+      ],
+      "offer_patch": true
     },
     {
       "pattern": "*gpt-5*",
@@ -38,7 +40,8 @@
       ],
       "tool_description_replacements": {
         "- Do not use this tool to read file contents — use read_file. Do not use this tool to edit files — use edit_file or write_file.": "- Do not use this tool to read file contents — use read_file. Do not use this tool to edit files — use apply_patch."
-      }
+      },
+      "offer_patch": true
     },
     {
       "pattern": "*grok-build-0.1",

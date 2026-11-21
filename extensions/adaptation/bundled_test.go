@@ -53,7 +53,8 @@ func TestProductionBundledDataIsValid(t *testing.T) {
 		testassert.Check(t, tbl[i].pattern == e.Pattern, "row %d: loader pattern %q != fixture %q", i, tbl[i].pattern, e.Pattern)
 		testassert.Check(t, slices.Equal(tbl[i].adapt.Append, e.Append) &&
 			slices.Equal(tbl[i].adapt.ExcludeTools, e.ExcludeTools) &&
-			maps.Equal(tbl[i].adapt.ToolDescriptionReplacements, e.ToolDescriptionReplacements), "row %d (%q): loaded adaptation outputs %+v != fixture row %+v", i, e.Pattern, tbl[i].adapt, e)
+			maps.Equal(tbl[i].adapt.ToolDescriptionReplacements, e.ToolDescriptionReplacements) &&
+			tbl[i].adapt.OfferPatch == e.OfferPatch, "row %d (%q): loaded adaptation outputs %+v != fixture row %+v", i, e.Pattern, tbl[i].adapt, e)
 	}
 }
 

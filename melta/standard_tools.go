@@ -1,9 +1,9 @@
 package melta
 
-// The baseline standard tools: the seven owner-constructed Tool
-// implementations — read_file, write_file, edit_file, and apply_patch over the
-// shared file preparation, snapshot bookkeeping, and artifact-derived code
-// groups, plus the foreground/background command, process, and sleep tools.
+// The baseline standard tools: the six owner-constructed Tool
+// implementations — read_file, write_file, and edit_file over the shared file
+// preparation, snapshot bookkeeping, and artifact-derived code groups, plus
+// the foreground/background command, process, and sleep tools.
 // They are ordinary composition members compiled directly into every
 // Melta: they are never optional plugin exports, and file tools carry no
 // process dependency.
@@ -202,24 +202,6 @@ func stringOutcome(ctx context.Context, callID string, call *tool.PreparedCall, 
 	return outcome
 }
 
-// patchOutcome runs one prepared patch call and wraps the outcome: the
-// model-visible content is the engine's own summary, and the captured
-// per-file previews convert into the edit_preview_files metadata shape with
-// their full preview content retained.
-func patchOutcome(ctx context.Context, callID string, call *tool.PreparedPatchCall) harness.ToolOutcome {
-	result, err := call.Execute(ctx, harness.LocationRecheckFromContext(ctx))
-	if err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
-	}
-	outcome := harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: result.Result}}
-	if m := tool.ApplyPatchPreviewMetadata(result.Previews); m != nil {
-		if raw, err := json.Marshal(m); err == nil {
-			outcome.Metadata = raw
-		}
-	}
-	return outcome
-}
-
 // normalizeCallArguments is the one shared Normalize body for every tool:
 // the strict decode of the call arguments, the tool's single argument
 // normalization, and the marshaled normalized object.
@@ -353,29 +335,6 @@ func (t editTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall
 			targets: prepared.Targets,
 			execute: func(ctx context.Context) harness.ToolOutcome {
 				return stringOutcome(ctx, call.ID, prepared, string(call.Arguments), editpreview.MetadataFromArgs)
-			},
-		}, nil
-	})
-}
-
-// patchTool is the apply_patch tool; it is advertised exactly like every
-// other selected eligible tool.
-type patchTool struct{ inst *standardTools }
-
-func (patchTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	return normalizeCallArguments(call, tool.NormalizePatchArgs)
-}
-
-func (t patchTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) harness.PreparedTool {
-	return t.inst.prepareMutation(tc, call, func(root, rootCanonical string, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
-		prepared, err := tool.PreparePatchCall(root, rootCanonical, group, args)
-		if err != nil {
-			return mutationPrepared{}, err
-		}
-		return mutationPrepared{
-			targets: prepared.Targets,
-			execute: func(ctx context.Context) harness.ToolOutcome {
-				return patchOutcome(ctx, call.ID, prepared)
 			},
 		}, nil
 	})
@@ -761,21 +720,20 @@ type standardToolDeclaration struct {
 	definition model.ToolDefinition
 }
 
-// standardToolDeclarations returns the seven standard tool declarations in
+// standardToolDeclarations returns the six standard tool declarations in
 // declaration order.
 func standardToolDeclarations() []standardToolDeclaration {
 	return []standardToolDeclaration{
 		{id: "read_file", definition: model.ToolDefinition{Name: "read_file", Description: readFileDescription, Parameters: json.RawMessage(readFileParameters)}},
 		{id: "write_file", definition: model.ToolDefinition{Name: "write_file", Description: writeFileDescription, Parameters: json.RawMessage(writeFileParameters)}},
 		{id: "edit_file", definition: model.ToolDefinition{Name: "edit_file", Description: editFileDescription, Parameters: json.RawMessage(editFileParameters)}},
-		{id: "apply_patch", definition: model.ToolDefinition{Name: "apply_patch", Description: applyPatchDescription, Parameters: json.RawMessage(applyPatchParameters)}},
 		{id: "run_command", definition: model.ToolDefinition{Name: "run_command", Description: runCommandDescription, Parameters: json.RawMessage(runCommandParameters)}},
 		{id: "process", definition: model.ToolDefinition{Name: "process", Description: processDescription, Parameters: json.RawMessage(processParameters)}},
 		{id: "sleep", definition: model.ToolDefinition{Name: "sleep", Description: sleepDescription, Parameters: json.RawMessage(sleepParameters)}},
 	}
 }
 
-// newStandardTools constructs the seven standard tool values over the owner
+// newStandardTools constructs the six standard tool values over the owner
 // data root and the jobs service: the file tools share one state that carries
 // no process dependency, run_command carries the jobs service beside that
 // state, process carries only the jobs service, and sleep needs neither; no
@@ -788,7 +746,6 @@ func newStandardTools(dataDir string, jobsService jobs.Jobs) map[string]Tool {
 		"read_file":   readTool{inst},
 		"write_file":  writeTool{inst},
 		"edit_file":   editTool{inst},
-		"apply_patch": patchTool{inst},
 		"run_command": runCommandTool{inst, jobsService},
 		"process":     processTool{jobsService},
 		"sleep":       sleepTool{},

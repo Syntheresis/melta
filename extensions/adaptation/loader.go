@@ -24,6 +24,7 @@ type bundledEntry struct {
 	ExcludeTools                []string          `json:"exclude_tools,omitempty"`
 	Append                      []string          `json:"append,omitempty"`
 	ToolDescriptionReplacements map[string]string `json:"tool_description_replacements,omitempty"`
+	OfferPatch                  bool              `json:"offer_patch,omitempty"`
 }
 
 // loadBundledTable reads, decodes, and validates the bundled adaptation
@@ -61,6 +62,7 @@ func loadBundledTable() []entry {
 			ExcludeTools:                append([]string(nil), e.ExcludeTools...),
 			Append:                      append([]string(nil), e.Append...),
 			ToolDescriptionReplacements: cloneStringMap(e.ToolDescriptionReplacements),
+			OfferPatch:                  e.OfferPatch,
 		}})
 	}
 	return out

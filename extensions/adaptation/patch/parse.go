@@ -1,4 +1,4 @@
-package tool
+package patch
 
 import (
 	"errors"
@@ -51,15 +51,17 @@ type hunkLine struct {
 }
 
 type hunk struct {
-	anchor string
-	lines  []hunkLine
+	Anchor string     `json:"anchor,omitempty"`
+	Lines  []hunkLine `json:"lines"`
 }
 
 type fileOp struct {
-	kind     opKind
-	path     string
-	movePath string
-	hunks    []hunk
+	kind        opKind
+	path        string
+	movePath    string
+	hunks       []hunk
+	source      boundTarget
+	destination *boundTarget
 }
 
 type patch struct {
@@ -113,7 +115,7 @@ func parsePatch(input string) (*patch, error) {
 				if !strings.HasPrefix(b, "+") {
 					return nil, fmt.Errorf("%w: %q", errApplyPatchAddBody, b)
 				}
-				op.hunks = append(op.hunks, hunk{lines: []hunkLine{{Kind: lineAdd, Text: b[1:]}}})
+				op.hunks = append(op.hunks, hunk{Lines: []hunkLine{{Kind: lineAdd, Text: b[1:]}}})
 				i++
 			}
 			if len(op.hunks) == 0 {
@@ -155,7 +157,7 @@ func parsePatch(input string) (*patch, error) {
 					return nil, fmt.Errorf("apply_patch: expected @@, got %q", b)
 				}
 				anchor := strings.TrimSpace(strings.TrimPrefix(b, applyPatchHunkPrefix))
-				h := hunk{anchor: anchor}
+				h := hunk{Anchor: anchor}
 				i++
 				if i < len(body) && (strings.HasPrefix(body[i], "*** ") || strings.HasPrefix(body[i], applyPatchHunkPrefix)) {
 					return nil, fmt.Errorf("apply_patch: hunk has no body lines")
@@ -170,17 +172,17 @@ func parsePatch(input string) (*patch, error) {
 					}
 					switch b[0] {
 					case ' ':
-						h.lines = append(h.lines, hunkLine{Kind: lineContext, Text: b[1:]})
+						h.Lines = append(h.Lines, hunkLine{Kind: lineContext, Text: b[1:]})
 					case '-':
-						h.lines = append(h.lines, hunkLine{Kind: lineRemove, Text: b[1:]})
+						h.Lines = append(h.Lines, hunkLine{Kind: lineRemove, Text: b[1:]})
 					case '+':
-						h.lines = append(h.lines, hunkLine{Kind: lineAdd, Text: b[1:]})
+						h.Lines = append(h.Lines, hunkLine{Kind: lineAdd, Text: b[1:]})
 					default:
 						return nil, fmt.Errorf("%w: %q", errApplyPatchHunkLine, b)
 					}
 					i++
 				}
-				if len(h.lines) == 0 {
+				if len(h.Lines) == 0 {
 					return nil, fmt.Errorf("apply_patch: hunk has no body lines")
 				}
 				op.hunks = append(op.hunks, h)

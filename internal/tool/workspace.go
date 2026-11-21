@@ -1,5 +1,13 @@
 package tool
 
+import (
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/Syntheresis/melta/internal/safefs"
+)
+
 // WorkspaceBinding retains the lexical and canonical witnesses for one target.
 type WorkspaceBinding struct{ bound boundCall }
 
@@ -44,4 +52,24 @@ func (b WorkspaceBinding) Write(store SnapshotStore, content []byte, createOnly 
 func (b WorkspaceBinding) Delete(store SnapshotStore, recheck func() error) (MutationOutcome, error) {
 	b.bound.recheck = recheck
 	return deleteBound(b.bound, store)
+}
+
+func deleteBound(bound boundCall, store SnapshotStore) (mutationOutcome, error) {
+	return mutateBound(bound, store, nil, func() (mutationOutcome, []byte, bool, error) {
+		if err := safefs.RemoveLeaf(bound.canonical); err != nil {
+			return mutationUntouched, nil, false, fmt.Errorf("remove: %w", err)
+		}
+		return mutationCompleted, nil, true, nil
+	})
+}
+
+// readFileBytes reads the entire file at canonicalPath with O_NOFOLLOW and
+// returns the raw bytes (including \r) unchanged.
+func readFileBytes(canonicalPath string) ([]byte, error) {
+	f, err := safefs.OpenExisting(canonicalPath, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }

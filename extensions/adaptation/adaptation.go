@@ -37,6 +37,12 @@ type Adaptation struct {
 	// rules are text-only — the same input text gets the same transformation
 	// whichever tool carries it.
 	ToolDescriptionReplacements map[string]string
+
+	// OfferPatch keeps the extension's apply_patch tool in this model's
+	// advertisement when the incoming advertisement already contains it. In
+	// every other case apply_patch is filtered out; it is never added from
+	// text or a catalog the earlier admission did not select.
+	OfferPatch bool
 }
 
 // TransformPrompt appends every ordered part to text, joined verbatim by one

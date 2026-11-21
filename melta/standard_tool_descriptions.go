@@ -77,24 +77,6 @@ const editFileParameters = `{
   "required": ["path", "old_string", "new_string"]
 }`
 
-const applyPatchDescription = `Edits, creates, deletes, or renames files using the apply_patch (V4A) patch format.
-- Wrap every change between *** Begin Patch and *** End Patch, with one section per file.
-- Start each section with a header: *** Add File: <path> (every following line is a + line of new content), *** Update File: <path> (edit in place), or *** Delete File: <path> (nothing follows).
-- To rename, put *** Move to: <new path> on the line right after *** Update File: <path>.
-- In an Update, write each change as a hunk starting with @@. Prefix context lines with a space, removed lines with -, and added lines with +. Include about 3 lines of context around each change, and add @@ <enclosing function or class> when that context is not unique.
-- Use file paths relative to the project root.`
-
-const applyPatchParameters = `{
-  "type": "object",
-  "properties": {
-    "input": {
-      "type": "string",
-      "description": "The full patch text, from *** Begin Patch to *** End Patch."
-    }
-  },
-  "required": ["input"]
-}`
-
 const runCommandDescription = `Executes a shell command and returns combined stdout and stderr.
 - Each call starts a fresh shell in the project root. Environment variables, aliases, and working directory do not persist between calls. Use "cd /path && command" if you need a different working directory.
 - Foreground commands use the default timeout. Background commands run until they exit, are killed, or reach an explicit timeout parameter.

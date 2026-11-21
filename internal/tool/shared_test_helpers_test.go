@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -36,21 +35,6 @@ func newCodeGroupStore(t *testing.T, groupDir string) testCodeGroupStore {
 func newTempCodeGroupStore(t *testing.T) testCodeGroupStore {
 	t.Helper()
 	return newCodeGroupStore(t, filepath.Join(t.TempDir(), "group"))
-}
-
-// execPatch runs one apply_patch through the exported Normalize* + Prepare*
-// entries and returns the structured execution result.
-func execPatch(t *testing.T, root, rootCanonical string, store SnapshotStore, args map[string]any) (PreparedPatchResult, error) {
-	t.Helper()
-	norm, err := NormalizePatchArgs(args)
-	if err != nil {
-		return PreparedPatchResult{}, err
-	}
-	call, err := PreparePatchCall(root, rootCanonical, store, norm)
-	if err != nil {
-		return PreparedPatchResult{}, err
-	}
-	return call.Execute(context.Background(), nil)
 }
 
 type snapshotCall struct {
@@ -302,23 +286,9 @@ func producerMutationCases() []producerMutationCase {
 			},
 		},
 		{
-			name: "patch_update", existing: true, seed: "a\nB\nc", intended: "a\nB2\nc", partialLine: "M file.txt",
-			run: func(t *testing.T, root, _ string, store testCodeGroupStore) error {
-				_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Update File: file.txt\n@@\n-B\n+B2")})
-				return err
-			},
-		},
-		{
 			name: "write_created", existing: false, seed: "", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
 				_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "after"})
-				return err
-			},
-		},
-		{
-			name: "patch_add_created", existing: false, seed: "", intended: "after", partialLine: "A created.txt",
-			run: func(t *testing.T, root, _ string, store testCodeGroupStore) error {
-				_, err := execPatch(t, root, "", store, map[string]any{"input": applyPatchInput(t, "*** Add File: created.txt\n+after")})
 				return err
 			},
 		},

@@ -74,6 +74,9 @@ type hookAPI struct {
 }
 
 func (a *hookAPI) Settings() json.RawMessage { return a.settings }
+func (a *hookAPI) RegisterTool(_ model.ToolDefinition, _ extension.RegisteredTool, _ extension.Registration) (extension.Registration, error) {
+	return nil, nil
+}
 func (a *hookAPI) AttachRequest(_ extension.HookMode, h extension.AuthorRequestHook, _ extension.Registration) (extension.Registration, error) {
 	a.hook = h
 	return nil, nil
@@ -121,7 +124,7 @@ func TestConfiguredSchemaValidatesConsumedTypes(t *testing.T) {
 		`{"enabled":true,"entries":[]}`,
 		`{"enabled":true,"entries":[{"pattern":""}]}`,
 		`{"enabled":true,"entries":[{"pattern":"*","name":"unconsumed","unknown":1}]}`,
-		`{"enabled":true,"entries":[{"pattern":"model-*","prompt":"","append":["a",""],"exclude_tools":[],"tool_description_replacements":{}}],"unclaimed":true}`,
+		`{"enabled":true,"entries":[{"pattern":"model-*","prompt":"","append":["a",""],"exclude_tools":[],"tool_description_replacements":{},"offer_patch":true}],"unclaimed":true}`,
 	} {
 		err := extension.ValidateManifestSection(manifest, json.RawMessage(section))
 		testassert.Check(t, err == nil, "ValidateManifestSection(%s) = %v, want valid", section, err)
@@ -136,6 +139,7 @@ func TestConfiguredSchemaValidatesConsumedTypes(t *testing.T) {
 		`{"enabled":true,"entries":[{"pattern":"*","exclude_tools":[1]}]}`,
 		`{"enabled":true,"entries":[{"pattern":"*","tool_description_replacements":{"k":1}}]}`,
 		`{"enabled":true,"entries":[{"pattern":"*","tool_description_replacements":{"":"v"}}]}`,
+		`{"enabled":true,"entries":[{"pattern":"*","offer_patch":1}]}`,
 	} {
 		err := extension.ValidateManifestSection(manifest, json.RawMessage(section))
 		testassert.Check(t, err != nil, "ValidateManifestSection(%s) accepted an invalid consumed shape", section)
@@ -152,7 +156,7 @@ func TestRequestAppliesShippedBundledRows(t *testing.T) {
 	// a match still states the complete advertisement.
 	for _, ref := range []model.ModelRef{{Provider: "xai", Model: "grok-build-0.1"}, {Provider: "google", Model: "gemini-3-pro"}} {
 		got := shapeBundled(t, ref, true)
-		testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), fixtureToolNames()) && changedDescriptions(got.Tools) == nil && got.Prompt != nil && strings.HasPrefix(*got.Prompt, "BASE_PROMPT\n\n"), "%s treatment = %+v, want append paragraphs and the full advertisement", ref.String(), got)
+		testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}) && changedDescriptions(got.Tools) == nil && got.Prompt != nil && strings.HasPrefix(*got.Prompt, "BASE_PROMPT\n\n"), "%s treatment = %+v, want append paragraphs and the incoming tools without offer_patch", ref.String(), got)
 	}
 }
 
@@ -172,7 +176,7 @@ func TestConfiguredEntriesPrecedeBundledOnEveryPrompt(t *testing.T) {
 		// exclusions nor its assembled-only guidance apply.
 		got := shapeSection(t, section, model.ModelRef{Provider: "openai", Model: "gpt-5.5"}, assembled)
 		testassert.Require(t, got.Prompt != nil && *got.Prompt == "CONFIGURED\n\nUSER_TAIL", "assembled=%v configured treatment = %+v, want the complete replacement followed by the explicit append", assembled, got)
-		testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), fixtureToolNames()) && changedDescriptions(got.Tools) == nil, "assembled=%v configured treatment = %+v, want the unexcluded advertisement and no bundled levers", assembled, got)
+		testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}) && changedDescriptions(got.Tools) == nil, "assembled=%v configured treatment = %+v, want the unexcluded advertisement without apply_patch and no bundled levers", assembled, got)
 	}
 
 	// A present empty prompt replacement replaces the text with empty; the
@@ -191,7 +195,7 @@ func TestConfiguredEmptyAndCatchAllPatternsMatch(t *testing.T) {
 	got := shapeSection(t, section, model.ModelRef{}, true)
 	testassert.Require(t, got.Prompt != nil && *got.Prompt == "EMPTY_ID", "empty-pattern treatment = %+v, want the configured replacement", got)
 	got = shapeSection(t, section, model.ModelRef{Provider: "prov", Model: "claude-x"}, true)
-	testassert.Require(t, got.Prompt == nil && got.Tools == nil, "nonempty-id treatment = %+v, want baseline", got)
+	testassert.Require(t, got.Prompt == nil && reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}), "nonempty-id treatment = %+v, want baseline prompt and the incoming tools without apply_patch", got)
 
 	got = shapeSection(t, `{"enabled":true,"entries":[{"pattern":"*","prompt":"ANY"}]}`, model.ModelRef{Provider: "prov", Model: "claude-x"}, true)
 	testassert.Require(t, got.Prompt != nil && *got.Prompt == "ANY", "catch-all treatment = %+v, want the configured replacement", got)
@@ -209,19 +213,19 @@ func TestConfiguredDecodeUsesExactCaseJSONNames(t *testing.T) {
 		"Entries":[{"pattern":"*","prompt":"UPPER","append":["UPPER_APPEND"],"exclude_tools":["read_file"],"tool_description_replacements":{"writes":"UPPER_WRITE"}}]}`
 	got := shapeSection(t, section, model.ModelRef{Provider: "prov", Model: "any"}, true)
 	testassert.Require(t, got.Prompt != nil && *got.Prompt == "LOWER\n\nLOWER_APPEND", "cased section prompt = %v, want the lowercase entry only", got.Prompt)
-	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "edit_file", "apply_patch", "run_command", "note_editor"}), "cased section tools = %q, want the lowercase exclusions only", toolNames(got.Tools))
+	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "edit_file", "run_command", "note_editor"}), "cased section tools = %q, want the lowercase exclusions only and no apply_patch without offer_patch", toolNames(got.Tools))
 	testassert.Require(t, reflect.DeepEqual(changedDescriptions(got.Tools), map[string]string{"read_file": "LOWER_READ one file"}), "cased section descriptions = %q, want the lowercase replacement key only", changedDescriptions(got.Tools))
 
 	miscased := `{"entries":[{"pattern":"*","Prompt":"UPPER","Append":["UPPER"],"Exclude_Tools":["read_file"],"Tool_Description_Replacements":{"writes":"UPPER"}}]}`
 	got = shapeSection(t, miscased, model.ModelRef{Provider: "prov", Model: "any"}, true)
-	testassert.Require(t, got.Prompt == nil && changedDescriptions(got.Tools) == nil && reflect.DeepEqual(toolNames(got.Tools), fixtureToolNames()), "miscased entry treatment = %+v, want no consumed configured fields", got)
+	testassert.Require(t, got.Prompt == nil && changedDescriptions(got.Tools) == nil && reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}), "miscased entry treatment = %+v, want no consumed configured fields", got)
 
 	got = shapeSection(t, `{"entries_extra":[],"Entries":[{"pattern":"*","prompt":"UPPER"}]}`, model.ModelRef{Provider: "anthropic", Model: "claude-x"}, true)
-	testassert.Require(t, got.Prompt == nil && got.Tools == nil, "uppercase entries treatment = %+v, want baseline", got)
+	testassert.Require(t, got.Prompt == nil && reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}), "uppercase entries treatment = %+v, want baseline prompt and the incoming tools without apply_patch", got)
 
 	unknownInvalid := `{"Entries":1,"ENTRIES":{},"entries":[{"pattern":"*","Prompt":1,"Append":{},"Exclude_Tools":"bad","Tool_Description_Replacements":[1]}]}`
 	got = shapeSection(t, unknownInvalid, model.ModelRef{Provider: "prov", Model: "any"}, true)
-	testassert.Require(t, got.Prompt == nil && changedDescriptions(got.Tools) == nil && reflect.DeepEqual(toolNames(got.Tools), fixtureToolNames()), "unknown invalid fields treatment = %+v, want the matching entry with no configured levers", got)
+	testassert.Require(t, got.Prompt == nil && changedDescriptions(got.Tools) == nil && reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}), "unknown invalid fields treatment = %+v, want the matching entry with no configured levers", got)
 
 	got = shapeSection(t, `{"entries":[{"pattern":"*","tool_description_replacements":{"READS":"UPPER"}}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true)
 	testassert.Require(t, changedDescriptions(got.Tools) == nil, "literal replacement keys = %q, want no case-folded match against reads one file", changedDescriptions(got.Tools))
@@ -229,13 +233,13 @@ func TestConfiguredDecodeUsesExactCaseJSONNames(t *testing.T) {
 
 func TestConfiguredAdvertisementIsIncomingMinusExclusions(t *testing.T) {
 	got := shapeSection(t, `{"enabled":true,"entries":[{"pattern":"*","exclude_tools":["write_file","edit_file"]}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true)
-	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "apply_patch", "run_command", "note_editor"}), "configured view = %q, want the incoming tools minus its exclusions", toolNames(got.Tools))
+	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "run_command", "note_editor"}), "configured view = %q, want the incoming tools minus its exclusions and apply_patch", toolNames(got.Tools))
 
 	got = shapeSection(t, `{"enabled":true,"entries":[{"pattern":"*","exclude_tools":["read_file","write_file","edit_file","apply_patch","run_command","note_editor"]}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true)
 	testassert.Require(t, got.Tools != nil && len(got.Tools) == 0, "all-excluded view = %#v, want a present empty advertisement", got.Tools)
 
 	got = shapeSection(t, `{"enabled":true,"entries":[{"pattern":"*","exclude_tools":[]}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true)
-	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), fixtureToolNames()), "unexcluded view = %q, want exactly the incoming tools", toolNames(got.Tools))
+	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}), "unexcluded view = %q, want exactly the incoming tools without apply_patch", toolNames(got.Tools))
 
 	// A match selects from the tools earlier hooks left advertised, in their
 	// order, never restoring a catalog member.
@@ -245,9 +249,9 @@ func TestConfiguredAdvertisementIsIncomingMinusExclusions(t *testing.T) {
 		{Name: "apply_patch", Description: "applies one patch"},
 	}
 	got = shape(t, `{"enabled":true,"entries":[{"pattern":"*","prompt":"SUBSET"}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true, incoming)
-	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"note_editor", "run_command", "apply_patch"}), "prompt-only view = %q, want the incoming subset in its order", toolNames(got.Tools))
+	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"note_editor", "run_command"}), "prompt-only view = %q, want the incoming subset in its order without apply_patch", toolNames(got.Tools))
 	got = shape(t, `{"enabled":true,"entries":[{"pattern":"*","exclude_tools":["read_file","run_command"]}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true, incoming)
-	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"note_editor", "apply_patch"}), "exclusion view = %q, want the incoming order minus the exclusion, the absent name not restored", toolNames(got.Tools))
+	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"note_editor"}), "exclusion view = %q, want the incoming order minus the exclusion and apply_patch, the absent name not restored", toolNames(got.Tools))
 	got = shape(t, `{"enabled":true,"entries":[{"pattern":"*","prompt":"NONE_VISIBLE"}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true, []model.ToolDefinition{})
 	testassert.Require(t, got.Tools != nil && len(got.Tools) == 0, "empty incoming view = %#v, want a present empty advertisement", got.Tools)
 }
@@ -261,14 +265,29 @@ func TestConfiguredDescriptionReplacementTransformsOnce(t *testing.T) {
 	testassert.Require(t, reflect.DeepEqual(changedDescriptions(got.Tools), want), "description replacements = %q, want only the tools whose text contains a key, each transformed once", changedDescriptions(got.Tools))
 }
 
+func TestRequestOfferPatchKeepsOnlyIncomingVisibility(t *testing.T) {
+	got := shapeSection(t, `{"enabled":true,"entries":[{"pattern":"*","offer_patch":true}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true)
+	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), fixtureToolNames()), "offer_patch view = %q, want the complete incoming advertisement including apply_patch", toolNames(got.Tools))
+
+	got = shapeSection(t, `{"enabled":true,"entries":[{"pattern":"*"}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true)
+	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}), "row without offer_patch view = %q, want apply_patch removed", toolNames(got.Tools))
+
+	admitted := []model.ToolDefinition{
+		{Name: "read_file", Description: "reads one file"},
+		{Name: "run_command", Description: bundledGPTGuidanceLine},
+	}
+	got = shape(t, `{"enabled":true,"entries":[{"pattern":"*","offer_patch":true,"tool_description_replacements":{"reads":"READ"}}]}`, model.ModelRef{Provider: "prov", Model: "any"}, true, admitted)
+	testassert.Require(t, reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "run_command"}), "admission-excluded apply_patch view = %q, want it never restored", toolNames(got.Tools))
+}
+
 func TestRequestUnmatchedModelIsBaseline(t *testing.T) {
 	got := shapeBundled(t, model.ModelRef{Provider: "anthropic", Model: "claude-x"}, true)
-	testassert.Require(t, got.Prompt == nil && got.Tools == nil, "unmatched model treatment = %+v, want the zero consequence", got)
+	testassert.Require(t, got.Prompt == nil && reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}), "unmatched model treatment = %+v, want the baseline prompt and the incoming tools without apply_patch", got)
 }
 
 func TestRequestMatchesTheModelComponentOnly(t *testing.T) {
 	got := shapeBundled(t, model.ModelRef{Provider: "gpt-5", Model: "unrelated"}, true)
-	testassert.Require(t, got.Prompt == nil && got.Tools == nil, "provider-shaped ref treatment = %+v, want the zero consequence", got)
+	testassert.Require(t, got.Prompt == nil && reflect.DeepEqual(toolNames(got.Tools), []string{"read_file", "write_file", "edit_file", "run_command", "note_editor"}), "provider-shaped ref treatment = %+v, want the baseline prompt and the incoming tools without apply_patch", got)
 	got = shapeBundled(t, model.ModelRef{Provider: "openai", Model: "GPT-5.4"}, true)
 	testassert.Require(t, len(got.Tools) == 4, "case-insensitive row did not match: %+v", got)
 }

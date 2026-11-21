@@ -36,24 +36,6 @@ type PreparedCall struct {
 	Execute func(context.Context, func() error) (string, error)
 }
 
-// PreparedPatchResult is the structured execution result of one prepared
-// apply_patch call: the model-visible summary plus the per-file preview
-// data the engine captured, in the exported engine shape, so the target
-// plugin can convert previews to its metadata.
-type PreparedPatchResult struct {
-	Result   string
-	Previews []AppliedFilePreview
-}
-
-// PreparedPatchCall is the preparation output for one apply_patch call.
-// The execution closure consumes the patch parsed during preparation — no
-// redecode or reparse — and revalidates the bound root and every target
-// before content access.
-type PreparedPatchCall struct {
-	Targets []PreparedTarget
-	Execute func(context.Context, func() error) (PreparedPatchResult, error)
-}
-
 // readTarget is the private per-target binding read preparation tracks;
 // the display path stays private to the suggestion path.
 type readTarget struct {
@@ -436,55 +418,4 @@ func editMutation(canonical string, displayPath, oldString, newString string, re
 // root remains the re-resolution input.
 func PrepareEditCall(root, rootCanonical string, store SnapshotStore, args map[string]any) (*PreparedCall, error) {
 	return prepareEdit(root, store, args, rootCanonical)
-}
-
-// preparePatchFromArgs parses the V4A patch exactly once and resolves every
-// source/destination target. Preparation performs only path resolution and
-// collision checks; no content read happens here, so an invalid patch target
-// is rejected at preparation, before authorization.
-func preparePatchFromArgs(root string, args map[string]any, rootCanonical string) (*patch, []boundCall, error) {
-	input, _ := args["input"].(string)
-	p, err := parsePatch(input)
-	if err != nil {
-		return nil, nil, err
-	}
-	targets, err := resolveApplyPatchTargetsFromParsed(root, p, rootCanonical)
-	if err != nil {
-		return nil, nil, err
-	}
-	return p, targets, nil
-}
-
-// PreparePatchCall is the exported preparation entry for target callers.
-// The caller supplies already-normalized arguments (NormalizePatchArgs) and
-// the canonical Workspace root witness bound at authorization, which replace
-// the internal resolutions: the execution closure revalidates against these
-// witnesses, re-resolving the lexical root. Preparation applies the patch
-// target resolution so an invalid patch source/destination is rejected before
-// authorization. The returned call's execution closure consumes the patch
-// parsed here — no redecode or reparse — revalidates the bound root and every
-// target before content access, and returns the structured result carrying
-// the model-visible summary and the captured preview data.
-func PreparePatchCall(root, rootCanonical string, store SnapshotStore, args map[string]any) (*PreparedPatchCall, error) {
-	rootCanonical, err := bindApproved(root, "apply_patch", rootCanonical)
-	if err != nil {
-		return nil, err
-	}
-	p, targets, err := preparePatchFromArgs(root, args, rootCanonical)
-	if err != nil {
-		return nil, err
-	}
-	displayTargets := make([]PreparedTarget, 0, len(targets))
-	for _, t := range targets {
-		displayTargets = append(displayTargets, PreparedTarget{CanonicalPath: t.canonical})
-	}
-	execute := func(_ context.Context, check func() error) (PreparedPatchResult, error) {
-		bound := append([]boundCall(nil), targets...)
-		for i := range bound {
-			bound[i].recheck = check
-		}
-		result, previews, err := executeParsedPatch(store, p, bound)
-		return PreparedPatchResult{Result: result, Previews: previews}, err
-	}
-	return &PreparedPatchCall{Targets: displayTargets, Execute: execute}, nil
 }

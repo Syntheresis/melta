@@ -1,4 +1,4 @@
-package tool
+package patch
 
 import (
 	"strings"
@@ -20,63 +20,63 @@ func TestLocateScenarios(t *testing.T) {
 		{
 			name:   "TestLocateExactMatch",
 			lines:  []string{"foo", "bar", "baz"},
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "bar"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "bar"}}},
 			cursor: 0,
 			start:  1,
 		},
 		{
 			name:   "TestLocateForwardScan first match",
 			lines:  []string{"foo", "bar", "foo", "bar"},
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo"}, {Kind: lineContext, Text: "bar"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo"}, {Kind: lineContext, Text: "bar"}}},
 			cursor: 0,
 			start:  0,
 		},
 		{
 			name:   "TestLocateForwardScan second match",
 			lines:  []string{"foo", "bar", "foo", "bar"},
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo"}, {Kind: lineContext, Text: "bar"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo"}, {Kind: lineContext, Text: "bar"}}},
 			cursor: 2,
 			start:  2,
 		},
 		{
 			name:   "TestLocateLevel2TrailingWhitespace",
 			lines:  []string{"foo   ", "bar", "baz"},
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
 			cursor: 0,
 			start:  0,
 		},
 		{
 			name:   "TestLocateLevel3LeadingAndTrailingWhitespace",
 			lines:  []string{"  foo  ", "bar", "baz"},
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
 			cursor: 0,
 			start:  0,
 		},
 		{
 			name:   "TestLocateLevel4UnicodeDashes",
 			lines:  []string{"foo\u2014bar", "baz"}, // em-dash
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo-bar"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo-bar"}}},
 			cursor: 0,
 			start:  0,
 		},
 		{
 			name:   "TestLocateLevel4UnicodeQuotes",
 			lines:  []string{"say \u201Chello\u201D", "baz"}, // curly double quotes
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "say \"hello\""}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "say \"hello\""}}},
 			cursor: 0,
 			start:  0,
 		},
 		{
 			name:   "TestLocateLevel4ExoticSpaces",
 			lines:  []string{"\u00A0foo\u00A0", "bar"}, // non-breaking space (U+00A0) on each side
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
 			cursor: 0,
 			start:  0,
 		},
 		{
 			name:   "TestLocateLowerLevelBeatsHigher",
 			lines:  []string{"foo", "bar", "foo   "}, // Level 1 matches at 0; level-2 fuzzy match at 2.
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
 			cursor: 0,
 			start:  0,
 		},
@@ -84,8 +84,8 @@ func TestLocateScenarios(t *testing.T) {
 			name:  "TestLocateAnchorAdvancesCursor",
 			lines: []string{"foo", "anchor", "bar", "baz"},
 			h: hunk{
-				anchor: "anchor",
-				lines:  []hunkLine{{Kind: lineContext, Text: "bar"}},
+				Anchor: "anchor",
+				Lines:  []hunkLine{{Kind: lineContext, Text: "bar"}},
 			},
 			cursor: 0,
 			start:  2,
@@ -94,8 +94,8 @@ func TestLocateScenarios(t *testing.T) {
 			name:  "TestLocateAnchorDoesNotNarrowRegion",
 			lines: []string{"anchor", "skip1", "skip2", "skip3", "match"}, // Pattern appears many lines after the anchor.
 			h: hunk{
-				anchor: "anchor",
-				lines:  []hunkLine{{Kind: lineContext, Text: "match"}},
+				Anchor: "anchor",
+				Lines:  []hunkLine{{Kind: lineContext, Text: "match"}},
 			},
 			cursor: 0,
 			start:  4,
@@ -104,8 +104,8 @@ func TestLocateScenarios(t *testing.T) {
 			name:  "TestLocateAnchorFoundViaFuzzyLadder",
 			lines: []string{"anchor   ", "match"},
 			h: hunk{
-				anchor: "anchor",
-				lines:  []hunkLine{{Kind: lineContext, Text: "match"}},
+				Anchor: "anchor",
+				Lines:  []hunkLine{{Kind: lineContext, Text: "match"}},
 			},
 			cursor: 0,
 			start:  1,
@@ -113,7 +113,7 @@ func TestLocateScenarios(t *testing.T) {
 		{
 			name:  "TestLocateEOFTrailingEmptyRetryDoesNotMatchBeforeEOF",
 			lines: []string{"alpha", "beta", "charlie"},
-			h: hunk{lines: []hunkLine{
+			h: hunk{Lines: []hunkLine{
 				{Kind: lineContext, Text: "alpha"},
 				{Kind: lineRemove, Text: ""},
 			}},
@@ -124,7 +124,7 @@ func TestLocateScenarios(t *testing.T) {
 		{
 			name:      "TestLocatePatternNotFound",
 			lines:     []string{"foo", "bar"},
-			h:         hunk{lines: []hunkLine{{Kind: lineContext, Text: "missing"}}},
+			h:         hunk{Lines: []hunkLine{{Kind: lineContext, Text: "missing"}}},
 			cursor:    0,
 			wantErr:   true,
 			errPrefix: "Failed to find expected lines in p:",
@@ -133,8 +133,8 @@ func TestLocateScenarios(t *testing.T) {
 			name:  "TestLocateAnchorNotFound",
 			lines: []string{"foo", "bar"},
 			h: hunk{
-				anchor: "missing",
-				lines:  []hunkLine{{Kind: lineContext, Text: "foo"}},
+				Anchor: "missing",
+				Lines:  []hunkLine{{Kind: lineContext, Text: "foo"}},
 			},
 			cursor:    0,
 			wantErr:   true,
@@ -143,7 +143,7 @@ func TestLocateScenarios(t *testing.T) {
 		{
 			name:  "TestLocateMixedContextAndRemove",
 			lines: []string{"alpha", "BEFORE", "beta"}, // File carries the lines the patch will remove.
-			h: hunk{lines: []hunkLine{
+			h: hunk{Lines: []hunkLine{
 				{Kind: lineContext, Text: "alpha"},
 				{Kind: lineRemove, Text: "BEFORE"},
 				{Kind: lineAdd, Text: "REPLACEMENT"}, // not in pattern
@@ -155,21 +155,21 @@ func TestLocateScenarios(t *testing.T) {
 		{
 			name:   "TestLocateNoContextOrRemove",
 			lines:  []string{"foo", "bar"}, // Hunk with only add lines: no pattern to match; return the cursor.
-			h:      hunk{lines: []hunkLine{{Kind: lineAdd, Text: "anything"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineAdd, Text: "anything"}}},
 			cursor: 0,
 			start:  0,
 		},
 		{
 			name:   "TestLocateCursorClamped negative cursor",
 			lines:  []string{"foo", "bar"}, // Negative cursor clamps to 0.
-			h:      hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
+			h:      hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
 			cursor: -5,
 			start:  0,
 		},
 		{
 			name:    "TestLocateCursorClamped past end",
 			lines:   []string{"foo", "bar"}, // Cursor past end clamps to len.
-			h:       hunk{lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
+			h:       hunk{Lines: []hunkLine{{Kind: lineContext, Text: "foo"}}},
 			cursor:  100,
 			wantErr: true,
 		},
@@ -195,7 +195,7 @@ func TestLocateEOFTrailingEmptyRetry(t *testing.T) {
 	// Pattern's last context line is empty. Without the EOF retry the
 	// pattern would not match; the retry drops the trailing "" and finds it.
 	lines := []string{"foo", "bar"}
-	h := hunk{lines: []hunkLine{
+	h := hunk{Lines: []hunkLine{
 		{Kind: lineContext, Text: "foo"},
 		{Kind: lineContext, Text: "bar"},
 		{Kind: lineContext, Text: ""},
@@ -212,7 +212,7 @@ func TestLocateNoEOFTrailingEmptyWhenFileHasIt(t *testing.T) {
 	// File has a trailing newline; pattern's last context line is empty;
 	// the empty matches lines[2]="". The full pattern matches without retry.
 	lines := []string{"foo", "bar", ""}
-	h := hunk{lines: []hunkLine{
+	h := hunk{Lines: []hunkLine{
 		{Kind: lineContext, Text: "foo"},
 		{Kind: lineContext, Text: "bar"},
 		{Kind: lineContext, Text: ""},

@@ -48,7 +48,7 @@ func chainAgentsDocument(body string) string {
 // hookPlugin requires, and no sessions section.
 func chainPlainConfigDocument(endpoint string) string {
 	return `{"providers":{"prov":` + nominalProvMember(endpoint, "PRODUCTION_TEST_KEY",
-		`{"gpt-5.5":{"name":"G","context_window":262144}}`) + `},"extensions":{"hooks":{"enabled":true,"tag":"T1"},"arghooks":{"enabled":true}}}`
+		`{"gpt-5.5":{"name":"G","context_window":262144}}`) + `},"extensions":{"hooks":{"enabled":true,"tag":"T1"},"arghooks":{"enabled":true},"adaptation":{"enabled":true,"entries":[{"pattern":"*gpt-5.5*","offer_patch":true}]}}}`
 }
 
 // chainCommandConfigDocument is the readonly-git row's provider document: no
@@ -359,6 +359,7 @@ func TestProductionCrossBoundaryComposition(t *testing.T) {
 				fixtureAgentPlugin(),
 				hookPlugin(hook),
 				argumentHookPlugin(argHook.BeforeTool),
+				adaptation.Author(),
 			}
 			return Open(ctx, testOptions(dataDir, configPath, home, plugins...))
 		}
@@ -685,7 +686,7 @@ func TestProductionAdaptationModelIndependent(t *testing.T) {
 		gptWire := decodeWireChatBody(t, server.bodyAt(0))
 		vanWire := decodeWireChatBody(t, server.bodyAt(3))
 		testassert.Require(t, slices.Equal(wireToolNames(gptWire), []string{"read_file", "apply_patch"}), "adapted advertisement = %v, want write/edit excluded and apply_patch included", wireToolNames(gptWire))
-		testassert.Require(t, slices.Equal(wireToolNames(vanWire), []string{"read_file", "write_file", "edit_file", "apply_patch"}), "baseline advertisement = %v, want every selected tool", wireToolNames(vanWire))
+		testassert.Require(t, slices.Equal(wireToolNames(vanWire), []string{"read_file", "write_file", "edit_file"}), "baseline advertisement = %v, want every selected standard tool and no offer_patch apply_patch", wireToolNames(vanWire))
 
 		// The excluded tools are refused by the ordinary unavailable path:
 		// each attempted call settles its exact error and no file effect

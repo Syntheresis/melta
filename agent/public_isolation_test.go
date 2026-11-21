@@ -280,8 +280,12 @@ func checkTrackedGoFile(rel string, imports []string, std map[string]bool) []str
 				problems = append(problems, rel+": internal/jobs imports "+imp+"; the jobs service may import only the standard library, "+harnessPkg+", and "+cmdoutputPkg+" — the Runtime owner consumes it, never the other way round")
 			}
 		case "extensions/adaptation":
+			if imp != modelPkg && imp != promptPkg && imp != extensionPkg && imp != harnessPkg && imp != publicModule+"/extensions/adaptation/patch" && !std[imp] {
+				problems = append(problems, rel+": extensions/adaptation imports "+imp+"; the supplied Adaptation extension may import only the standard library, public contracts, and its own patch subpackage, never the Runtime owner or another concrete implementation package")
+			}
+		case "extensions/adaptation/patch":
 			if imp != modelPkg && imp != promptPkg && imp != extensionPkg && imp != harnessPkg && !std[imp] {
-				problems = append(problems, rel+": extensions/adaptation imports "+imp+"; the supplied Adaptation extension may import only the standard library and public contracts, never the Runtime owner or another concrete implementation package")
+				problems = append(problems, rel+": extensions/adaptation/patch imports "+imp+"; the supplied Adaptation patch package may import only the standard library and public contracts, never the Runtime owner or another concrete implementation package")
 			}
 
 		case "internal/toolargs":

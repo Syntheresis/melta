@@ -88,7 +88,7 @@ func TestComposedToolsSettingsPublication(t *testing.T) {
 }
 
 // toolExportIDs are the baseline standard tools in declaration order.
-var toolExportIDs = []string{"read_file", "write_file", "edit_file", "apply_patch", "run_command", "process", "sleep"}
+var toolExportIDs = []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"}
 
 // fakeJobs is the scriptable jobs.Jobs test double: it records every call
 // and serves scripted errors, reservations, and live results.
@@ -165,7 +165,7 @@ func openTools(t *testing.T, dataDir string) map[string]Tool {
 }
 
 // TestStandardToolsReservedAgainstShadowing proves the baseline tool universe:
-// the seven standard tool values are constructed directly with no
+// the six standard tool values are constructed directly with no
 // registration, and a registration naming one standard tool is refused while
 // the extension's own names still register.
 func TestStandardToolsReservedAgainstShadowing(t *testing.T) {
@@ -184,7 +184,7 @@ func TestStandardToolsReservedAgainstShadowing(t *testing.T) {
 	defer stage.release()
 	testassert.Require(t, stage.tools["custom_tool"] != nil && stage.tools["read_file"] == nil, "registrations = %v, want only the extension's own name", stage.tools)
 	byID, _ := openToolsComposed(t, t.TempDir(), &fakeJobs{}, nil)
-	testassert.Equal(t, len(byID), 7)
+	testassert.Equal(t, len(byID), 6)
 }
 
 // stubManagedEnv returns one real manager bound to a throwaway .env whose
@@ -379,7 +379,7 @@ func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Reque
 	byID, _ := openToolsComposed(t, dataDir, jobsValue, nil)
 	advertise := opts.advertise
 	if advertise == nil {
-		advertise = []string{"read_file", "write_file", "edit_file", "apply_patch"}
+		advertise = []string{"read_file", "write_file", "edit_file"}
 	}
 
 	owner, cancel := context.WithCancel(ctx)
@@ -903,24 +903,6 @@ func TestPrepareShapesAndCanonicals(t *testing.T) {
 		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "file.write", "plan = %+v, want one executor; permissions = %+v, want one file.write pair", plan, plan.Permissions)
 		testassert.Require(t, plan.Permissions[0].Target == filepath.Join(ws, "wd", "out.txt") && plan.CanonicalWorkspace == ws, "target = %q, canonical workspace = %q, want the canonical file path in the workspace", plan.Permissions[0].Target, plan.CanonicalWorkspace)
 	})
-	t.Run("apply_patch declares every source and destination in declaration order", func(t *testing.T) {
-		ws := t.TempDir()
-		for name, content := range map[string]string{"b.txt": "old\n", "c.txt": "gone\n", "d.txt": "d\n"} {
-			testassert.NoError(t, os.WriteFile(filepath.Join(ws, name), []byte(content), 0o644))
-		}
-		patch := "*** Begin Patch\n*** Add File: a.txt\n+new\n*** Update File: b.txt\n@@\n-old\n+new\n*** Delete File: c.txt\n*** Update File: d.txt\n*** Move to: e.txt\n*** End Patch"
-		input, err := json.Marshal(map[string]string{"input": patch})
-		testassert.NoError(t, err)
-		plan := prepare(t, byID["apply_patch"], callToolContext(ws), "apply_patch", string(input))
-		want := []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}
-		if len(plan.Permissions) != len(want) {
-			t.Fatalf("permissions = %+v, want %d file.write pairs in declaration order", plan.Permissions, len(want))
-		}
-		for i, name := range want {
-			pair := plan.Permissions[i]
-			testassert.Require(t, pair.Permission == "file.write" && pair.Target == filepath.Join(ws, name), "pair %d = %+v, want file.write on %s", i, pair, name)
-		}
-	})
 	t.Run("undecodable arguments in Prepare map to the immediate validation error", func(t *testing.T) {
 		ws := t.TempDir()
 		plan := prepare(t, byID["read_file"], callToolContext(ws), "read_file", `{"path":`)
@@ -1028,53 +1010,6 @@ func TestExecuteFileEffects(t *testing.T) {
 		}
 		testassert.Require(t, metadata.EditPreview != nil && len(metadata.EditPreview.Hunks) == 1 && len(metadata.EditPreview.Hunks[0].Rows) == 2, "metadata = %s, want one hunk with the remove/add diff rows", outcome.Metadata)
 	})
-	t.Run("apply_patch applies add update move delete and emits the per-file preview shape", func(t *testing.T) {
-		ws := t.TempDir()
-		for name, content := range map[string]string{"b.txt": "old\n", "c.txt": "gone\n", "d.txt": "d\n"} {
-			testassert.NoError(t, os.WriteFile(filepath.Join(ws, name), []byte(content), 0o644))
-		}
-		patch := "*** Begin Patch\n*** Add File: a.txt\n+new\n*** Update File: b.txt\n@@\n-old\n+new\n*** Delete File: c.txt\n*** Update File: d.txt\n*** Move to: e.txt\n*** End Patch"
-		input, err := json.Marshal(map[string]string{"input": patch})
-		testassert.NoError(t, err)
-		plan := prepare(t, byID["apply_patch"], callToolContext(ws), "apply_patch", string(input))
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.Contains(outcome.Result.Content, "Success. Updated the following files:"), "result = %+v, want the patch success summary", outcome.Result)
-		{
-			_, err := os.Stat(filepath.Join(ws, "a.txt"))
-			testassert.NoError(t, err)
-		}
-		data, err := os.ReadFile(filepath.Join(ws, "b.txt"))
-		testassert.Require(t, err == nil && string(data) == "new\n", "updated file = (%q, %v), want the replacement", data, err)
-		{
-			_, err := os.Stat(filepath.Join(ws, "c.txt"))
-			testassert.Require(t, errors.Is(err, os.ErrNotExist), "deleted file stat = %v, want gone", err)
-		}
-		{
-			_, err := os.Stat(filepath.Join(ws, "d.txt"))
-			testassert.Require(t, errors.Is(err, os.ErrNotExist), "move source stat = %v, want gone", err)
-		}
-		{
-			data, err := os.ReadFile(filepath.Join(ws, "e.txt"))
-			testassert.Require(t, err == nil && string(data) == "d\n", "move destination = (%q, %v), want the renamed content", data, err)
-		}
-		testassert.Require(t, outcome.Metadata != nil, "apply_patch emitted no metadata")
-		var metadata struct {
-			Files []struct {
-				Path string `json:"path"`
-				Op   string `json:"op"`
-			} `json:"edit_preview_files"`
-		}
-		{
-			err := json.Unmarshal(outcome.Metadata, &metadata)
-			testassert.Require(t, err == nil, "metadata %s is not the documented shape: %v", outcome.Metadata, err)
-		}
-		var ops []string
-		for _, f := range metadata.Files {
-			ops = append(ops, f.Path+"="+f.Op)
-		}
-		// The engine emits the move destination (M) before its source (D).
-		testassert.Require(t, strings.Join(ops, ",") == "a.txt=A,b.txt=M,c.txt=D,e.txt=M,d.txt=D", "previews = %v, want the full A/M/D list with content retained", ops)
-	})
 	t.Run("successive calls of one operation share the disk group through fresh handles", func(t *testing.T) {
 		dataDir := t.TempDir()
 		byID := openTools(t, dataDir)
@@ -1110,16 +1045,6 @@ func TestExecuteFileEffects(t *testing.T) {
 		if entries, err := os.ReadDir(turnDir); err != nil || len(entries) != 1 {
 			t.Fatalf("other group turn dir = (%d entries, %v), want exactly one entry", len(entries), err)
 		}
-	})
-	t.Run("executed patch failures surface as error outcomes", func(t *testing.T) {
-		ws := t.TempDir()
-		testassert.NoError(t, os.WriteFile(filepath.Join(ws, "b.txt"), []byte("different\n"), 0o644))
-		patch := "*** Begin Patch\n*** Update File: b.txt\n@@\n-old\n+new\n*** End Patch"
-		input, err := json.Marshal(map[string]string{"input": patch})
-		testassert.NoError(t, err)
-		plan := prepare(t, byID["apply_patch"], callToolContext(ws), "apply_patch", string(input))
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content != "", "result = %+v, want the failed-hunk error outcome", outcome.Result)
 	})
 }
 

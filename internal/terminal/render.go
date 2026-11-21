@@ -143,6 +143,10 @@ type toolChangeCounts struct {
 }
 
 func toolChangeSummary(name, args string, metadata map[string]any) (toolChangeCounts, bool) {
+	if files, ok := editpreview.FilesFromMetadata(metadata); ok {
+		counts := filePreviewChangeCounts(files)
+		return counts, counts.added > 0 || counts.removed > 0
+	}
 	switch name {
 	case "edit_file":
 		preview, ok := editpreview.FromMetadata(metadata)
@@ -150,13 +154,6 @@ func toolChangeSummary(name, args string, metadata map[string]any) (toolChangeCo
 			return toolChangeCounts{}, false
 		}
 		counts := editPreviewChangeCounts(preview)
-		return counts, counts.added > 0 || counts.removed > 0
-	case "apply_patch":
-		files, ok := editpreview.FilesFromMetadata(metadata)
-		if !ok {
-			return toolChangeCounts{}, false
-		}
-		counts := applyPatchFilesChangeCounts(files)
 		return counts, counts.added > 0 || counts.removed > 0
 	case "write_file":
 		lines := countContentLines(extractWriteContent(args))
@@ -169,7 +166,7 @@ func toolChangeSummary(name, args string, metadata map[string]any) (toolChangeCo
 	}
 }
 
-func applyPatchFilesChangeCounts(files []editpreview.FileEntry) toolChangeCounts {
+func filePreviewChangeCounts(files []editpreview.FileEntry) toolChangeCounts {
 	var counts toolChangeCounts
 	for _, f := range files {
 		for _, hunk := range f.Preview.Hunks {
@@ -243,14 +240,11 @@ func RenderToolResult(name, args, result string, success, unknown bool, expanded
 		return ""
 	}
 
-	// apply_patch success output is per-file; render one diff block
-	// per file under the outer per-file shape.
-	if name == "apply_patch" {
-		if files, ok := editpreview.FilesFromMetadata(metadata); ok {
-			b.WriteString(renderApplyPatchFiles(files, indent, inner, expanded))
-			return b.String()
-		}
-		return ""
+	// File-preview metadata renders one diff block per file under the outer
+	// per-file shape, independently of the tool name that produced it.
+	if files, ok := editpreview.FilesFromMetadata(metadata); ok {
+		b.WriteString(renderPreviewFiles(files, indent, inner, expanded))
+		return b.String()
 	}
 
 	display := result
@@ -350,12 +344,12 @@ func editPreviewRowCount(preview *editpreview.Preview) int {
 	return total
 }
 
-// renderApplyPatchFiles renders one diff block per entry in the
+// renderPreviewFiles renders one diff block per entry in the
 // edit_preview_files list (apply_patch). Each block has the op tag
 // (A/M/D) and the path on its first line, followed by the per-file
 // preview's hunks. Per-file expand / collapse is per-block; the outer
 // shape mirrors the GUI's outer per-file grouping.
-func renderApplyPatchFiles(files []editpreview.FileEntry, indent string, inner int, expanded bool) string {
+func renderPreviewFiles(files []editpreview.FileEntry, indent string, inner int, expanded bool) string {
 	if len(files) == 0 {
 		return ""
 	}
