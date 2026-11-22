@@ -300,6 +300,23 @@ func decodeNotification(raw []byte, instance string) (protocol.Event, error) {
 			return protocol.Event{}, err
 		}
 		return out, nil
+	case "response_restarted":
+		var event protocol.ResponseRestartedEvent
+		members, err := decodeStrict(raw, &event)
+		if err != nil {
+			return protocol.Event{}, err
+		}
+		if err := requireMembers(members, "kind", "scope"); err != nil {
+			return protocol.Event{}, err
+		}
+		if err := validateScope(members["scope"]); err != nil {
+			return protocol.Event{}, err
+		}
+		var out protocol.Event
+		if err := out.FromResponseRestartedEvent(event); err != nil {
+			return protocol.Event{}, err
+		}
+		return out, nil
 	default:
 		return protocol.Event{}, fmt.Errorf("unknown event kind %q", envelope.Kind)
 	}

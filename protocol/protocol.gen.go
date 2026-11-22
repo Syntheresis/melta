@@ -38,7 +38,6 @@ func (e AssistantItemKind) Valid() bool {
 // Defines values for AssistantItemStatus.
 const (
 	AssistantItemStatusCompleted   AssistantItemStatus = "completed"
-	AssistantItemStatusErrored     AssistantItemStatus = "errored"
 	AssistantItemStatusInterrupted AssistantItemStatus = "interrupted"
 )
 
@@ -46,8 +45,6 @@ const (
 func (e AssistantItemStatus) Valid() bool {
 	switch e {
 	case AssistantItemStatusCompleted:
-		return true
-	case AssistantItemStatusErrored:
 		return true
 	case AssistantItemStatusInterrupted:
 		return true
@@ -265,13 +262,13 @@ func (e ExtensionSuccessKind) Valid() bool {
 
 // Defines values for HealthProtocolVersion.
 const (
-	N19 HealthProtocolVersion = "19"
+	N20 HealthProtocolVersion = "20"
 )
 
 // Valid indicates whether the value is a known member of the HealthProtocolVersion enum.
 func (e HealthProtocolVersion) Valid() bool {
 	switch e {
-	case N19:
+	case N20:
 		return true
 	default:
 		return false
@@ -698,6 +695,21 @@ func (e RegisteredExtensionOperationTarget) Valid() bool {
 	}
 }
 
+// Defines values for ResponseRestartedEventKind.
+const (
+	ResponseRestarted ResponseRestartedEventKind = "response_restarted"
+)
+
+// Valid indicates whether the value is a known member of the ResponseRestartedEventKind enum.
+func (e ResponseRestartedEventKind) Valid() bool {
+	switch e {
+	case ResponseRestarted:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RuntimeScopeKind.
 const (
 	RuntimeScopeKindRuntime RuntimeScopeKind = "runtime"
@@ -796,9 +808,8 @@ func (e SignalItemKind) Valid() bool {
 
 // Defines values for SignalItemSubtype.
 const (
-	SignalItemSubtypeBackgroundCompletion     SignalItemSubtype = "background_completion"
-	SignalItemSubtypeInterruption             SignalItemSubtype = "interruption"
-	SignalItemSubtypeModelFailureContinuation SignalItemSubtype = "model_failure_continuation"
+	SignalItemSubtypeBackgroundCompletion SignalItemSubtype = "background_completion"
+	SignalItemSubtypeInterruption         SignalItemSubtype = "interruption"
 )
 
 // Valid indicates whether the value is a known member of the SignalItemSubtype enum.
@@ -807,8 +818,6 @@ func (e SignalItemSubtype) Valid() bool {
 	case SignalItemSubtypeBackgroundCompletion:
 		return true
 	case SignalItemSubtypeInterruption:
-		return true
-	case SignalItemSubtypeModelFailureContinuation:
 		return true
 	default:
 		return false
@@ -1727,6 +1736,17 @@ type RegisteredExtensionOperation struct {
 
 // RegisteredExtensionOperationTarget defines model for RegisteredExtensionOperation.Target.
 type RegisteredExtensionOperationTarget string
+
+// ResponseRestartedEvent defines model for ResponseRestartedEvent.
+type ResponseRestartedEvent struct {
+	Kind ResponseRestartedEventKind `json:"kind"`
+
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: workspace carries workspace, session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	Scope Scope `json:"scope"`
+}
+
+// ResponseRestartedEventKind defines model for ResponseRestartedEvent.Kind.
+type ResponseRestartedEventKind string
 
 // RevertCodeRequest defines model for RevertCodeRequest.
 type RevertCodeRequest struct {
@@ -2875,6 +2895,32 @@ func (t *Event) MergeToolFinishedEvent(v ToolFinishedEvent) error {
 	return err
 }
 
+// AsResponseRestartedEvent returns the union data inside the Event as a ResponseRestartedEvent
+func (t Event) AsResponseRestartedEvent() (ResponseRestartedEvent, error) {
+	var body ResponseRestartedEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromResponseRestartedEvent overwrites any union data inside the Event as the provided ResponseRestartedEvent
+func (t *Event) FromResponseRestartedEvent(v ResponseRestartedEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeResponseRestartedEvent performs a merge with any union data inside the Event, using the provided ResponseRestartedEvent
+func (t *Event) MergeResponseRestartedEvent(v ResponseRestartedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 func (t Event) Discriminator() (string, error) {
 	var discriminator struct {
 		Discriminator string `json:"kind"`
@@ -2893,6 +2939,8 @@ func (t Event) ValueByDiscriminator() (interface{}, error) {
 		return t.AsConfigurationChangedEvent()
 	case "refusal_delta":
 		return t.AsRefusalDeltaEvent()
+	case "response_restarted":
+		return t.AsResponseRestartedEvent()
 	case "scope_closed":
 		return t.AsScopeEvent()
 	case "scope_opened":

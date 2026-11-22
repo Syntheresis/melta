@@ -282,7 +282,9 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 		var output model.Output
 		attemptRes := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, func(stream model.Stream) (model.Output, error) {
 			return assemble(intent.expected, h.observeStream(intent.sessionID, d.operationID, stream))
-		}, d.execution.Retry)
+		}, d.execution.Retry, func() {
+			h.emitFact(HarnessFact{Kind: FactResponseRestarted, SessionID: intent.sessionID, OperationID: d.operationID})
+		})
 		if attemptRes.usageErr != nil { // an inexact retried-usage sum aborts before any result publication
 			return agent.ModelSettlement{}, attemptRes.usageErr
 		}

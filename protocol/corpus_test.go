@@ -620,6 +620,7 @@ var contractGeneratedTypes = map[string]func() any{
 	"ReadFileRequest":                func() any { return new(protocol.ReadFileRequest) },
 	"ReadFileResult":                 func() any { return new(protocol.ReadFileResult) },
 	"RefusalDeltaEvent":              func() any { return new(protocol.RefusalDeltaEvent) },
+	"ResponseRestartedEvent":         func() any { return new(protocol.ResponseRestartedEvent) },
 	"RevertCodeRequest":              func() any { return new(protocol.RevertCodeRequest) },
 	"RevisionResponse":               func() any { return new(protocol.RevisionResponse) },
 	"RuntimeScope":                   func() any { return new(protocol.RuntimeScope) },

@@ -491,6 +491,17 @@ func toolFinishedEvent(scope protocol.Scope, callID string, status model.ToolRes
 	return event
 }
 
+// responseRestartedEvent builds one transient restart hint: the Operation's
+// model response is being retried.
+func responseRestartedEvent(scope protocol.Scope) Event {
+	var event Event
+	_ = event.FromResponseRestartedEvent(protocol.ResponseRestartedEvent{ // plain members; the marshal cannot fail
+		Kind:  protocol.ResponseRestarted,
+		Scope: scope,
+	})
+	return event
+}
+
 // observationAdapter is the Melta's one passive publication adapter: it
 // maps committed Harness facts and warning-store changes onto the bounded
 // observation bus as generated protocol events. It is created before any
@@ -643,6 +654,9 @@ func (a *observationAdapter) observe(fact harness.HarnessFact) {
 		case harness.FactToolFinished:
 			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
 			return []Event{toolFinishedEvent(scope, fact.CallID, fact.Status, fact.Evidence)}
+		case harness.FactResponseRestarted:
+			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
+			return []Event{responseRestartedEvent(scope)}
 		}
 		return nil
 	})

@@ -606,6 +606,21 @@
    ]
   },
   {
+   "schema": "ResponseRestartedEvent",
+   "accept": [
+    {
+     "name": "progress",
+     "json": "{\"kind\":\"response_restarted\",\"scope\":{\"kind\":\"operation\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\"}}"
+    }
+   ],
+   "reject": [
+    {
+     "name": "unknown-member",
+     "json": "{\"kind\":\"response_restarted\",\"scope\":{\"kind\":\"runtime\"},\"extra\":true}"
+    }
+   ]
+  },
+  {
    "schema": "Event",
    "accept": [
     {
@@ -639,6 +654,10 @@
     {
      "name": "ToolFinishedEvent",
      "json": "{\"kind\":\"tool_finished\",\"scope\":{\"kind\":\"runtime\"},\"call_id\":\"fixture\",\"status\":\"success\"}"
+    },
+    {
+     "name": "ResponseRestartedEvent",
+     "json": "{\"kind\":\"response_restarted\",\"scope\":{\"kind\":\"runtime\"}}"
     },
     {
      "name": "scope-closed",
@@ -696,7 +715,7 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"19\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"20\"}"
     }
    ],
    "reject": [
@@ -706,20 +725,20 @@
     },
     {
      "name": "previous-version",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"18\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"19\"}"
     },
     {
      "name": "bad-instance-pattern",
-     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"19\"}",
+     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"20\"}",
      "typescript": false
     },
     {
      "name": "missing-instance",
-     "json": "{\"protocol_version\":\"19\"}"
+     "json": "{\"protocol_version\":\"20\"}"
     },
     {
      "name": "unknown-member",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"19\",\"extra\":true}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"20\",\"extra\":true}"
     }
    ]
   },
@@ -1848,8 +1867,8 @@
      "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"interruption\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"session\",\"id\":\"child-1\"}}"
     },
     {
-     "name": "model-failure-continuation",
-     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"model_failure_continuation\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"job\",\"id\":\"job-9\"}}"
+     "name": "background-completion-job",
+     "json": "{\"item_id\":\"signal-item\",\"kind\":\"signal\",\"committed_at\":\"2026-01-02T03:04:08Z\",\"operation_id\":\"op-1\",\"subtype\":\"background_completion\",\"content\":\"child finished\",\"related_member\":{\"kind\":\"job\",\"id\":\"job-9\"}}"
     }
    ],
    "reject": [

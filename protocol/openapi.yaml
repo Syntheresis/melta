@@ -7,7 +7,7 @@
 openapi: "3.0.3"
 info:
   title: melta-protocol
-  version: "19"
+  version: "20"
 servers:
   - url: "http://127.0.0.1"
 # Every path requires the bearer credential; it is declared once here and
@@ -1190,7 +1190,7 @@ components:
         protocol_version:
           type: string
           enum:
-            - "19"
+            - "20"
     Scope:
       description: >
         One SSE event's applicable scope, discriminated by kind. Every
@@ -1772,7 +1772,6 @@ components:
           type: string
           enum:
             - completed
-            - errored
             - interrupted
         source:
           $ref: "#/components/schemas/ModelRef"
@@ -1813,7 +1812,6 @@ components:
           type: string
           enum:
             - interruption
-            - model_failure_continuation
             - background_completion
         content:
           type: string
@@ -2959,6 +2957,19 @@ components:
           $ref: "#/components/schemas/ToolCallStatus"
         evidence:
           $ref: "#/components/schemas/ExecutionEvidence"
+    ResponseRestartedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - scope
+      properties:
+        kind:
+          type: string
+          enum:
+            - response_restarted
+        scope:
+          $ref: "#/components/schemas/Scope"
     Event:
       oneOf:
         - $ref: "#/components/schemas/ConfigurationChangedEvent"
@@ -2969,6 +2980,7 @@ components:
         - $ref: "#/components/schemas/RefusalDeltaEvent"
         - $ref: "#/components/schemas/ToolStartedEvent"
         - $ref: "#/components/schemas/ToolFinishedEvent"
+        - $ref: "#/components/schemas/ResponseRestartedEvent"
       discriminator:
         propertyName: kind
         mapping:
@@ -2981,3 +2993,4 @@ components:
           refusal_delta: "#/components/schemas/RefusalDeltaEvent"
           tool_started: "#/components/schemas/ToolStartedEvent"
           tool_finished: "#/components/schemas/ToolFinishedEvent"
+          response_restarted: "#/components/schemas/ResponseRestartedEvent"

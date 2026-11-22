@@ -335,7 +335,7 @@ const actionItems: ConversationItem[] = [
     tool_calls: [],
   },
   {
-    item_id: 'a-parts', kind: 'assistant', committed_at: '0', operation_id: 'op-a-parts', status: 'errored', source: 'prov/model',
+    item_id: 'a-parts', kind: 'assistant', committed_at: '0', operation_id: 'op-a-parts', status: 'interrupted', source: 'prov/model',
     content: [
       { kind: 'text', text: '**bold** raw' },
       { kind: 'image_url', url: 'http://img/x.png' },
@@ -379,7 +379,7 @@ describe('assistant link and copy actions', () => {
     const rows = [...target.querySelectorAll('.message.assistant')];
     const buttons = rows.map((row) => row.querySelector('.copy-icon'));
     expect(buttons[0]).not.toBeNull(); // completed with canonical text
-    expect(buttons[1]).not.toBeNull(); // errored with canonical text: the same rule
+    expect(buttons[1]).not.toBeNull(); // interrupted with canonical text: the same rule
     expect(buttons[2]).toBeNull(); // interrupted without canonical text: no action
     clipboardWrite.mockResolvedValue(undefined);
     vi.useFakeTimers();

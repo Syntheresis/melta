@@ -461,7 +461,9 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		var usage attemptUsage
 		attemptRes := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, func(stream model.Stream) (model.Output, error) {
 			return assemble(intent.expected, h.observeStream(intent.sessionID, operationID, stream)) // the enclosing Operation owns the deltas
-		}, d.execution.Retry)
+		}, d.execution.Retry, func() {
+			h.emitFact(HarnessFact{Kind: FactResponseRestarted, SessionID: intent.sessionID, OperationID: operationID})
+		})
 		if attemptRes.usageErr != nil { // an inexact retried-usage sum aborts before any fact or settlement publication
 			return agent.ModelSettlement{}, attemptRes.usageErr
 		}

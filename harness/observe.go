@@ -40,6 +40,11 @@ const (
 	// Recovery settles before any Harness observer exists and therefore emits
 	// no settled fact.
 	FactOperationSettled HarnessFactKind = "operation_settled"
+	// FactResponseRestarted reports that the retry policy granted another
+	// physical attempt for one logical model effect. It carries the Session and
+	// Operation identities only: the restart is transient progress, and the
+	// committed assistant entry or settlement remains authoritative.
+	FactResponseRestarted HarnessFactKind = "response_restarted"
 )
 
 // SessionRevision is the value identity of one Session's revision pair: the
@@ -61,7 +66,8 @@ type SessionRevision struct {
 // OperationID, CallID, the closed Status, and the committed execution
 // Evidence; an admitted Operation carries SessionID and OperationID; a settled
 // Operation carries SessionID, OperationID and the closed terminal
-// OperationStatus. Every field a kind does not require stays zero. A fact
+// OperationStatus; a response restart carries SessionID and OperationID. Every
+// field a kind does not require stays zero. A fact
 // grants no authority: it can never alter an admission, an effect, a
 // settlement, or a lifecycle transition. A fact carries no revision pair: no
 // producer sample can become notification authority; passive publishers read

@@ -179,7 +179,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '19';
+    protocol_version: '20';
 };
 
 /**
@@ -417,7 +417,7 @@ export type AssistantItem = {
     kind: 'assistant';
     committed_at: string;
     operation_id?: string;
-    status: 'completed' | 'errored' | 'interrupted';
+    status: 'completed' | 'interrupted';
     source: ModelRef;
     content: Array<ContentPart>;
     refusal?: string;
@@ -430,7 +430,7 @@ export type SignalItem = {
     kind: 'signal';
     committed_at: string;
     operation_id?: string;
-    subtype: 'interruption' | 'model_failure_continuation' | 'background_completion';
+    subtype: 'interruption' | 'background_completion';
     content: string;
     related_member?: BackgroundMember;
 };
@@ -929,6 +929,11 @@ export type ToolFinishedEvent = {
     evidence?: ExecutionEvidence;
 };
 
+export type ResponseRestartedEvent = {
+    kind: 'response_restarted';
+    scope: Scope;
+};
+
 export type Event = ({
     kind: 'configuration_changed';
 } & ConfigurationChangedEvent) | ({
@@ -945,7 +950,9 @@ export type Event = ({
     kind: 'tool_started';
 } & ToolStartedEvent) | ({
     kind: 'tool_finished';
-} & ToolFinishedEvent);
+} & ToolFinishedEvent) | ({
+    kind: 'response_restarted';
+} & ResponseRestartedEvent);
 
 export type SessionId = string;
 

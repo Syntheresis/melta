@@ -29,7 +29,7 @@ const (
 	testCredential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	// testVersion is the current wire identity every compatible fixture
 	// speaks; the incompatible rows keep the literal old "1".
-	testVersion = string(protocol.N19)
+	testVersion = string(protocol.N20)
 )
 
 // recordContent builds one private four-field discovery document.
@@ -447,14 +447,18 @@ func TestEventsFrames(t *testing.T) {
 		testassert.NoError(t, finished.FromToolFinishedEvent(protocol.ToolFinishedEvent{
 			Kind: protocol.ToolFinished, Scope: operationEventScope(), CallId: "call-1", Status: protocol.ToolCallStatusSuccess, Evidence: &evidence,
 		}))
-		frames := notificationFrame(t, delta) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished)
+		var restarted protocol.Event
+		testassert.NoError(t, restarted.FromResponseRestartedEvent(protocol.ResponseRestartedEvent{
+			Kind: protocol.ResponseRestarted, Scope: operationEventScope(),
+		}))
+		frames := notificationFrame(t, delta) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) + notificationFrame(t, restarted)
 		server := newFixture(t, jsonHealth(testInstance, testVersion), writeFrames(frames))
 		c := connectFixture(t, writeDiscovery(t, server.URL, testInstance, testVersion, testCredential))
 		events, errs := c.Events(context.Background())
 		delivered, err := drainEvents(events, errs)
 		testassert.Require(t, errors.Is(err, client.ErrResyncRequired), "disconnect error = %v, want ErrResyncRequired", err)
-		testassert.Equal(t, len(delivered), 4)
-		for i, want := range []string{"text_delta", "refusal_delta", "tool_started", "tool_finished"} {
+		testassert.Equal(t, len(delivered), 5)
+		for i, want := range []string{"text_delta", "refusal_delta", "tool_started", "tool_finished", "response_restarted"} {
 			{
 				kind, _ := delivered[i].Discriminator()
 				testassert.Require(t, kind == want, "event %d kind = %q, want %q", i, kind, want)
@@ -523,6 +527,8 @@ func TestEventsFrames(t *testing.T) {
 		{"unknown tool status", rawNotification(`{"kind":"tool_finished","scope":{"kind":"runtime"},"call_id":"c","status":"pending"}`)},
 		{"unknown tool evidence", rawNotification(`{"kind":"tool_finished","scope":{"kind":"runtime"},"call_id":"c","status":"success","evidence":"pending"}`)},
 		{"negative tool ordinal", rawNotification(`{"kind":"tool_started","scope":{"kind":"runtime"},"call_id":"c","ordinal":-1,"name":"n"}`)},
+		{"response_restarted without scope", rawNotification(`{"kind":"response_restarted"}`)},
+		{"response_restarted unknown member", rawNotification(`{"kind":"response_restarted","scope":{"kind":"runtime"},"extra":true}`)},
 		{"wrong event name", "event: other\ndata: {}\n\n"},
 		{"unexpected stream field", "id: 7\nevent: notification\ndata: {}\n\n"},
 		{"unknown stream line", "garbage\n\n"},

@@ -164,7 +164,7 @@ func TestRequestBodyAttemptIsolation(t *testing.T) {
 		return completedTurnStream(), nil
 	}, func(stream model.Stream) (model.Output, error) {
 		return agent.Assemble(context.Background(), testModelRef(), stream)
-	}, func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 })
+	}, func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 }, func() {})
 	if res.kind != attemptSettled || calls != 2 || string(params["temperature"]) != "0.2" || params["leak"] != nil {
 		t.Fatalf("kind=%v calls=%d retained=%s", res.kind, calls, params)
 	}

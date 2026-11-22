@@ -82,14 +82,15 @@ func acceptedAttemptUsage(reports []*model.Usage) (attemptUsage, error) {
 // stream once and report the boundary ProtocolError for an outcome that is both
 // or neither — before the post-failure cancellation check — let observed
 // cancellation win over retry classification, select the standard policy for a
-// nil Retry, stop on a false classification or a negative delay, and run the
-// backoff behind the cancellation check. An assembled output ends the loop;
+// nil Retry, stop on a false classification or a negative delay, report one
+// restart observation through onRetry when the policy grants another attempt,
+// and run the backoff behind the cancellation check. An assembled output ends the loop;
 // an accepted stream that fails before its finish reason is one more attempt
 // failure whose reported usage the record keeps, and every other assembly
 // error is the effect's boundary failure. Every physical attempt receives its
 // own deep-owned copy of the logical request, so no callback can reach the next
 // attempt's view, the retained evidence, or the captured catalog.
-func runModelAttempts(ctx context.Context, req model.Request, parameters model.Extra, attempt func(context.Context, model.Request, model.Extra) (model.Stream, error), assemble func(model.Stream) (model.Output, error), retry RetryPolicy) attemptResult {
+func runModelAttempts(ctx context.Context, req model.Request, parameters model.Extra, attempt func(context.Context, model.Request, model.Extra) (model.Stream, error), assemble func(model.Stream) (model.Output, error), retry RetryPolicy, onRetry func()) attemptResult {
 	if retry == nil {
 		retry = standardRetryPolicy
 	}
@@ -136,6 +137,7 @@ func runModelAttempts(ctx context.Context, req model.Request, parameters model.E
 		if !again || delay < 0 {
 			return result(attemptFailed, model.Output{}, attemptErr)
 		}
+		onRetry()
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done(): // cancellation during backoff interrupts; no attempt starts

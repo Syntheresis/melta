@@ -32,7 +32,7 @@ func (r *Melta) Health(ctx context.Context, c Caller) (protocol.Health, error) {
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return protocol.Health{}, err
 	}
-	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N19}, nil
+	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N20}, nil
 }
 
 // ListSessions projects Session headers under one required workspace and
