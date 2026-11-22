@@ -1,6 +1,7 @@
 {
   "ArchiveSession": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -9,6 +10,7 @@
   },
   "CompactSession": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -17,6 +19,7 @@
   },
   "ConnectProvider": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -30,6 +33,7 @@
   },
   "CreateProvider": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -38,6 +42,7 @@
   },
   "CreateSession": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -46,6 +51,7 @@
   },
   "DeleteProviderDetail": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -59,6 +65,7 @@
   },
   "DeleteProviderModel": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -76,6 +83,7 @@
   },
   "DeleteSession": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -84,6 +92,7 @@
   },
   "DisconnectProvider": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -97,6 +106,7 @@
   },
   "DiscoverProviderCandidates": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -105,6 +115,7 @@
   },
   "DiscoverProviderModelCandidates": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -118,6 +129,7 @@
   },
   "ForkSession": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -126,6 +138,7 @@
   },
   "GetConfiguration": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -134,6 +147,7 @@
   },
   "GetHealth": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -142,6 +156,7 @@
   },
   "GetProviderDetail": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -155,6 +170,7 @@
   },
   "GetSessionCodeSnapshots": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -163,6 +179,7 @@
   },
   "GetSessionHistory": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "optional",
@@ -176,6 +193,7 @@
   },
   "GetSessionHydration": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -184,6 +202,16 @@
   },
   "GetSessionOperation": {
     "body": "forbidden",
+    "call_id": "forbidden",
+    "field": "forbidden",
+    "operation_id": "required",
+    "query": "forbidden",
+    "query_members": {},
+    "session_id": "required"
+  },
+  "GetSessionToolOutput": {
+    "body": "forbidden",
+    "call_id": "required",
     "field": "forbidden",
     "operation_id": "required",
     "query": "forbidden",
@@ -192,6 +220,7 @@
   },
   "GetWarnings": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -200,6 +229,7 @@
   },
   "InstallExtensionPackage": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -208,6 +238,7 @@
   },
   "InterruptSession": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -216,6 +247,7 @@
   },
   "InvokeExtension": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -224,6 +256,7 @@
   },
   "ListExtensionPackages": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -232,6 +265,7 @@
   },
   "ListExtensions": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -240,6 +274,7 @@
   },
   "ListModels": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -253,6 +288,7 @@
   },
   "ListProviderModels": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -266,6 +302,7 @@
   },
   "ListProviders": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -274,6 +311,7 @@
   },
   "ListSessions": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -291,6 +329,7 @@
   },
   "ListWorkspaces": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -299,6 +338,7 @@
   },
   "ReadWorkspaceFile": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -307,6 +347,7 @@
   },
   "ReloadConfiguration": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -315,6 +356,7 @@
   },
   "RemoveExtensionPackage": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -328,6 +370,7 @@
   },
   "ReopenSession": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -336,6 +379,7 @@
   },
   "ResetProviderField": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "required",
     "operation_id": "forbidden",
     "query": "required",
@@ -349,6 +393,7 @@
   },
   "ResetProviderModelField": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "required",
     "operation_id": "forbidden",
     "query": "required",
@@ -366,6 +411,7 @@
   },
   "RevertSessionCode": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -374,6 +420,7 @@
   },
   "SetSessionInputs": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -382,6 +429,7 @@
   },
   "SetSessionModel": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -390,6 +438,7 @@
   },
   "StopSession": {
     "body": "forbidden",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -398,6 +447,7 @@
   },
   "SubmitSession": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -406,6 +456,7 @@
   },
   "UpdateConfigurationSettings": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "forbidden",
@@ -414,6 +465,7 @@
   },
   "UpdateProviderDetail": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",
@@ -427,6 +479,7 @@
   },
   "UpdateProviderModel": {
     "body": "required",
+    "call_id": "forbidden",
     "field": "forbidden",
     "operation_id": "forbidden",
     "query": "required",

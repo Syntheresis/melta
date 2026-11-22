@@ -7,7 +7,7 @@
 openapi: "3.0.3"
 info:
   title: melta-protocol
-  version: "21"
+  version: "22"
 servers:
   - url: "http://127.0.0.1"
 # Every path requires the bearer credential; it is declared once here and
@@ -284,6 +284,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionOperation"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/sessions/{id}/operations/{operation_id}/tool-calls/{call_id}/output:
+    get:
+      operationId: GetSessionToolOutput
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+        - $ref: "#/components/parameters/OperationID"
+        - $ref: "#/components/parameters/ToolCallID"
+      responses:
+        "200":
+          description: One running foreground command's bounded current output.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandOutput"
         default:
           $ref: "#/components/responses/Error"
   /v1/sessions/{id}/code-snapshots:
@@ -787,6 +803,13 @@ components:
       schema:
         type: string
         minLength: 1
+    ToolCallID:
+      name: call_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
     WorkspaceQuery:
       name: workspace
       in: query
@@ -1190,7 +1213,7 @@ components:
         protocol_version:
           type: string
           enum:
-            - "21"
+            - "22"
     Scope:
       description: >
         One SSE event's applicable scope, discriminated by kind. Every
@@ -1583,6 +1606,14 @@ components:
           $ref: "#/components/schemas/Operation"
         inputs:
           $ref: "#/components/schemas/OperationInputs"
+    CommandOutput:
+      type: object
+      additionalProperties: false
+      required:
+        - output
+      properties:
+        output:
+          type: string
     OperationInputs:
       type: object
       additionalProperties: false
@@ -2990,6 +3021,23 @@ components:
             - response_restarted
         scope:
           $ref: "#/components/schemas/Scope"
+    ToolOutputChangedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - scope
+        - call_id
+      properties:
+        kind:
+          type: string
+          enum:
+            - tool_output_changed
+        scope:
+          $ref: "#/components/schemas/Scope"
+        call_id:
+          type: string
+          minLength: 1
     Event:
       oneOf:
         - $ref: "#/components/schemas/ConfigurationChangedEvent"
@@ -3002,6 +3050,7 @@ components:
         - $ref: "#/components/schemas/ToolStartedEvent"
         - $ref: "#/components/schemas/ToolFinishedEvent"
         - $ref: "#/components/schemas/ResponseRestartedEvent"
+        - $ref: "#/components/schemas/ToolOutputChangedEvent"
       discriminator:
         propertyName: kind
         mapping:
@@ -3016,3 +3065,4 @@ components:
           tool_started: "#/components/schemas/ToolStartedEvent"
           tool_finished: "#/components/schemas/ToolFinishedEvent"
           response_restarted: "#/components/schemas/ResponseRestartedEvent"
+          tool_output_changed: "#/components/schemas/ToolOutputChangedEvent"

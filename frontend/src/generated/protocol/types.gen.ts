@@ -179,7 +179,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '21';
+    protocol_version: '22';
 };
 
 /**
@@ -338,6 +338,10 @@ export type Operation = {
 export type SessionOperation = {
     operation: Operation;
     inputs: OperationInputs;
+};
+
+export type CommandOutput = {
+    output: string;
 };
 
 export type OperationInputs = {
@@ -941,6 +945,12 @@ export type ResponseRestartedEvent = {
     scope: Scope;
 };
 
+export type ToolOutputChangedEvent = {
+    kind: 'tool_output_changed';
+    scope: Scope;
+    call_id: string;
+};
+
 export type Event = ({
     kind: 'configuration_changed';
 } & ConfigurationChangedEvent) | ({
@@ -961,11 +971,15 @@ export type Event = ({
     kind: 'tool_finished';
 } & ToolFinishedEvent) | ({
     kind: 'response_restarted';
-} & ResponseRestartedEvent);
+} & ResponseRestartedEvent) | ({
+    kind: 'tool_output_changed';
+} & ToolOutputChangedEvent);
 
 export type SessionId = string;
 
 export type OperationId = string;
+
+export type ToolCallId = string;
 
 export type WorkspaceQuery = string;
 
@@ -1432,6 +1446,35 @@ export type GetSessionOperationResponses = {
 };
 
 export type GetSessionOperationResponse = GetSessionOperationResponses[keyof GetSessionOperationResponses];
+
+export type GetSessionToolOutputData = {
+    body?: never;
+    path: {
+        id: string;
+        operation_id: string;
+        call_id: string;
+    };
+    query?: never;
+    url: '/v1/sessions/{id}/operations/{operation_id}/tool-calls/{call_id}/output';
+};
+
+export type GetSessionToolOutputErrors = {
+    /**
+     * One schema-defined typed error.
+     */
+    default: Error;
+};
+
+export type GetSessionToolOutputError = GetSessionToolOutputErrors[keyof GetSessionToolOutputErrors];
+
+export type GetSessionToolOutputResponses = {
+    /**
+     * One running foreground command's bounded current output.
+     */
+    200: CommandOutput;
+};
+
+export type GetSessionToolOutputResponse = GetSessionToolOutputResponses[keyof GetSessionToolOutputResponses];
 
 export type GetSessionCodeSnapshotsData = {
     body?: never;

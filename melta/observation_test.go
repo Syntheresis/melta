@@ -869,6 +869,34 @@ func TestObservationReasoningDeltaProgress(t *testing.T) {
 	testassert.Require(t, scope.SessionId == sessionID && scope.OperationId == "op-reasoning" && scope.Workspace != nil && *scope.Workspace != "", "reasoning event scope = %+v, want the real Session and Operation", scope)
 }
 
+// TestObservationToolOutputChangedProgress proves one running foreground
+// command's change notice reaches the passive bus with the real Operation
+// scope and call identity.
+func TestObservationToolOutputChangedProgress(t *testing.T) {
+	e := newOwnerEnv(t)
+	e.fixtureStore(storage.NewMemory())
+	r, err := e.open(context.Background())
+	testassert.NoError(t, err)
+	defer func() {
+		testassert.NoError(t, r.Close(context.Background()))
+	}()
+	record, err := r.createSession(context.Background(), e.dataDir, "solo")
+	testassert.NoError(t, err)
+	sessionID := record.Identity.SessionID
+	sub, err := r.Subscribe(4)
+	testassert.NoError(t, err)
+	r.toolOutput.publishChanged(e.dataDir, sessionID, "op-output", "call-1")
+	event, ok := nextEvent(t, sub)
+	testassert.Require(t, ok, "the subscription closed before the tool output event")
+	testassert.Equal(t, eventKind(t, event), "tool_output_changed")
+	body, err := event.AsToolOutputChangedEvent()
+	testassert.NoError(t, err)
+	testassert.Equal(t, body.CallId, "call-1")
+	scope, err := body.Scope.AsOperationScope()
+	testassert.NoError(t, err)
+	testassert.Require(t, scope.SessionId == sessionID && scope.OperationId == "op-output" && scope.Workspace != nil && *scope.Workspace != "", "tool output event scope = %+v, want the real Session and Operation", scope)
+}
+
 // TestObservationObserverOverflowDetachesOnlyThatRegistration proves one
 // saturated observer registration detaches without blocking the producer or
 // the healthy sibling: the later fact reaches the healthy observer only.

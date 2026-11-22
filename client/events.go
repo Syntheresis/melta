@@ -337,6 +337,26 @@ func decodeNotification(raw []byte, instance string) (protocol.Event, error) {
 			return protocol.Event{}, err
 		}
 		return out, nil
+	case "tool_output_changed":
+		var event protocol.ToolOutputChangedEvent
+		members, err := decodeStrict(raw, &event)
+		if err != nil {
+			return protocol.Event{}, err
+		}
+		if err := requireMembers(members, "kind", "scope", "call_id"); err != nil {
+			return protocol.Event{}, err
+		}
+		if err := validateScope(members["scope"]); err != nil {
+			return protocol.Event{}, err
+		}
+		if event.CallId == "" {
+			return protocol.Event{}, errors.New("tool_output_changed carries an empty call_id")
+		}
+		var out protocol.Event
+		if err := out.FromToolOutputChangedEvent(event); err != nil {
+			return protocol.Event{}, err
+		}
+		return out, nil
 	default:
 		return protocol.Event{}, fmt.Errorf("unknown event kind %q", envelope.Kind)
 	}

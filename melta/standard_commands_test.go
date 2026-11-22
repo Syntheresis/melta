@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Syntheresis/melta/internal/cmdoutput"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
@@ -98,24 +99,24 @@ func TestCommandOutcomeClassifiesByDeliveredCause(t *testing.T) {
 	t.Run("external-signal death keeps its real result after the context cancels", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		runForegroundCommandFn = func(ctx context.Context, command, dir string, timeoutSec, maxBytes, maxLineChars int, spillDir string, env []string) (string, error) {
-			result, err := orig(ctx, command, dir, timeoutSec, maxBytes, maxLineChars, spillDir, env)
+		runForegroundCommandFn = func(ctx context.Context, command, dir string, timeoutSec int, capture *cmdoutput.Capture, env []string) (string, error) {
+			result, err := orig(ctx, command, dir, timeoutSec, capture, env)
 			cancel()
 			return result, err
 		}
-		outcome := commandOutcome(ctx, "call-1", "kill -TERM $$", "", 0, defaultToolSettings(), t.TempDir(), nil)
+		outcome := commandOutcome(ctx, "call-1", "kill -TERM $$", "", 0, cmdoutput.NewCapture(cmdoutput.Options{Directory: t.TempDir()}), nil)
 		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == "Error: Exit code -1\n", "result = (%v, %q), want the real signal-death result as an error", outcome.Result.Status, outcome.Result.Content)
 	})
 
 	t.Run("own timeout keeps its real result after the context cancels", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		runForegroundCommandFn = func(ctx context.Context, command, dir string, timeoutSec, maxBytes, maxLineChars int, spillDir string, env []string) (string, error) {
-			result, err := orig(ctx, command, dir, timeoutSec, maxBytes, maxLineChars, spillDir, env)
+		runForegroundCommandFn = func(ctx context.Context, command, dir string, timeoutSec int, capture *cmdoutput.Capture, env []string) (string, error) {
+			result, err := orig(ctx, command, dir, timeoutSec, capture, env)
 			cancel()
 			return result, err
 		}
-		outcome := commandOutcome(ctx, "call-2", "sleep 5", "", 1, defaultToolSettings(), t.TempDir(), nil)
+		outcome := commandOutcome(ctx, "call-2", "sleep 5", "", 1, cmdoutput.NewCapture(cmdoutput.Options{Directory: t.TempDir()}), nil)
 		testassert.Require(t, outcome.Result.Status == model.ResultError && strings.HasPrefix(outcome.Result.Content, "Error: Exit code -1 (timeout)\n"), "result = (%v, %q), want the retained timeout text as an error", outcome.Result.Status, outcome.Result.Content)
 	})
 }

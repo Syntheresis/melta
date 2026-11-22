@@ -29,7 +29,7 @@ const (
 	testCredential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	// testVersion is the current wire identity every compatible fixture
 	// speaks; the incompatible rows keep the literal old "1".
-	testVersion = string(protocol.N21)
+	testVersion = string(protocol.N22)
 )
 
 // recordContent builds one private four-field discovery document.
@@ -455,14 +455,18 @@ func TestEventsFrames(t *testing.T) {
 		testassert.NoError(t, restarted.FromResponseRestartedEvent(protocol.ResponseRestartedEvent{
 			Kind: protocol.ResponseRestarted, Scope: operationEventScope(),
 		}))
-		frames := notificationFrame(t, delta) + notificationFrame(t, reasoning) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) + notificationFrame(t, restarted)
+		var outputChanged protocol.Event
+		testassert.NoError(t, outputChanged.FromToolOutputChangedEvent(protocol.ToolOutputChangedEvent{
+			Kind: protocol.ToolOutputChanged, Scope: operationEventScope(), CallId: "call-1",
+		}))
+		frames := notificationFrame(t, delta) + notificationFrame(t, reasoning) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) + notificationFrame(t, restarted) + notificationFrame(t, outputChanged)
 		server := newFixture(t, jsonHealth(testInstance, testVersion), writeFrames(frames))
 		c := connectFixture(t, writeDiscovery(t, server.URL, testInstance, testVersion, testCredential))
 		events, errs := c.Events(context.Background())
 		delivered, err := drainEvents(events, errs)
 		testassert.Require(t, errors.Is(err, client.ErrResyncRequired), "disconnect error = %v, want ErrResyncRequired", err)
-		testassert.Equal(t, len(delivered), 6)
-		for i, want := range []string{"text_delta", "reasoning_delta", "refusal_delta", "tool_started", "tool_finished", "response_restarted"} {
+		testassert.Equal(t, len(delivered), 7)
+		for i, want := range []string{"text_delta", "reasoning_delta", "refusal_delta", "tool_started", "tool_finished", "response_restarted", "tool_output_changed"} {
 			{
 				kind, _ := delivered[i].Discriminator()
 				testassert.Require(t, kind == want, "event %d kind = %q, want %q", i, kind, want)
@@ -474,6 +478,8 @@ func TestEventsFrames(t *testing.T) {
 		testassert.Require(t, err == nil && refusalBody.Content == "refused", "delivered refusal delta = (%+v, %v), want its distinct refusal content", refusalBody, err)
 		finishedBody, err := delivered[4].AsToolFinishedEvent()
 		testassert.Require(t, err == nil && finishedBody.Evidence != nil && *finishedBody.Evidence == protocol.Unknown, "delivered tool finished = (%+v, %v), want its unknown evidence carried through", finishedBody, err)
+		outputBody, err := delivered[6].AsToolOutputChangedEvent()
+		testassert.Require(t, err == nil && outputBody.CallId == "call-1", "delivered tool output change = (%+v, %v), want its call identity", outputBody, err)
 	})
 
 	// Every non-global scope kind delivers through its real producer shape:
@@ -539,6 +545,10 @@ func TestEventsFrames(t *testing.T) {
 		{"negative tool ordinal", rawNotification(`{"kind":"tool_started","scope":{"kind":"runtime"},"call_id":"c","ordinal":-1,"name":"n"}`)},
 		{"response_restarted without scope", rawNotification(`{"kind":"response_restarted"}`)},
 		{"response_restarted unknown member", rawNotification(`{"kind":"response_restarted","scope":{"kind":"runtime"},"extra":true}`)},
+		{"tool_output_changed without scope", rawNotification(`{"kind":"tool_output_changed","call_id":"call-1"}`)},
+		{"tool_output_changed missing call_id", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"}}`)},
+		{"tool_output_changed empty call_id", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":""}`)},
+		{"tool_output_changed unknown member", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":"call-1","extra":true}`)},
 		{"wrong event name", "event: other\ndata: {}\n\n"},
 		{"unexpected stream field", "id: 7\nevent: notification\ndata: {}\n\n"},
 		{"unknown stream line", "garbage\n\n"},

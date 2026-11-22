@@ -520,7 +520,7 @@ func TestContractCorpusSSEIdentity(t *testing.T) {
 		}
 	}
 
-	for _, component := range []string{"TextDeltaEvent", "RefusalDeltaEvent", "ReasoningDeltaEvent", "ToolStartedEvent", "ToolFinishedEvent"} {
+	for _, component := range []string{"TextDeltaEvent", "RefusalDeltaEvent", "ReasoningDeltaEvent", "ToolStartedEvent", "ToolFinishedEvent", "ToolOutputChangedEvent"} {
 		fixture := contractComponentFixture(t, corpus, component, "progress")
 		var members map[string]json.RawMessage
 		{
@@ -543,6 +543,7 @@ var contractGeneratedTypes = map[string]func() any{
 	"CodeRevertError":                func() any { return new(protocol.CodeRevertError) },
 	"CodeRevertResult":               func() any { return new(protocol.CodeRevertResult) },
 	"CodeSnapshotGroup":              func() any { return new(protocol.CodeSnapshotGroup) },
+	"CommandOutput":                  func() any { return new(protocol.CommandOutput) },
 	"CompactRequest":                 func() any { return new(protocol.CompactRequest) },
 	"CompactionSettings":             func() any { return new(protocol.CompactionSettings) },
 	"CheckpointItem":                 func() any { return new(protocol.CheckpointItem) },
@@ -650,6 +651,7 @@ var contractGeneratedTypes = map[string]func() any{
 	"ToolCallView":                   func() any { return new(protocol.ToolCallView) },
 	"ToolFinishedEvent":              func() any { return new(protocol.ToolFinishedEvent) },
 	"ToolMetadata":                   func() any { return new(protocol.ToolMetadata) },
+	"ToolOutputChangedEvent":         func() any { return new(protocol.ToolOutputChangedEvent) },
 	"ToolsSettings":                  func() any { return new(protocol.ToolsSettings) },
 	"ToolStartedEvent":               func() any { return new(protocol.ToolStartedEvent) },
 	"UpdateProviderDetailRequest":    func() any { return new(protocol.UpdateProviderDetailRequest) },

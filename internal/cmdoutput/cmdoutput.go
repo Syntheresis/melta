@@ -22,7 +22,16 @@ type Options struct {
 	SpillPrefix  string
 	MaxBytes     int
 	MaxLineChars int
+	// OnChange, when non-nil, is called on its own goroutine after a write,
+	// at most once per 250 ms: the first write arms one timer, the timer's
+	// firing clears the armed state and calls OnChange, and a write during
+	// the call arms the next one. Write never calls it directly, and no call
+	// starts after Close returns.
+	OnChange func()
 }
+
+// changeInterval is the minimum spacing between one capture's OnChange calls.
+const changeInterval = 250 * time.Millisecond
 
 type Capture struct {
 	opts Options
@@ -40,6 +49,11 @@ type Capture struct {
 	visibleReturned  bool
 	lastFormattedLen int64
 	cachedResult     string
+
+	changeMu     sync.Mutex
+	changeTimer  *time.Timer
+	changeClosed bool
+	changeCalls  sync.WaitGroup
 }
 
 type streamState struct {
@@ -121,6 +135,41 @@ func (c *Capture) Format() string {
 	return preview
 }
 
+// Preview returns the text Format would render for the output captured so
+// far, without writing the visible spill file: under the cap it is exactly
+// Format's output, and an over-cap preview reads only one bounded window at
+// the start and one at the end of the output and marks the omission
+// "[Output truncated. <n> bytes so far.]". After Close it reports absence.
+func (c *Capture) Preview() (string, bool) {
+	c.fmtMu.Lock()
+	defer c.fmtMu.Unlock()
+
+	snap := c.snapshot()
+	if snap.closed {
+		return "", false
+	}
+	if snap.maxBytes <= 0 || snap.totalBytes <= int64(snap.maxBytes) {
+		return string(snap.stdout.buf) + string(snap.stderr.buf), true
+	}
+
+	lineCap := newPreview(snap.maxLineChars, snap.maxBytes).lineCap
+	window := int64(10 * (4*lineCap + 1))
+	kept := keptBytes(snap)
+	marker := fmt.Sprintf("[Output truncated. %d bytes so far.]", snap.totalBytes)
+	if kept <= 2*window {
+		return formatPreview(snap, marker), true
+	}
+
+	head := newPreview(snap.maxLineChars, snap.maxBytes)
+	_ = head.read(outputWindow(snap, 0, window))
+	tail := newPreview(snap.maxLineChars, snap.maxBytes)
+	_ = tail.read(outputWindow(snap, kept-window, kept))
+	lines := append([]string{}, head.first...)
+	lines = append(lines, marker)
+	lines = append(lines, tail.last...)
+	return strings.Join(lines, "\n"), true
+}
+
 func (c *Capture) Close() {
 	c.fmtMu.Lock()
 	defer c.fmtMu.Unlock()
@@ -152,6 +201,7 @@ func (c *Capture) Close() {
 	if removeVisible {
 		_ = os.Remove(visiblePath)
 	}
+	c.closeChanges()
 }
 
 func (w writer) Write(p []byte) (int, error) {
@@ -173,6 +223,7 @@ func (c *Capture) write(s *streamState, p []byte) {
 	if maxBytes <= 0 {
 		_, _ = s.buf.Write(p)
 		c.totalBytes += int64(len(p))
+		c.armChange()
 		return
 	}
 
@@ -189,6 +240,50 @@ func (c *Capture) write(s *streamState, p []byte) {
 	if len(p) > 0 {
 		c.writeSpill(s, p)
 	}
+	c.armChange()
+}
+
+// armChange arms the one change timer after a write. A write while the timer
+// is already pending belongs to that interval; the firing clears the timer
+// before invoking OnChange, so a write during the call arms the next one.
+func (c *Capture) armChange() {
+	if c.opts.OnChange == nil {
+		return
+	}
+	c.changeMu.Lock()
+	defer c.changeMu.Unlock()
+	if c.changeTimer != nil || c.changeClosed {
+		return
+	}
+	c.changeTimer = time.AfterFunc(changeInterval, c.fireChange)
+}
+
+// fireChange is the one timer firing: it clears the timer before invoking
+// OnChange on the timer's own goroutine.
+func (c *Capture) fireChange() {
+	c.changeMu.Lock()
+	if c.changeClosed {
+		c.changeMu.Unlock()
+		return
+	}
+	c.changeTimer = nil
+	c.changeCalls.Add(1)
+	c.changeMu.Unlock()
+	defer c.changeCalls.Done()
+	c.opts.OnChange()
+}
+
+// closeChanges stops the timer and waits for an in-flight change call, so no
+// call starts after Close returns.
+func (c *Capture) closeChanges() {
+	c.changeMu.Lock()
+	c.changeClosed = true
+	if c.changeTimer != nil {
+		c.changeTimer.Stop()
+		c.changeTimer = nil
+	}
+	c.changeMu.Unlock()
+	c.changeCalls.Wait()
 }
 
 func (c *Capture) writeSpill(s *streamState, p []byte) {
@@ -260,6 +355,7 @@ type snapshot struct {
 	visiblePath      string
 	lastFormattedLen int64
 	cachedResult     string
+	closed           bool
 	stdout           streamSnapshot
 	stderr           streamSnapshot
 }
@@ -275,6 +371,7 @@ func (c *Capture) snapshot() snapshot {
 		visiblePath:      c.visiblePath,
 		lastFormattedLen: c.lastFormattedLen,
 		cachedResult:     c.cachedResult,
+		closed:           c.closed,
 		stdout:           c.snapshotStream(c.stdout),
 		stderr:           c.snapshotStream(c.stderr),
 	}
@@ -296,7 +393,7 @@ func writeVisible(path string, snap snapshot) error {
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(f, outputReader(snap))
+	_, copyErr := io.Copy(f, outputWindow(snap, 0, keptBytes(snap)))
 	closeErr := f.Close()
 	if copyErr != nil {
 		return copyErr
@@ -304,24 +401,75 @@ func writeVisible(path string, snap snapshot) error {
 	return closeErr
 }
 
-func outputReader(snap snapshot) io.Reader {
-	readers := []io.Reader{bytes.NewReader(snap.stdout.buf)}
-	if snap.stdout.spillPath != "" && snap.stdout.spillLen > 0 {
-		readers = append(readers, limitedFileReader(snap.stdout.spillPath, snap.stdout.spillLen))
+// spillFile is the read-only handle Preview and Format's full copy use for one
+// private spill file.
+type spillFile interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// openSpill is the package-internal seam over opening one private spill file
+// for a bounded read; tests replace it to count bytes read from spill files.
+var openSpill = func(path string) (spillFile, error) { return os.Open(path) }
+
+// outputSpan is one contiguous run of the captured output in capture order: a
+// retained buffer or a private spill file of the given length.
+type outputSpan struct {
+	data   []byte
+	path   string
+	length int64
+}
+
+func outputSpans(snap snapshot) []outputSpan {
+	var spans []outputSpan
+	if len(snap.stdout.buf) > 0 {
+		spans = append(spans, outputSpan{data: snap.stdout.buf, length: int64(len(snap.stdout.buf))})
 	}
-	readers = append(readers, bytes.NewReader(snap.stderr.buf))
+	if snap.stdout.spillPath != "" && snap.stdout.spillLen > 0 {
+		spans = append(spans, outputSpan{path: snap.stdout.spillPath, length: snap.stdout.spillLen})
+	}
+	if len(snap.stderr.buf) > 0 {
+		spans = append(spans, outputSpan{data: snap.stderr.buf, length: int64(len(snap.stderr.buf))})
+	}
 	if snap.stderr.spillPath != "" && snap.stderr.spillLen > 0 {
-		readers = append(readers, limitedFileReader(snap.stderr.spillPath, snap.stderr.spillLen))
+		spans = append(spans, outputSpan{path: snap.stderr.spillPath, length: snap.stderr.spillLen})
+	}
+	return spans
+}
+
+// outputWindow returns the [start, end) byte window of the captured output in
+// capture order, reading no spill byte outside the window or beyond its
+// recorded length.
+func outputWindow(snap snapshot, start, end int64) io.Reader {
+	var readers []io.Reader
+	offset := int64(0)
+	for _, span := range outputSpans(snap) {
+		spanStart := offset
+		spanEnd := offset + span.length
+		offset = spanEnd
+		if end <= spanStart {
+			break
+		}
+		if start >= spanEnd {
+			continue
+		}
+		from := max(start, spanStart) - spanStart
+		to := min(end, spanEnd) - spanStart
+		if span.path != "" {
+			readers = append(readers, spillWindow(span.path, from, to-from))
+			continue
+		}
+		readers = append(readers, bytes.NewReader(span.data[from:to]))
 	}
 	return io.MultiReader(readers...)
 }
 
-func limitedFileReader(path string, n int64) io.Reader {
-	f, err := os.Open(path)
+func spillWindow(path string, offset, length int64) io.Reader {
+	f, err := openSpill(path)
 	if err != nil {
 		return errorReader{err: err}
 	}
-	return closeAfterEOF{Reader: &io.LimitedReader{R: f, N: n}, closer: f}
+	return closeAfterEOF{Reader: io.NewSectionReader(f, offset, length), closer: f}
 }
 
 type errorReader struct {
@@ -343,9 +491,13 @@ func (r closeAfterEOF) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func keptBytes(snap snapshot) int64 {
+	return int64(len(snap.stdout.buf)) + snap.stdout.spillLen + int64(len(snap.stderr.buf)) + snap.stderr.spillLen
+}
+
 func formatPreview(snap snapshot, marker string) string {
 	p := newPreview(snap.maxLineChars, snap.maxBytes)
-	_ = p.read(outputReader(snap))
+	_ = p.read(outputWindow(snap, 0, keptBytes(snap)))
 	return p.format(marker)
 }
 

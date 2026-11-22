@@ -194,6 +194,18 @@ var operationDescriptors = map[string]descriptor{
 			return c.GetSessionOperation(ctx, pathValue, operationValue)
 		},
 	},
+	"GetSessionToolOutput": {
+		session:   memberRequired,
+		operation: memberRequired,
+		callID:    memberRequired,
+		status:    200,
+		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
+			pathValue := protocol.SessionID(env.session)
+			operationValue := protocol.OperationID(env.operation)
+			callValue := protocol.ToolCallID(env.callID)
+			return c.GetSessionToolOutput(ctx, pathValue, operationValue, callValue)
+		},
+	},
 	"GetWarnings": {
 		status: 200,
 		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {

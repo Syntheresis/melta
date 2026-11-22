@@ -8,6 +8,7 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/cmdoutput"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
@@ -512,6 +513,74 @@ func responseRestartedEvent(scope protocol.Scope) Event {
 		Scope: scope,
 	})
 	return event
+}
+
+// toolOutputChangedEvent builds one transient foreground command output
+// hint: the addressed call's output grew.
+func toolOutputChangedEvent(scope protocol.Scope, callID string) Event {
+	var event Event
+	_ = event.FromToolOutputChangedEvent(protocol.ToolOutputChangedEvent{ // plain members; the marshal cannot fail
+		Kind:   protocol.ToolOutputChanged,
+		Scope:  scope,
+		CallId: callID,
+	})
+	return event
+}
+
+// toolOutputIdentity addresses one foreground tool call's running output: the
+// Operation is part of the identity because call IDs are unique only within
+// an Operation.
+type toolOutputIdentity struct {
+	sessionID   string
+	operationID string
+	callID      string
+}
+
+// liveToolOutput is the owner's per-instance registry of running foreground
+// commands' output captures: the run_command executor registers one capture
+// under its call identity before the process starts and removes it after the
+// runner returns, so a client can read the bounded current output while the
+// command runs and repair from reads after every notice.
+type liveToolOutput struct {
+	obs      *observation
+	mu       sync.Mutex
+	captures map[toolOutputIdentity]*cmdoutput.Capture
+}
+
+func newLiveToolOutput(obs *observation) *liveToolOutput {
+	return &liveToolOutput{obs: obs, captures: make(map[toolOutputIdentity]*cmdoutput.Capture)}
+}
+
+func (l *liveToolOutput) register(sessionID, operationID, callID string, capture *cmdoutput.Capture) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.captures[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}] = capture
+}
+
+func (l *liveToolOutput) remove(sessionID, operationID, callID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.captures, toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID})
+}
+
+// preview reads one registered capture's bounded current output; an absent or
+// already closed capture reports absence.
+func (l *liveToolOutput) preview(sessionID, operationID, callID string) (string, bool) {
+	l.mu.Lock()
+	capture := l.captures[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}]
+	l.mu.Unlock()
+	if capture == nil {
+		return "", false
+	}
+	return capture.Preview()
+}
+
+// publishChanged publishes one tool_output_changed notice for the running
+// call on its Operation scope.
+func (l *liveToolOutput) publishChanged(workspace, sessionID, operationID, callID string) {
+	l.obs.publish(func() []Event {
+		return []Event{toolOutputChangedEvent(operationEventScope(workspace, sessionID, operationID), callID)}
+	})
 }
 
 // observationAdapter is the Melta's one passive publication adapter: it
