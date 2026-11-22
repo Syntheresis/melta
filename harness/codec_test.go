@@ -632,42 +632,8 @@ func TestEntryPayloadOperationlessRules(t *testing.T) {
 		testassert.Require(t, err != nil, "operationless assistant with stored usage must be rejected")
 	}
 
-	withRetry := validAssistantEntry("")
-	withRetry.RetryUsage = testUsage(2)
-	if _, err := encodeAssistantEntry(withRetry); err == nil {
-		t.Fatalf("encode of operationless assistant with retry usage must fail")
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Fatalf("operationless retry usage rejection must use ErrInvalid, got %v", err)
-	}
-	withRetryUnknown := validAssistantEntry("")
-	withRetryUnknown.RetryUsageUnknown = true
-	if _, err := encodeAssistantEntry(withRetryUnknown); err == nil {
-		t.Fatalf("encode of operationless assistant with retry usage unknown must fail")
-	}
-	for name, payload := range map[string]json.RawMessage{
-		"retry usage":         setKey(raw, "retry_usage", json.RawMessage(`{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0}`)),
-		"retry usage unknown": setKey(raw, "retry_usage_unknown", json.RawMessage(`true`)),
-	} {
-		env.Payload = payload
-		{
-			_, err := decodeAssistantEntry(env)
-			testassert.Require(t, err != nil, "operationless assistant with stored %s must be rejected", name)
-		}
-	}
-
-	// A copied checkpoint fact carries neither retry member.
-	checkpointRetry := validCompactionEntry("")
-	checkpointRetry.Facts[0].RetryUsage = testUsage(2)
-	if _, err := encodeContextCheckpointEntry(checkpointRetry); err == nil {
-		t.Fatalf("encode of operationless checkpoint with retry usage must fail")
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Fatalf("operationless checkpoint retry usage rejection must use ErrInvalid, got %v", err)
-	}
-	checkpointUnknown := validCompactionEntry("")
-	checkpointUnknown.Facts[0].RetryUsageUnknown = true
-	if _, err := encodeContextCheckpointEntry(checkpointUnknown); err == nil {
-		t.Fatalf("encode of operationless checkpoint with retry usage unknown must fail")
-	}
+	// A copied assistant entry and a copied checkpoint fact each carry
+	// neither retry member: encode and decode reject every one of them.
 	checkpoint := validCompactionEntry("")
 	checkpointRaw, err := encodeContextCheckpointEntry(checkpoint)
 	testassert.NoError(t, err)
@@ -689,42 +655,44 @@ func TestEntryPayloadOperationlessRules(t *testing.T) {
 		testassert.NoError(t, err)
 		return out
 	}
-	for name, payload := range map[string]json.RawMessage{
-		"retry usage":         forcedFact("retry_usage", json.RawMessage(`{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0}`)),
-		"retry usage unknown": forcedFact("retry_usage_unknown", json.RawMessage(`true`)),
-	} {
-		checkpointEnv.Payload = payload
-		{
-			_, err := decodeContextCheckpointEntry(checkpointEnv)
-			testassert.Require(t, err != nil, "operationless checkpoint fact with stored %s must be rejected", name)
-		}
+	retryMembers := []struct {
+		member    string
+		value     json.RawMessage
+		assistant func(*assistantEntry)
+		fact      func(*maintenanceFact)
+	}{
+		{"retry_usage", json.RawMessage(`{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0}`),
+			func(a *assistantEntry) { a.RetryUsage = testUsage(2) }, func(f *maintenanceFact) { f.RetryUsage = testUsage(2) }},
+		{"retry_usage_unknown", json.RawMessage(`true`),
+			func(a *assistantEntry) { a.RetryUsageUnknown = true }, func(f *maintenanceFact) { f.RetryUsageUnknown = true }},
 	}
-}
-
-// TestRetryUsageUnknownMemberShapes proves the shared retried-attempt member
-// shapes on a decoded record: null and non-boolean retry_usage_unknown values
-// and a malformed retry_usage reject, and true decodes as the unknown marker
-// alone.
-func TestRetryUsageUnknownMemberShapes(t *testing.T) {
-	raw, err := encodeAssistantEntry(validAssistantEntry(testOpID))
-	testassert.NoError(t, err)
-	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Sequence: 1, CommittedAt: testTime}
-	for name, payload := range map[string]json.RawMessage{
-		"null":      setKey(raw, "retry_usage_unknown", json.RawMessage(`null`)),
-		"non-bool":  setKey(raw, "retry_usage_unknown", json.RawMessage(`1`)),
-		"bad retry": setKey(raw, "retry_usage", json.RawMessage(`{"input_tokens":1}`)),
-	} {
-		env.Payload = payload
-		{
-			_, err := decodeAssistantEntry(env)
-			testassert.Require(t, err != nil, "retry member %s must be rejected", name)
-		}
-	}
-	env.Payload = setKey(raw, "retry_usage_unknown", json.RawMessage(`true`))
-	{
-		decoded, err := decodeAssistantEntry(env)
-		testassert.NoError(t, err)
-		testassert.Require(t, decoded.RetryUsageUnknown && decoded.RetryUsage == nil, "decoded retry usage unknown = %v retry usage = %+v, want the unknown marker alone", decoded.RetryUsageUnknown, decoded.RetryUsage)
+	for _, member := range retryMembers {
+		t.Run("assistant/"+member.member, func(t *testing.T) {
+			entry := validAssistantEntry("")
+			member.assistant(&entry)
+			{
+				_, err := encodeAssistantEntry(entry)
+				testassert.Require(t, errors.Is(err, ErrInvalid), "encode of operationless assistant with %s = %v, want the invalid-input class", member.member, err)
+			}
+			env.Payload = setKey(raw, member.member, member.value)
+			{
+				_, err := decodeAssistantEntry(env)
+				testassert.Require(t, err != nil, "operationless assistant with stored %s must be rejected", member.member)
+			}
+		})
+		t.Run("checkpoint fact/"+member.member, func(t *testing.T) {
+			entry := validCompactionEntry("")
+			member.fact(&entry.Facts[0])
+			{
+				_, err := encodeContextCheckpointEntry(entry)
+				testassert.Require(t, errors.Is(err, ErrInvalid), "encode of operationless checkpoint with %s = %v, want the invalid-input class", member.member, err)
+			}
+			checkpointEnv.Payload = forcedFact(member.member, member.value)
+			{
+				_, err := decodeContextCheckpointEntry(checkpointEnv)
+				testassert.Require(t, err != nil, "operationless checkpoint fact with stored %s must be rejected", member.member)
+			}
+		})
 	}
 }
 

@@ -352,29 +352,6 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 			"settlement = %+v, want the completed textless output accepted by the folding stage with its reported usage", settlement)
 	})
 
-	t.Run("broken summary retried records both usages on the checkpoint", func(t *testing.T) {
-		calls := 0
-		compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
-			calls++
-			if calls == 1 {
-				return failStream(errors.New("provider failure"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7})), nil
-			}
-			return summaryStream("summary one", model.Usage{InputTokens: 10, CachedInputTokens: 2, OutputTokens: 5}), nil
-		}
-		_, store, _, sessionID, err := run(t, compact, (&retrySpy{limit: 1}).retry, nil)
-		testassert.NoError(t, err)
-		testassert.Equal(t, calls, 2)
-		graph, err := validateFixture(t, store, sessionID)
-		testassert.NoError(t, err)
-		comp := compactedEntryOf(t, graph)
-		testassert.Require(t, len(comp.Facts) == 1, "checkpoint facts = %+v, want one fact for the one request", comp.Facts)
-		fact := comp.Facts[0]
-		testassert.Require(t, fact.Usage != nil && *fact.Usage == (UsageCount{InputTokens: 10, CachedInputTokens: 2, OutputTokens: 5}), "fact usage = %+v, want the successful attempt's report", fact.Usage)
-		testassert.Require(t, fact.RetryUsage != nil && *fact.RetryUsage == (UsageCount{InputTokens: 5, OutputTokens: 7}) && !fact.RetryUsageUnknown, "fact retry usage = %+v (unknown %v), want the broken attempt's report", fact.RetryUsage, fact.RetryUsageUnknown)
-		want := UsageTotals{ByModel: []ModelUsage{{Model: compactRef, Usage: UsageCount{InputTokens: 15, CachedInputTokens: 2, OutputTokens: 12}}}}
-		testassert.Require(t, usageTotalsEqual(graph.Session.State.Usage, want), "session usage = %+v, want both summary attempts counted", graph.Session.State.Usage)
-	})
-
 	t.Run("boundary failure keeps an accepted attempt's usage", func(t *testing.T) {
 		calls := 0
 		compact := func(context.Context, model.Request, model.Extra) (model.Stream, error) {

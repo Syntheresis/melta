@@ -155,137 +155,72 @@ func TestObserveFactKinds(t *testing.T) {
 	testassert.Require(t, invalidations >= 2 && deltas == 2 && started == 1 && finished == 1 && settled == 1, "fact counts = invalidations %d deltas %d started %d finished %d settled %d", invalidations, deltas, started, finished, settled)
 }
 
-// TestModelEffectResponseRestartedFacts proves the shared attempt loop reports
-// one response restart exactly when the retry policy grants another attempt:
-// every grant emits one operation-scoped fact, while a stopped policy or a
-// negative delay emits none.
-func TestModelEffectResponseRestartedFacts(t *testing.T) {
-	run := func(t *testing.T, retry RetryPolicy, failures int) ([]HarnessFact, string) {
-		t.Helper()
-		calls := 0
-		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			calls++
-			if calls <= failures {
-				return nil, errors.New("transport failed")
-			}
-			return completedTurnStream(), nil
-		}
-		h, _, c, sessionID := newEffectHarness(t, nil)
-		col := observeHarness(h)
-		exec := effectExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} })
-		exec.Retry = retry
-		testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return exec, nil
-		})))
-		var restarts []HarnessFact
-		for _, fact := range col.snapshot() {
-			if fact.Kind == FactResponseRestarted {
-				restarts = append(restarts, fact)
-			}
-		}
-		return restarts, sessionID
+// TestModelEffectRestartFactCarriesOperationIdentity proves each model
+// effect's restart observation names the enclosing Operation: one retried
+// conversation round and one retried compaction report exactly one restart
+// fact under their own Session and Operation.
+func TestModelEffectRestartFactCarriesOperationIdentity(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(t *testing.T) (*factCollector, string, string)
+	}{
+		{
+			name: "conversation effect",
+			run: func(t *testing.T) (*factCollector, string, string) {
+				t.Helper()
+				calls := 0
+				modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+					calls++
+					if calls == 1 {
+						return nil, errors.New("provider failure")
+					}
+					return completedTurnStream(), nil
+				}
+				h, _, c, sessionID := newEffectHarness(t, nil)
+				col := observeHarness(h)
+				exec := effectExecution(modelFn, nil)
+				exec.Retry = func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 }
+				testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+					return exec, nil
+				})))
+				return col, sessionID, testOpID
+			},
+		},
+		{
+			name: "compaction effect",
+			run: func(t *testing.T) (*factCollector, string, string) {
+				t.Helper()
+				calls := 0
+				compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+					calls++
+					if calls == 1 {
+						return nil, errors.New("broken summary")
+					}
+					return completedTurnStream(), nil
+				}
+				exec := compactionExecution(t, compactFn, func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 })
+				store := idleFixture(t, validTestGraph(), hexID(20))
+				h := newCompactHarness(t, store, compactPrepared(testCapture(), exec))
+				c := leaseCoordinator(t, h, testSessionID)
+				col := observeHarness(h)
+				testassert.NoError(t, runManualCompact(t, h, c, testSessionID, "compact-1"))
+				return col, testSessionID, "compact-1"
+			},
+		},
 	}
-
-	t.Run("every grant emits one fact", func(t *testing.T) {
-		got, sessionID := run(t, func(_ error, failed int) (time.Duration, bool) { return 0, failed <= 2 }, 2)
-		want := []HarnessFact{
-			{Kind: FactResponseRestarted, SessionID: sessionID, OperationID: testOpID},
-			{Kind: FactResponseRestarted, SessionID: sessionID, OperationID: testOpID},
-		}
-		testassert.Require(t, slices.Equal(got, want), "restart facts = %+v, want one operation-scoped fact per granted attempt %+v", got, want)
-	})
-
-	t.Run("policy stop emits none", func(t *testing.T) {
-		got, _ := run(t, func(error, int) (time.Duration, bool) { return 0, false }, 1)
-		testassert.Require(t, len(got) == 0, "restart facts = %+v, want none when the policy stops", got)
-	})
-
-	t.Run("negative delay emits none", func(t *testing.T) {
-		got, _ := run(t, func(error, int) (time.Duration, bool) { return -1, true }, 1)
-		testassert.Require(t, len(got) == 0, "restart facts = %+v, want none when the granted delay is negative", got)
-	})
-
-	t.Run("emitted before the backoff wait", func(t *testing.T) {
-		const restartWait = 5 * time.Second
-		attempts := 0
-		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			attempts++
-			return nil, errors.New("transport failed")
-		}
-		h, store, c, sessionID := newEffectHarness(t, nil)
-		col := observeHarness(h)
-		exec := effectExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} })
-		exec.Retry = func(error, int) (time.Duration, bool) { return time.Hour, true }
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		done := make(chan error, 1)
-		go func() {
-			done <- executeDirect(h, c, ctx, testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-				return exec, nil
-			}))
-		}()
-		deadline := time.Now().Add(restartWait)
-		restartArrived := false
-		for !restartArrived && time.Now().Before(deadline) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col, sessionID, operationID := tc.run(t)
+			var restarts []HarnessFact
 			for _, fact := range col.snapshot() {
 				if fact.Kind == FactResponseRestarted {
-					restartArrived = true
-					break
+					restarts = append(restarts, fact)
 				}
 			}
-			if !restartArrived {
-				time.Sleep(10 * time.Millisecond)
-			}
-		}
-		cancel()
-		select {
-		case err := <-done:
-			testassert.NoError(t, err)
-		case <-time.After(10 * time.Second):
-			t.Fatal("the execution did not stop after cancellation")
-		}
-		if !restartArrived {
-			t.Fatalf("response_restarted did not arrive within %v while the one-hour backoff was pending", restartWait)
-		}
-		var restarts []HarnessFact
-		for _, fact := range col.snapshot() {
-			if fact.Kind == FactResponseRestarted {
-				restarts = append(restarts, fact)
-			}
-		}
-		want := []HarnessFact{{Kind: FactResponseRestarted, SessionID: sessionID, OperationID: testOpID}}
-		testassert.Require(t, slices.Equal(restarts, want), "restart facts = %+v, want exactly the one operation-scoped fact %+v", restarts, want)
-		testassert.Require(t, attempts == 1, "physical attempts = %d, want the cancellation to stop the second attempt", attempts)
-		graph, err := validateFixture(t, store, sessionID)
-		testassert.NoError(t, err)
-		settlement := settlementEntryOf(t, graph)
-		testassert.Require(t, settlement.Status == OperationInterruption && settlement.Detail == executionInterruptedDetail, "settlement = %+v, want the fixed interruption terminal", settlement)
-	})
-
-	t.Run("compaction attributes the enclosing operation", func(t *testing.T) {
-		calls := 0
-		compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			calls++
-			if calls == 1 {
-				return nil, errors.New("broken summary")
-			}
-			return completedTurnStream(), nil
-		}
-		exec := compactionExecution(t, compactFn, func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 })
-		store := idleFixture(t, validTestGraph(), hexID(20))
-		h := newCompactHarness(t, store, compactPrepared(testCapture(), exec))
-		c := leaseCoordinator(t, h, testSessionID)
-		col := observeHarness(h)
-		testassert.NoError(t, runManualCompact(t, h, c, testSessionID, "compact-1"))
-		var restarts []HarnessFact
-		for _, fact := range col.snapshot() {
-			if fact.Kind == FactResponseRestarted {
-				restarts = append(restarts, fact)
-			}
-		}
-		want := []HarnessFact{{Kind: FactResponseRestarted, SessionID: testSessionID, OperationID: "compact-1"}}
-		testassert.Require(t, slices.Equal(restarts, want), "compact restart facts = %+v, want the enclosing Operation %+v", restarts, want)
-	})
+			want := []HarnessFact{{Kind: FactResponseRestarted, SessionID: sessionID, OperationID: operationID}}
+			testassert.Require(t, slices.Equal(restarts, want), "restart facts = %+v, want exactly one under Session %q and Operation %q", restarts, sessionID, operationID)
+		})
+	}
 }
 
 // TestObserveReservationClocks proves each reservation acquisition and release

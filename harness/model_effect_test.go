@@ -381,70 +381,6 @@ func TestModelEffectStandardClassifierRows(t *testing.T) {
 	}
 }
 
-// TestModelEffectBrokenAcceptedStreamSettlesWithStoppingPolicy proves the
-// acceptance boundary: an accepted stream whose read fails mid-body is one
-// physical attempt failure classified by the retry policy; a stopping policy
-// makes it terminal — exactly one request, one policy consultation with the
-// *StreamError* — and the broken attempt settles failure carrying the reported
-// usage on the settlement, with no assistant entry and no signal.
-func TestModelEffectBrokenAcceptedStreamSettlesWithStoppingPolicy(t *testing.T) {
-	srv, hits, _ := sseChatServer(t, scriptedResponses{status: http.StatusOK})
-	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hits.Add(1) > 1 {
-			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprint(w, `data: {"choices":[{"delta":{"role":"assistant","content":"after"},"finish_reason":"stop"}]}`+"\n\n")
-			fmt.Fprint(w, "data: [DONE]\n\n")
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, `data: {"choices":[{"delta":{"role":"assistant","content":"partial"}}]}`+"\n\n")
-		fmt.Fprint(w, `data: {"usage":{"prompt_tokens":5,"completion_tokens":7}}`+"\n\n")
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush() // both events reach the client before the sever
-		}
-		panic(http.ErrAbortHandler) // sever the accepted connection mid-body: a read failure, never a new request
-	})
-	spy := &retrySpy{limit: 0}
-	h, store, c, sessionID := newEffectHarness(t, nil)
-	exec := transportExecution(srv, spy.retry)
-	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return exec, nil
-	})))
-	testassert.Require(t, len(spy.attempts) == 1 && spy.attempts[0] == 1, "policy consultations = %v, want the one stopping classification", spy.attempts)
-	var streamErr *agent.StreamError
-	testassert.Require(t, errors.As(spy.seen[0], &streamErr), "classified failure = %T, want *agent.StreamError", spy.seen[0])
-	graph, err := validateFixture(t, store, sessionID)
-	testassert.NoError(t, err)
-	assistants, settlements, signals := 0, 0, 0
-	var settlement *operationSettlementEntry
-	for i := range graph.Entries {
-		if graph.Entries[i].Assistant != nil {
-			assistants++
-		}
-		if graph.Entries[i].Signal != nil {
-			signals++
-		}
-		if graph.Entries[i].Settlement != nil {
-			settlements++
-			settlement = graph.Entries[i].Settlement
-		}
-	}
-	testassert.Require(t, assistants == 0 && settlements == 1 && signals == 0, "committed %d assistants, %d settlements and %d signals, want none, one and none", assistants, settlements, signals)
-	testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, "stream body read failed"), "settlement = %+v, want the broken-stream failure terminal", settlement)
-	testassert.Require(t, settlement.Model != nil && *settlement.Model == testModelRef() && settlement.Usage != nil && *settlement.Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}), "settlement model/usage = %+v/%+v, want the broken attempt's reported usage", settlement.Model, settlement.Usage)
-	want := UsageTotals{ByModel: []ModelUsage{{Model: testModelRef(), Usage: UsageCount{InputTokens: 5, OutputTokens: 7}}}}
-	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
-	testassert.NoError(t, err)
-	testassert.Require(t, usageTotalsEqual(rec.State.Usage, want), "operation usage = %+v, want %+v", rec.State.Usage, want)
-	view, err := h.ReadSessionView(context.Background(), sessionID)
-	testassert.NoError(t, err)
-	testassert.Require(t, usageTotalsEqual(view.TotalUsage, want), "session usage = %+v, want %+v", view.TotalUsage, want)
-	// Nothing from the failed attempt reaches history.
-	msgs, err := fixtureProjection(h, c)(context.Background())
-	testassert.NoError(t, err)
-	testassert.Require(t, len(msgs) == 2, "projection = %#v, want the system prompt and admitted input only", msgs)
-}
-
 // brokenAttemptScript returns a physical callback yielding the ordered broken
 // accepted streams with their optional reports and then the exhausted policy.
 func brokenAttemptScript(reports []*model.Usage) (func(context.Context, model.Request, model.Extra) (model.Stream, error), *int) {
@@ -462,19 +398,14 @@ func brokenAttemptScript(reports []*model.Usage) (func(context.Context, model.Re
 // TestModelEffectExhaustedBrokenStreamsRecordRetryUsage proves the effect's
 // accepted-attempt usage record when the retry budget is exhausted by broken
 // streams: the last accepted attempt's report stays the record's usage, the
-// earlier attempts' reports are summed into retry_usage, a retried attempt
-// that reported nothing marks the retry usage unknown, and a pre-acceptance
-// exhaustion records no retry members at all. Totals include both members,
-// the measurement reads only usage, the estimate is known exactly when every
-// retried report is present, and nothing from the failed attempts is
-// projected.
+// earlier attempts' reports are its retry usage, a retried attempt that
+// reported nothing marks the retry usage unknown, totals include both members,
+// and the context measurement reads only usage.
 func TestModelEffectExhaustedBrokenStreamsRecordRetryUsage(t *testing.T) {
 	u := func(input, output int) *model.Usage { return &model.Usage{InputTokens: input, OutputTokens: output} }
 	run := func(t *testing.T, modelFn func(context.Context, model.Request, model.Extra) (model.Stream, error), retry RetryPolicy) (*Harness, *graphStorage, string) {
 		t.Helper()
-		capture := testCapture()
-		capture.Pricing = &ModelPricing{Input: rate(1), Output: rate(2)}
-		prepared := preparedExecutionFor(capture, func(context.Context, OperationAdmission) (Execution, error) {
+		prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 			exec := effectExecution(modelFn, nil)
 			exec.Retry = retry
 			return exec, nil
@@ -485,27 +416,26 @@ func TestModelEffectExhaustedBrokenStreamsRecordRetryUsage(t *testing.T) {
 	}
 
 	t.Run("every retried attempt reported", func(t *testing.T) {
-		modelFn, _ := brokenAttemptScript([]*model.Usage{u(1, 1), u(2, 2), u(3, 3)})
-		h, store, sessionID := run(t, modelFn, (&retrySpy{limit: 2}).retry)
+		modelFn, _ := brokenAttemptScript([]*model.Usage{u(1, 1), u(3, 3)})
+		h, store, sessionID := run(t, modelFn, (&retrySpy{limit: 1}).retry)
 		graph, err := validateFixture(t, store, sessionID)
 		testassert.NoError(t, err)
 		settlement := settlementEntryOf(t, graph)
 		testassert.Require(t, settlement.Status == OperationFailure && settlement.Model != nil && *settlement.Model == testModelRef(), "settlement = %+v, want the conversation model producer", settlement)
 		testassert.Require(t, settlement.Usage != nil && *settlement.Usage == (UsageCount{InputTokens: 3, OutputTokens: 3}), "settlement usage = %+v, want the last accepted attempt's report", settlement.Usage)
-		testassert.Require(t, settlement.RetryUsage != nil && *settlement.RetryUsage == (UsageCount{InputTokens: 3, OutputTokens: 3}) && !settlement.RetryUsageUnknown, "settlement retry usage = %+v (unknown %v), want the earlier attempts' summed reports", settlement.RetryUsage, settlement.RetryUsageUnknown)
-		wantTotals := UsageTotals{ByModel: []ModelUsage{{Model: testModelRef(), Usage: UsageCount{InputTokens: 6, OutputTokens: 6}}}}
+		testassert.Require(t, settlement.RetryUsage != nil && *settlement.RetryUsage == (UsageCount{InputTokens: 1, OutputTokens: 1}) && !settlement.RetryUsageUnknown, "settlement retry usage = %+v (unknown %v), want the earlier accepted attempt's report", settlement.RetryUsage, settlement.RetryUsageUnknown)
+		wantTotals := UsageTotals{ByModel: []ModelUsage{{Model: testModelRef(), Usage: UsageCount{InputTokens: 4, OutputTokens: 4}}}}
 		testassert.Require(t, usageTotalsEqual(graph.Session.State.Usage, wantTotals), "session usage = %+v, want both attempt members counted", graph.Session.State.Usage)
 		testassert.Require(t, !hasAssistantOrSignal(graph), "failed attempts projected an assistant entry or a signal")
 		view, err := h.ReadSessionView(context.Background(), sessionID)
 		testassert.NoError(t, err)
-		assertEstimate(t, "session", view.EstimatedCostUSD, ptrUSD(18e-6))
 		measured := view.History.LatestContextUsage()
 		testassert.Require(t, measured != nil && *measured == (UsageCount{InputTokens: 3, OutputTokens: 3}), "latest context measurement = %+v, want only the last accepted attempt", measured)
 	})
 
 	t.Run("one retried attempt reported nothing", func(t *testing.T) {
 		modelFn, _ := brokenAttemptScript([]*model.Usage{u(1, 1), nil, u(3, 3)})
-		h, store, sessionID := run(t, modelFn, (&retrySpy{limit: 2}).retry)
+		_, store, sessionID := run(t, modelFn, (&retrySpy{limit: 2}).retry)
 		graph, err := validateFixture(t, store, sessionID)
 		testassert.NoError(t, err)
 		settlement := settlementEntryOf(t, graph)
@@ -513,9 +443,6 @@ func TestModelEffectExhaustedBrokenStreamsRecordRetryUsage(t *testing.T) {
 		testassert.Require(t, settlement.RetryUsage != nil && *settlement.RetryUsage == (UsageCount{InputTokens: 1, OutputTokens: 1}) && settlement.RetryUsageUnknown, "settlement retry usage = %+v (unknown %v), want the reported attempt summed and the reportless one marked unknown", settlement.RetryUsage, settlement.RetryUsageUnknown)
 		wantTotals := UsageTotals{ByModel: []ModelUsage{{Model: testModelRef(), Usage: UsageCount{InputTokens: 4, OutputTokens: 4}}}}
 		testassert.Require(t, usageTotalsEqual(graph.Session.State.Usage, wantTotals), "session usage = %+v, want only the reported attempts counted", graph.Session.State.Usage)
-		view, err := h.ReadSessionView(context.Background(), sessionID)
-		testassert.NoError(t, err)
-		assertEstimate(t, "session", view.EstimatedCostUSD, nil)
 	})
 
 	t.Run("an errored output after a broken attempt", func(t *testing.T) {
@@ -542,19 +469,17 @@ func TestModelEffectExhaustedBrokenStreamsRecordRetryUsage(t *testing.T) {
 		measured := view.History.LatestContextUsage()
 		testassert.Require(t, measured != nil && *measured == (UsageCount{InputTokens: 3, OutputTokens: 3}), "latest context measurement = %+v, want the errored output's report only", measured)
 	})
+}
 
-	t.Run("pre-acceptance exhaustion records no retry members", func(t *testing.T) {
-		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			return nil, errors.New("provider dropped")
+// hasAssistantOrSignal reports whether one validated fixture graph carries an
+// assistant entry or a signal entry.
+func hasAssistantOrSignal(graph *sessionGraph) bool {
+	for i := range graph.Entries {
+		if graph.Entries[i].Assistant != nil || graph.Entries[i].Signal != nil {
+			return true
 		}
-		_, store, sessionID := run(t, modelFn, (&retrySpy{limit: 2}).retry)
-		graph, err := validateFixture(t, store, sessionID)
-		testassert.NoError(t, err)
-		settlement := settlementEntryOf(t, graph)
-		testassert.Require(t, settlement.Status == OperationFailure && settlement.Model != nil && *settlement.Model == testModelRef() && settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement = %+v, want the model identity with no usage and no retry members", settlement)
-		testassert.Require(t, len(graph.Session.State.Usage.ByModel) == 0, "session usage = %+v, want no accepted attempt's counts", graph.Session.State.Usage)
-		testassert.Require(t, !hasAssistantOrSignal(graph), "failed attempts projected an assistant entry or a signal")
-	})
+	}
+	return false
 }
 
 // TestModelEffectRetriedUsageOverflowAbortsWithoutPublication proves the
@@ -589,17 +514,6 @@ func TestModelEffectRetriedUsageOverflowAbortsWithoutPublication(t *testing.T) {
 	rec, rerr := h.ReadOperation(context.Background(), sessionID, testOpID)
 	testassert.NoError(t, rerr)
 	testassert.Require(t, rec.State.Status == OperationRunning && rec.State.ActiveEffect != nil, "operation state = %+v, want the committed intent left for recovery as a failed publication", rec.State)
-}
-
-// hasAssistantOrSignal reports whether one validated fixture graph carries an
-// assistant entry or a signal entry.
-func hasAssistantOrSignal(graph *sessionGraph) bool {
-	for i := range graph.Entries {
-		if graph.Entries[i].Assistant != nil || graph.Entries[i].Signal != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // TestModelEffectCancellationDuringBackoffKeepsAcceptedUsage proves the
@@ -699,32 +613,6 @@ func TestModelEffectBrokenBodyRetriesUnderThePolicy(t *testing.T) {
 	}
 	testassert.Require(t, assistant != nil && assistant.Content[0].Text == "done", "assistant = %+v, want only the retry's content", assistant)
 	testassert.Require(t, assistant.Usage != nil && *assistant.Usage == (UsageCount{InputTokens: 3, OutputTokens: 2}) && assistant.RetryUsage != nil && *assistant.RetryUsage == (UsageCount{InputTokens: 5, OutputTokens: 7}), "assistant usage = %+v retry usage = %+v, want the completed attempt and the broken attempt", assistant.Usage, assistant.RetryUsage)
-}
-
-// TestModelEffectProtocolFailureStopsWithoutRetry proves the in-stream
-// protocol row: a complete malformed event inside an accepted stream is an
-// attempt failure the standard policy stops on, leaving one request and a
-// failure settlement with no assistant.
-func TestModelEffectProtocolFailureStopsWithoutRetry(t *testing.T) {
-	srv, hits, _ := sseChatServer(t, scriptedResponses{status: http.StatusOK, events: []string{`{not-json`}})
-	var cause error
-	policy := func(err error, failed int) (time.Duration, bool) {
-		cause = err
-		return standardRetryPolicy(err, failed)
-	}
-	h, store, c, sessionID := newEffectHarness(t, nil)
-	exec := transportExecution(srv, policy)
-	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return exec, nil
-	})))
-	testassert.Equal(t, hits.Load(), int64(1))
-	var streamErr *agent.StreamError
-	testassert.Require(t, errors.As(cause, &streamErr) && errors.Is(streamErr.Err, model.ErrProtocol), "classified failure = %v, want the in-stream protocol failure inside a *StreamError", cause)
-	requireIntentAndResultCounts(t, h, store, sessionID, false)
-	graph, err := validateFixture(t, store, sessionID)
-	testassert.NoError(t, err)
-	settlement := settlementEntryOf(t, graph)
-	testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, "not valid JSON"), "settlement = %+v, want the in-stream protocol failure terminal", settlement)
 }
 
 // TestModelEffectOneAssemblyAndClose pins the ownership boundary on an

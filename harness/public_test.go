@@ -5440,14 +5440,17 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		script := newScriptModel(
-			publicTurn("call-1"), // op-1 turn 1 publishes a call
+			publicTurn("call-1"), // op-1's retried attempt publishes a call
 			publicTurn(),         // op-2 completes
 			publicTurn(),         // op-3 completes
 		)
 		parked := make(chan struct{}, 1)
-		var turns atomic.Int64
+		var attempts atomic.Int64
 		conversation := func(ctx context.Context, req model.Request, extra model.Extra) (model.Stream, error) {
-			if turns.Add(1) == 2 { // op-1's second attempt parks until the public interruption
+			switch attempts.Add(1) {
+			case 1: // the first physical attempt reports usage and breaks before its finish reason
+				return publicPartialTurnStream(), nil
+			case 3: // op-1's second round parks until the public interruption
 				parked <- struct{}{}
 				<-ctx.Done()
 				return nil, ctx.Err()
@@ -5456,18 +5459,20 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		}
 		f := newPublicFixture(t, store, script, nil)
 		f.prepareHook = func(_ int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
+			exec := publicExecutionOver(conversation, conversation, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+				// the copied tool result carries tool-owned
+				// formatted metadata that the fork must preserve
+				// in its encoded durable form
+				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran " + call.ID},
+					Metadata: json.RawMessage(`{ "n" : [1, 1.0, 1e0, 9007199254740993], "s" : "<>&" }`),
+				}}
+			})
+			exec.Retry = func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 }
 			return harness.PreparedExecution{
 				Capture: publicCapture(),
 				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-					return publicExecutionOver(conversation, conversation, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-						// the copied tool result carries tool-owned
-						// formatted metadata that the fork must preserve
-						// in its encoded durable form
-						return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
-							Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran " + call.ID},
-							Metadata: json.RawMessage(`{ "n" : [1, 1.0, 1e0, 9007199254740993], "s" : "<>&" }`),
-						}}
-					}), nil
+					return exec, nil
 				},
 			}, nil
 		}
@@ -5581,13 +5586,15 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 				ResultEntryID       string `json:"result_entry_id"`
 				NormalizedArguments []byte `json:"normalized_arguments_base64"`
 			} `json:"tool_calls"`
-			Usage *struct{} `json:"usage"`
+			Usage             *struct{} `json:"usage"`
+			RetryUsage        *struct{} `json:"retry_usage"`
+			RetryUsageUnknown bool      `json:"retry_usage_unknown"`
 		}
 		{
 			err := json.Unmarshal(entries[1].Payload, &copiedAssistant)
 			testassert.NoError(t, err)
 		}
-		testassert.Require(t, copiedAssistant.Usage == nil, "copied assistant carries source usage")
+		testassert.Require(t, copiedAssistant.Usage == nil && copiedAssistant.RetryUsage == nil && !copiedAssistant.RetryUsageUnknown, "copied assistant carries source usage, retry usage %v, or the unknown mark %v", copiedAssistant.RetryUsage, copiedAssistant.RetryUsageUnknown)
 		testassert.Require(t, len(copiedAssistant.ToolCalls) == 1 && copiedAssistant.ToolCalls[0].ID == "call-1" && copiedAssistant.ToolCalls[0].ResultEntryID == entries[2].ID, "copied call reservation = %+v, want it rewritten to the copied result entry %s", copiedAssistant.ToolCalls, entries[2].ID)
 		var copiedResult struct {
 			AssistantEntry struct {
