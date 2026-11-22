@@ -1338,8 +1338,8 @@ func TestACPRuntimeForwarding(t *testing.T) {
 			w.WriteHeader(201)
 			fmt.Fprint(w, `{"session_id":"s1","durable_revision":"9007199254740993"}`)
 		},
-		"/v1/sessions/s1/revert-code":       jsonHandler(409, `{"error":{"code":"conflict","message":"partial restore"},"restored":["a.go"],"skipped":[{"path":"b.go","reason":"denied"}]}`),
-		"/v1/sessions/s1/hydration":         jsonHandler(500, "<html>broken</html>"),
+		"/v1/sessions/s1/revert-code": jsonHandler(409, `{"error":{"code":"conflict","message":"partial restore"},"restored":["a.go"],"skipped":[{"path":"b.go","reason":"denied"}]}`),
+		"/v1/sessions/s1/hydration":   jsonHandler(500, "<html>broken</html>"),
 		"/v1/extensions/invoke": jsonHandler(422, `{
   "kind": "failure",
   "error": {"code": "guest_code", "message": "guest message", "data": {"big": 9007199254740993, "whole": 1.0, "huge": 1e400, "text": "line\n<>&"}},
