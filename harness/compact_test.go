@@ -291,8 +291,8 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 
 	t.Run("failed summary settles the reported usage", func(t *testing.T) {
 		compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
-			// The accepted stream reports usage before it breaks: the stream
-			// failure carries it into the settlement.
+			// The failing response reports usage before the read failure:
+			// the errored assembly retains it.
 			return failStream(errors.New("provider failure"),
 				turnDelta("", "partial"), usageDelta(model.Usage{InputTokens: 5, CachedInputTokens: 5, OutputTokens: 5})), nil
 		}
@@ -310,6 +310,48 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 		testassert.Require(t, view.History.LatestContextUsage() == nil, "latest context measurement = %+v, want the marked summary usage billed but ineligible", view.History.LatestContextUsage())
 	})
 
+	failedReports := func(reports ...model.Usage) func(int) (model.Stream, error) {
+		return func(call int) (model.Stream, error) {
+			return failStream(errors.New("provider failure"), usageDelta(reports[call-1])), nil
+		}
+	}
+	boundary := func(call int) (model.Stream, error) {
+		if call == 1 {
+			return failStream(errors.New("provider failure"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7})), nil
+		}
+		return nil, nil
+	}
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	usageCases := []struct {
+		name       string
+		stream     func(int) (model.Stream, error)
+		retry      RetryPolicy
+		ctx        context.Context
+		wantStatus OperationState
+		wantUsage  UsageCount
+		wantRetry  *UsageCount
+	}{
+		{"exhausted broken summary", failedReports(model.Usage{InputTokens: 5, OutputTokens: 7}, model.Usage{InputTokens: 2, CachedInputTokens: 1, OutputTokens: 1}), (&retrySpy{limit: 1}).retry, nil, OperationFailure, UsageCount{InputTokens: 2, CachedInputTokens: 1, OutputTokens: 1}, &UsageCount{InputTokens: 5, OutputTokens: 7}},
+		{"boundary failure", boundary, (&retrySpy{limit: 1}).retry, nil, OperationFailure, UsageCount{InputTokens: 5, OutputTokens: 7}, nil},
+		{"cancellation during backoff", failedReports(model.Usage{InputTokens: 5, OutputTokens: 7}, model.Usage{InputTokens: 2, OutputTokens: 1}), cancelOnGrant(cancel, 2), cancelCtx, OperationInterruption, UsageCount{InputTokens: 2, OutputTokens: 1}, &UsageCount{InputTokens: 5, OutputTokens: 7}},
+	}
+	for _, tc := range usageCases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			_, store, _, sessionID, err := run(t, func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+				calls++
+				return tc.stream(calls)
+			}, tc.retry, tc.ctx)
+			testassert.Require(t, err != nil, "run = nil, want the effect's failure")
+			graph, gerr := validateFixture(t, store, sessionID)
+			testassert.NoError(t, gerr)
+			settlement := settlementEntryOfOperation(t, graph, "compact-1")
+			testassert.Require(t, settlement.Status == tc.wantStatus && settlement.Model == nil && settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement = %+v, want %s with no model or usage", settlement, tc.wantStatus)
+			fact := settlement.Facts[0]
+			testassert.Require(t, sameUsage(fact.Usage, &tc.wantUsage) && sameUsage(fact.RetryUsage, tc.wantRetry), "fact usage = %+v retry usage = %+v, want %+v/%+v", fact.Usage, fact.RetryUsage, tc.wantUsage, tc.wantRetry)
+		})
+	}
 	t.Run("interruption settles through the terminal path", func(t *testing.T) {
 		_, store, _, sessionID, err := run(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 			t.Errorf("no attempt may start under a canceled execution context")
@@ -351,138 +393,22 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 		testassert.Require(t, settlement.Status == OperationSuccess && len(settlement.Facts) == 1 && settlement.Facts[0].Usage != nil && *settlement.Facts[0].Usage == (UsageCount{InputTokens: 2, OutputTokens: 1}),
 			"settlement = %+v, want the completed textless output accepted by the folding stage with its reported usage", settlement)
 	})
-
-	t.Run("boundary failure keeps an accepted attempt's usage", func(t *testing.T) {
-		calls := 0
-		compact := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			calls++
-			if calls == 1 {
-				return failStream(errors.New("provider failure"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7})), nil
-			}
-			return nil, nil
-		}
-		_, store, _, sessionID, err := run(t, compact, (&retrySpy{limit: 1}).retry, nil)
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "neither exactly one stream nor one error"), "run = %v, want the invalid second attempt's boundary failure", err)
-		testassert.Equal(t, calls, 2)
-		graph, gerr := validateFixture(t, store, sessionID)
-		testassert.NoError(t, gerr)
-		settlement := settlementEntryOfOperation(t, graph, "compact-1")
-		testassert.Require(t, settlement.Status == OperationFailure && len(settlement.Facts) == 1, "settlement = %+v, want the failure terminal with one request fact", settlement)
-		fact := settlement.Facts[0]
-		testassert.Require(t, fact.Usage != nil && *fact.Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}), "fact usage = %+v, want the accepted attempt's report", fact.Usage)
-		testassert.Require(t, settlement.Model == nil && settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement model/usage/retry usage = %+v/%+v/%+v (unknown %v), want no model or usage on the settlement", settlement.Model, settlement.Usage, settlement.RetryUsage, settlement.RetryUsageUnknown)
-		want := UsageTotals{ByModel: []ModelUsage{{Model: compactRef, Usage: UsageCount{InputTokens: 5, OutputTokens: 7}}}}
-		testassert.Require(t, usageTotalsEqual(graph.Session.State.Usage, want), "session usage = %+v, want the accepted attempt's report", graph.Session.State.Usage)
-	})
-
-	t.Run("invalid first attempt leaves no usage", func(t *testing.T) {
-		compact := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			return nil, nil
-		}
-		_, store, _, sessionID, err := run(t, compact, nil, nil)
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "neither exactly one stream nor one error"), "run = %v, want the physical-request boundary failure", err)
-		graph, gerr := validateFixture(t, store, sessionID)
-		testassert.NoError(t, gerr)
-		settlement := settlementEntryOfOperation(t, graph, "compact-1")
-		testassert.Require(t, len(settlement.Facts) == 1 && settlement.Facts[0].Usage == nil && settlement.Facts[0].RetryUsage == nil && !settlement.Facts[0].RetryUsageUnknown, "fact = %+v, want no usage without an accepted attempt", settlement.Facts[0])
-		testassert.Require(t, settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement usage/retry usage = %+v/%+v (unknown %v), want no usage", settlement.Usage, settlement.RetryUsage, settlement.RetryUsageUnknown)
-	})
-
-	t.Run("broken summary retried records both usages on the failure settlement", func(t *testing.T) {
-		calls := 0
-		compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
-			calls++
-			if calls == 1 {
-				return failStream(errors.New("provider failure"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7})), nil
-			}
-			return failStream(errors.New("provider failure"), usageDelta(model.Usage{InputTokens: 2, CachedInputTokens: 1, OutputTokens: 1})), nil
-		}
-		_, store, _, sessionID, err := run(t, compact, (&retrySpy{limit: 1}).retry, nil)
-		testassert.Require(t, err != nil && strings.Contains(err.Error(), "provider failure"), "run = %v, want the summary failure", err)
-		testassert.Equal(t, calls, 2)
-		graph, err := validateFixture(t, store, sessionID)
-		testassert.NoError(t, err)
-		settlement := settlementEntryOfOperation(t, graph, "compact-1")
-		testassert.Require(t, len(settlement.Facts) == 1, "settlement facts = %+v, want one fact for the one request", settlement.Facts)
-		fact := settlement.Facts[0]
-		testassert.Require(t, fact.Usage != nil && *fact.Usage == (UsageCount{InputTokens: 2, CachedInputTokens: 1, OutputTokens: 1}), "fact usage = %+v, want the last accepted attempt's report", fact.Usage)
-		testassert.Require(t, fact.RetryUsage != nil && *fact.RetryUsage == (UsageCount{InputTokens: 5, OutputTokens: 7}) && !fact.RetryUsageUnknown, "fact retry usage = %+v (unknown %v), want the earlier attempt's report", fact.RetryUsage, fact.RetryUsageUnknown)
-		want := UsageTotals{ByModel: []ModelUsage{{Model: compactRef, Usage: UsageCount{InputTokens: 7, CachedInputTokens: 1, OutputTokens: 8}}}}
-		testassert.Require(t, usageTotalsEqual(graph.Session.State.Usage, want), "session usage = %+v, want both summary attempts counted", graph.Session.State.Usage)
-		for i := range graph.Entries {
-			testassert.Require(t, graph.Entries[i].Compaction == nil, "compaction entry committed on a failure path")
-		}
-	})
 }
 
-// TestCompactModelEffectCancellationDuringBackoffKeepsAcceptedUsage proves the
-// maintenance effect's usage placement when cancellation stops the retry wait
-// after broken summary attempts: the interruption settlement carries no model
-// or usage, the request's maintenance fact carries the last accepted attempt's
-// report and the retried attempt's report, both reports count in the totals,
-// and the Operation's estimate stays known.
-func TestCompactModelEffectCancellationDuringBackoffKeepsAcceptedUsage(t *testing.T) {
-	execCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	reports := []model.Usage{
-		{InputTokens: 5, OutputTokens: 7},
-		{InputTokens: 2, OutputTokens: 1},
-	}
+func cancelOnGrant(cancel context.CancelFunc, grant int) RetryPolicy {
 	calls := 0
-	compact := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-		report := reports[calls]
+	return func(error, int) (time.Duration, bool) {
 		calls++
-		return failStream(errors.New("provider failure"), usageDelta(report)), nil
-	}
-	backoff := make(chan struct{})
-	policyCalls := 0
-	policy := func(error, int) (time.Duration, bool) {
-		policyCalls++
-		if policyCalls == 2 {
-			close(backoff)
+		if calls == grant {
+			go cancel() // the cancellation arrives while the backoff waits
 			return time.Hour, true
 		}
 		return 0, true
 	}
-	capture := testCapture()
-	capture.Compact.Pricing = &ModelPricing{Input: rate(1), Output: rate(1)}
-	store := idleFixture(t, validTestGraph(), hexID(20))
-	exec := compactionExecution(t, compact, policy)
-	prepared := compactPrepared(capture, exec)
-	h := newCompactHarness(t, store, prepared)
-	c := leaseCoordinator(t, h, testSessionID)
-	go func() {
-		<-backoff
-		cancel()
-	}()
-	err := runManualCompactCtx(t, h, c, execCtx, testSessionID, "compact-1")
-	testassert.Require(t, err == errExecutionInterrupted, "run = %v, want the interruption token through the real owner", err)
-	testassert.Equal(t, calls, 2)
-	graph, gerr := validateFixture(t, store, testSessionID)
-	testassert.NoError(t, gerr)
-	settlement := settlementEntryOfOperation(t, graph, "compact-1")
-	testassert.Require(t, settlement.Status == OperationInterruption && settlement.Detail == executionInterruptedDetail, "settlement = %+v, want the interruption terminal", settlement)
-	testassert.Require(t, settlement.Model == nil && settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement model/usage/retry usage = %+v/%+v/%+v (unknown %v), want no model or usage on the settlement", settlement.Model, settlement.Usage, settlement.RetryUsage, settlement.RetryUsageUnknown)
-	testassert.Require(t, len(settlement.Facts) == 1, "settlement facts = %+v, want one request fact", settlement.Facts)
-	fact := settlement.Facts[0]
-	testassert.Require(t, fact.Usage != nil && *fact.Usage == (UsageCount{InputTokens: 2, OutputTokens: 1}) && fact.RetryUsage != nil && *fact.RetryUsage == (UsageCount{InputTokens: 5, OutputTokens: 7}) && !fact.RetryUsageUnknown, "fact usage = %+v retry usage = %+v (unknown %v), want the last accepted attempt and the retried attempt", fact.Usage, fact.RetryUsage, fact.RetryUsageUnknown)
-	for i := range graph.Entries {
-		testassert.Require(t, graph.Entries[i].Compaction == nil, "compaction entry committed on an interruption path")
-	}
-	wantTotals := UsageTotals{ByModel: []ModelUsage{{Model: capture.Compact.Model, Usage: UsageCount{InputTokens: 7, OutputTokens: 8}}}}
-	testassert.Require(t, usageTotalsEqual(graph.Session.State.Usage, wantTotals), "session usage = %+v, want both accepted attempts", graph.Session.State.Usage)
-	rec, rerr := h.ReadOperation(context.Background(), testSessionID, "compact-1")
-	testassert.NoError(t, rerr)
-	testassert.Require(t, usageTotalsEqual(rec.State.Usage, wantTotals), "operation usage = %+v, want both accepted attempts", rec.State.Usage)
-	view, verr := h.ReadSessionView(context.Background(), testSessionID)
-	testassert.NoError(t, verr)
-	var estimate *float64
-	for _, op := range view.Operations {
-		if op.OperationID == "compact-1" {
-			estimate = op.EstimatedCostUSD
-		}
-	}
-	assertEstimate(t, "operation compact-1", estimate, ptrUSD(15e-6))
+}
+
+func sameUsage(got, want *UsageCount) bool {
+	return (got == nil) == (want == nil) && (got == nil || *got == *want)
 }
 
 // acceptAnyStrategy runs one maintenance model pass and folds every completed
@@ -765,56 +691,30 @@ func TestRunCompactionEmptySnapshotFailsNothingToCompact(t *testing.T) {
 	}
 }
 
-// TestRunCompactionBrokenSummarySettlesFailureThroughTheRun proves the carried
-// failure through a real agent.Run: an accepted summary stream that breaks
-// before its finish reason settles its terminal inside its own effect with no
-// output, and the returned failure settlement satisfies the run's callback gate
-// — the run returns the summary's own failure detail, never a settlement-shape
+// TestRunCompactionErroredSummaryCarriesOutputThroughTheRun proves the errored
+// response through a real agent.Run: its finish-reason failure settles inside
+// its own effect with the reported usage on the request's maintenance fact,
+// never consulting the retry policy, and satisfies the run's callback gate —
+// the run returns the summary's own failure detail, never a settlement-shape
 // boundary violation about an outputless settlement.
-func TestRunCompactionBrokenSummarySettlesFailureThroughTheRun(t *testing.T) {
-	store := idleFixture(t, validTestGraph(), hexID(20))
-	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
-		return brokenBeforeFinishStream(), nil // text "partial" with usage, then the read failure
-	}, (&retrySpy{limit: 0}).retry)
-	prepared := compactPrepared(testCapture(), exec)
-	h := newCompactHarness(t, store, prepared)
-	c := leaseCoordinator(t, h, testSessionID)
-	err := runManualCompact(t, h, c, testSessionID, "compact-1")
-	testassert.Require(t, err != nil && strings.Contains(err.Error(), "provider failure"), "error %v, want the summary's own failure detail, not a settlement-shape boundary violation", err)
-	graph, gerr := validateFixture(t, store, testSessionID)
-	testassert.NoError(t, gerr)
-	settlement := settlementEntryOfOperation(t, graph, "compact-1")
-	testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, "provider failure"), "settlement entry = %+v, want the failure terminal", settlement)
-	testassert.Require(t, settlement.Facts[0].Model == testCompactCapture().Model, "settlement fact model = %+v, want the compact model identity", settlement.Facts[0].Model)
-	testassert.Require(t, settlement.Facts[0].Usage != nil && *settlement.Facts[0].Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}) && settlement.CompactionUsage, "settlement fact usage = %+v, want the reported counts; settlement compaction_usage = false, want the summary usage provenance marked", settlement.Facts[0].Usage)
-	for i := range graph.Entries {
-		testassert.Require(t, graph.Entries[i].Compaction == nil, "compaction entry committed on a failure path")
-	}
-}
-
-// TestRunCompactionErroredSummaryCarriesOutputThroughTheRun proves the carried
-// output through a real agent.Run: an errored summary settles its terminal
-// inside its own effect and the returned failure settlement carries the errored
-// output, satisfying the run's callback gate — the run returns the summary's own
-// failure detail, never a settlement-shape boundary violation about an
-// outputless settlement.
 func TestRunCompactionErroredSummaryCarriesOutputThroughTheRun(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
+	spy := &retrySpy{limit: 5}
 	exec := compactionExecution(t, func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
 		return streamOf(turnDelta("length", "partial"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7})), nil
-	}, (&retrySpy{limit: 0}).retry)
+	}, spy.retry)
 	prepared := compactPrepared(testCapture(), exec)
 	h := newCompactHarness(t, store, prepared)
 	c := leaseCoordinator(t, h, testSessionID)
 	err := runManualCompact(t, h, c, testSessionID, "compact-1")
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), `unsupported finish reason "length"`), "error %v, want the summary's own failure detail, not a settlement-shape boundary violation", err)
+	testassert.Equal(t, len(spy.attempts), 0)
 	graph, gerr := validateFixture(t, store, testSessionID)
 	testassert.NoError(t, gerr)
 	settlement := settlementEntryOfOperation(t, graph, "compact-1")
 	testassert.Require(t, settlement.Status == OperationFailure && strings.Contains(settlement.Detail, `unsupported finish reason "length"`), "settlement entry = %+v, want the failure terminal", settlement)
 	testassert.Require(t, settlement.Facts[0].Model == testCompactCapture().Model, "settlement fact model = %+v, want the compact model identity", settlement.Facts[0].Model)
 	testassert.Require(t, settlement.Facts[0].Usage != nil && *settlement.Facts[0].Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}) && settlement.CompactionUsage, "settlement fact usage = %+v, want the reported counts; settlement compaction_usage = false, want the summary usage provenance marked", settlement.Facts[0].Usage)
-	testassert.Require(t, settlement.Facts[0].RetryUsage == nil && !settlement.Facts[0].RetryUsageUnknown, "settlement fact retry usage = %+v (unknown %v), want none on an errored summary", settlement.Facts[0].RetryUsage, settlement.Facts[0].RetryUsageUnknown)
 	for i := range graph.Entries {
 		testassert.Require(t, graph.Entries[i].Compaction == nil, "compaction entry committed on a failure path")
 	}

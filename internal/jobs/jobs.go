@@ -59,8 +59,7 @@ type ExitResult struct {
 
 // StartRequest is one reserved job's launch input. Config is the opaque
 // top-level jobs section the caller forwards; Env is the exact child
-// environment; TimeoutSec 0 means no timeout; OnChange, when non-nil, is the
-// job capture's throttled output-change callback.
+// environment; TimeoutSec 0 means no timeout; OnChange is the capture callback.
 type StartRequest struct {
 	JobID, SessionID, Workspace, Command string
 	TimeoutSec                           int
@@ -400,33 +399,25 @@ func (j *Manager) timeoutLoop(rec *jobRecord, cmd *exec.Cmd, timeoutSec int) {
 	}
 }
 
-// unknownJobID is the unknown-ID error ownedCapture reports for an absent,
-// reserved, or foreign job identity.
-func unknownJobID(jobID string) error {
-	return fmt.Errorf("process: no process with ID %q", jobID)
-}
-
-// ownedCapture returns the addressed running-or-exited record's capture when it
-// belongs to the Session; every absent, reserved, or foreign identity is the
-// one unknown-ID error.
+// ownedCapture returns the owned running-or-exited record's capture; every
+// absent, reserved, or foreign identity is the one unknown-ID error.
 func (j *Manager) ownedCapture(sessionID, jobID string) (*cmdoutput.Capture, error) {
 	j.mu.Lock()
 	rec, ok := j.jobs[jobID]
 	j.mu.Unlock()
 	if !ok {
-		return nil, unknownJobID(jobID)
+		return nil, fmt.Errorf("process: no process with ID %q", jobID)
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if rec.state == stateReserved || rec.sessionID != sessionID {
-		return nil, unknownJobID(jobID)
+		return nil, fmt.Errorf("process: no process with ID %q", jobID)
 	}
 	return rec.capture, nil
 }
 
-// Read returns the retained output text for one owned record: unknown-ID for
-// absent or foreign identities (reservations are invisible), the retained
-// empty placeholder for a silent capture, and the bounded format otherwise.
+// Read returns the owned record's retained output text: a silent capture's
+// placeholder or its bounded format.
 func (j *Manager) Read(sessionID, jobID string) (string, error) {
 	capture, err := j.ownedCapture(sessionID, jobID)
 	if err != nil {
@@ -438,9 +429,8 @@ func (j *Manager) Read(sessionID, jobID string) (string, error) {
 	return capture.Format(), nil
 }
 
-// Preview returns the owned record's capture tail — empty before the first
-// write, never the read placeholder — and empty for every identity Read
-// rejects.
+// Preview returns the owned record's capture tail, never the read placeholder,
+// and empty for every identity Read rejects.
 func (j *Manager) Preview(sessionID, jobID string) string {
 	capture, err := j.ownedCapture(sessionID, jobID)
 	if err != nil {

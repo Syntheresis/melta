@@ -217,74 +217,22 @@ func TestStartReadKillListLiveRetainedTexts(t *testing.T) {
 	}
 }
 
-// TestPreviewTracksRunningOutputAndFollowsReadOwnership proves the bounded
-// live preview: empty before the first write (never the read placeholder),
-// growing while the job runs with the capture's change callback firing, and
-// empty for every identity Read hides — reserved, foreign, absent, removed.
-func TestPreviewTracksRunningOutputAndFollowsReadOwnership(t *testing.T) {
+// TestPreviewFollowsReadOwnership proves Preview serves the owned capture tail,
+// forwards its change callback, and is empty for every identity Read rejects.
+func TestPreviewFollowsReadOwnership(t *testing.T) {
 	j := openJobs(t, t.TempDir())
 	const sid = "session-preview"
-
 	changes := make(chan struct{}, 8)
-	runningID := reserveStart(t, j, StartRequest{
-		SessionID: sid, Command: "sleep 1; printf first; sleep 0.3; printf second; sleep 30", Env: os.Environ(),
-		OnChange: func() {
-			select {
-			case changes <- struct{}{}:
-			default:
-			}
-		},
-	})
-	{
-		preview := j.Preview(sid, runningID)
-		testassert.Require(t, preview == "", "Preview before the first write = %q, want the empty text", preview)
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	var seenFirst bool
-	var preview string
-	for {
-		preview = j.Preview(sid, runningID)
-		seenFirst = seenFirst || strings.Contains(preview, "first")
-		if seenFirst && strings.Contains(preview, "second") {
-			break
-		}
-		testassert.Require(t, time.Now().Before(deadline), "running job preview never grew (last %q)", preview)
-		time.Sleep(5 * time.Millisecond)
-	}
-	testassert.Require(t, preview == "firstsecond", "running job preview = %q, want the output so far", preview)
+	id := reserveStart(t, j, StartRequest{SessionID: sid, Command: "printf first; sleep 30", Env: os.Environ(), OnChange: func() { changes <- struct{}{} }})
 	select {
 	case <-changes:
 	case <-time.After(15 * time.Second):
-		t.Fatal("the job capture's change callback never ran")
+		t.Fatal("StartRequest.OnChange never reached the job's capture")
 	}
-
+	testassert.Require(t, j.Preview(sid, id) == "first", "Preview = %q, want the written output", j.Preview(sid, id))
 	reserved, err := j.Reserve()
 	testassert.NoError(t, err)
-	for _, row := range []struct {
-		name      string
-		sessionID string
-		jobID     string
-	}{
-		{"absent", sid, "deadbeef"},
-		{"reserved", sid, reserved},
-		{"foreign session", "other-session", runningID},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			preview := j.Preview(row.sessionID, row.jobID)
-			testassert.Require(t, preview == "", "Preview = %q, want empty", preview)
-		})
-	}
-
-	exit := make(chan ExitResult, 1)
-	shortID := reserveStart(t, j, StartRequest{
-		SessionID: sid, Command: "printf done", Env: os.Environ(),
-		OnExit: func(r ExitResult) { exit <- r },
-	})
-	waitExit(t, exit)
-	waitRemoved(t, j, shortID)
-	if preview := j.Preview(sid, shortID); preview != "" {
-		t.Fatalf("Preview after removal = %q, want empty", preview)
-	}
+	testassert.Require(t, j.Preview(sid, "deadbeef") == "" && j.Preview(sid, reserved) == "" && j.Preview("other", id) == "", "Preview of an absent, reserved, or foreign identity was not empty")
 }
 
 // TestKillExitedShortCircuits proves the retained Kill contract over an

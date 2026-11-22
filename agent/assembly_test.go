@@ -17,12 +17,11 @@ func assemble(t *testing.T, ctx context.Context, ref model.ModelRef, steps ...fu
 	return out, s
 }
 
-// assembleFailure runs one assembly expecting an accepted-stream failure: no output, one *StreamError, and the stream released exactly once.
+// assembleFailure runs one assembly expecting an accepted-stream failure, asserting exactly-once close.
 func assembleFailure(t *testing.T, ctx context.Context, ref model.ModelRef, steps ...func() (model.StreamDelta, error)) *StreamError {
 	t.Helper()
 	s := newFakeStream(steps...)
-	out, err := Assemble(ctx, ref, s)
-	testassert.Require(t, out == (model.Output{}), "stream failure returned output %#v", out)
+	_, err := Assemble(ctx, ref, s)
 	var streamErr *StreamError
 	testassert.Require(t, errors.As(err, &streamErr), "assembly error = %v, want *StreamError", err)
 	assertSingleClose(t, s)

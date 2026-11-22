@@ -683,6 +683,12 @@ func progressEventScope(t *testing.T, event Event) protocol.Scope {
 		body, err := event.AsTextDeltaEvent()
 		testassert.NoError(t, err)
 		return body.Scope
+	case "reasoning_delta":
+		body, _ := event.AsReasoningDeltaEvent()
+		return body.Scope
+	case "response_restarted":
+		body, _ := event.AsResponseRestartedEvent()
+		return body.Scope
 	case "refusal_delta":
 		body, err := event.AsRefusalDeltaEvent()
 		testassert.NoError(t, err)
@@ -814,59 +820,24 @@ func TestObservationRefusalDeltaProgress(t *testing.T) {
 	})
 }
 
-// TestObservationResponseRestartedProgress proves one granted model retry
-// reaches the passive bus as one transient response_restarted event carrying
-// the real Operation scope.
-func TestObservationResponseRestartedProgress(t *testing.T) {
-	e := newOwnerEnv(t)
-	e.fixtureStore(storage.NewMemory())
-	r, err := e.open(context.Background())
-	testassert.NoError(t, err)
-	defer func() {
-		testassert.NoError(t, r.Close(context.Background()))
-	}()
-	record, err := r.createSession(context.Background(), e.dataDir, "solo")
-	testassert.NoError(t, err)
-	sessionID := record.Identity.SessionID
-	sub, err := r.Subscribe(4)
-	testassert.NoError(t, err)
-	r.passive.observe(harness.HarnessFact{Kind: harness.FactResponseRestarted, SessionID: sessionID, OperationID: "op-restarted"})
-	event, ok := nextEvent(t, sub)
-	testassert.Require(t, ok, "the subscription closed before the restart event")
-	testassert.Equal(t, eventKind(t, event), "response_restarted")
-	body, err := event.AsResponseRestartedEvent()
-	testassert.NoError(t, err)
-	scope, err := body.Scope.AsOperationScope()
-	testassert.NoError(t, err)
-	testassert.Require(t, scope.SessionId == sessionID && scope.OperationId == "op-restarted" && scope.Workspace != nil && *scope.Workspace != "", "restart event scope = %+v, want the real Session and Operation", scope)
-}
-
-// TestObservationReasoningDeltaProgress proves one reasoning fact reaches the
-// passive bus as one transient reasoning_delta event carrying the real
-// Operation scope and no position.
-func TestObservationReasoningDeltaProgress(t *testing.T) {
-	e := newOwnerEnv(t)
-	e.fixtureStore(storage.NewMemory())
-	r, err := e.open(context.Background())
-	testassert.NoError(t, err)
-	defer func() {
-		testassert.NoError(t, r.Close(context.Background()))
-	}()
-	record, err := r.createSession(context.Background(), e.dataDir, "solo")
-	testassert.NoError(t, err)
-	sessionID := record.Identity.SessionID
-	sub, err := r.Subscribe(4)
-	testassert.NoError(t, err)
+// TestObservationProgressFacts proves both progress facts reach the bus.
+func TestObservationProgressFacts(t *testing.T) {
+	r, _ := openProjectionRuntime(t, storage.NewMemory())
+	defer closeProjectionRuntime(r)
+	sessionID := projectionSession(t, r, t.TempDir(), "solo").Identity.SessionID
+	sub, _ := r.Subscribe(4)
+	r.passive.observe(harness.HarnessFact{Kind: harness.FactResponseRestarted, SessionID: sessionID, OperationID: "op-restart"})
+	restart, _ := nextEvent(t, sub)
+	testassert.NoError(t, assertOperationScoped(t, restart, sessionID, "op-restart"))
 	r.passive.observe(harness.HarnessFact{Kind: harness.FactReasoningDelta, SessionID: sessionID, OperationID: "op-reasoning", Content: "considering"})
-	event, ok := nextEvent(t, sub)
-	testassert.Require(t, ok, "the subscription closed before the reasoning event")
-	testassert.Equal(t, eventKind(t, event), "reasoning_delta")
-	body, err := event.AsReasoningDeltaEvent()
-	testassert.NoError(t, err)
-	testassert.Equal(t, body.Content, "considering")
-	scope, err := body.Scope.AsOperationScope()
-	testassert.NoError(t, err)
-	testassert.Require(t, scope.SessionId == sessionID && scope.OperationId == "op-reasoning" && scope.Workspace != nil && *scope.Workspace != "", "reasoning event scope = %+v, want the real Session and Operation", scope)
+	reasoning, _ := nextEvent(t, sub)
+	testassert.NoError(t, assertOperationScoped(t, reasoning, sessionID, "op-reasoning"))
+	body, err := reasoning.AsReasoningDeltaEvent()
+	testassert.Require(t, err == nil && body.Content == "considering", "reasoning content = %q err %v", body.Content, err)
+	for _, event := range []Event{restart, reasoning} {
+		ws, ok := scopeWorkspaceAttribution(t, progressEventScope(t, event))
+		testassert.Require(t, ok && ws != "", "progress Workspace = %q (%v), want the Session's Workspace", ws, ok)
+	}
 }
 
 // TestObservationObserverOverflowDetachesOnlyThatRegistration proves one

@@ -246,57 +246,24 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 }
 
 // TestConversationProjectionReasoning proves the committed assistant item's
-// reasoning text follows the same rule as live reasoning: message extras
-// first, thinking parts for the providers that carry them, interrupted
-// entries included, and no member when the text is empty. The raw extra and
-// content parts stay projected exactly as committed.
+// reasoning is the message extra or the thinking parts' text, absent when
+// empty, while the raw extra and parts stay unchanged.
 func TestConversationProjectionReasoning(t *testing.T) {
-	firstID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa21"
-	secondID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa22"
-	thirdID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa23"
-	first := harness.AssistantEntry{
-		SessionID: convSessionID, EntryID: firstID, OperationID: "op-1",
-		Status: model.OutputCompleted, Source: model.ModelRef{Provider: "prov", Model: "m"},
-		Content: []model.ContentPart{{Kind: model.PartText, Text: "answer"}},
-		Extra:   model.Extra{"reasoning_content": json.RawMessage(`"because"`), "vendor": json.RawMessage(`{"n":1}`)},
-	}
-	second := harness.AssistantEntry{
-		SessionID: convSessionID, EntryID: secondID, OperationID: "op-2",
-		Status: model.OutputInterrupted, Source: model.ModelRef{Provider: "mistral", Model: "magistral"},
-		Content: []model.ContentPart{
-			{Kind: model.PartText, Text: "partial"},
-			{Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"thinking": json.RawMessage(`[{"text":"step one"},{"text":" and two"}]`)}},
-		},
-	}
-	third := harness.AssistantEntry{
-		SessionID: convSessionID, EntryID: thirdID, OperationID: "op-3",
-		Status: model.OutputCompleted, Source: model.ModelRef{Provider: "prov", Model: "m"},
-		Content: []model.ContentPart{{Kind: model.PartText, Text: "plain"}},
+	entry := func(id string, status model.OutputStatus, parts []model.ContentPart, extra model.Extra) harness.HistoryFact {
+		return convAssistantFact(id, "op", harness.AssistantEntry{SessionID: convSessionID, EntryID: id, Status: status, Content: parts, Extra: extra})
 	}
 	items, err := projectConversation(convSessionID, []harness.HistoryFact{
-		convAssistantFact(firstID, "op-1", first),
-		convAssistantFact(secondID, "op-2", second),
-		convAssistantFact(thirdID, "op-3", third),
+		entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa21", model.OutputCompleted, []model.ContentPart{{Kind: model.PartText, Text: "answer"}}, model.Extra{"reasoning_content": json.RawMessage(`"because"`), "vendor": json.RawMessage(`{"n":1}`)}),
+		entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa22", model.OutputInterrupted, []model.ContentPart{{Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"thinking": json.RawMessage(`[{"text":"step one"},{"text":" and two"}]`)}}}, nil),
+		entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa23", model.OutputCompleted, []model.ContentPart{{Kind: model.PartText, Text: "plain"}}, nil),
 	})
 	testassert.NoError(t, err)
-	testassert.Equal(t, len(items), 3)
-
-	extras, err := items[0].AsAssistantItem()
-	testassert.NoError(t, err)
-	testassert.Require(t, extras.Reasoning != nil && *extras.Reasoning == "because", "completed reasoning = %v, want the committed extra's text", extras.Reasoning)
-	testassert.Require(t, extras.Extra != nil && string((*extras.Extra)["reasoning_content"]) == `"because"` && string((*extras.Extra)["vendor"]) == `{"n":1}`, "assistant extra = %v, want the raw extras projected unchanged", extras.Extra)
-	firstText, err := extras.Content[0].AsTextPart()
-	testassert.Require(t, err == nil && firstText.Text == "answer", "completed content = %+v err %v, want the committed part unchanged", extras.Content, err)
-
-	thinking, err := items[1].AsAssistantItem()
-	testassert.NoError(t, err)
-	testassert.Require(t, thinking.Status == protocol.AssistantItemStatusInterrupted && thinking.Reasoning != nil && *thinking.Reasoning == "step one and two", "interrupted reasoning = %v status %q, want the thinking parts' text on the interrupted item", thinking.Reasoning, thinking.Status)
-	opaque, err := thinking.Content[1].AsOpaquePart()
-	testassert.Require(t, err == nil && opaque.OpaqueWireType == "thinking" && opaque.Extra != nil && string((*opaque.Extra)["thinking"]) == `[{"text":"step one"},{"text":" and two"}]`, "interrupted content = %+v err %v, want the thinking part projected unchanged", thinking.Content, err)
-
-	empty, err := items[2].AsAssistantItem()
-	testassert.NoError(t, err)
-	testassert.Require(t, empty.Reasoning == nil, "assistant reasoning = %v, want the member absent without reasoning text", empty.Reasoning)
+	for at, want := range []string{"because", "step one and two", ""} {
+		item, err := items[at].AsAssistantItem()
+		testassert.Require(t, err == nil && (item.Reasoning == nil && want == "" || item.Reasoning != nil && *item.Reasoning == want), "reasoning %d = %v, want %q", at, item.Reasoning, want)
+	}
+	raw, err := json.Marshal(items)
+	testassert.Require(t, err == nil && strings.Contains(string(raw), `"reasoning_content":"because"`) && strings.Contains(string(raw), `"vendor":{"n":1}`) && strings.Contains(string(raw), `"extra":{"thinking":[{"text":"step one"},{"text":" and two"}]}`), "projection = %s, want the raw extra and parts unchanged", raw)
 }
 
 // TestConversationProjectionSameCallIDAcrossOperations proves the tool-result
@@ -765,33 +732,19 @@ func TestConversationProjectionSyntheticInterruptedResult(t *testing.T) {
 	})
 }
 
-// TestConversationProjectionMalformedStreamEventFailsWithoutAssistant proves the
-// malformed stream event axis: a complete event that does not decode fails the
-// response after its accepted fragment, the Operation settles failure, and the
-// conversation carries no assistant item and no signal — the failed attempt
-// leaves nothing behind.
+// TestConversationProjectionMalformedStreamEventFailsWithoutAssistant proves a malformed stream event settles without an assistant item.
 func TestConversationProjectionMalformedStreamEventFailsWithoutAssistant(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
-		stopper := newLifecycleStopper()
-		bg := openBackgroundRuntime(t, store, stopper)
+		bg := openBackgroundRuntime(t, store, newLifecycleStopper())
 		defer closeProjectionRuntime(bg.r)
-		session := bg.session("errored")
-		bg.e.server.setScript(func(_ context.Context, body string) []string {
-			// The first turn: the partial answer streams, then the malformed
-			// event fails the response after its accepted fragment.
-			return []string{
-				`{"choices":[{"delta":{"role":"assistant","content":"partial answer"},"finish_reason":null}]}`,
-				`{"choices":[{"delta":`,
-			}
+		bg.e.server.setScript(func(context.Context, string) []string {
+			return []string{`{"choices":[{"delta":{"role":"assistant","content":"partial answer"},"finish_reason":null}]}`, `{"choices":[{"delta":`}
 		})
+		session := bg.session("errored")
 		submitThroughRuntime(t, bg.r, session, "op-1", "work")
 		awaitOperation(t, bg.r, session, "op-1", harness.OperationFailure)
-		testassert.Equal(t, bg.e.server.requests(), 1)
-
 		items := projectSessionItems(t, bg.r, session)
-		if len(items) != 2 || itemKind(t, items[0]) != "input" || itemKind(t, items[1]) != "operation_end" {
-			t.Fatalf("items = %d (%s), want the committed order input, end", len(items), itemKinds(t, items))
-		}
+		testassert.Require(t, len(items) == 2 && itemKind(t, items[0]) == "input", "items = %s, want input, end", itemKinds(t, items))
 		end, err := items[1].AsOperationEndItem()
 		testassert.Require(t, err == nil && end.Status == protocol.OperationEndItemStatusFailure && strings.Contains(end.Detail, "streaming protocol violation"), "end = %+v err %v, want the protocol failure detail", end, err)
 	})

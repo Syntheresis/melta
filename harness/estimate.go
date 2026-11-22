@@ -108,9 +108,8 @@ func (e *costEstimate) value() *float64 {
 // conversation pricing, terminal no-output model producers (settlement Model
 // with optional Usage) under their corresponding captured pricing, and each
 // maintenance fact on a checkpoint or a settlement under the pricing captured
-// for the fact's own model. Each retried attempt's reported usage is priced
-// with the same record's model, and a record whose retry usage is unknown
-// makes its estimate unknown. Independently copied fork-prefix entries
+// for the fact's own model; an unknown retry usage makes the estimate unknown.
+// Independently copied fork-prefix entries
 // (operationless envelopes) and every informational signal — background
 // completion reports included — contribute nothing, so a copied producer never
 // charges twice and a copied absent usage never turns a zero-cost fork
@@ -145,12 +144,12 @@ func estimateGraphCosts(graph *sessionGraph) (map[string]*costEstimate, *costEst
 		estimate.unknown = true
 		session.unknown = true
 	}
-	produceRecord := func(operationID string, pricing *ModelPricing, usage, retryUsage *UsageCount, retryUsageUnknown bool) {
+	produceRecord := func(operationID string, pricing *ModelPricing, usage *UsageCount, retry retryUsage) {
 		produce(operationID, pricing, usage)
-		if retryUsage != nil {
-			produce(operationID, pricing, retryUsage)
+		if retry.RetryUsage != nil {
+			produce(operationID, pricing, retry.RetryUsage)
 		}
-		if retryUsageUnknown {
+		if retry.RetryUsageUnknown {
 			markUnknown(operationID)
 		}
 	}
@@ -163,18 +162,18 @@ func estimateGraphCosts(graph *sessionGraph) (map[string]*costEstimate, *costEst
 		capture := captures[operationID]
 		switch {
 		case entry.Assistant != nil:
-			produceRecord(operationID, capture.Pricing, entry.Assistant.Usage, entry.Assistant.RetryUsage, entry.Assistant.RetryUsageUnknown)
+			produceRecord(operationID, capture.Pricing, entry.Assistant.Usage, entry.Assistant.retryUsage)
 		case entry.Settlement != nil:
 			if entry.Settlement.Model != nil {
 				pricing := capturedPricingFor(capture, *entry.Settlement.Model)
-				produceRecord(operationID, pricing, entry.Settlement.Usage, entry.Settlement.RetryUsage, entry.Settlement.RetryUsageUnknown)
+				produceRecord(operationID, pricing, entry.Settlement.Usage, entry.Settlement.retryUsage)
 			}
 			for _, fact := range entry.Settlement.Facts {
-				produceRecord(operationID, capturedPricingFor(capture, fact.Model), fact.Usage, fact.RetryUsage, fact.RetryUsageUnknown)
+				produceRecord(operationID, capturedPricingFor(capture, fact.Model), fact.Usage, fact.retryUsage)
 			}
 		case entry.Compaction != nil:
 			for _, fact := range entry.Compaction.Facts {
-				produceRecord(operationID, capturedPricingFor(capture, fact.Model), fact.Usage, fact.RetryUsage, fact.RetryUsageUnknown)
+				produceRecord(operationID, capturedPricingFor(capture, fact.Model), fact.Usage, fact.retryUsage)
 			}
 		}
 	}

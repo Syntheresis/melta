@@ -429,11 +429,11 @@ func TestModelEffectCompactTriggerOverflowCompactsFirst(t *testing.T) {
 // TestModelEffectCompactTriggerCheckpointFailureUnsent proves the failure
 // row through real runs: a prior manual checkpoint commits over the seed
 // report, its zero-reporting conversation turn stays after the boundary, and a
-// later admitted Operation whose zero report overflows a negative threshold:
-// its accepted summary stream breaks before its finish reason — the failure
-// terminal carries the broken attempt's reported usage keyed by the compact
-// model, the request is never sent, and the previous projection and checkpoint
-// stay current with its successful prior compaction unchanged.
+// later admitted Operation whose zero report overflows a negative threshold
+// fails its summary response — the failure terminal carries the failed
+// summary's reported usage keyed by the compact model, the request is never
+// sent, and the previous projection and checkpoint stay current with its
+// successful prior compaction unchanged.
 func TestModelEffectCompactTriggerCheckpointFailureUnsent(t *testing.T) {
 	// The prior turn reports zero usage and is committed after the prior
 	// checkpoint, so it is the current measurement while the earlier seed's
@@ -484,8 +484,8 @@ func TestModelEffectCompactTriggerCheckpointFailureUnsent(t *testing.T) {
 			if !strings.Contains(r.Messages[len(r.Messages)-1].TextContent(), "prior summary") {
 				return nil, errors.New("later checkpoint omitted the committed prior summary")
 			}
-			// The one broken summary attempt: it reports usage before the
-			// read failure.
+			// The one failed summary response: it reports usage before
+			// the read failure.
 			return failStream(errors.New("provider failure"),
 				turnDelta("", "partial"), usageDelta(model.Usage{InputTokens: 4, OutputTokens: 2})), nil
 		},

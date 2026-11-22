@@ -142,19 +142,22 @@ func TestSessionReadViewCostEstimates(t *testing.T) {
 				for _, entry := range g.entries {
 					if entry.assistant != nil && entry.assistant.EntryID == hexID(2) {
 						entry.assistant.Usage = &UsageCount{InputTokens: 10, CachedInputTokens: 10, OutputTokens: 10}
+						entry.assistant.RetryUsage = &UsageCount{InputTokens: 20}
 					}
 				}
 			},
-			// op1: (10+40+20)/1e6 + (3+4+4)/1e6 = 81e-6; op-compact: (1+4+2)/1e6 = 7e-6.
-			wantOp:      map[string]*float64{testOpID: ptrUSD(81e-6), "op-compact": ptrUSD(7e-6)},
-			wantSession: ptrUSD(88e-6),
+			wantOp:      map[string]*float64{testOpID: ptrUSD(101e-6), "op-compact": ptrUSD(7e-6)},
+			wantSession: ptrUSD(108e-6),
 		},
 		{
 			name: "one reportless assistant producer makes its operation and the session unknown",
-			// The fixture's first assistant reports no usage: op1 is unknown
-			// even though its second assistant and the compact fact are known,
-			// and the Session sum is never presented as a partial-known total.
-			mutate:      func(*testGraph) {},
+			// The fixture's first assistant reports no usage and an unknown
+			// retried attempt: op1 is unknown even though its second assistant
+			// and the compact fact are known.
+			mutate: func(g *testGraph) {
+				g.entries[1].assistant.RetryUsage = &UsageCount{InputTokens: 20}
+				g.entries[1].assistant.RetryUsageUnknown = true
+			},
 			wantOp:      map[string]*float64{testOpID: nil, "op-compact": ptrUSD(7e-6)},
 			wantSession: nil,
 		},
@@ -402,35 +405,6 @@ func TestSessionReadViewCostEstimates(t *testing.T) {
 				}
 			},
 			wantOp:      map[string]*float64{testOpID: nil, "op-compact": ptrUSD(0)},
-			wantSession: nil,
-		},
-		{
-			name: "retried attempts are priced with their record's model",
-			mutate: func(g *testGraph) {
-				for _, entry := range g.entries {
-					if entry.assistant != nil && entry.assistant.EntryID == hexID(2) {
-						entry.assistant.Usage = &UsageCount{InputTokens: 10, CachedInputTokens: 10, OutputTokens: 10}
-						entry.assistant.RetryUsage = &UsageCount{InputTokens: 20}
-					}
-				}
-			},
-			// op1: the producer's 70e-6 plus its retried 20e-6 input at the
-			// conversation rate; op-compact stays the fact's 7e-6.
-			wantOp:      map[string]*float64{testOpID: ptrUSD(101e-6), "op-compact": ptrUSD(7e-6)},
-			wantSession: ptrUSD(108e-6),
-		},
-		{
-			name: "a reportless retried attempt makes the record's estimate unknown",
-			mutate: func(g *testGraph) {
-				for _, entry := range g.entries {
-					if entry.assistant != nil && entry.assistant.EntryID == hexID(2) {
-						entry.assistant.Usage = &UsageCount{InputTokens: 10, CachedInputTokens: 10, OutputTokens: 10}
-						entry.assistant.RetryUsage = &UsageCount{InputTokens: 20}
-						entry.assistant.RetryUsageUnknown = true
-					}
-				}
-			},
-			wantOp:      map[string]*float64{testOpID: nil, "op-compact": ptrUSD(7e-6)},
 			wantSession: nil,
 		},
 	}

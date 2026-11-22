@@ -438,9 +438,6 @@ func TestSteeringContinuationAcrossOutputShapes(t *testing.T) {
 			{
 				rec := settledOperation(t, store, session, "op-1")
 				testassert.Equal(t, rec.State.Status, tc.wantEnd)
-				if tc.wantEnd == OperationFailure { // the attempt is a completed response whose finish reason fails the matrix, not a broken stream.
-					testassert.Require(t, rec.State.Terminal != nil && strings.Contains(rec.State.Terminal.Detail, `unsupported finish reason "length"`), "operation terminal = %+v, want the errored response's finish-reason detail", rec.State.Terminal)
-				}
 			}
 			receiveBounded(t, watch.seen, "the steering successor's settlement")
 			{

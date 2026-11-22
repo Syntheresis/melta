@@ -17,15 +17,9 @@ import (
 	"github.com/Syntheresis/melta/internal/testassert"
 )
 
-// testCapture constructs the caller-supplied foreground capture over one
-// spill directory.
+// testCapture builds the caller-supplied capture over one spill directory.
 func testCapture(spillDir string, maxBytes, maxLineChars int) *cmdoutput.Capture {
-	return cmdoutput.NewCapture(cmdoutput.Options{
-		Directory:    spillDir,
-		SpillPrefix:  "cmd_output_",
-		MaxBytes:     maxBytes,
-		MaxLineChars: maxLineChars,
-	})
+	return cmdoutput.NewCapture(cmdoutput.Options{Directory: spillDir, MaxBytes: maxBytes, MaxLineChars: maxLineChars})
 }
 
 // TestRunForegroundCommandTimeoutSendsTERMBeforeKILL pins the timeout

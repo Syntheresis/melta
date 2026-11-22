@@ -526,22 +526,12 @@ func toolOutputChangedEvent(scope protocol.Scope, callID string) Event {
 	return event
 }
 
-// toolOutputIdentity addresses one tool call's running output: the Operation
-// is part of the identity because call IDs are unique only within an
-// Operation.
-type toolOutputIdentity struct {
-	sessionID   string
-	operationID string
-	callID      string
-}
+// toolOutputIdentity addresses one call's running output.
+type toolOutputIdentity struct{ sessionID, operationID, callID string }
 
 // liveToolOutput is the owner's per-instance registry of running commands'
-// output previews: the run_command executor registers one preview under its
-// call identity around the command's lifetime, so a client can read the
-// bounded current output while the call runs and repair from reads after
-// every notice. Presence comes from the registration alone; the registered
-// function supplies only the text. The call's output is the same registry
-// entry whether the command runs in the foreground or as a background job.
+// output previews: a registration's presence is the call's live output, and
+// the registered function supplies only the text.
 type liveToolOutput struct {
 	obs      *observation
 	mu       sync.Mutex
@@ -555,20 +545,20 @@ func newLiveToolOutput(obs *observation) *liveToolOutput {
 func (l *liveToolOutput) register(sessionID, operationID, callID string, preview func() string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.previews[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}] = preview
+	l.previews[toolOutputIdentity{sessionID, operationID, callID}] = preview
 }
 
 func (l *liveToolOutput) remove(sessionID, operationID, callID string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.previews, toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID})
+	delete(l.previews, toolOutputIdentity{sessionID, operationID, callID})
 }
 
 // preview reads one registered preview's bounded current output; presence is
 // the map lookup alone.
 func (l *liveToolOutput) preview(sessionID, operationID, callID string) (string, bool) {
 	l.mu.Lock()
-	read, ok := l.previews[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}]
+	read, ok := l.previews[toolOutputIdentity{sessionID, operationID, callID}]
 	l.mu.Unlock()
 	if !ok {
 		return "", false
@@ -576,8 +566,7 @@ func (l *liveToolOutput) preview(sessionID, operationID, callID string) (string,
 	return read(), true
 }
 
-// publishChanged publishes one tool_output_changed notice for the running
-// call on its Operation scope.
+// publishChanged publishes one tool_output_changed notice for the running call.
 func (l *liveToolOutput) publishChanged(workspace, sessionID, operationID, callID string) {
 	l.obs.publish(func() []Event {
 		return []Event{toolOutputChangedEvent(operationEventScope(workspace, sessionID, operationID), callID)}

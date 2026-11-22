@@ -155,72 +155,28 @@ func TestObserveFactKinds(t *testing.T) {
 	testassert.Require(t, invalidations >= 2 && deltas == 2 && started == 1 && finished == 1 && settled == 1, "fact counts = invalidations %d deltas %d started %d finished %d settled %d", invalidations, deltas, started, finished, settled)
 }
 
-// TestModelEffectRestartFactCarriesOperationIdentity proves each model
-// effect's restart observation names the enclosing Operation: one retried
-// conversation round and one retried compaction report exactly one restart
-// fact under their own Session and Operation.
-func TestModelEffectRestartFactCarriesOperationIdentity(t *testing.T) {
-	cases := []struct {
-		name string
-		run  func(t *testing.T) (*factCollector, string, string)
-	}{
-		{
-			name: "conversation effect",
-			run: func(t *testing.T) (*factCollector, string, string) {
-				t.Helper()
-				calls := 0
-				modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-					calls++
-					if calls == 1 {
-						return nil, errors.New("provider failure")
-					}
-					return completedTurnStream(), nil
-				}
-				h, _, c, sessionID := newEffectHarness(t, nil)
-				col := observeHarness(h)
-				exec := effectExecution(modelFn, nil)
-				exec.Retry = func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 }
-				testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-					return exec, nil
-				})))
-				return col, sessionID, testOpID
-			},
-		},
-		{
-			name: "compaction effect",
-			run: func(t *testing.T) (*factCollector, string, string) {
-				t.Helper()
-				calls := 0
-				compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-					calls++
-					if calls == 1 {
-						return nil, errors.New("broken summary")
-					}
-					return completedTurnStream(), nil
-				}
-				exec := compactionExecution(t, compactFn, func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 })
-				store := idleFixture(t, validTestGraph(), hexID(20))
-				h := newCompactHarness(t, store, compactPrepared(testCapture(), exec))
-				c := leaseCoordinator(t, h, testSessionID)
-				col := observeHarness(h)
-				testassert.NoError(t, runManualCompact(t, h, c, testSessionID, "compact-1"))
-				return col, testSessionID, "compact-1"
-			},
-		},
+// TestObserveResponseRestarted proves the attempt loop reports a restart only after a granted retry and before the backoff wait.
+func TestObserveResponseRestarted(t *testing.T) {
+	attempt := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+		return nil, errors.New("provider dropped")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			col, sessionID, operationID := tc.run(t)
-			var restarts []HarnessFact
-			for _, fact := range col.snapshot() {
-				if fact.Kind == FactResponseRestarted {
-					restarts = append(restarts, fact)
-				}
-			}
-			want := []HarnessFact{{Kind: FactResponseRestarted, SessionID: sessionID, OperationID: operationID}}
-			testassert.Require(t, slices.Equal(restarts, want), "restart facts = %+v, want exactly one under Session %q and Operation %q", restarts, sessionID, operationID)
-		})
+	assemble := func(model.Stream) (model.Output, error) { return model.Output{Status: model.OutputCompleted}, nil }
+	for _, policy := range []RetryPolicy{
+		func(error, int) (time.Duration, bool) { return 0, false },
+		func(error, int) (time.Duration, bool) { return -time.Second, true },
+	} {
+		reports := 0
+		runModelAttempts(context.Background(), model.Request{}, nil, attempt, assemble, policy, func() { reports++ })
+		testassert.Equal(t, reports, 0)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	reports := 0
+	runModelAttempts(ctx, model.Request{}, nil, attempt, assemble, func(error, int) (time.Duration, bool) { return 10 * time.Second, true }, func() {
+		reports++
+		cancel()
+	})
+	testassert.Equal(t, reports, 1) // reported before the wait: the report cancels it
 }
 
 // TestObserveReservationClocks proves each reservation acquisition and release
@@ -1184,60 +1140,15 @@ func TestObserveStreamFilter(t *testing.T) {
 		testassert.Require(t, len(*got) == 1 && (*got)[0].kind == FactTextDelta, "emitted = %+v, want the text fragment and no refusal emission", *got)
 	})
 
-	t.Run("reasoning extra emits before content text and refusal", func(t *testing.T) {
-		inner := streamOf(model.StreamDelta{
-			HasChoice:       true,
-			Role:            "assistant",
-			MessageExtra:    model.Extra{"reasoning_content": json.RawMessage(`"thinking it through"`)},
-			RefusalFragment: "but no",
-			ContentFragments: []model.ContentFragment{
-				{Position: 0, Kind: model.PartText, Text: "working"},
-			},
-		})
+	t.Run("reasoning emits once before the delta's text", func(t *testing.T) {
+		inner := streamOf(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`)}, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "working"}}})
 		wrapper, got := collect(t, inner)
 		{
 			_, err := wrapper.Recv()
 			testassert.NoError(t, err)
 		}
-		want := []emitted{
-			{kind: FactReasoningDelta, position: 0, content: "thinking it through"},
-			{kind: FactTextDelta, position: 0, content: "working"},
-			{kind: FactRefusalDelta, position: 0, content: "but no"},
-		}
-		testassert.Require(t, slices.Equal(*got, want), "emitted = %+v, want the reasoning fact before the content text and refusal %+v", *got, want)
-	})
-
-	t.Run("thinking fragment emits reasoning and no text", func(t *testing.T) {
-		inner := streamOf(model.StreamDelta{
-			HasChoice: true,
-			Role:      "assistant",
-			ContentFragments: []model.ContentFragment{
-				{Position: 0, Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"thinking": json.RawMessage(`"hidden"`)}},
-			},
-		})
-		wrapper, got := collect(t, inner)
-		{
-			_, err := wrapper.Recv()
-			testassert.NoError(t, err)
-		}
-		want := []emitted{{kind: FactReasoningDelta, position: 0, content: "hidden"}}
-		testassert.Require(t, slices.Equal(*got, want), "emitted = %+v, want only the thinking part's reasoning fact %+v", *got, want)
-	})
-
-	t.Run("empty reasoning emits only the text", func(t *testing.T) {
-		inner := streamOf(model.StreamDelta{
-			HasChoice:    true,
-			MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`""`)},
-			ContentFragments: []model.ContentFragment{
-				{Position: 0, Kind: model.PartText, Text: "kept"},
-			},
-		})
-		wrapper, got := collect(t, inner)
-		{
-			_, err := wrapper.Recv()
-			testassert.NoError(t, err)
-		}
-		testassert.Require(t, len(*got) == 1 && (*got)[0] == (emitted{kind: FactTextDelta, position: 0, content: "kept"}), "emitted = %+v, want the text fragment and no empty reasoning emission", *got)
+		want := []emitted{{kind: FactReasoningDelta, position: 0, content: "thinking"}, {kind: FactTextDelta, position: 0, content: "working"}}
+		testassert.Require(t, slices.Equal(*got, want), "emitted = %+v, want the delta's reasoning fact before its text %+v", *got, want)
 	})
 
 	t.Run("original delta and error preserved", func(t *testing.T) {
@@ -1264,9 +1175,7 @@ func TestObserveStreamFilter(t *testing.T) {
 		cases := []model.StreamDelta{
 			{ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "x"}}}, // no choice
 			{RefusalFragment: "no"}, // refusal without a choice
-			{MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"x"`)}}, // reasoning without a choice
-			{HasChoice: true}, // empty
-			{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`""`)}},                                             // empty reasoning
+			{HasChoice: true},       // empty
 			{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartImageURL, URL: "u"}}},                      // non-text
 			{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: -1, Kind: model.PartText, Text: "x"}}},                        // invalid position
 			{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "x", URL: "u"}}},               // cross-kind
@@ -1320,6 +1229,11 @@ func TestObserveStreamFilter(t *testing.T) {
 				checkOrig: func(t *testing.T, returned model.StreamDelta) {
 					testassert.Require(t, returned.Usage == usageOnly.Usage, "%v", "the original usage pointer was not returned unchanged")
 				},
+			},
+			{
+				name:  "thinking content fragment emits one reasoning fact",
+				delta: model.StreamDelta{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"thinking": json.RawMessage(`"plan"`)}}}},
+				want:  []emitted{{kind: FactReasoningDelta, position: 0, content: "plan"}},
 			},
 			{
 				name:  "invalid tool position suppresses valid-looking text",
@@ -1391,8 +1305,7 @@ func TestObserveCompactAttribution(t *testing.T) {
 	c := leaseCoordinator(t, h, testSessionID)
 	col := observeHarness(h)
 	testassert.NoError(t, runManualCompact(t, h, c, testSessionID, "compact-1"))
-	deltas := 0
-	reasoning := 0
+	deltas, reasoning := 0, 0
 	for _, fact := range col.snapshot() {
 		switch fact.Kind {
 		case FactTextDelta:

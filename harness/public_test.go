@@ -168,8 +168,9 @@ func (s *publicScriptStream) Recv() (model.StreamDelta, error) {
 	return d, nil
 }
 
-// publicPartialTurnStream is one accepted stream that breaks before its finish
-// reason while carrying text and usage: the fixture broken summary turn.
+// publicPartialTurnStream is one accepted stream whose read fails before its
+// finish reason after carrying text and usage: the fixture broken summary
+// turn, which retains no partial output.
 func publicPartialTurnStream() *publicScriptStream {
 	return &publicScriptStream{
 		deltas: []model.StreamDelta{
@@ -5428,29 +5429,29 @@ func TestPublicForkPreparationRefusalLeavesNoDestination(t *testing.T) {
 // through public operations: an idle source forks at a committed input
 // boundary; the destination inherits the source Workspace and current Agent
 // type with informational source/boundary lineage and zero usage; only the
-// strict-before-boundary input, assistant, tool_result, and interruption
-// signal entries are copied, under new operationless identities with cleared
-// usage, the rewritten result/assistant references, and the copied signal's
-// source Operation left as informational history; settlements and the boundary
+// strict-before-boundary input, assistant, tool_result, and signal entries
+// are copied, under new operationless identities with cleared usage, the
+// rewritten result/assistant references, and the copied signal's source
+// Operation left as informational history; settlements and the boundary
 // itself are excluded; the fresh admission carries the caller's replacement
-// origin and provenance and owns a running message Operation; the source stays
-// byte-identical; and the destination execution starts after the commit and
-// projects the copied prefix before the fork input.
+// origin and provenance and owns a running message Operation; the source
+// stays byte-identical; and the destination execution starts after the commit
+// and projects the copied prefix before the fork input.
 func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		script := newScriptModel(
-			publicTurn("call-1"), // op-1's retried attempt publishes a call
-			publicTurn(),         // op-2 completes
-			publicTurn(),         // op-3 completes
+			publicTurn("call-1"),
+			publicTurn(),
+			publicTurn(),
 		)
 		parked := make(chan struct{}, 1)
-		var attempts atomic.Int64
+		attempts := 0
 		conversation := func(ctx context.Context, req model.Request, extra model.Extra) (model.Stream, error) {
-			switch attempts.Add(1) {
-			case 1: // the first physical attempt reports usage and breaks before its finish reason
+			switch attempts++; attempts {
+			case 1:
 				return publicPartialTurnStream(), nil
-			case 3: // op-1's second round parks until the public interruption
+			case 3:
 				parked <- struct{}{}
 				<-ctx.Done()
 				return nil, ctx.Err()
@@ -5460,9 +5461,6 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		f := newPublicFixture(t, store, script, nil)
 		f.prepareHook = func(_ int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
 			exec := publicExecutionOver(conversation, conversation, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				// the copied tool result carries tool-owned
-				// formatted metadata that the fork must preserve
-				// in its encoded durable form
 				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
 					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran " + call.ID},
 					Metadata: json.RawMessage(`{ "n" : [1, 1.0, 1e0, 9007199254740993], "s" : "<>&" }`),
@@ -5485,8 +5483,7 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		<-script.arrived // the published call
 		<-parked         // the second attempt parks
 		testassert.NoError(t, f.h.Interrupt(ctx, source))
-		interrupted := awaitTerminal(t, f.h, source, "op-1")
-		testassert.Require(t, interrupted.State.Status == harness.OperationInterruption, "source operation = %+v, want terminal interruption", interrupted.State)
+		awaitTerminal(t, f.h, source, "op-1")
 		{
 			_, err := f.h.Submit(ctx, harness.SubmitRequest{
 				SessionID:   source,

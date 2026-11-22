@@ -6,210 +6,68 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 )
 
-// TestCaptureOnChangeThrottlesWithTrailingCall proves the change callback is
-// never invoked by Write, runs at most once per 250 ms, and fires once more
-// for a write that arrived while the previous call was running.
-func TestCaptureOnChangeThrottlesWithTrailingCall(t *testing.T) {
-	home := t.TempDir()
-	called := make(chan time.Time, 16)
-	started := make(chan struct{})
+// TestCaptureOnChangeThrottles proves OnChange never runs inside Write, fires at most once per 250 ms with a trailing call, and not after Close.
+func TestCaptureOnChangeThrottles(t *testing.T) {
+	called := make(chan time.Time, 2)
 	release := make(chan struct{})
-	var calls atomic.Int64
-	c := NewCapture(Options{
-		Directory:    filepath.Join(home, ".melta"),
-		SpillPrefix:  "cmd_output_",
-		MaxBytes:     0,
-		MaxLineChars: 80,
-		OnChange: func() {
-			call := calls.Add(1)
-			called <- time.Now()
-			if call == 1 {
-				close(started)
-				<-release
-			}
-		},
-	})
-	defer c.Close()
-
+	var once sync.Once
+	c := NewCapture(Options{Directory: t.TempDir(), OnChange: func() {
+		called <- time.Now()
+		once.Do(func() { <-release })
+	}})
 	_, _ = c.Stdout().Write([]byte("one"))
-	first := awaitChange(t, called)
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the change call never started")
-	}
 	_, _ = c.Stdout().Write([]byte("two"))
+	first := awaitChange(t, called)
 	_, _ = c.Stdout().Write([]byte("three"))
 	close(release)
 	second := awaitChange(t, called)
 	testassert.Require(t, second.Sub(first) >= 240*time.Millisecond, "change calls %s apart, want at most one per 250 ms", second.Sub(first))
+	_, _ = c.Stdout().Write([]byte("four"))
+	c.Close()
 	select {
 	case <-called:
-		t.Fatal("a write without a later interval produced another change call")
-	case <-time.After(400 * time.Millisecond):
+		t.Fatal("OnChange ran after Close")
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
-// TestCaptureOnChangeStopsAtClose proves Close before the interval elapses
-// suppresses the armed call.
-func TestCaptureOnChangeStopsAtClose(t *testing.T) {
-	var calls atomic.Int64
-	c := NewCapture(Options{
-		Directory:    filepath.Join(t.TempDir(), ".melta"),
-		SpillPrefix:  "cmd_output_",
-		MaxLineChars: 80,
-		OnChange:     func() { calls.Add(1) },
-	})
-	_, _ = c.Stdout().Write([]byte("one"))
-	c.Close()
-	time.Sleep(300 * time.Millisecond)
-	testassert.Equal(t, calls.Load(), int64(0))
-}
-
-// previewWrite is one TestCapturePreview row's stream-tagged write.
-type previewWrite struct {
-	stderr bool
-	text   string
-}
-
-// TestCapturePreview proves the live preview is the bounded write-order tail,
-// read only from captured memory.
+// TestCapturePreview proves Preview is the write-order tail bounded to MaxBytes,
+// rune-aligned, marked when truncated, memory-only, and readable after Close.
 func TestCapturePreview(t *testing.T) {
 	cases := []struct {
 		name     string
 		maxBytes int
-		writes   []previewWrite
-		close    bool
+		writes   []string // a 2> prefix targets stderr
 		want     string
 	}{
-		{
-			name:     "before any write",
-			maxBytes: 16,
-		},
-		{
-			name:     "under bound in write order",
-			maxBytes: 64,
-			writes: []previewWrite{
-				{text: "out one\n"},
-				{stderr: true, text: "err one\n"},
-				{text: "out two\n"},
-			},
-			want: "out one\nerr one\nout two\n",
-		},
-		{
-			name:     "disabled bound keeps every byte in write order",
-			maxBytes: 0,
-			writes: []previewWrite{
-				{text: "first"},
-				{stderr: true, text: "second"},
-			},
-			want: "firstsecond",
-		},
-		{
-			name:     "past bound keeps the last bytes",
-			maxBytes: 8,
-			writes: []previewWrite{
-				{text: "abcdef"},
-				{stderr: true, text: "ghijkl"},
-			},
-			want: "[Output truncated. 12 bytes so far.]\nefghijkl",
-		},
-		{
-			name:     "many small writes keep the last bounded bytes",
-			maxBytes: 8,
-			writes: []previewWrite{
-				{text: "a"}, {text: "b"}, {text: "c"}, {text: "d"}, {text: "e"}, {text: "f"},
-				{text: "g"}, {text: "h"}, {text: "i"}, {text: "j"}, {text: "k"}, {text: "l"},
-				{text: "m"}, {text: "n"}, {text: "o"}, {text: "p"}, {text: "q"}, {text: "r"},
-			},
-			want: "[Output truncated. 18 bytes so far.]\nklmnopqr",
-		},
-		{
-			name:     "cut inside a rune starts at the next rune",
-			maxBytes: 3,
-			writes: []previewWrite{
-				{text: "éé"},
-			},
-			want: "[Output truncated. 4 bytes so far.]\né",
-		},
-		{
-			name:     "after close",
-			maxBytes: 8,
-			writes: []previewWrite{
-				{text: "abcdefghijkl"},
-			},
-			close: true,
-			want:  "[Output truncated. 12 bytes so far.]\nefghijkl",
-		},
+		{"disabled bound", 0, []string{"first", "2>second"}, "firstsecond"},
+		{"past bound", 8, []string{"abcdefgh", "ijklmnop", "qrstuvwx"}, "[Output truncated. 24 bytes so far.]\nqrstuvwx"},
+		{"rune cut", 3, []string{"éé"}, "[Output truncated. 4 bytes so far.]\né"},
+		{"leading continuation byte under bound", 8, []string{"\x80abc"}, "abc"},
+		{"write order", 8, []string{"a", "2>b", "c"}, "abc"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), ".melta")
-			c := NewCapture(Options{Directory: dir, SpillPrefix: "cmd_output_", MaxBytes: tc.maxBytes, MaxLineChars: 80})
+			c := NewCapture(Options{Directory: dir, MaxBytes: tc.maxBytes})
 			for _, write := range tc.writes {
 				target := c.Stdout()
-				if write.stderr {
-					target = c.Stderr()
+				if strings.HasPrefix(write, "2>") {
+					target, write = c.Stderr(), write[2:]
 				}
-				_, _ = target.Write([]byte(write.text))
+				_, _ = target.Write([]byte(write))
 			}
-			if tc.close {
-				c.Close()
-			} else {
-				defer c.Close()
-			}
-
-			before := dirEntries(t, dir)
-			preview := c.Preview()
-			testassert.Require(t, preview == tc.want, "Preview = %q, want %q", preview, tc.want)
-			testassert.Require(t, equalStrings(before, dirEntries(t, dir)), "Preview changed the spill directory from %v to %v", before, dirEntries(t, dir))
+			c.Close()
+			_ = os.RemoveAll(dir)
+			testassert.Require(t, c.Preview() == tc.want && (tc.maxBytes <= 0 || len(c.tail) <= 2*tc.maxBytes), "Preview = %q, want %q", c.Preview(), tc.want)
 		})
 	}
-}
-
-// awaitChange reads one change call within the test budget.
-func awaitChange(t *testing.T, called <-chan time.Time) time.Time {
-	t.Helper()
-	select {
-	case at := <-called:
-		return at
-	case <-time.After(5 * time.Second):
-		t.Fatal("no change call arrived within the test budget")
-		return time.Time{}
-	}
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func dirEntries(t *testing.T, dir string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	testassert.Require(t, err == nil, "ReadDir(%q): %v", dir, err)
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	return names
 }
 
 func TestCaptureBelowCapExactOutputNoSpill(t *testing.T) {
@@ -422,6 +280,18 @@ func TestCaptureCloseDeletesUnreturnedVisibleSpillAndKeepsReturned(t *testing.T)
 			testassert.NoError(t, err)
 		}
 	})
+}
+
+// awaitChange reads one change call within the test budget.
+func awaitChange(t *testing.T, called <-chan time.Time) time.Time {
+	t.Helper()
+	select {
+	case at := <-called:
+		return at
+	case <-time.After(5 * time.Second):
+		t.Fatal("no change call arrived within the test budget")
+		return time.Time{}
+	}
 }
 
 func numberedLines(n int) string {

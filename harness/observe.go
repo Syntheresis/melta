@@ -22,10 +22,7 @@ const (
 	// concatenate in arrival order — and no authority: the committed
 	// assistant entry's refusal is the authoritative value.
 	FactRefusalDelta HarnessFactKind = "refusal_delta"
-	// FactReasoningDelta reports one nonempty transient reasoning fragment of
-	// an accepted model stream. It carries no position — reasoning fragments
-	// concatenate in arrival order — and no authority: the committed assistant
-	// entry is the authoritative value.
+	// FactReasoningDelta reports one nonempty transient reasoning fragment.
 	FactReasoningDelta HarnessFactKind = "reasoning_delta"
 	// FactToolStarted reports one dispatched tool call. It is emitted once at
 	// the live dispatcher entry, before any branch-specific validation, hook,
@@ -45,10 +42,8 @@ const (
 	// Recovery settles before any Harness observer exists and therefore emits
 	// no settled fact.
 	FactOperationSettled HarnessFactKind = "operation_settled"
-	// FactResponseRestarted reports that the retry policy granted another
-	// physical attempt for one logical model effect. It carries the Session and
-	// Operation identities only: the restart is transient progress, and the
-	// committed assistant entry or settlement remains authoritative.
+	// FactResponseRestarted reports one retry granted for a logical model
+	// effect; it carries Session and Operation identities only.
 	FactResponseRestarted HarnessFactKind = "response_restarted"
 )
 
@@ -69,11 +64,11 @@ type SessionRevision struct {
 // nonempty Content and no Position; a reasoning delta carries SessionID,
 // OperationID, and the nonempty Content and no Position; a tool start carries
 // SessionID, OperationID, CallID, Ordinal, and Name; a tool finish carries
-// SessionID, OperationID, CallID, the closed Status, and the committed execution
-// Evidence; an admitted Operation carries SessionID and OperationID; a settled
-// Operation carries SessionID, OperationID and the closed terminal
-// OperationStatus; a response restart carries SessionID and OperationID. Every
-// field a kind does not require stays zero. A fact
+// SessionID, OperationID, CallID, the closed Status, and the committed
+// execution Evidence; an admitted Operation carries SessionID and
+// OperationID; a settled Operation carries SessionID, OperationID and the
+// closed terminal OperationStatus; a response restart carries SessionID and
+// OperationID. Every field a kind does not require stays zero. A fact
 // grants no authority: it can never alter an admission, an effect, a
 // settlement, or a lifecycle transition. A fact carries no revision pair: no
 // producer sample can become notification authority; passive publishers read
@@ -239,17 +234,11 @@ func (h *Harness) observeStream(sessionID, operationID string, stream model.Stre
 
 // observedStream is the one accepted-stream wrapper: Recv delegates unchanged,
 // Close delegates exactly once, and only a successfully parsed choice-bearing
-// delta contributes facts — one reasoning fact when the delta carries
-// reasoning text, and one fact per nonempty fragment. An invalid delta, or one
-// with neither reasoning text nor a nonempty fragment, emits nothing, and a
-// delta returned together with an error
-// (EOF included) emits nothing; the original delta and error are always
-// returned exactly as received — the validation gate reads the same contract
-// the constructor enforces without building an owned copy. A delta's
-// positioned content-text fragments are emitted before its refusal fragment,
-// and refusal emits no position. A delta's reasoning text, when nonempty, is
-// emitted before its text and refusal fragments. No tool or finish fragment
-// is interpreted, and no second assembler or accumulator exists.
+// delta contributes facts — one reasoning fact for its reasoning text, emitted
+// before the delta's text facts, and one fact per nonempty positioned text or
+// refusal fragment. An invalid, empty, or error-bearing delta emits nothing;
+// the original delta and error are returned unchanged. No tool or finish
+// fragment is interpreted.
 type observedStream struct {
 	inner model.Stream
 	emit  func(kind HarnessFactKind, position int, content string)

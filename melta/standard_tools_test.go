@@ -28,13 +28,7 @@ const (
 // directTools constructs the baseline tool values over one data root with no
 // jobs service, the way newStandardTools composes them.
 func directTools(dataDir string) map[string]Tool {
-	return newStandardTools(dataDir, nil, newTestLiveToolOutput())
-}
-
-// newTestLiveToolOutput constructs the per-instance live output registry over
-// one real observation bus, the way the owner constructs it.
-func newTestLiveToolOutput() *liveToolOutput {
-	return newLiveToolOutput(newObservation())
+	return newStandardTools(dataDir, nil, newLiveToolOutput(newObservation()))
 }
 
 // callToolContext is the ToolContext the direct tests prepare with: a real

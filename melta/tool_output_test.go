@@ -10,166 +10,118 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
-	"github.com/Syntheresis/melta/protocol"
 )
 
-// TestForegroundToolOutputLiveReadAndNotices drives one real run_command
-// through the owner: while the command runs its output grows through the live
-// read, the change notices stay at most one per 250 ms, and after settlement
-// every unknown, foreign or malformed identity is the same not-found class
-// while a caller without the Session grant is denied.
-func TestForegroundToolOutputLiveReadAndNotices(t *testing.T) {
-	e := newOwnerEnv(t)
-	e.fixtureStore(storage.NewMemory())
+// TestToolOutputLiveRead proves running commands publish readable output and
+// scoped notices, and errors keep their classes.
+func TestToolOutputLiveRead(t *testing.T) {
+	store := storage.NewMemory()
+	r, e := openProjectionRuntime(t, store)
+	defer closeProjectionRuntime(r)
 	e.server.setScript(func(_ context.Context, body string) []string {
-		if lastMessageRole(body) == "tool" {
+		switch {
+		case lastMessageRole(body) == "tool" || strings.Contains(body, "Background process "):
 			return textTurnEvents("done")
+		case strings.Contains(body, "job"):
+			return toolCallTurnEvents("call-job", "run_command", `{"command":"printf a; sleep 1; printf b; sleep 1","background":true}`)
+		default:
+			return toolCallTurnEvents("call-live", "run_command", `{"command":"printf a; sleep 1; printf b; sleep 1"}`)
 		}
-		return toolCallTurnEvents("call-output", "run_command", `{"command":"printf first; sleep 1; printf second; sleep 1"}`)
 	})
-	ctx := context.Background()
-	r, err := e.open(ctx)
+	ctx, caller := context.Background(), testCaller(r)
+	sessionID := createHeldSession(t, r, t.TempDir(), []string{"run_command"}).Identity.SessionID
+	sub, err := r.Subscribe(64)
 	testassert.NoError(t, err)
-	defer func() { _ = r.Close(ctx) }()
-	session := createHeldSession(t, r, t.TempDir(), []string{"run_command"})
-	sessionID := session.Identity.SessionID
-	caller := testCaller(r)
-	sub, err := r.Subscribe(256)
-	testassert.NoError(t, err)
-
-	type notice struct {
-		at    time.Time
-		event Event
-	}
-	notices := make(chan notice, 64)
-	noticesClosed := make(chan struct{})
+	defer sub.Close()
+	notices := make(chan Event, 64)
 	go func() {
-		defer close(noticesClosed)
 		for event := range sub.Events() {
 			if kind, _ := event.Discriminator(); kind == "tool_output_changed" {
-				notices <- notice{at: time.Now(), event: event}
+				notices <- event
 			}
 		}
 	}()
+	await := func(operationID, callID string) time.Time {
+		var event Event
+		select {
+		case event = <-notices:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("no tool_output_changed notice for call %q in Operation %q", callID, operationID)
+		}
+		body, _ := event.AsToolOutputChangedEvent()
+		scope, _ := body.Scope.AsOperationScope()
+		testassert.Require(t, body.CallId == callID && scope.SessionId == sessionID && scope.OperationId == operationID && scope.Workspace != nil && *scope.Workspace != "", "notice = (%q, %+v), want call %q in the Operation with its Workspace", body.CallId, scope, callID)
+		return time.Now()
+	}
+	// readLive polls the running output until want appears or the deadline passes.
+	readLive := func(operationID, callID, want string) {
+		deadline := time.Now().Add(10 * time.Second)
+		var got string
+		for {
+			output, err := r.GetSessionToolOutput(ctx, caller, sessionID, operationID, callID)
+			switch {
+			case err == nil:
+				got = output.Output
+				if got == want {
+					return
+				}
+			case errors.Is(err, harness.ErrNotFound):
+			default:
+				t.Fatalf("GetSessionToolOutput = %v", err)
+			}
+			testassert.Require(t, time.Now().Before(deadline), "running output = %q, want %q", got, want)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 
-	submitThroughRuntime(t, r, sessionID, "op-live", "run")
-	var outputs []string
+	submitThroughRuntime(t, r, sessionID, "op-live", "foreground")
+	first := await("op-live", "call-live")
+	readLive("op-live", "call-live", "a")
+	second := await("op-live", "call-live")
+	readLive("op-live", "call-live", "ab")
+	testassert.Require(t, second.Sub(first) >= 240*time.Millisecond, "notices %s apart, want at most one per 250 ms", second.Sub(first))
+	awaitOperation(t, r, sessionID, "op-live", harness.OperationSuccess)
+
+	other := projectionSession(t, r, t.TempDir(), "solo").Identity.SessionID
+	denied, err := r.Caller(CallerContext{Origin: harness.InputOriginUser, Scope: CallerScope{Kind: CallerScopeSession, SessionID: other}})
+	testassert.NoError(t, err)
+	for _, row := range [][3]string{
+		{sessionID, "op-live", "call-live"}, {sessionID, "op-other", "call-live"}, {other, "op-live", "call-live"},
+		{sessionID, "op-live", "not a call"}, {sessionID, "", "call-live"},
+	} {
+		_, err := r.GetSessionToolOutput(ctx, caller, row[0], row[1], row[2])
+		testassert.Require(t, errors.Is(err, harness.ErrNotFound), "GetSessionToolOutput(%q, %q) = %v, want not_found", row[1], row[2], err)
+	}
+	_, err = r.GetSessionToolOutput(ctx, denied, sessionID, "op-live", "call-live")
+	testassert.Require(t, errors.Is(err, ErrDenied), "ungranted caller = %v, want denied", err)
+
+	submitThroughRuntime(t, r, sessionID, "op-job", "job")
+	await("op-job", "call-job")
+	readLive("op-job", "call-job", "a")
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		output, err := r.GetSessionToolOutput(ctx, caller, sessionID, "op-live", "call-output")
-		switch {
-		case err == nil:
-			if len(outputs) == 0 || outputs[len(outputs)-1] != output.Output {
-				outputs = append(outputs, output.Output)
-			}
-			if strings.Contains(output.Output, "second") {
-				operation, readErr := r.GetSessionOperation(ctx, caller, sessionID, "op-live")
-				testassert.Require(t, readErr == nil && operation.Operation.Status == protocol.OperationStatusRunning, "Operation = (%+v, %v), want the command's Operation still running", operation.Operation, readErr)
-				goto settled
-			}
-		case errors.Is(err, harness.ErrNotFound):
-		default:
-			t.Fatalf("GetSessionToolOutput = (%+v, %v)", output, err)
+		page, err := r.GetHistory(ctx, caller, sessionID, nil)
+		testassert.Require(t, err == nil && time.Now().Before(deadline), "the job's completion was never delivered (%v)", err)
+		if hasRuntimeOriginInput(t, page.Items, "Background process ") {
+			break
 		}
-		testassert.Require(t, time.Now().Before(deadline), "the running command output never grew (outputs %v)", outputs)
 		time.Sleep(10 * time.Millisecond)
 	}
-settled:
-	testassert.Require(t, len(outputs) >= 2, "live outputs = %q, want output that grew while the command ran", outputs)
-	awaitOperation(t, r, sessionID, "op-live", harness.OperationSuccess)
-	sub.Close()
-	<-noticesClosed
-
-	var times []time.Time
 	for {
-		select {
-		case received := <-notices:
-			body, err := received.event.AsToolOutputChangedEvent()
-			testassert.NoError(t, err)
-			testassert.Equal(t, body.CallId, "call-output")
-			scope, err := body.Scope.AsOperationScope()
-			testassert.NoError(t, err)
-			testassert.Require(t, scope.SessionId == sessionID && scope.OperationId == "op-live" && scope.Workspace != nil && *scope.Workspace != "", "notice scope = %+v, want the running Operation", scope)
-			times = append(times, received.at)
-		default:
-			goto drained
+		_, err := r.GetSessionToolOutput(ctx, caller, sessionID, "op-job", "call-job")
+		if errors.Is(err, harness.ErrNotFound) {
+			break
 		}
-	}
-drained:
-	testassert.Require(t, len(times) >= 2, "tool output notices = %d, want one per written interval", len(times))
-	for i := 1; i < len(times); i++ {
-		testassert.Require(t, times[i].Sub(times[i-1]) >= 240*time.Millisecond, "tool output notices %s apart, want at most one per 250 ms", times[i].Sub(times[i-1]))
+		testassert.Require(t, err == nil && time.Now().Before(deadline), "delivered job output = %v, want not_found", err)
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	{
-		_, err := r.GetSessionToolOutput(ctx, caller, sessionID, "op-live", "call-output")
-		testassert.Require(t, errors.Is(err, harness.ErrNotFound), "settled call output = %v, want not_found", err)
-	}
-	{
-		_, err := r.GetSessionToolOutput(ctx, caller, sessionID, "op-other", "call-output")
-		testassert.Require(t, errors.Is(err, harness.ErrNotFound), "same call under another Operation = %v, want not_found", err)
-	}
-	other, err := r.createSession(ctx, t.TempDir(), "")
-	testassert.NoError(t, err)
-	otherSession := other.Identity.SessionID
-	{
-		_, err := r.GetSessionToolOutput(ctx, caller, otherSession, "op-live", "call-output")
-		testassert.Require(t, errors.Is(err, harness.ErrNotFound), "another Session's call = %v, want not_found", err)
-	}
-	{
-		_, err := r.GetSessionToolOutput(ctx, caller, sessionID, "op-live", "not a call")
-		testassert.Require(t, errors.Is(err, harness.ErrNotFound), "malformed call identity = %v, want not_found", err)
-	}
-	{
-		_, err := r.GetSessionToolOutput(ctx, caller, sessionID, "", "call-output")
-		testassert.Require(t, errors.Is(err, harness.ErrNotFound), "missing Operation identity = %v, want not_found", err)
-	}
-	denied, err := r.Caller(CallerContext{Origin: harness.InputOriginUser, Scope: CallerScope{Kind: CallerScopeSession, SessionID: otherSession}})
-	testassert.NoError(t, err)
-	{
-		_, err := r.GetSessionToolOutput(ctx, denied, sessionID, "op-live", "call-output")
-		testassert.Require(t, errors.Is(err, ErrDenied), "caller without the Session grant = %v, want denied", err)
-	}
-}
-
-// TestGetSessionToolOutputReadsSessionAvailability proves the live read keeps
-// the Session availability class: the preview is captured before the Session
-// check, so a Session already unavailable or made unavailable by the preview
-// call answers with that class instead of the preview text.
-func TestGetSessionToolOutputReadsSessionAvailability(t *testing.T) {
-	ctx := context.Background()
-	t.Run("corrupt before the read", func(t *testing.T) {
-		const corruptID = "0123456789abcdef0123456789abcdef"
-		store := storage.NewMemory()
-		lifecycleInsertRegister(t, store, harness.RegisterKey{SessionID: corruptID, Kind: harness.RegisterSession}, `{"not":"a session register"}`)
-		r, _ := openProjectionRuntime(t, store)
-		defer closeProjectionRuntime(r)
-		r.toolOutput.register(corruptID, "op-live", "call-live", func() string { return "live" })
-
-		caller := testCaller(r)
-		_, operationErr := r.GetSessionOperation(ctx, caller, corruptID, "op-live")
-		testassert.Require(t, errors.Is(operationErr, harness.ErrCorrupt), "GetSessionOperation = %v, want the corruption class", operationErr)
-		_, outputErr := r.GetSessionToolOutput(ctx, caller, corruptID, "op-live", "call-live")
-		testassert.Require(t, errors.Is(outputErr, harness.ErrCorrupt), "GetSessionToolOutput = %v, want the same corruption class", outputErr)
-		var corruptErr *harness.CorruptionError
-		testassert.Require(t, errors.As(outputErr, &corruptErr) && corruptErr.SessionID == corruptID, "GetSessionToolOutput error = %v, want the typed corruption for session %s", outputErr, corruptID)
-	})
-
-	t.Run("preview makes the session corrupt", func(t *testing.T) {
-		const sessionID = "fedcba9876543210fedcba9876543210"
-		store := storage.NewMemory()
-		seedLifecycleRoot(t, store, sessionID)
-		r, _ := openProjectionRuntime(t, store)
-		defer closeProjectionRuntime(r)
-		r.toolOutput.register(sessionID, "op-live", "call-live", func() string {
-			corruptSessionRegister(t, store, sessionID)
-			return "live"
-		})
-
-		output, err := r.GetSessionToolOutput(ctx, testCaller(r), sessionID, "op-live", "call-live")
-		testassert.Require(t, errors.Is(err, harness.ErrCorrupt), "GetSessionToolOutput = (%q, %v), want the corruption class the preview made", output.Output, err)
-		var corruptErr *harness.CorruptionError
-		testassert.Require(t, errors.As(err, &corruptErr) && corruptErr.SessionID == sessionID, "GetSessionToolOutput error = %v, want the typed corruption for session %s", err, sessionID)
-		testassert.Require(t, output.Output == "", "GetSessionToolOutput output = %q, want no preview text", output.Output)
-	})
+	const corruptID = "0123456789abcdef0123456789abcdef"
+	lifecycleInsertRegister(t, store, harness.RegisterKey{SessionID: corruptID, Kind: harness.RegisterSession}, `{"not":"a session register"}`)
+	_, err = r.GetSessionToolOutput(ctx, caller, corruptID, "op", "call")
+	testassert.Require(t, errors.Is(err, harness.ErrCorrupt), "corrupt Session = %v, want ErrCorrupt", err)
+	r.toolOutput.register(other, "op", "call", func() string { corruptSessionRegister(t, store, other); return "live" })
+	output, err := r.GetSessionToolOutput(ctx, caller, other, "op", "call")
+	var corrupt *harness.CorruptionError
+	testassert.Require(t, errors.Is(err, harness.ErrCorrupt) && errors.As(err, &corrupt) && corrupt.SessionID == other && output.Output == "", "preview-corrupted Session = (%q, %v), want the typed corruption", output.Output, err)
 }

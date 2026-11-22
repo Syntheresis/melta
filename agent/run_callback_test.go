@@ -71,11 +71,9 @@ func TestRunCallbackInvocationAfterStreamErrorSettlesLastOutput(t *testing.T) {
 	broken := newFakeStream(errStep(errors.New("read failure")))
 	good := newFakeStream(deltaStep(choiceDelta(txtPos(0, "second"))))
 	f.modelSet = func(_ int, _ model.Request, cb AssemblyCallback) (ModelSettlement, error) {
-		{
-			_, err := cb(testRef, broken)
-			var streamErr *StreamError
-			testassert.Require(t, errors.As(err, &streamErr), "first callback returned %v, want a *StreamError", err)
-		}
+		_, err := cb(testRef, broken)
+		var streamErr *StreamError
+		testassert.Require(t, errors.As(err, &streamErr), "first callback returned %v, want a *StreamError", err)
 		out, err := cb(testRef, good)
 		if err != nil {
 			return ModelSettlement{}, err

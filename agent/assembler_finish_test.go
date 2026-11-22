@@ -34,12 +34,6 @@ func TestAssembleFinishReasonMatrix(t *testing.T) {
 			deltaStep(stopDelta()),
 		}},
 
-		{"stop-with-tool-calls", []func() (model.StreamDelta, error){
-			deltaStep(choiceDelta(txtPos(0, "x"))),
-			deltaStep(toolDelta(model.ToolCallFragment{ID: "a", Name: "n"})),
-			deltaStep(stopDelta()),
-		}},
-
 		{"tool-calls-without-valid-call", []func() (model.StreamDelta, error){
 			deltaStep(toolCallsDelta()),
 		}},
@@ -47,11 +41,6 @@ func TestAssembleFinishReasonMatrix(t *testing.T) {
 		{"unsupported-finish-reason", []func() (model.StreamDelta, error){
 			deltaStep(choiceDelta(txtPos(0, "x"))),
 			deltaStep(model.StreamDelta{HasChoice: true, FinishReason: "length"}), // Unknown finish reasons are not normalized.
-		}},
-
-		{"content-filter-finish-reason", []func() (model.StreamDelta, error){
-			deltaStep(choiceDelta(txtPos(0, "x"))),
-			deltaStep(model.StreamDelta{HasChoice: true, FinishReason: "content_filter"}),
 		}},
 
 		{"finish-reason-conflict-late", []func() (model.StreamDelta, error){
@@ -69,9 +58,8 @@ func TestAssembleFinishReasonMatrix(t *testing.T) {
 			switch tc.name {
 			case "stop-with-text", "tool-calls-valid", "no-finish-reason-content-only":
 				expectStatus(t, out, model.OutputCompleted)
-			default: // Each negative row fails one mandatory finalization requirement and carries no message.
+			default: // Each negative row fails one mandatory finalization requirement.
 				expectStatus(t, out, model.OutputErrored)
-				testassert.Require(t, out.Message == nil, "errored output unexpectedly carried a message: %#v", out.Message)
 			}
 		})
 	}

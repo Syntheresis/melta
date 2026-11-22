@@ -23,11 +23,9 @@ type Options struct {
 	SpillPrefix  string
 	MaxBytes     int
 	MaxLineChars int
-	// OnChange, when non-nil, is called on its own goroutine after a write,
-	// at most once per 250 ms: the first write arms one timer, the timer's
-	// firing clears the armed state and calls OnChange, and a write during
-	// the call arms the next one. Write never calls it directly. Close stops
-	// the timer, and a firing that observes the capture closed calls nothing.
+	// OnChange, when non-nil, runs on its own goroutine after a write, at most
+	// once per 250 ms with a trailing call, never inside Write, and not after
+	// Close.
 	OnChange func()
 }
 
@@ -54,9 +52,7 @@ type Capture struct {
 	lastFormattedLen int64
 	cachedResult     string
 
-	changeMu     sync.Mutex
-	changeTimer  *time.Timer
-	changeClosed bool
+	changeTimer *time.Timer
 }
 
 type streamState struct {
@@ -138,10 +134,9 @@ func (c *Capture) Format() string {
 	return preview
 }
 
-// Preview returns the last MaxBytes bytes written in write order, starting at
-// its first complete UTF-8 rune and preceded by
-// "[Output truncated. <n> bytes so far.]" when bytes were dropped from its
-// front. It reads no file and stays readable after Close.
+// Preview returns the last MaxBytes bytes written to either stream in write
+// order, starting at its first complete UTF-8 rune and prefixed with the
+// truncation marker when bytes were dropped; it reads no file and survives Close.
 func (c *Capture) Preview() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -174,6 +169,10 @@ func (c *Capture) Close() {
 	removeVisible := visiblePath != "" && !c.visibleReturned
 	c.stdout.spillFile = nil
 	c.stderr.spillFile = nil
+	if c.changeTimer != nil {
+		c.changeTimer.Stop()
+		c.changeTimer = nil
+	}
 	c.mu.Unlock()
 
 	if stdoutFile != nil {
@@ -191,7 +190,6 @@ func (c *Capture) Close() {
 	if removeVisible {
 		_ = os.Remove(visiblePath)
 	}
-	c.closeChanges()
 }
 
 func (w writer) Write(p []byte) (int, error) {
@@ -208,81 +206,50 @@ func (c *Capture) write(s *streamState, p []byte) {
 	if len(p) == 0 {
 		return
 	}
-	c.appendTail(p)
-
-	maxBytes := c.opts.MaxBytes
-	if maxBytes <= 0 {
-		_, _ = s.buf.Write(p)
-		c.totalBytes += int64(len(p))
-		c.armChange()
-		return
-	}
-
-	remaining := int64(maxBytes) - c.totalBytes
-	c.totalBytes += int64(len(p))
-	if remaining > 0 {
-		keep := int(remaining)
-		if keep > len(p) {
-			keep = len(p)
-		}
-		_, _ = s.buf.Write(p[:keep])
-		p = p[keep:]
-	}
-	if len(p) > 0 {
-		c.writeSpill(s, p)
-	}
-	c.armChange()
-}
-
-// appendTail appends p to the write-order tail and compacts it back to its
-// last MaxBytes bytes only once it exceeds twice that bound, so writes pay the
-// copy amortized and Preview trims the slack on read.
-func (c *Capture) appendTail(p []byte) {
 	maxBytes := c.opts.MaxBytes
 	c.tail = append(c.tail, p...)
 	if maxBytes > 0 && len(c.tail) > 2*maxBytes {
 		c.tail = append(c.tail[:0], c.tail[len(c.tail)-maxBytes:]...)
 	}
+
+	remaining := int64(maxBytes) - c.totalBytes
+	c.totalBytes += int64(len(p))
+	if maxBytes <= 0 {
+		_, _ = s.buf.Write(p)
+	} else {
+		if remaining > 0 {
+			keep := int(remaining)
+			if keep > len(p) {
+				keep = len(p)
+			}
+			_, _ = s.buf.Write(p[:keep])
+			p = p[keep:]
+		}
+		if len(p) > 0 {
+			c.writeSpill(s, p)
+		}
+	}
+	c.armChange()
 }
 
-// armChange arms the one change timer after a write. A write while the timer
-// is already pending belongs to that interval; the firing clears the timer
-// before invoking OnChange, so a write during the call arms the next one.
+// armChange arms the one change timer after a write; a write during the call
+// arms the next interval.
 func (c *Capture) armChange() {
-	if c.opts.OnChange == nil {
-		return
+	if c.opts.OnChange != nil && c.changeTimer == nil {
+		c.changeTimer = time.AfterFunc(changeInterval, c.fireChange)
 	}
-	c.changeMu.Lock()
-	defer c.changeMu.Unlock()
-	if c.changeTimer != nil || c.changeClosed {
-		return
-	}
-	c.changeTimer = time.AfterFunc(changeInterval, c.fireChange)
 }
 
-// fireChange is the one timer firing: a firing that observes the closed mark
-// calls nothing; otherwise it clears the timer before invoking OnChange.
+// fireChange clears the timer and calls OnChange unless the capture is closed.
 func (c *Capture) fireChange() {
-	c.changeMu.Lock()
-	if c.changeClosed {
-		c.changeMu.Unlock()
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
 		return
 	}
 	c.changeTimer = nil
-	c.changeMu.Unlock()
+	c.mu.Unlock()
 	c.opts.OnChange()
-}
-
-// closeChanges marks the timer closed and stops it, so a pending firing calls
-// nothing.
-func (c *Capture) closeChanges() {
-	c.changeMu.Lock()
-	c.changeClosed = true
-	if c.changeTimer != nil {
-		c.changeTimer.Stop()
-		c.changeTimer = nil
-	}
-	c.changeMu.Unlock()
 }
 
 func (c *Capture) writeSpill(s *streamState, p []byte) {

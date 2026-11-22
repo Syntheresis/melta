@@ -556,9 +556,8 @@ func TestPublicManualCompactEmptyConversationFails(t *testing.T) {
 
 // TestPublicManualCompactFailedSummaryMarkerSurvivesReload proves the usage
 // provenance across a cold reload on both stores: a manual compaction whose
-// accepted summary stream breaks before its finish reason after reporting
-// usage leaves that usage durably on the marked settlement entry, and the
-// conversation measurement reads the assistant
+// summary fails after reporting usage leaves that usage durably on the marked
+// settlement entry, and the conversation measurement reads the assistant
 // turn's usage unchanged through the warm view and through a freshly built
 // Harness over the same store — whose Session graph cold-loads from storage
 // via validateSessionGraph — because the marked settlement never supplies the

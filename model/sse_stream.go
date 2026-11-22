@@ -46,18 +46,15 @@ func (s *httpStream) Recv() (StreamDelta, error) {
 		}
 
 		switch {
-		case line == "" && rerr != nil: // terminal read with no bytes this round (EOF or a body failure).
-			if rerr != io.EOF {
-				return StreamDelta{}, s.fail(streamBrokenError(rerr))
-			}
-			if len(data) > 0 {
-				return s.flushPending(data)
-			} // Only a pending unterminated event is flushed before the missing terminator is reported.
-			return StreamDelta{}, s.fail(streamBrokenEOF())
+		case line == "" && rerr != nil: // terminal read with no bytes this round (EOF or a body failure): handled after the switch.
 
 		case line == "": // blank line ends an event; one without any data lines is ignored entirely (its other fields were discarded as they arrived).
 			if len(data) > 0 {
-				return s.decodeEvent(data)
+				delta, err := s.decode(data)
+				if err != nil {
+					return s.fail(err)
+				}
+				return delta, nil
 			}
 			continue
 
@@ -72,42 +69,32 @@ func (s *httpStream) Recv() (StreamDelta, error) {
 
 		if rerr != nil { // terminal read that still delivered a final unterminated fragment; it was processed above as an ordinary line.
 			if rerr != io.EOF {
-				return StreamDelta{}, s.fail(streamBrokenError(rerr))
+				return s.fail(streamBrokenError(rerr))
 			}
 			if len(data) > 0 {
 				return s.flushPending(data)
 			}
-			return StreamDelta{}, s.fail(streamBrokenEOF()) // no [DONE] arrived: the stream is broken.
+			return s.fail(streamBrokenEOF()) // no [DONE] arrived: the stream is broken.
 		}
 	}
 }
 
-// flushPending delivers one pending unterminated event at raw body EOF: a [DONE] tail ends the stream, any other decode error is a truncation, and a delivered event makes the next receive report the missing [DONE] terminator.
+// flushPending delivers one pending unterminated event at raw body EOF: [DONE] ends the stream, a decode failure is a truncation, and a delivered event makes the next receive report the missing terminator.
 func (s *httpStream) flushPending(data []string) (StreamDelta, error) {
 	delta, err := s.decode(data)
-	if err != nil {
-		if errors.Is(err, io.EOF) { // the pending payload was [DONE].
-			return StreamDelta{}, s.fail(io.EOF)
-		}
-		return StreamDelta{}, s.fail(streamBrokenEOF()) // an undecodable tail at body EOF is a truncation, not a malformed complete event.
+	if err == io.EOF {
+		return s.fail(io.EOF)
 	}
-	s.terminal = streamBrokenEOF() // the pending event is delivered first; the next receive reports the missing terminator.
+	if err != nil {
+		return s.fail(streamBrokenEOF())
+	}
+	s.terminal = streamBrokenEOF()
 	return delta, nil
 }
 
-// decodeEvent delivers one complete blank-line-terminated event; its decode result is stored as the stream's terminal result.
-func (s *httpStream) decodeEvent(data []string) (StreamDelta, error) {
-	delta, err := s.decode(data)
-	if err != nil {
-		return StreamDelta{}, s.fail(err)
-	}
-	return delta, nil
-}
-
-// fail records one terminal result and returns it unchanged, so every later Recv reports exactly it.
-func (s *httpStream) fail(err error) error {
+func (s *httpStream) fail(err error) (StreamDelta, error) {
 	s.terminal = err
-	return err
+	return StreamDelta{}, err
 }
 
 // Close releases this accepted stream's response body exactly once; a second call is a no-op returning nil. Recv after close reports io.EOF through its error return per the public contract because the body is released. A close failure does not retroactively change any delta already delivered and never becomes another physical request — it is cleanup-only for whoever consumed this stream.
@@ -250,7 +237,7 @@ func parseStreamChunkRaw(raw json.RawMessage) (StreamDelta, error) { // shared b
 	return out, nil
 }
 
-// rawStreamUsage mirrors the OpenAI usage object's numeric fields exactly as signed ints; prompt_tokens_details.cached_tokens is the only nested value this parser consumes. Absent (null/missing) sub-objects leave their producers at zero — normalizing an absent cached count to zero IS the retained behavior, and total tokens have no Usage field here because usage totals are out of scope for this phase's values.
+// rawStreamUsage mirrors the OpenAI usage object's numeric fields exactly as signed ints; prompt_tokens_details.cached_tokens is the only nested value this parser consumes. Absent (null/missing) sub-objects leave their producers at zero — normalizing an absent cached count to zero IS the retained behavior, and total tokens have no Usage field here because usage totals are out of scope for these values.
 type rawStreamUsage struct {
 	PromptTokens        int `json:"prompt_tokens,omitempty"` // total prompt token count as reported (cached included per provider convention).
 	CompletionTokens    int `json:"completion_tokens,omitempty"`
@@ -261,7 +248,7 @@ type rawStreamUsage struct {
 }
 
 // decodeStringField decodes one raw value under the fixed parser rule for string-typed canonical fields: absent and null both yield "" (absence is never an error), a present non-null JSON string yields its value, and any other present non-null type fails with ErrProtocol naming the field — wrong types are protocol errors, not silent drops.
-func decodeStringField(raw json.RawMessage, field string) (string, error) { // retained legacy tolerance for null/absent plus the plan's strictness for anything that is actually supplied.
+func decodeStringField(raw json.RawMessage, field string) (string, error) { // retained legacy tolerance for null/absent plus the fixed strictness for anything that is actually supplied.
 	if len(raw) == 0 || isJSONNull(raw) {
 		return "", nil
 	}

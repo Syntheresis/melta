@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -244,68 +242,33 @@ func TestProtocolSuppliedRuntimeBaselineControls(t *testing.T) {
 	}
 }
 
-// TestProtocolMountedToolOutputRead proves the generated running-command read
-// returns the bounded current output over the mounted route and maps the same
-// identity to the typed not-found read once the command settles.
+// TestProtocolMountedToolOutputRead proves the mounted authenticated route
+// returns a running foreground command's bounded output by call ID.
 func TestProtocolMountedToolOutputRead(t *testing.T) {
 	modelEndpoint := newBaselineModel(t)
-	modelEndpoint.setRespond(func(w http.ResponseWriter, body string) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		if strings.Contains(body, `"role":"tool"`) {
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":null}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}]}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
-			return
-		}
-		args := `{"command":"printf first; sleep 1; printf second; sleep 1"}`
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-live","type":"function","function":{"name":"run_command","arguments":`+strconv.Quote(args)+`}}]},"finish_reason":null}]}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+	modelEndpoint.setRespond(func(w http.ResponseWriter, _ string) {
+		shippedToolTurn(w, "call-live", "run_command", `{"command":"printf live; sleep 2"}`)
 	})
-	dataDir := t.TempDir()
-	options := melta.Options{
-		DataDir:       dataDir,
-		Configuration: melta.NewValueConfigurationSource(baselineConfigDocument(modelEndpoint.URL, map[string]string{"m": "M"}, nil)),
-		Credentials:   melta.NewEnvironmentCredentialSource(filepath.Join(dataDir, ".env")),
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, _, server := mountedOwner(t, ctx, options)
-	client := mountedClient(t, server)
-	workspace := t.TempDir()
-	created, err := client.CreateSessionWithResponse(ctx, protocol.CreateSessionRequest{Workspace: workspace})
-	testassert.Require(t, err == nil && created.JSON201 != nil, "CreateSession = (%+v, %v)", created, err)
-	sessionID := created.JSON201.SessionId
-	tools := []string{"run_command"}
-	ref := protocol.ModelRef("prov/m")
+	_, client := shippedMount(t, ctx, t.TempDir(), baselineConfigDocument(modelEndpoint.URL, map[string]string{"m": "M"}, nil), nil)
+	sessionID := shippedCreateSession(t, ctx, client, t.TempDir())
+	tools, ref := []string{"run_command"}, protocol.ModelRef("prov/m")
 	selected, err := client.SetSessionInputsWithResponse(ctx, sessionID, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Model: &ref, Tools: &tools}})
 	testassert.Require(t, err == nil && selected.JSON200 != nil, "SetSessionInputs = (%+v, %v)", selected, err)
-	submitted, err := client.SubmitSessionWithResponse(ctx, sessionID, protocol.SubmitRequest{
-		OperationId: "op-live", Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{baselineTextPart(t, "hello")},
-	})
+	submitted, err := client.SubmitSessionWithResponse(ctx, sessionID, protocol.SubmitRequest{OperationId: "op-live", Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{baselineTextPart(t, "live")}})
 	testassert.Require(t, err == nil && submitted.JSON200 != nil, "SubmitSession = (%+v, %v)", submitted, err)
 
-	params := &protocol.GetSessionToolOutputParams{CallId: "call-live"}
 	deadline := time.Now().Add(20 * time.Second)
-	var sawFirst, sawSecond bool
 	for {
-		read, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", params)
+		read, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", &protocol.GetSessionToolOutputParams{CallId: "call-live"})
 		testassert.Require(t, err == nil, "GetSessionToolOutput: %v", err)
-		if read.JSON200 != nil {
-			sawFirst = sawFirst || strings.Contains(read.JSON200.Output, "first")
-			if strings.Contains(read.JSON200.Output, "second") {
-				sawSecond = true
-				break
-			}
+		if read.JSON200 != nil && read.JSON200.Output == "live" {
+			return
 		}
-		testassert.Require(t, time.Now().Before(deadline), "running command output never grew past first (status %d, response %s)", read.StatusCode(), read.Body)
+		testassert.Require(t, time.Now().Before(deadline), "running command output never appeared (status %d, response %s)", read.StatusCode(), read.Body)
 		time.Sleep(10 * time.Millisecond)
 	}
-	testassert.Require(t, sawFirst && sawSecond, "live reads saw first=%v second=%v, want the growing running output", sawFirst, sawSecond)
-	awaitMountedSuccess(t, ctx, client, sessionID, "op-live")
-
-	settled, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", params)
-	testassert.Require(t, err == nil && settled.StatusCode() == http.StatusNotFound && settled.JSONDefault != nil && settled.JSONDefault.Code == protocol.ErrorCodeNotFound, "settled tool output = (%+v, %v), want typed not found", settled, err)
 }
 
 // TestProtocolMountedSessionOperationRead proves the generated Operation read

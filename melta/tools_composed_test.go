@@ -158,12 +158,12 @@ func realJobs(t *testing.T, dataDir string) *jobs.Manager {
 // its bound capability values.
 func openToolsComposed(t *testing.T, dataDir string, jobsValue jobs.Jobs, _ any) (map[string]Tool, map[string]any) {
 	t.Helper()
-	return newStandardTools(dataDir, jobsValue, newTestLiveToolOutput()), nil
+	return newStandardTools(dataDir, jobsValue, newLiveToolOutput(newObservation())), nil
 }
 
 func openTools(t *testing.T, dataDir string) map[string]Tool {
 	t.Helper()
-	return newStandardTools(dataDir, &fakeJobs{}, newTestLiveToolOutput())
+	return newStandardTools(dataDir, &fakeJobs{}, newLiveToolOutput(newObservation()))
 }
 
 // TestStandardToolsReservedAgainstShadowing proves the baseline tool universe:
@@ -1272,7 +1272,7 @@ func TestRunCommandConcurrentManagedWritesSpawnChildren(t *testing.T) {
 	managed := stubManagedEnv(t)
 	jobsDir := t.TempDir()
 	jobsInst := realJobs(t, jobsDir)
-	byID := newStandardTools(jobsDir, jobsInst, newTestLiveToolOutput())
+	byID := newStandardTools(jobsDir, jobsInst, newLiveToolOutput(newObservation()))
 	ws := t.TempDir()
 	tc := callToolContext(ws)
 	tc.SubprocessEnv = testSubprocessEnv(managed)
@@ -1375,7 +1375,7 @@ func TestBackgroundJobEnvironmentScrubsManagedKey(t *testing.T) {
 	testassert.NoError(t, os.Unsetenv("MELTA_BG_MANAGED"))
 	dataDir := t.TempDir()
 	jobsInst := realJobs(t, dataDir)
-	byID := newStandardTools(dataDir, jobsInst, newTestLiveToolOutput())
+	byID := newStandardTools(dataDir, jobsInst, newLiveToolOutput(newObservation()))
 	managed := stubManagedEnv(t)
 	ws := t.TempDir()
 	tc := callToolContext(ws)
@@ -1529,7 +1529,7 @@ func reserveAndStart(t *testing.T, jobsInst jobs.Jobs, workspace, command string
 func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 	jobsDir := t.TempDir()
 	jobsInst := realJobs(t, jobsDir)
-	byID := newStandardTools(jobsDir, jobsInst, newTestLiveToolOutput())
+	byID := newStandardTools(jobsDir, jobsInst, newLiveToolOutput(newObservation()))
 	process := byID["process"]
 	ws := t.TempDir()
 	tc := callToolContext(ws)

@@ -438,10 +438,6 @@ func TestEventsFrames(t *testing.T) {
 		testassert.NoError(t, refusal.FromRefusalDeltaEvent(protocol.RefusalDeltaEvent{
 			Kind: protocol.RefusalDelta, Scope: operationEventScope(), Content: "refused",
 		}))
-		var reasoning protocol.Event
-		testassert.NoError(t, reasoning.FromReasoningDeltaEvent(protocol.ReasoningDeltaEvent{
-			Kind: protocol.ReasoningDelta, Scope: operationEventScope(), Content: "considered",
-		}))
 		var started protocol.Event
 		testassert.NoError(t, started.FromToolStartedEvent(protocol.ToolStartedEvent{
 			Kind: protocol.ToolStarted, Scope: operationEventScope(), CallId: "call-1", Ordinal: 0, Name: "read",
@@ -451,35 +447,26 @@ func TestEventsFrames(t *testing.T) {
 		testassert.NoError(t, finished.FromToolFinishedEvent(protocol.ToolFinishedEvent{
 			Kind: protocol.ToolFinished, Scope: operationEventScope(), CallId: "call-1", Status: protocol.ToolCallStatusSuccess, Evidence: &evidence,
 		}))
-		var restarted protocol.Event
-		testassert.NoError(t, restarted.FromResponseRestartedEvent(protocol.ResponseRestartedEvent{
-			Kind: protocol.ResponseRestarted, Scope: operationEventScope(),
-		}))
-		var outputChanged protocol.Event
-		testassert.NoError(t, outputChanged.FromToolOutputChangedEvent(protocol.ToolOutputChangedEvent{
-			Kind: protocol.ToolOutputChanged, Scope: operationEventScope(), CallId: "call-1",
-		}))
-		frames := notificationFrame(t, delta) + notificationFrame(t, reasoning) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) + notificationFrame(t, restarted) + notificationFrame(t, outputChanged)
+		frames := notificationFrame(t, delta) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) +
+			rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"},"content":"considered"}`) +
+			rawNotification(`{"kind":"response_restarted","scope":{"kind":"runtime"}}`) +
+			rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":"call-1"}`)
 		server := newFixture(t, jsonHealth(testInstance, testVersion), writeFrames(frames))
 		c := connectFixture(t, writeDiscovery(t, server.URL, testInstance, testVersion, testCredential))
 		events, errs := c.Events(context.Background())
 		delivered, err := drainEvents(events, errs)
 		testassert.Require(t, errors.Is(err, client.ErrResyncRequired), "disconnect error = %v, want ErrResyncRequired", err)
 		testassert.Equal(t, len(delivered), 7)
-		for i, want := range []string{"text_delta", "reasoning_delta", "refusal_delta", "tool_started", "tool_finished", "response_restarted", "tool_output_changed"} {
+		for i, want := range []string{"text_delta", "refusal_delta", "tool_started", "tool_finished", "reasoning_delta", "response_restarted", "tool_output_changed"} {
 			{
 				kind, _ := delivered[i].Discriminator()
 				testassert.Require(t, kind == want, "event %d kind = %q, want %q", i, kind, want)
 			}
 		}
-		reasoningBody, err := delivered[1].AsReasoningDeltaEvent()
-		testassert.Require(t, err == nil && reasoningBody.Content == "considered", "delivered reasoning delta = (%+v, %v), want its distinct reasoning content", reasoningBody, err)
-		refusalBody, err := delivered[2].AsRefusalDeltaEvent()
+		refusalBody, err := delivered[1].AsRefusalDeltaEvent()
 		testassert.Require(t, err == nil && refusalBody.Content == "refused", "delivered refusal delta = (%+v, %v), want its distinct refusal content", refusalBody, err)
-		finishedBody, err := delivered[4].AsToolFinishedEvent()
+		finishedBody, err := delivered[3].AsToolFinishedEvent()
 		testassert.Require(t, err == nil && finishedBody.Evidence != nil && *finishedBody.Evidence == protocol.Unknown, "delivered tool finished = (%+v, %v), want its unknown evidence carried through", finishedBody, err)
-		outputBody, err := delivered[6].AsToolOutputChangedEvent()
-		testassert.Require(t, err == nil && outputBody.CallId == "call-1", "delivered tool output change = (%+v, %v), want its call identity", outputBody, err)
 	})
 
 	// Every non-global scope kind delivers through its real producer shape:

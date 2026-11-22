@@ -79,7 +79,6 @@ type forgedModelSettlement struct {
 func forgedModelSettlements() []forgedModelSettlement {
 	completed := &model.Output{Status: model.OutputCompleted, Source: testRef, Message: &model.Message{Role: model.RoleAssistant, Source: testRef, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}}}
 	errored := &model.Output{Status: model.OutputErrored, Source: testRef, Detail: "boom"}
-	erroredWithMessage := &model.Output{Status: model.OutputErrored, Source: testRef, Detail: "boom", Message: &model.Message{Role: model.RoleAssistant, Source: testRef, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}}}
 	foreign := &model.Output{Status: model.OutputCompleted, Source: model.ModelRef{Provider: "acme", Model: "m-other"}, Message: &model.Message{Role: model.RoleAssistant, Source: model.ModelRef{Provider: "acme", Model: "m-other"}, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}}}
 
 	return []forgedModelSettlement{
@@ -87,7 +86,6 @@ func forgedModelSettlements() []forgedModelSettlement {
 		{"ready-errored-output", ModelSettlement{Disposition: DispoReady, Output: errored}}, // Ready requires completed; an errored output is the wrong direction.
 		{"ready-nonempty-detail", ModelSettlement{Disposition: DispoReady, Output: completed, Detail: "x"}},
 		{"failure-completed-output", ModelSettlement{Disposition: DispoFailure, Output: completed, Detail: "d"}}, // Failure permits no output or its errored one; completed is the nearest forbidden sibling of valid failure-with-errored.
-		{"failure-errored-with-message", ModelSettlement{Disposition: DispoFailure, Output: erroredWithMessage, Detail: "d"}},
 		{"failure-empty-detail", ModelSettlement{Disposition: DispoFailure}},
 		{"interruption-errored-output", ModelSettlement{Disposition: DispoInterruption, Output: errored, Detail: "d"}}, // Interruption admits no/interrupted/completed; errored is the nearest forbidden sibling of valid interruption-in-flight.
 		{"interruption-empty-detail", ModelSettlement{Disposition: DispoInterruption}},

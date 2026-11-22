@@ -24,7 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Syntheresis/melta/agent"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
@@ -40,10 +39,10 @@ type attemptTableFixture struct {
 	h *harness.Harness
 }
 
-func newAttemptTableFixture(t *testing.T, store harness.Storage, conversationFn, compactFn func(context.Context, model.Request, model.Extra) (model.Stream, error), retry harness.RetryPolicy) *attemptTableFixture {
+func newAttemptTableFixture(t *testing.T, store harness.Storage, conversationFn, compactFn func(context.Context, model.Request, model.Extra) (model.Stream, error), retry harness.RetryPolicy, observe ...func(harness.HarnessFact)) *attemptTableFixture {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	h, err := harness.New(ctx, harness.Dependencies{Storage: store, Prepare: func(context.Context, harness.PreparationRequest) (harness.PreparedExecution, error) {
+	deps := harness.Dependencies{Storage: store, Prepare: func(context.Context, harness.PreparationRequest) (harness.PreparedExecution, error) {
 		return harness.PreparedExecution{
 			Capture: publicCapture(),
 			Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
@@ -52,7 +51,11 @@ func newAttemptTableFixture(t *testing.T, store harness.Storage, conversationFn,
 				return exec, nil
 			},
 		}, nil
-	}})
+	}}
+	if len(observe) == 1 {
+		deps.Observe = observe[0]
+	}
+	h, err := harness.New(ctx, deps)
 	if err != nil {
 		cancel()
 		t.Fatalf("New: %v", err)
@@ -109,29 +112,6 @@ func attemptTableTurnStream() *attemptTableStream {
 		{HasChoice: true, Role: "assistant", ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "done"}}, FinishReason: "stop"},
 		{Usage: &model.Usage{InputTokens: 3, OutputTokens: 2}},
 	}}
-}
-
-// attemptTableBrokenStream is one accepted stream that reports text and usage,
-// then ends before [DONE]: the broken-stream failure of the retry row.
-func attemptTableBrokenStream() *attemptTableStream {
-	return &attemptTableStream{
-		deltas: []model.StreamDelta{
-			{HasChoice: true, Role: "assistant", ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "partial"}}},
-			{Usage: &model.Usage{InputTokens: 5, OutputTokens: 7}},
-		},
-		err: fmt.Errorf("%w: stream body ended before [DONE]: %w", model.ErrStreamBroken, io.ErrUnexpectedEOF),
-	}
-}
-
-// attemptTableRequestText joins one dispatched request's projected message
-// texts for the row's history assertions.
-func attemptTableRequestText(req model.Request) string {
-	var text strings.Builder
-	for _, message := range req.Messages {
-		text.WriteString(message.TextContent())
-		text.WriteString("\n")
-	}
-	return text.String()
 }
 
 // attemptTableHTTPServer answers every request with one completed-turn SSE
@@ -515,95 +495,6 @@ var publicAttemptTableRows = []struct {
 		},
 	},
 	{
-		name: "accepted read failure retries and records both usages",
-		run: func(t *testing.T, store harness.Storage, conversation bool) {
-			var mu sync.Mutex
-			var requests []model.Request
-			attempts := 0
-			fn := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
-				mu.Lock()
-				requests = append(requests, req)
-				attempts++
-				n := attempts
-				mu.Unlock()
-				if n == 1 {
-					return attemptTableBrokenStream(), nil
-				}
-				return attemptTableTurnStream(), nil
-			}
-			var policyCalls int
-			var policyCause error
-			retry := func(cause error, failed int) (time.Duration, bool) {
-				policyCalls++
-				policyCause = cause
-				return 0, failed == 1
-			}
-			conversationFn, compactFn := attemptTablePair(fn, conversation)
-			f := newAttemptTableFixture(t, store, conversationFn, compactFn, retry)
-			session := createSession(t, f.h)
-			operation := "op-1"
-			if conversation {
-				rec := attemptTableRunConversation(t, f, session, operation)
-				attemptTableRequireTerminal(t, rec, harness.OperationSuccess, "")
-			} else {
-				attemptTableSeedHistory(t, f, session)
-				operation = "c-1"
-				rec := attemptTableRunCompact(t, f, session, operation)
-				attemptTableRequireTerminal(t, rec, harness.OperationSuccess, "")
-			}
-			var streamErr *agent.StreamError
-			testassert.Require(t, policyCalls == 1 && errors.As(policyCause, &streamErr) && errors.Is(streamErr.Err, model.ErrStreamBroken), "policy consultations = %d failure = %v, want the one broken-stream classification", policyCalls, policyCause)
-			mu.Lock()
-			gotRequests := append([]model.Request(nil), requests...)
-			mu.Unlock()
-			testassert.Require(t, len(gotRequests) == 2 && reflect.DeepEqual(gotRequests[0], gotRequests[1]), "dispatched requests = %d, want the retry to send the same request", len(gotRequests))
-
-			view, err := f.h.ReadSessionView(context.Background(), session)
-			testassert.NoError(t, err)
-			wantCompact := harness.UsageTotals{ByModel: []harness.ModelUsage{{Model: publicModelRef, Usage: harness.UsageCount{InputTokens: 8, OutputTokens: 9}}}}
-			rec, err := f.h.ReadOperation(context.Background(), session, operation)
-			testassert.NoError(t, err)
-			testassert.Require(t, reflect.DeepEqual(rec.State.Usage, wantCompact), "operation usage = %+v, want the last accepted attempt and the retried attempt", rec.State.Usage)
-			history, err := f.h.ReadHistoryView(context.Background(), session)
-			testassert.NoError(t, err)
-			facts := history.HistoryFacts(historyIDsOf(history.HistoryHeaders()))
-			var assistant *harness.AssistantEntry
-			var checkpoint *harness.ContextCheckpointEntry
-			for i := range facts {
-				switch {
-				case facts[i].Assistant != nil:
-					assistant = facts[i].Assistant
-				case facts[i].Checkpoint != nil:
-					checkpoint = facts[i].Checkpoint
-				}
-			}
-			if conversation {
-				testassert.Require(t, assistant != nil && assistant.Content[0].Text == "done", "assistant = %+v, want only the retry's content", assistant)
-				testassert.Require(t, assistant.Usage != nil && *assistant.Usage == (harness.UsageCount{InputTokens: 3, OutputTokens: 2}) && assistant.RetryUsage != nil && *assistant.RetryUsage == (harness.UsageCount{InputTokens: 5, OutputTokens: 7}) && !assistant.RetryUsageUnknown, "assistant usage = %+v retry usage = %+v (unknown %v), want the retry's report and the broken attempt's report", assistant.Usage, assistant.RetryUsage, assistant.RetryUsageUnknown)
-				measured := view.History.LatestContextUsage()
-				testassert.Require(t, measured != nil && *measured == (harness.UsageCount{InputTokens: 3, OutputTokens: 2}), "latest context measurement = %+v, want only the last accepted attempt", measured)
-				// The next request omits everything the failed attempt streamed.
-				rec2 := attemptTableRunConversation(t, f, session, "op-2")
-				attemptTableRequireTerminal(t, rec2, harness.OperationSuccess, "")
-				mu.Lock()
-				next := requests[len(requests)-1]
-				mu.Unlock()
-				text := attemptTableRequestText(next)
-				testassert.Require(t, strings.Contains(text, "done") && !strings.Contains(text, "partial"), "next request = %q, want the committed turn without the failed attempt's text", text)
-			} else {
-				testassert.Require(t, checkpoint != nil && len(checkpoint.Facts) == 1, "checkpoint = %+v, want one maintenance fact for the one request", checkpoint)
-				fact := checkpoint.Facts[0]
-				testassert.Require(t, fact.Usage != nil && *fact.Usage == (harness.UsageCount{InputTokens: 3, OutputTokens: 2}) && fact.RetryUsage != nil && *fact.RetryUsage == (harness.UsageCount{InputTokens: 5, OutputTokens: 7}) && !fact.RetryUsageUnknown, "facts[0] usage = %+v retry usage = %+v (unknown %v), want the successful attempt and the broken attempt", fact.Usage, fact.RetryUsage, fact.RetryUsageUnknown)
-				// The seeded conversation turn reports its own usage too.
-				wantSession := harness.UsageTotals{ByModel: []harness.ModelUsage{{Model: publicModelRef, Usage: harness.UsageCount{InputTokens: 11, OutputTokens: 11}}}}
-				testassert.Require(t, reflect.DeepEqual(view.TotalUsage, wantSession), "session usage = %+v, want the seed turn and both attempt reports counted", view.TotalUsage)
-			}
-			if conversation {
-				testassert.Require(t, reflect.DeepEqual(view.TotalUsage, wantCompact), "session usage = %+v, want both attempt reports counted", view.TotalUsage)
-			}
-		},
-	},
-	{
 		name: "one intent across attempts and one accepted assembly",
 		run: func(t *testing.T, store harness.Storage, conversation bool) {
 			var requests, policyCalls atomic.Int64
@@ -667,6 +558,101 @@ var publicAttemptTableRows = []struct {
 			} else if !conversation && !slices.Contains(kinds, harness.EntryCompaction) {
 				t.Fatalf("compact operation entries = %v, want the compaction entry", kinds)
 			}
+		},
+	},
+	{
+		name: "accepted read failure retries and records both usages",
+		run: func(t *testing.T, store harness.Storage, conversation bool) {
+			var mu sync.Mutex
+			var policyAttempts []int
+			var requests []model.Request
+			broken := func(usage model.Usage) *attemptTableStream {
+				return &attemptTableStream{
+					deltas: []model.StreamDelta{
+						{HasChoice: true, Role: "assistant", ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "partial"}}},
+						{Usage: &usage},
+					},
+					err: fmt.Errorf("%w: stream body ended before [DONE]: %w", model.ErrStreamBroken, io.ErrUnexpectedEOF),
+				}
+			}
+			fn := func(_ context.Context, req model.Request, _ model.Extra) (model.Stream, error) {
+				mu.Lock()
+				requests = append(requests, req)
+				mu.Unlock()
+				switch len(policyAttempts) + 1 {
+				case 1, 3:
+					return nil, &model.HTTPStatusError{StatusCode: http.StatusTooManyRequests, StatusText: "429"}
+				case 2:
+					return broken(model.Usage{InputTokens: 5, OutputTokens: 7}), nil
+				case 4:
+					return broken(model.Usage{InputTokens: 1, OutputTokens: 1}), nil
+				}
+				return attemptTableTurnStream(), nil
+			}
+			conversationFn, compactFn := attemptTablePair(fn, conversation)
+			var facts []harness.HarnessFact
+			f := newAttemptTableFixture(t, store, conversationFn, compactFn, func(_ error, failed int) (time.Duration, bool) {
+				policyAttempts = append(policyAttempts, failed)
+				return 0, true
+			}, func(fact harness.HarnessFact) {
+				mu.Lock()
+				facts = append(facts, fact)
+				mu.Unlock()
+			})
+			session := createSession(t, f.h)
+			operation := "op-1"
+			if conversation {
+				attemptTableRequireTerminal(t, attemptTableRunConversation(t, f, session, operation), harness.OperationSuccess, "")
+			} else {
+				attemptTableSeedHistory(t, f, session)
+				operation = "c-1"
+				attemptTableRequireTerminal(t, attemptTableRunCompact(t, f, session, operation), harness.OperationSuccess, "")
+			}
+			if fmt.Sprint(policyAttempts) != "[1 2 3 4]" {
+				t.Fatalf("policy attempts = %v, want four retried failures and the settling fifth", policyAttempts)
+			}
+			mu.Lock()
+			gotRequests := append([]model.Request(nil), requests...)
+			mu.Unlock()
+			testassert.Require(t, len(gotRequests) == 5 && reflect.DeepEqual(gotRequests[0], gotRequests[1]) && reflect.DeepEqual(gotRequests[1], gotRequests[2]), "dispatched requests = %d, want each retry, including the one after the broken accepted stream, to resend exactly the same request", len(gotRequests))
+			for i, req := range gotRequests {
+				var text strings.Builder
+				for _, message := range req.Messages {
+					text.WriteString(message.TextContent())
+				}
+				testassert.Require(t, !strings.Contains(text.String(), "partial"), "request %d = %q, want no request carrying the broken attempt's partial text", i, text.String())
+			}
+			mu.Lock()
+			restarts := slices.DeleteFunc(append([]harness.HarnessFact(nil), facts...), func(fact harness.HarnessFact) bool { return fact.Kind != harness.FactResponseRestarted })
+			mu.Unlock()
+			testassert.Require(t, len(restarts) == 4 && restarts[0].SessionID == session && restarts[0].OperationID == operation, "restart facts = %+v, want one per granted retry under %q/%q", restarts, session, operation)
+			want := harness.UsageTotals{ByModel: []harness.ModelUsage{{Model: publicModelRef, Usage: harness.UsageCount{InputTokens: 9, OutputTokens: 10}}}}
+			rec, err := f.h.ReadOperation(context.Background(), session, operation)
+			testassert.NoError(t, err)
+			testassert.Require(t, reflect.DeepEqual(rec.State.Usage, want), "operation usage = %+v, want the last report and the retried sum", rec.State.Usage)
+			view, err := f.h.ReadSessionView(context.Background(), session)
+			testassert.NoError(t, err)
+			if !conversation {
+				want = harness.UsageTotals{ByModel: []harness.ModelUsage{{Model: publicModelRef, Usage: harness.UsageCount{InputTokens: 12, OutputTokens: 12}}}}
+			}
+			testassert.Require(t, reflect.DeepEqual(view.TotalUsage, want), "session usage = %+v, want both attempt reports counted", view.TotalUsage)
+			var assistant *harness.AssistantEntry
+			var checkpoint *harness.ContextCheckpointEntry
+			for _, fact := range readHistoryFacts(t, f.h, session) {
+				if fact.Assistant != nil {
+					assistant = fact.Assistant
+				}
+				if fact.Checkpoint != nil {
+					checkpoint = fact.Checkpoint
+				}
+			}
+			if conversation {
+				testassert.Require(t, assistant != nil && assistant.Content[0].Text == "done" && assistant.Usage != nil && *assistant.Usage == (harness.UsageCount{InputTokens: 3, OutputTokens: 2}) && assistant.RetryUsage != nil && *assistant.RetryUsage == (harness.UsageCount{InputTokens: 6, OutputTokens: 8}) && !assistant.RetryUsageUnknown, "assistant = %+v, want only the retry's content with its usage and the earlier attempts' sum", assistant)
+				measured := view.History.LatestContextUsage()
+				testassert.Require(t, measured != nil && *measured == (harness.UsageCount{InputTokens: 3, OutputTokens: 2}), "latest context measurement = %+v, want only the last accepted attempt", measured)
+				return
+			}
+			testassert.Require(t, checkpoint != nil && len(checkpoint.Facts) == 1 && checkpoint.Facts[0].Usage != nil && *checkpoint.Facts[0].Usage == (harness.UsageCount{InputTokens: 3, OutputTokens: 2}) && checkpoint.Facts[0].RetryUsage != nil && *checkpoint.Facts[0].RetryUsage == (harness.UsageCount{InputTokens: 6, OutputTokens: 8}) && !checkpoint.Facts[0].RetryUsageUnknown, "checkpoint = %+v, want one fact with the last attempt's usage and the earlier sum", checkpoint)
 		},
 	},
 }

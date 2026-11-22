@@ -21,20 +21,12 @@ const (
 	attemptInvalid                        // nil output, the boundary model ProtocolError or another assembly failure
 )
 
-// attemptUsage carries one effect's accepted-attempt usage: the last accepted
-// attempt's report, the sum of the retried attempts' reports, and whether any
-// retried attempt reported none. The retry sum is present only when at least
-// one retried attempt reported.
 type attemptUsage struct {
-	last         *UsageCount
-	retry        *UsageCount
-	retryUnknown bool
+	last *UsageCount
+	retryUsage
 }
 
-// attemptResult is the one shared attempt loop's result: its kind, the
-// assembled output when one settled, the attempt or boundary error otherwise,
-// the accepted attempts' usage contribution, and the retried-attempt sum's
-// accounting error when one overflowed.
+// attemptResult is the one shared attempt loop's result.
 type attemptResult struct {
 	kind     attemptKind
 	output   model.Output
@@ -43,12 +35,9 @@ type attemptResult struct {
 	usageErr error
 }
 
-// acceptedAttemptUsage splits one effect's accepted-attempt reports: the last
-// accepted attempt supplies the record's usage, and every earlier retried
-// attempt that reported is added with the checked usage arithmetic. A retried
-// attempt that reported nothing marks the retry usage unknown; no accepted
-// attempt leaves every member absent. An overflowing retry sum returns the
-// storage-failure class and no partial value.
+// acceptedAttemptUsage splits one effect's accepted-attempt reports into the
+// last attempt's usage and the earlier retries' checked sum; an absent earlier
+// report marks the retry usage unknown and an overflow returns ErrStorage.
 func acceptedAttemptUsage(reports []*model.Usage) (attemptUsage, error) {
 	var usage attemptUsage
 	if len(reports) == 0 {
@@ -57,39 +46,31 @@ func acceptedAttemptUsage(reports []*model.Usage) (attemptUsage, error) {
 	usage.last = usageCount(reports[len(reports)-1])
 	for _, report := range reports[:len(reports)-1] {
 		if report == nil {
-			usage.retryUnknown = true
+			usage.RetryUsageUnknown = true
 			continue
 		}
 		count := usageCount(report)
-		if usage.retry == nil {
-			usage.retry = count
-			continue
+		if usage.RetryUsage != nil {
+			sum, err := addUsageCount(*usage.RetryUsage, *count)
+			if err != nil {
+				return attemptUsage{}, err
+			}
+			count = &sum
 		}
-		sum, err := addUsageCount(*usage.retry, *count)
-		if err != nil {
-			return attemptUsage{}, err
-		}
-		usage.retry = &sum
+		usage.RetryUsage = count
 	}
 	return usage, nil
 }
 
 // runModelAttempts runs the one physical model-attempt loop shared by the
-// conversation and compact model effects: check cancellation before every
-// attempt, invoke the physical callback once per iteration, accept exactly
-// one nonnil stream with a nil error without reclassifying a late
-// cancellation, assemble each accepted stream exactly once, close any supplied
-// stream once and report the boundary ProtocolError for an outcome that is both
-// or neither — before the post-failure cancellation check — let observed
-// cancellation win over retry classification, select the standard policy for a
-// nil Retry, stop on a false classification or a negative delay, report one
-// restart observation through onRetry when the policy grants another attempt,
-// and run the backoff behind the cancellation check. An assembled output ends the loop;
-// an accepted stream that fails before its finish reason is one more attempt
-// failure whose reported usage the record keeps, and every other assembly
-// error is the effect's boundary failure. Every physical attempt receives its
-// own deep-owned copy of the logical request, so no callback can reach the next
-// attempt's view, the retained evidence, or the captured catalog.
+// conversation and compact model effects: cancel-check each attempt, invoke
+// the physical callback, assemble an accepted stream once, close a supplied
+// stream once, and report a stream/error disagreement as the boundary
+// ProtocolError. Observed cancellation wins over retry classification, a nil
+// Retry selects the standard policy, onRetry sees each granted restart, and
+// waits run behind the cancellation check. An assembled output ends the loop; a
+// broken stream is another attempt whose reported usage is kept, and any other
+// assembly error is the boundary failure.
 func runModelAttempts(ctx context.Context, req model.Request, parameters model.Extra, attempt func(context.Context, model.Request, model.Extra) (model.Stream, error), assemble func(model.Stream) (model.Output, error), retry RetryPolicy, onRetry func()) attemptResult {
 	if retry == nil {
 		retry = standardRetryPolicy
@@ -128,8 +109,7 @@ func runModelAttempts(ctx context.Context, req model.Request, parameters model.E
 		}
 		// An attempt failure observed under a done execution context
 		// interrupts before any classification: regardless of the attempt
-		// error's shape or the retry policy's answer, cancellation is an
-		// interruption with no output.
+		// error's shape or the retry policy's answer, cancellation wins.
 		if ctx.Err() != nil {
 			return result(attemptInterrupted, model.Output{}, nil)
 		}

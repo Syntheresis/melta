@@ -322,33 +322,23 @@ func summaryFact(maintenanceID string, produced model.ModelRef, evidence *Reques
 	}
 }
 
-// retainUsage lands one model effect's accepted-attempt usage on the newest
-// fact before the effect settles: the last accepted attempt's report, the
-// retried attempts' summed reports, and whether any retried attempt reported
-// none. An attempt reporting no usage leaves the corresponding member absent,
-// and a reported zero stays known zero.
+// retainUsage lands one model effect's accepted-attempt usage on the newest fact.
 func (f *maintenanceFacts) retainUsage(usage attemptUsage) {
 	if len(f.facts) == 0 {
 		return
 	}
 	fact := &f.facts[len(f.facts)-1]
 	fact.Usage = usage.last
-	fact.RetryUsage = usage.retry
-	fact.RetryUsageUnknown = usage.retryUnknown
+	fact.retryUsage = usage.retryUsage
 }
 
 // factsUsageContribution renders the ordered facts' reported usage as the
 // one totals contribution: per fact, absent usage contributes nothing and a
-// reported zero stays known zero. Each fact's last accepted attempt usage and
-// its retried attempts' usage are both counted under the fact's model.
+// reported zero stays known zero.
 func factsUsageContribution(facts []maintenanceFact) (UsageTotals, error) {
 	var contribution UsageTotals
 	for _, fact := range facts {
-		part, err := usageContribution(fact.Model, attemptUsage{
-			last:         fact.Usage,
-			retry:        fact.RetryUsage,
-			retryUnknown: fact.RetryUsageUnknown,
-		})
+		part, err := usageContribution(fact.Model, fact.Usage, fact.retryUsage)
 		if err != nil {
 			return UsageTotals{}, err
 		}
@@ -441,25 +431,10 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		// Result and terminal transactions run without cancellation so an
 		// already-produced result or required terminal settlement publishes.
 		settleCtx := context.WithoutCancel(h.ctx)
-		settle := func(cause error, usage attemptUsage) (agent.ModelSettlement, error) {
-			facts.retainUsage(usage)
-			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
-				terminal:      OperationFailure,
-				detail:        failureDetail(cause),
-				compaction:    true,
-				facts:         facts,
-				maintenanceID: facts.producer(),
-			}); err != nil {
-				return agent.ModelSettlement{}, err
-			}
-			return agent.ModelSettlement{}, cause
-		}
 		// The one shared attempt loop lives inside the committed intent,
 		// identical to the conversation model effect's but running through the
 		// compact transport. The physical attempt carries the opened
 		// maintenance invocation and this producer's own reserved identity.
-		var output model.Output
-		var usage attemptUsage
 		attemptRes := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, func(stream model.Stream) (model.Output, error) {
 			return assemble(intent.expected, h.observeStream(intent.sessionID, operationID, stream)) // the enclosing Operation owns the deltas
 		}, d.execution.Retry, func() {
@@ -469,19 +444,23 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 			return agent.ModelSettlement{}, attemptRes.usageErr
 		}
 		switch attemptRes.kind {
-		case attemptSettled:
-			output = attemptRes.output
-			usage = attemptRes.usage
 		case attemptInterrupted:
-			// The request's maintenance fact carries the accepted attempts'
-			// usage; the interruption settlement itself names no model usage.
 			facts.retainUsage(attemptRes.usage)
 			return d.interruptModelEffect(intent, attemptUsage{}, facts)
 		case attemptInvalid:
-			return settle(attemptRes.err, attemptRes.usage)
+			facts.retainUsage(attemptRes.usage)
+			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
+				terminal:      OperationFailure,
+				detail:        failureDetail(attemptRes.err),
+				compaction:    true,
+				facts:         facts,
+				maintenanceID: facts.producer(),
+			}); err != nil {
+				return agent.ModelSettlement{}, err
+			}
+			return agent.ModelSettlement{}, attemptRes.err
 		case attemptFailed:
-			// The attempts' reported usage lands on the request's maintenance
-			// fact before the terminal settlement; a pre-acceptance failure has none.
+			// The attempts' usage lands on the request's fact first.
 			facts.retainUsage(attemptRes.usage)
 			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(attemptRes.err)}
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
@@ -495,10 +474,10 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 			}
 			return committed, nil
 		}
-		// The accepted attempts' reported usage lands on the carrier's
-		// newest fact before that output settles; an attempt reporting no
-		// usage leaves the fact's corresponding member absent.
-		facts.retainUsage(usage)
+		// The accepted attempts' usage lands on the carrier's newest fact
+		// before the output settles.
+		facts.retainUsage(attemptRes.usage)
+		output := attemptRes.output
 		if output.Status == model.OutputCompleted {
 			// The empty running result inserts no entry, clears the active
 			// effect, and replaces both registers with no usage; the reserved

@@ -903,21 +903,18 @@ func (v *graphValidation) validatePendingCalls(opID string, published []publishe
 }
 
 // validateUsage recomputes Operation and Session totals from the
-// usage-bearing producer entries — assistant usages and their retried
-// attempts' usage, terminal no-output-settlement usage pairs, and committed
-// maintenance fact usages — and
-// requires exact agreement. Counts accumulate per model identity into maps
-// and each total materializes exactly once: accumulation is linear in entries,
-// followed by sorting each total's distinct model identities.
+// usage-bearing producer entries — assistant usages with their retried
+// attempts' usage, terminal no-output settlement usage pairs, and committed
+// maintenance fact usages — and requires exact agreement. Counts accumulate
+// per model identity into maps and each total materializes exactly once:
+// accumulation is linear in entries, followed by sorting each total's
+// distinct model identities.
 func (v *graphValidation) validateUsage() error {
 	sessionCounts := make(map[model.ModelRef]UsageCount)
 	perOperation := make(map[string]map[model.ModelRef]UsageCount, len(v.graph.Operations))
 	for _, entry := range v.graph.Entries {
 		if entry.Assistant != nil {
-			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, entry.Assistant.Source, entry.Assistant.Usage); err != nil {
-				return err
-			}
-			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, entry.Assistant.Source, entry.Assistant.RetryUsage); err != nil {
+			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, entry.Assistant.Source, entry.Assistant.Usage, entry.Assistant.RetryUsage); err != nil {
 				return err
 			}
 		}
@@ -925,10 +922,7 @@ func (v *graphValidation) validateUsage() error {
 		// maintenance fact usages are additive when both occur on one
 		// settlement.
 		if entry.Settlement != nil && entry.Settlement.Model != nil {
-			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, *entry.Settlement.Model, entry.Settlement.Usage); err != nil {
-				return err
-			}
-			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, *entry.Settlement.Model, entry.Settlement.RetryUsage); err != nil {
+			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, *entry.Settlement.Model, entry.Settlement.Usage, entry.Settlement.RetryUsage); err != nil {
 				return err
 			}
 		}
@@ -941,10 +935,7 @@ func (v *graphValidation) validateUsage() error {
 			facts = entry.Settlement.Facts
 		}
 		for _, fact := range facts {
-			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, fact.Model, fact.Usage); err != nil {
-				return err
-			}
-			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, fact.Model, fact.RetryUsage); err != nil {
+			if err := v.recordUsage(sessionCounts, perOperation, entry.Envelope.OperationID, fact.Model, fact.Usage, fact.RetryUsage); err != nil {
 				return err
 			}
 		}
@@ -972,30 +963,31 @@ func (v *graphValidation) validateUsage() error {
 	return nil
 }
 
-// recordUsage accumulates one usage-bearing producer's present counts into
-// the session and owning-operation totals; an absent report contributes
-// nothing.
-func (v *graphValidation) recordUsage(sessionCounts map[model.ModelRef]UsageCount, perOperation map[string]map[model.ModelRef]UsageCount, operationID string, ref model.ModelRef, counts *UsageCount) error {
-	if counts == nil {
-		return nil
-	}
-	if operationID != "" {
-		opCounts := perOperation[operationID]
-		if opCounts == nil {
-			opCounts = make(map[model.ModelRef]UsageCount)
-			perOperation[operationID] = opCounts
+// recordUsage accumulates one usage-bearing producer's present counts into the
+// session and owning-operation totals.
+func (v *graphValidation) recordUsage(sessionCounts map[model.ModelRef]UsageCount, perOperation map[string]map[model.ModelRef]UsageCount, operationID string, ref model.ModelRef, counts ...*UsageCount) error {
+	for _, count := range counts {
+		if count == nil {
+			continue
 		}
-		sum, err := addUsageCount(opCounts[ref], *counts)
+		if operationID != "" {
+			opCounts := perOperation[operationID]
+			if opCounts == nil {
+				opCounts = make(map[model.ModelRef]UsageCount)
+				perOperation[operationID] = opCounts
+			}
+			sum, err := addUsageCount(opCounts[ref], *count)
+			if err != nil {
+				return v.corrupt("usage of operation %q overflows: %v", operationID, err)
+			}
+			opCounts[ref] = sum
+		}
+		sum, err := addUsageCount(sessionCounts[ref], *count)
 		if err != nil {
-			return v.corrupt("usage of operation %q overflows: %v", operationID, err)
+			return v.corrupt("session usage overflows: %v", err)
 		}
-		opCounts[ref] = sum
+		sessionCounts[ref] = sum
 	}
-	sum, err := addUsageCount(sessionCounts[ref], *counts)
-	if err != nil {
-		return v.corrupt("session usage overflows: %v", err)
-	}
-	sessionCounts[ref] = sum
 	return nil
 }
 
