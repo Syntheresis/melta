@@ -131,3 +131,45 @@ drained:
 		testassert.Require(t, errors.Is(err, ErrDenied), "caller without the Session grant = %v, want denied", err)
 	}
 }
+
+// TestGetSessionToolOutputReadsSessionAvailability proves the live read keeps
+// the Session availability class: the preview is captured before the Session
+// check, so a Session already unavailable or made unavailable by the preview
+// call answers with that class instead of the preview text.
+func TestGetSessionToolOutputReadsSessionAvailability(t *testing.T) {
+	ctx := context.Background()
+	t.Run("corrupt before the read", func(t *testing.T) {
+		const corruptID = "0123456789abcdef0123456789abcdef"
+		store := storage.NewMemory()
+		lifecycleInsertRegister(t, store, harness.RegisterKey{SessionID: corruptID, Kind: harness.RegisterSession}, `{"not":"a session register"}`)
+		r, _ := openProjectionRuntime(t, store)
+		defer closeProjectionRuntime(r)
+		r.toolOutput.register(corruptID, "op-live", "call-live", func() string { return "live" })
+
+		caller := testCaller(r)
+		_, operationErr := r.GetSessionOperation(ctx, caller, corruptID, "op-live")
+		testassert.Require(t, errors.Is(operationErr, harness.ErrCorrupt), "GetSessionOperation = %v, want the corruption class", operationErr)
+		_, outputErr := r.GetSessionToolOutput(ctx, caller, corruptID, "op-live", "call-live")
+		testassert.Require(t, errors.Is(outputErr, harness.ErrCorrupt), "GetSessionToolOutput = %v, want the same corruption class", outputErr)
+		var corruptErr *harness.CorruptionError
+		testassert.Require(t, errors.As(outputErr, &corruptErr) && corruptErr.SessionID == corruptID, "GetSessionToolOutput error = %v, want the typed corruption for session %s", outputErr, corruptID)
+	})
+
+	t.Run("preview makes the session corrupt", func(t *testing.T) {
+		const sessionID = "fedcba9876543210fedcba9876543210"
+		store := storage.NewMemory()
+		seedLifecycleRoot(t, store, sessionID)
+		r, _ := openProjectionRuntime(t, store)
+		defer closeProjectionRuntime(r)
+		r.toolOutput.register(sessionID, "op-live", "call-live", func() string {
+			corruptSessionRegister(t, store, sessionID)
+			return "live"
+		})
+
+		output, err := r.GetSessionToolOutput(ctx, testCaller(r), sessionID, "op-live", "call-live")
+		testassert.Require(t, errors.Is(err, harness.ErrCorrupt), "GetSessionToolOutput = (%q, %v), want the corruption class the preview made", output.Output, err)
+		var corruptErr *harness.CorruptionError
+		testassert.Require(t, errors.As(err, &corruptErr) && corruptErr.SessionID == sessionID, "GetSessionToolOutput error = %v, want the typed corruption for session %s", err, sessionID)
+		testassert.Require(t, output.Output == "", "GetSessionToolOutput output = %q, want no preview text", output.Output)
+	})
+}

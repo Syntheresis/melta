@@ -905,9 +905,10 @@ func (r *Melta) GetSessionOperation(ctx context.Context, c Caller, sessionID, op
 // GetSessionToolOutput reads one running command's bounded current output
 // under the owning Session's read authority, whether the command runs in the
 // foreground or as a background job. The call identity includes the Operation
-// because call IDs are unique only within one; an absent, already closed, or
-// foreign registration is the same not-found class an unknown Operation reads
-// as.
+// because call IDs are unique only within one. After authorization it captures
+// the registered preview, then reads the Session header so an unavailable or
+// corrupt Session answers as the other Session reads do. A call without a
+// registration is not found.
 func (r *Melta) GetSessionToolOutput(ctx context.Context, c Caller, sessionID, operationID, callID string) (protocol.CommandOutput, error) {
 	var out protocol.CommandOutput
 	if err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
@@ -915,6 +916,9 @@ func (r *Melta) GetSessionToolOutput(ctx context.Context, c Caller, sessionID, o
 			return err
 		}
 		preview, ok := r.toolOutput.preview(sessionID, operationID, callID)
+		if _, err := h.ReadSessionHeader(ctx, sessionID); err != nil {
+			return err
+		}
 		if !ok {
 			return fmt.Errorf("tool call %q in operation %q of session %q has no live output: %w", callID, operationID, sessionID, harness.ErrNotFound)
 		}

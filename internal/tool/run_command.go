@@ -25,7 +25,7 @@ var waitCommand = func(cmd *exec.Cmd) error { return cmd.Wait() }
 // SIGTERM/500ms/SIGKILL. timeoutSec at most zero disables the timeout;
 // a positive value is converted to a duration only within bounds. It closes
 // the capture on every return and formats it once the command has run; the
-// caller must not use it afterward.
+// caller may still read the capture's preview after Close.
 //
 // Classification follows the cause, never which wait channel fired: a
 // Wait-returned command keeps its real result, a timeout exists only when a

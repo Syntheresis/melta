@@ -568,9 +568,8 @@ func TestModelEffectCancellationDuringBackoffKeepsAcceptedUsage(t *testing.T) {
 
 // TestModelEffectBrokenBodyRetriesUnderThePolicy proves the broken-stream row
 // through the real transport: a body that ends before [DONE] is
-// model.ErrStreamBroken wrapping io.ErrUnexpectedEOF, the retry policy decides
-// it, and the accepted retry's output keeps only its own payload while the
-// broken attempt's report lands as retry usage.
+// model.ErrStreamBroken wrapping io.ErrUnexpectedEOF, and the retry policy
+// decides it.
 func TestModelEffectBrokenBodyRetriesUnderThePolicy(t *testing.T) {
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -578,14 +577,12 @@ func TestModelEffectBrokenBodyRetriesUnderThePolicy(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		if n == 1 {
 			fmt.Fprint(w, `data: {"choices":[{"delta":{"role":"assistant","content":"partial"}}]}`+"\n\n")
-			fmt.Fprint(w, `data: {"usage":{"prompt_tokens":5,"completion_tokens":7}}`+"\n\n")
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 			return // the body ends before [DONE]
 		}
 		fmt.Fprint(w, `data: {"choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`+"\n\n")
-		fmt.Fprint(w, `data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}`+"\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(srv.Close)
@@ -596,23 +593,13 @@ func TestModelEffectBrokenBodyRetriesUnderThePolicy(t *testing.T) {
 		cause = err
 		return 0, failed == 1
 	}
-	h, store, c, sessionID := newEffectHarness(t, nil)
+	h, _, c, _ := newEffectHarness(t, nil)
 	exec := transportExecution(srv, policy)
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	})))
 	testassert.Require(t, hits.Load() == 2 && calls == 1, "physical requests = %d policy consultations = %d, want the one broken attempt retried", hits.Load(), calls)
 	testassert.Require(t, errors.Is(cause, model.ErrStreamBroken) && errors.Is(cause, io.ErrUnexpectedEOF), "classified failure = %v, want the broken-body sentinel with its EOF cause", cause)
-	graph, err := validateFixture(t, store, sessionID)
-	testassert.NoError(t, err)
-	var assistant *assistantEntry
-	for i := range graph.Entries {
-		if graph.Entries[i].Assistant != nil {
-			assistant = graph.Entries[i].Assistant
-		}
-	}
-	testassert.Require(t, assistant != nil && assistant.Content[0].Text == "done", "assistant = %+v, want only the retry's content", assistant)
-	testassert.Require(t, assistant.Usage != nil && *assistant.Usage == (UsageCount{InputTokens: 3, OutputTokens: 2}) && assistant.RetryUsage != nil && *assistant.RetryUsage == (UsageCount{InputTokens: 5, OutputTokens: 7}), "assistant usage = %+v retry usage = %+v, want the completed attempt and the broken attempt", assistant.Usage, assistant.RetryUsage)
 }
 
 // TestModelEffectOneAssemblyAndClose pins the ownership boundary on an

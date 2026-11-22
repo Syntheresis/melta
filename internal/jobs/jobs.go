@@ -79,7 +79,7 @@ type Jobs interface {
 	Abort(jobID string)           // resolve a reservation that will not start; idempotent
 	Start(req StartRequest) error // start the reserved job; only its timeout or an explicit stop ends the process
 	Read(sessionID, jobID string) (string, error)
-	Preview(sessionID, jobID string) (string, bool)
+	Preview(sessionID, jobID string) string // owned record's capture tail; empty for every identity Read rejects
 	Kill(sessionID, jobID string) error
 	List(sessionID string) string
 	Live(sessionID string) []string // the session's running job IDs, sorted
@@ -438,13 +438,13 @@ func (j *Manager) Read(sessionID, jobID string) (string, error) {
 	return capture.Format(), nil
 }
 
-// Preview returns the bounded current output of one owned record — empty
-// before the first write, never the read placeholder — and false for every
-// identity Read rejects and for a capture that is closed.
-func (j *Manager) Preview(sessionID, jobID string) (string, bool) {
+// Preview returns the owned record's capture tail — empty before the first
+// write, never the read placeholder — and empty for every identity Read
+// rejects.
+func (j *Manager) Preview(sessionID, jobID string) string {
 	capture, err := j.ownedCapture(sessionID, jobID)
 	if err != nil {
-		return "", false
+		return ""
 	}
 	return capture.Preview()
 }

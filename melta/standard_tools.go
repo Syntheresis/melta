@@ -345,12 +345,12 @@ func (t editTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall
 // conclusive simple commands into one command.run target per complete
 // segment, falls back to one complete target for everything else, and always
 // executes through the shell. background=true starts a job through the
-// background bridge, returns the retained immediate text, and names the job in
-// the result content; every start failure renders through the one wrapper. Its
-// own fields are the file-tool state (for the spill directory and settings), the
-// jobs service the background start calls, and the live-output registry that
-// tracks the starting call's output preview and publishes its
-// `tool_output_changed` notices for both foreground and background commands.
+// background bridge and returns the retained immediate text; every start
+// failure renders through the one wrapper. Its own fields are the file-tool
+// state (for the spill directory and settings), the jobs service the
+// background start calls, and the live-output registry that tracks the
+// starting call's output preview and publishes its `tool_output_changed`
+// notices for both foreground and background commands.
 type runCommandTool struct {
 	inst       *standardTools
 	jobs       jobs.Jobs
@@ -488,7 +488,7 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 	if err != nil {
 		return backgroundStartOutcome(callID, err)
 	}
-	t.toolOutput.register(sessionID, tc.OperationID, callID, func() (string, bool) {
+	t.toolOutput.register(sessionID, tc.OperationID, callID, func() string {
 		return jobsInst.Preview(sessionID, jobID)
 	})
 	err = tc.Background.StartJob(jobID, func(ctx context.Context, deliver func(string) error) error {
@@ -521,14 +521,12 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 		t.toolOutput.remove(sessionID, tc.OperationID, callID)
 		return backgroundStartOutcome(callID, err)
 	}
-	return harness.ToolOutcome{
-		Result: model.ToolResult{
-			CallID: callID,
-			Status: model.ResultSuccess,
-			Content: fmt.Sprintf("Command running in the background with ID: `%s`. You will be notified when it finishes. If your next steps do not depend on its output, continue with them; otherwise use sleep to wait and process to read the output.\nRunning in the background: `%s`.",
-				jobID, strings.Join(jobsInst.Live(sessionID), ", ")),
-		},
-	}
+	return harness.ToolOutcome{Result: model.ToolResult{
+		CallID: callID,
+		Status: model.ResultSuccess,
+		Content: fmt.Sprintf("Command running in the background with ID: `%s`. You will be notified when it finishes. If your next steps do not depend on its output, continue with them; otherwise use sleep to wait and process to read the output.\nRunning in the background: `%s`.",
+			jobID, strings.Join(jobsInst.Live(sessionID), ", ")),
+	}}
 }
 
 // backgroundStartOutcome renders one background start failure through the

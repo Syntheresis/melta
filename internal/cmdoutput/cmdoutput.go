@@ -141,13 +141,10 @@ func (c *Capture) Format() string {
 // Preview returns the last MaxBytes bytes written in write order, starting at
 // its first complete UTF-8 rune and preceded by
 // "[Output truncated. <n> bytes so far.]" when bytes were dropped from its
-// front. It reads no file, and after Close it reports absence.
-func (c *Capture) Preview() (string, bool) {
+// front. It reads no file and stays readable after Close.
+func (c *Capture) Preview() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
-		return "", false
-	}
 	tail := c.tail
 	if maxBytes := c.opts.MaxBytes; maxBytes > 0 && len(tail) > maxBytes {
 		tail = tail[len(tail)-maxBytes:]
@@ -160,7 +157,7 @@ func (c *Capture) Preview() (string, bool) {
 	if int64(len(tail)) < c.totalBytes {
 		text = fmt.Sprintf("[Output truncated. %d bytes so far.]\n%s", c.totalBytes, text)
 	}
-	return text, true
+	return text
 }
 
 func (c *Capture) Close() {

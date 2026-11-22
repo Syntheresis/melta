@@ -181,7 +181,7 @@ func (s *lifecycleStopper) Start(jobs.StartRequest) error {
 func (s *lifecycleStopper) Read(string, string) (string, error) {
 	return "", errors.New("lifecycle jobs service reads nothing")
 }
-func (s *lifecycleStopper) Preview(string, string) (string, bool) { return "", false }
+func (s *lifecycleStopper) Preview(string, string) string { return "" }
 func (s *lifecycleStopper) Kill(string, string) error {
 	return errors.New("lifecycle jobs service kills nothing")
 }

@@ -539,19 +539,20 @@ type toolOutputIdentity struct {
 // output previews: the run_command executor registers one preview under its
 // call identity around the command's lifetime, so a client can read the
 // bounded current output while the call runs and repair from reads after
-// every notice. The call's output is the same registry entry whether the
-// command runs in the foreground or as a background job.
+// every notice. Presence comes from the registration alone; the registered
+// function supplies only the text. The call's output is the same registry
+// entry whether the command runs in the foreground or as a background job.
 type liveToolOutput struct {
 	obs      *observation
 	mu       sync.Mutex
-	previews map[toolOutputIdentity]func() (string, bool)
+	previews map[toolOutputIdentity]func() string
 }
 
 func newLiveToolOutput(obs *observation) *liveToolOutput {
-	return &liveToolOutput{obs: obs, previews: make(map[toolOutputIdentity]func() (string, bool))}
+	return &liveToolOutput{obs: obs, previews: make(map[toolOutputIdentity]func() string)}
 }
 
-func (l *liveToolOutput) register(sessionID, operationID, callID string, preview func() (string, bool)) {
+func (l *liveToolOutput) register(sessionID, operationID, callID string, preview func() string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.previews[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}] = preview
@@ -563,16 +564,16 @@ func (l *liveToolOutput) remove(sessionID, operationID, callID string) {
 	delete(l.previews, toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID})
 }
 
-// preview reads one registered preview's bounded current output; an absent
-// registration reports absence.
+// preview reads one registered preview's bounded current output; presence is
+// the map lookup alone.
 func (l *liveToolOutput) preview(sessionID, operationID, callID string) (string, bool) {
 	l.mu.Lock()
-	read := l.previews[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}]
+	read, ok := l.previews[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}]
 	l.mu.Unlock()
-	if read == nil {
+	if !ok {
 		return "", false
 	}
-	return read()
+	return read(), true
 }
 
 // publishChanged publishes one tool_output_changed notice for the running

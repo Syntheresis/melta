@@ -88,12 +88,10 @@ func TestCapturePreview(t *testing.T) {
 		writes   []previewWrite
 		close    bool
 		want     string
-		wantOK   bool
 	}{
 		{
 			name:     "before any write",
 			maxBytes: 16,
-			wantOK:   true,
 		},
 		{
 			name:     "under bound in write order",
@@ -103,8 +101,7 @@ func TestCapturePreview(t *testing.T) {
 				{stderr: true, text: "err one\n"},
 				{text: "out two\n"},
 			},
-			want:   "out one\nerr one\nout two\n",
-			wantOK: true,
+			want: "out one\nerr one\nout two\n",
 		},
 		{
 			name:     "disabled bound keeps every byte in write order",
@@ -113,8 +110,7 @@ func TestCapturePreview(t *testing.T) {
 				{text: "first"},
 				{stderr: true, text: "second"},
 			},
-			want:   "firstsecond",
-			wantOK: true,
+			want: "firstsecond",
 		},
 		{
 			name:     "past bound keeps the last bytes",
@@ -123,8 +119,7 @@ func TestCapturePreview(t *testing.T) {
 				{text: "abcdef"},
 				{stderr: true, text: "ghijkl"},
 			},
-			want:   "[Output truncated. 12 bytes so far.]\nefghijkl",
-			wantOK: true,
+			want: "[Output truncated. 12 bytes so far.]\nefghijkl",
 		},
 		{
 			name:     "many small writes keep the last bounded bytes",
@@ -134,8 +129,7 @@ func TestCapturePreview(t *testing.T) {
 				{text: "g"}, {text: "h"}, {text: "i"}, {text: "j"}, {text: "k"}, {text: "l"},
 				{text: "m"}, {text: "n"}, {text: "o"}, {text: "p"}, {text: "q"}, {text: "r"},
 			},
-			want:   "[Output truncated. 18 bytes so far.]\nklmnopqr",
-			wantOK: true,
+			want: "[Output truncated. 18 bytes so far.]\nklmnopqr",
 		},
 		{
 			name:     "cut inside a rune starts at the next rune",
@@ -143,8 +137,7 @@ func TestCapturePreview(t *testing.T) {
 			writes: []previewWrite{
 				{text: "éé"},
 			},
-			want:   "[Output truncated. 4 bytes so far.]\né",
-			wantOK: true,
+			want: "[Output truncated. 4 bytes so far.]\né",
 		},
 		{
 			name:     "after close",
@@ -152,8 +145,8 @@ func TestCapturePreview(t *testing.T) {
 			writes: []previewWrite{
 				{text: "abcdefghijkl"},
 			},
-			close:  true,
-			wantOK: false,
+			close: true,
+			want:  "[Output truncated. 12 bytes so far.]\nefghijkl",
 		},
 	}
 	for _, tc := range cases {
@@ -174,8 +167,8 @@ func TestCapturePreview(t *testing.T) {
 			}
 
 			before := dirEntries(t, dir)
-			preview, ok := c.Preview()
-			testassert.Require(t, ok == tc.wantOK && preview == tc.want, "Preview = (%q, %v), want (%q, %v)", preview, ok, tc.want, tc.wantOK)
+			preview := c.Preview()
+			testassert.Require(t, preview == tc.want, "Preview = %q, want %q", preview, tc.want)
 			testassert.Require(t, equalStrings(before, dirEntries(t, dir)), "Preview changed the spill directory from %v to %v", before, dirEntries(t, dir))
 		})
 	}

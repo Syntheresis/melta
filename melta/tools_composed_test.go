@@ -125,7 +125,7 @@ func (f *fakeJobs) Read(_, _ string) (string, error) {
 	return "", nil
 }
 
-func (f *fakeJobs) Preview(_, _ string) (string, bool) { return "", false }
+func (f *fakeJobs) Preview(_, _ string) string { return "" }
 
 func (f *fakeJobs) Kill(_, _ string) error {
 	f.kills++
