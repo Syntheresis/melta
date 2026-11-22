@@ -29,7 +29,7 @@ const (
 	testCredential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	// testVersion is the current wire identity every compatible fixture
 	// speaks; the incompatible rows keep the literal old "1".
-	testVersion = string(protocol.N20)
+	testVersion = string(protocol.N21)
 )
 
 // recordContent builds one private four-field discovery document.
@@ -438,6 +438,10 @@ func TestEventsFrames(t *testing.T) {
 		testassert.NoError(t, refusal.FromRefusalDeltaEvent(protocol.RefusalDeltaEvent{
 			Kind: protocol.RefusalDelta, Scope: operationEventScope(), Content: "refused",
 		}))
+		var reasoning protocol.Event
+		testassert.NoError(t, reasoning.FromReasoningDeltaEvent(protocol.ReasoningDeltaEvent{
+			Kind: protocol.ReasoningDelta, Scope: operationEventScope(), Content: "considered",
+		}))
 		var started protocol.Event
 		testassert.NoError(t, started.FromToolStartedEvent(protocol.ToolStartedEvent{
 			Kind: protocol.ToolStarted, Scope: operationEventScope(), CallId: "call-1", Ordinal: 0, Name: "read",
@@ -451,22 +455,24 @@ func TestEventsFrames(t *testing.T) {
 		testassert.NoError(t, restarted.FromResponseRestartedEvent(protocol.ResponseRestartedEvent{
 			Kind: protocol.ResponseRestarted, Scope: operationEventScope(),
 		}))
-		frames := notificationFrame(t, delta) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) + notificationFrame(t, restarted)
+		frames := notificationFrame(t, delta) + notificationFrame(t, reasoning) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) + notificationFrame(t, restarted)
 		server := newFixture(t, jsonHealth(testInstance, testVersion), writeFrames(frames))
 		c := connectFixture(t, writeDiscovery(t, server.URL, testInstance, testVersion, testCredential))
 		events, errs := c.Events(context.Background())
 		delivered, err := drainEvents(events, errs)
 		testassert.Require(t, errors.Is(err, client.ErrResyncRequired), "disconnect error = %v, want ErrResyncRequired", err)
-		testassert.Equal(t, len(delivered), 5)
-		for i, want := range []string{"text_delta", "refusal_delta", "tool_started", "tool_finished", "response_restarted"} {
+		testassert.Equal(t, len(delivered), 6)
+		for i, want := range []string{"text_delta", "reasoning_delta", "refusal_delta", "tool_started", "tool_finished", "response_restarted"} {
 			{
 				kind, _ := delivered[i].Discriminator()
 				testassert.Require(t, kind == want, "event %d kind = %q, want %q", i, kind, want)
 			}
 		}
-		refusalBody, err := delivered[1].AsRefusalDeltaEvent()
+		reasoningBody, err := delivered[1].AsReasoningDeltaEvent()
+		testassert.Require(t, err == nil && reasoningBody.Content == "considered", "delivered reasoning delta = (%+v, %v), want its distinct reasoning content", reasoningBody, err)
+		refusalBody, err := delivered[2].AsRefusalDeltaEvent()
 		testassert.Require(t, err == nil && refusalBody.Content == "refused", "delivered refusal delta = (%+v, %v), want its distinct refusal content", refusalBody, err)
-		finishedBody, err := delivered[3].AsToolFinishedEvent()
+		finishedBody, err := delivered[4].AsToolFinishedEvent()
 		testassert.Require(t, err == nil && finishedBody.Evidence != nil && *finishedBody.Evidence == protocol.Unknown, "delivered tool finished = (%+v, %v), want its unknown evidence carried through", finishedBody, err)
 	})
 
@@ -521,6 +527,10 @@ func TestEventsFrames(t *testing.T) {
 		{"empty scope member", rawNotification(`{"kind":"scope_opened","scope":{"kind":"runtime","workspace":""}}`)},
 		{"negative text position", rawNotification(`{"kind":"text_delta","scope":{"kind":"runtime"},"position":-1,"content":"x"}`)},
 		{"empty text content", rawNotification(`{"kind":"text_delta","scope":{"kind":"runtime"},"position":0,"content":""}`)},
+		{"missing reasoning content", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"}}`)},
+		{"empty reasoning content", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"},"content":""}`)},
+		{"reasoning_delta without scope", rawNotification(`{"kind":"reasoning_delta","content":"considered"}`)},
+		{"reasoning_delta unknown member", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"},"content":"considered","extra":true}`)},
 		{"empty refusal content", rawNotification(`{"kind":"refusal_delta","scope":{"kind":"runtime"},"content":""}`)},
 		{"missing refusal content", rawNotification(`{"kind":"refusal_delta","scope":{"kind":"runtime"}}`)},
 		{"position member on refusal_delta", rawNotification(`{"kind":"refusal_delta","scope":{"kind":"runtime"},"content":"x","position":0}`)},

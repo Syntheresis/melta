@@ -32,7 +32,7 @@ func (r *Melta) Health(ctx context.Context, c Caller) (protocol.Health, error) {
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return protocol.Health{}, err
 	}
-	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N20}, nil
+	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N21}, nil
 }
 
 // ListSessions projects Session headers under one required workspace and
@@ -370,6 +370,9 @@ func projectAssistantItem(id string, fact harness.HistoryFact, results map[strin
 	if entry.Refusal != "" {
 		refusal := entry.Refusal
 		item.Refusal = &refusal
+	}
+	if reasoning := model.ReasoningText(entry.Extra, entry.Content); reasoning != "" {
+		item.Reasoning = &reasoning
 	}
 	return item, nil
 }

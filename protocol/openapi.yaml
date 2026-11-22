@@ -7,7 +7,7 @@
 openapi: "3.0.3"
 info:
   title: melta-protocol
-  version: "20"
+  version: "21"
 servers:
   - url: "http://127.0.0.1"
 # Every path requires the bearer credential; it is declared once here and
@@ -1190,7 +1190,7 @@ components:
         protocol_version:
           type: string
           enum:
-            - "20"
+            - "21"
     Scope:
       description: >
         One SSE event's applicable scope, discriminated by kind. Every
@@ -1781,6 +1781,9 @@ components:
             $ref: "#/components/schemas/ContentPart"
         refusal:
           type: string
+        reasoning:
+          type: string
+          minLength: 1
         tool_calls:
           type: array
           items:
@@ -2913,6 +2916,23 @@ components:
         content:
           type: string
           minLength: 1
+    ReasoningDeltaEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - scope
+        - content
+      properties:
+        kind:
+          type: string
+          enum:
+            - reasoning_delta
+        scope:
+          $ref: "#/components/schemas/Scope"
+        content:
+          type: string
+          minLength: 1
     ToolStartedEvent:
       type: object
       additionalProperties: false
@@ -2978,6 +2998,7 @@ components:
         - $ref: "#/components/schemas/WarningChangedEvent"
         - $ref: "#/components/schemas/TextDeltaEvent"
         - $ref: "#/components/schemas/RefusalDeltaEvent"
+        - $ref: "#/components/schemas/ReasoningDeltaEvent"
         - $ref: "#/components/schemas/ToolStartedEvent"
         - $ref: "#/components/schemas/ToolFinishedEvent"
         - $ref: "#/components/schemas/ResponseRestartedEvent"
@@ -2991,6 +3012,7 @@ components:
           warning_changed: "#/components/schemas/WarningChangedEvent"
           text_delta: "#/components/schemas/TextDeltaEvent"
           refusal_delta: "#/components/schemas/RefusalDeltaEvent"
+          reasoning_delta: "#/components/schemas/ReasoningDeltaEvent"
           tool_started: "#/components/schemas/ToolStartedEvent"
           tool_finished: "#/components/schemas/ToolFinishedEvent"
           response_restarted: "#/components/schemas/ResponseRestartedEvent"

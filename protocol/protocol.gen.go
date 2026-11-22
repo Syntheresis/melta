@@ -262,13 +262,13 @@ func (e ExtensionSuccessKind) Valid() bool {
 
 // Defines values for HealthProtocolVersion.
 const (
-	N20 HealthProtocolVersion = "20"
+	N21 HealthProtocolVersion = "21"
 )
 
 // Valid indicates whether the value is a known member of the HealthProtocolVersion enum.
 func (e HealthProtocolVersion) Valid() bool {
 	switch e {
-	case N20:
+	case N21:
 		return true
 	default:
 		return false
@@ -659,6 +659,21 @@ func (e ProviderField) Valid() bool {
 	}
 }
 
+// Defines values for ReasoningDeltaEventKind.
+const (
+	ReasoningDelta ReasoningDeltaEventKind = "reasoning_delta"
+)
+
+// Valid indicates whether the value is a known member of the ReasoningDeltaEventKind enum.
+func (e ReasoningDeltaEventKind) Valid() bool {
+	switch e {
+	case ReasoningDelta:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RefusalDeltaEventKind.
 const (
 	RefusalDelta RefusalDeltaEventKind = "refusal_delta"
@@ -1011,6 +1026,7 @@ type AssistantItem struct {
 	ItemId      string            `json:"item_id"`
 	Kind        AssistantItemKind `json:"kind"`
 	OperationId *string           `json:"operation_id,omitempty"`
+	Reasoning   *string           `json:"reasoning,omitempty"`
 	Refusal     *string           `json:"refusal,omitempty"`
 
 	// Source A full model identity spelled as the "provider/model" string, split at the first slash; provider identifiers never contain a slash, so a slash-containing model suffix stays unambiguous.
@@ -1701,6 +1717,18 @@ type ReadFileResult struct {
 	Content       string `json:"content"`
 	Truncated     bool   `json:"truncated"`
 }
+
+// ReasoningDeltaEvent defines model for ReasoningDeltaEvent.
+type ReasoningDeltaEvent struct {
+	Content string                  `json:"content"`
+	Kind    ReasoningDeltaEventKind `json:"kind"`
+
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: workspace carries workspace, session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	Scope Scope `json:"scope"`
+}
+
+// ReasoningDeltaEventKind defines model for ReasoningDeltaEvent.Kind.
+type ReasoningDeltaEventKind string
 
 // RefusalDeltaEvent defines model for RefusalDeltaEvent.
 type RefusalDeltaEvent struct {
@@ -2843,6 +2871,32 @@ func (t *Event) MergeRefusalDeltaEvent(v RefusalDeltaEvent) error {
 	return err
 }
 
+// AsReasoningDeltaEvent returns the union data inside the Event as a ReasoningDeltaEvent
+func (t Event) AsReasoningDeltaEvent() (ReasoningDeltaEvent, error) {
+	var body ReasoningDeltaEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromReasoningDeltaEvent overwrites any union data inside the Event as the provided ReasoningDeltaEvent
+func (t *Event) FromReasoningDeltaEvent(v ReasoningDeltaEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeReasoningDeltaEvent performs a merge with any union data inside the Event, using the provided ReasoningDeltaEvent
+func (t *Event) MergeReasoningDeltaEvent(v ReasoningDeltaEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsToolStartedEvent returns the union data inside the Event as a ToolStartedEvent
 func (t Event) AsToolStartedEvent() (ToolStartedEvent, error) {
 	var body ToolStartedEvent
@@ -2937,6 +2991,8 @@ func (t Event) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "configuration_changed":
 		return t.AsConfigurationChangedEvent()
+	case "reasoning_delta":
+		return t.AsReasoningDeltaEvent()
 	case "refusal_delta":
 		return t.AsRefusalDeltaEvent()
 	case "response_restarted":

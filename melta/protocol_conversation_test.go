@@ -245,6 +245,60 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 	testassert.Require(t, string(first) == string(second), "second projection = %s, want the deterministic %s", second, first)
 }
 
+// TestConversationProjectionReasoning proves the committed assistant item's
+// reasoning text follows the same rule as live reasoning: message extras
+// first, thinking parts for the providers that carry them, interrupted
+// entries included, and no member when the text is empty. The raw extra and
+// content parts stay projected exactly as committed.
+func TestConversationProjectionReasoning(t *testing.T) {
+	firstID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa21"
+	secondID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa22"
+	thirdID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa23"
+	first := harness.AssistantEntry{
+		SessionID: convSessionID, EntryID: firstID, OperationID: "op-1",
+		Status: model.OutputCompleted, Source: model.ModelRef{Provider: "prov", Model: "m"},
+		Content: []model.ContentPart{{Kind: model.PartText, Text: "answer"}},
+		Extra:   model.Extra{"reasoning_content": json.RawMessage(`"because"`), "vendor": json.RawMessage(`{"n":1}`)},
+	}
+	second := harness.AssistantEntry{
+		SessionID: convSessionID, EntryID: secondID, OperationID: "op-2",
+		Status: model.OutputInterrupted, Source: model.ModelRef{Provider: "mistral", Model: "magistral"},
+		Content: []model.ContentPart{
+			{Kind: model.PartText, Text: "partial"},
+			{Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"thinking": json.RawMessage(`[{"text":"step one"},{"text":" and two"}]`)}},
+		},
+	}
+	third := harness.AssistantEntry{
+		SessionID: convSessionID, EntryID: thirdID, OperationID: "op-3",
+		Status: model.OutputCompleted, Source: model.ModelRef{Provider: "prov", Model: "m"},
+		Content: []model.ContentPart{{Kind: model.PartText, Text: "plain"}},
+	}
+	items, err := projectConversation(convSessionID, []harness.HistoryFact{
+		convAssistantFact(firstID, "op-1", first),
+		convAssistantFact(secondID, "op-2", second),
+		convAssistantFact(thirdID, "op-3", third),
+	})
+	testassert.NoError(t, err)
+	testassert.Equal(t, len(items), 3)
+
+	extras, err := items[0].AsAssistantItem()
+	testassert.NoError(t, err)
+	testassert.Require(t, extras.Reasoning != nil && *extras.Reasoning == "because", "completed reasoning = %v, want the committed extra's text", extras.Reasoning)
+	testassert.Require(t, extras.Extra != nil && string((*extras.Extra)["reasoning_content"]) == `"because"` && string((*extras.Extra)["vendor"]) == `{"n":1}`, "assistant extra = %v, want the raw extras projected unchanged", extras.Extra)
+	firstText, err := extras.Content[0].AsTextPart()
+	testassert.Require(t, err == nil && firstText.Text == "answer", "completed content = %+v err %v, want the committed part unchanged", extras.Content, err)
+
+	thinking, err := items[1].AsAssistantItem()
+	testassert.NoError(t, err)
+	testassert.Require(t, thinking.Status == protocol.AssistantItemStatusInterrupted && thinking.Reasoning != nil && *thinking.Reasoning == "step one and two", "interrupted reasoning = %v status %q, want the thinking parts' text on the interrupted item", thinking.Reasoning, thinking.Status)
+	opaque, err := thinking.Content[1].AsOpaquePart()
+	testassert.Require(t, err == nil && opaque.OpaqueWireType == "thinking" && opaque.Extra != nil && string((*opaque.Extra)["thinking"]) == `[{"text":"step one"},{"text":" and two"}]`, "interrupted content = %+v err %v, want the thinking part projected unchanged", thinking.Content, err)
+
+	empty, err := items[2].AsAssistantItem()
+	testassert.NoError(t, err)
+	testassert.Require(t, empty.Reasoning == nil, "assistant reasoning = %v, want the member absent without reasoning text", empty.Reasoning)
+}
+
 // TestConversationProjectionSameCallIDAcrossOperations proves the tool-result
 // binding when two Operations of one Session publish the same call ID: call
 // identities are unique per Operation, while the reserved result entry

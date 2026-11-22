@@ -179,7 +179,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '20';
+    protocol_version: '21';
 };
 
 /**
@@ -421,6 +421,7 @@ export type AssistantItem = {
     source: ModelRef;
     content: Array<ContentPart>;
     refusal?: string;
+    reasoning?: string;
     tool_calls: Array<ToolCallView>;
     extra?: JsonObject;
 };
@@ -913,6 +914,12 @@ export type RefusalDeltaEvent = {
     content: string;
 };
 
+export type ReasoningDeltaEvent = {
+    kind: 'reasoning_delta';
+    scope: Scope;
+    content: string;
+};
+
 export type ToolStartedEvent = {
     kind: 'tool_started';
     scope: Scope;
@@ -947,6 +954,8 @@ export type Event = ({
 } & TextDeltaEvent) | ({
     kind: 'refusal_delta';
 } & RefusalDeltaEvent) | ({
+    kind: 'reasoning_delta';
+} & ReasoningDeltaEvent) | ({
     kind: 'tool_started';
 } & ToolStartedEvent) | ({
     kind: 'tool_finished';

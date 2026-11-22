@@ -1249,6 +1249,62 @@ func TestObserveStreamFilter(t *testing.T) {
 		testassert.Require(t, len(*got) == 1 && (*got)[0].kind == FactTextDelta, "emitted = %+v, want the text fragment and no refusal emission", *got)
 	})
 
+	t.Run("reasoning extra emits before content text and refusal", func(t *testing.T) {
+		inner := streamOf(model.StreamDelta{
+			HasChoice:       true,
+			Role:            "assistant",
+			MessageExtra:    model.Extra{"reasoning_content": json.RawMessage(`"thinking it through"`)},
+			RefusalFragment: "but no",
+			ContentFragments: []model.ContentFragment{
+				{Position: 0, Kind: model.PartText, Text: "working"},
+			},
+		})
+		wrapper, got := collect(t, inner)
+		{
+			_, err := wrapper.Recv()
+			testassert.NoError(t, err)
+		}
+		want := []emitted{
+			{kind: FactReasoningDelta, position: 0, content: "thinking it through"},
+			{kind: FactTextDelta, position: 0, content: "working"},
+			{kind: FactRefusalDelta, position: 0, content: "but no"},
+		}
+		testassert.Require(t, slices.Equal(*got, want), "emitted = %+v, want the reasoning fact before the content text and refusal %+v", *got, want)
+	})
+
+	t.Run("thinking fragment emits reasoning and no text", func(t *testing.T) {
+		inner := streamOf(model.StreamDelta{
+			HasChoice: true,
+			Role:      "assistant",
+			ContentFragments: []model.ContentFragment{
+				{Position: 0, Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"thinking": json.RawMessage(`"hidden"`)}},
+			},
+		})
+		wrapper, got := collect(t, inner)
+		{
+			_, err := wrapper.Recv()
+			testassert.NoError(t, err)
+		}
+		want := []emitted{{kind: FactReasoningDelta, position: 0, content: "hidden"}}
+		testassert.Require(t, slices.Equal(*got, want), "emitted = %+v, want only the thinking part's reasoning fact %+v", *got, want)
+	})
+
+	t.Run("empty reasoning emits only the text", func(t *testing.T) {
+		inner := streamOf(model.StreamDelta{
+			HasChoice:    true,
+			MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`""`)},
+			ContentFragments: []model.ContentFragment{
+				{Position: 0, Kind: model.PartText, Text: "kept"},
+			},
+		})
+		wrapper, got := collect(t, inner)
+		{
+			_, err := wrapper.Recv()
+			testassert.NoError(t, err)
+		}
+		testassert.Require(t, len(*got) == 1 && (*got)[0] == (emitted{kind: FactTextDelta, position: 0, content: "kept"}), "emitted = %+v, want the text fragment and no empty reasoning emission", *got)
+	})
+
 	t.Run("original delta and error preserved", func(t *testing.T) {
 		delta := model.StreamDelta{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "x"}}}
 		inner := &duplexStream{delta: delta, err: errors.New("read failed")}
@@ -1273,7 +1329,9 @@ func TestObserveStreamFilter(t *testing.T) {
 		cases := []model.StreamDelta{
 			{ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "x"}}}, // no choice
 			{RefusalFragment: "no"}, // refusal without a choice
-			{HasChoice: true},       // empty
+			{MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"x"`)}}, // reasoning without a choice
+			{HasChoice: true}, // empty
+			{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`""`)}},                                             // empty reasoning
 			{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartImageURL, URL: "u"}}},                      // non-text
 			{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: -1, Kind: model.PartText, Text: "x"}}},                        // invalid position
 			{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "x", URL: "u"}}},               // cross-kind
@@ -1387,7 +1445,10 @@ func TestObserveStreamFilter(t *testing.T) {
 func TestObserveCompactAttribution(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
 	compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-		return completedTurnStream(), nil
+		return streamOf(
+			model.StreamDelta{HasChoice: true, Role: "assistant", MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"plan"`)}},
+			turnDelta("stop", "done"),
+		), nil
 	}
 	exec := compactionExecution(t, compactFn, nil)
 	prepared := compactPrepared(testCapture(), exec)
@@ -1396,14 +1457,19 @@ func TestObserveCompactAttribution(t *testing.T) {
 	col := observeHarness(h)
 	testassert.NoError(t, runManualCompact(t, h, c, testSessionID, "compact-1"))
 	deltas := 0
+	reasoning := 0
 	for _, fact := range col.snapshot() {
-		if fact.Kind != FactTextDelta {
-			continue
+		switch fact.Kind {
+		case FactTextDelta:
+			deltas++
+			testassert.Require(t, fact.SessionID == testSessionID && fact.OperationID == "compact-1" && fact.Position == 0 && fact.Content == "done", "compact delta fact = %+v, want the enclosing Operation attribution", fact)
+		case FactReasoningDelta:
+			reasoning++
+			testassert.Require(t, fact.SessionID == testSessionID && fact.OperationID == "compact-1" && fact.Position == 0 && fact.Content == "plan", "compact reasoning fact = %+v, want the enclosing Operation attribution", fact)
 		}
-		deltas++
-		testassert.Require(t, fact.SessionID == testSessionID && fact.OperationID == "compact-1" && fact.Position == 0 && fact.Content == "done", "compact delta fact = %+v, want the enclosing Operation attribution", fact)
 	}
 	testassert.Equal(t, deltas, 1)
+	testassert.Equal(t, reasoning, 1)
 }
 
 // TestObserveRefusalFacts proves a real accepted refusal stream emits one

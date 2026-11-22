@@ -22,6 +22,11 @@ const (
 	// concatenate in arrival order — and no authority: the committed
 	// assistant entry's refusal is the authoritative value.
 	FactRefusalDelta HarnessFactKind = "refusal_delta"
+	// FactReasoningDelta reports one nonempty transient reasoning fragment of
+	// an accepted model stream. It carries no position — reasoning fragments
+	// concatenate in arrival order — and no authority: the committed assistant
+	// entry is the authoritative value.
+	FactReasoningDelta HarnessFactKind = "reasoning_delta"
 	// FactToolStarted reports one dispatched tool call. It is emitted once at
 	// the live dispatcher entry, before any branch-specific validation, hook,
 	// permission decision, or execution.
@@ -61,9 +66,10 @@ type SessionRevision struct {
 // carries SessionID and the optional JobID of a job member admission or
 // finish; a text delta carries SessionID, OperationID, Position, and the
 // nonempty Content; a refusal delta carries SessionID, OperationID, and the
-// nonempty Content and no Position; a tool start carries SessionID,
-// OperationID, CallID, Ordinal, and Name; a tool finish carries SessionID,
-// OperationID, CallID, the closed Status, and the committed execution
+// nonempty Content and no Position; a reasoning delta carries SessionID,
+// OperationID, and the nonempty Content and no Position; a tool start carries
+// SessionID, OperationID, CallID, Ordinal, and Name; a tool finish carries
+// SessionID, OperationID, CallID, the closed Status, and the committed execution
 // Evidence; an admitted Operation carries SessionID and OperationID; a settled
 // Operation carries SessionID, OperationID and the closed terminal
 // OperationStatus; a response restart carries SessionID and OperationID. Every
@@ -233,14 +239,17 @@ func (h *Harness) observeStream(sessionID, operationID string, stream model.Stre
 
 // observedStream is the one accepted-stream wrapper: Recv delegates unchanged,
 // Close delegates exactly once, and only a successfully parsed choice-bearing
-// delta contributes one fact per nonempty fragment. An empty, non-text, or
-// invalid delta emits nothing, and a delta returned together with an error
+// delta contributes facts — one reasoning fact when the delta carries
+// reasoning text, and one fact per nonempty fragment. An invalid delta, or one
+// with neither reasoning text nor a nonempty fragment, emits nothing, and a
+// delta returned together with an error
 // (EOF included) emits nothing; the original delta and error are always
 // returned exactly as received — the validation gate reads the same contract
 // the constructor enforces without building an owned copy. A delta's
 // positioned content-text fragments are emitted before its refusal fragment,
-// and refusal emits no position. No reasoning, tool, or finish fragment is
-// interpreted, and no second assembler or accumulator exists.
+// and refusal emits no position. A delta's reasoning text, when nonempty, is
+// emitted before its text and refusal fragments. No tool or finish fragment
+// is interpreted, and no second assembler or accumulator exists.
 type observedStream struct {
 	inner model.Stream
 	emit  func(kind HarnessFactKind, position int, content string)
@@ -253,6 +262,13 @@ func (s observedStream) Recv() (model.StreamDelta, error) {
 	}
 	if verr := model.ValidateStreamDelta(delta); verr != nil { // validation gate only; the original delta is returned unchanged
 		return delta, err
+	}
+	parts := make([]model.ContentPart, 0, len(delta.ContentFragments))
+	for _, fragment := range delta.ContentFragments {
+		parts = append(parts, model.ContentPart{Kind: fragment.Kind, OpaqueWireType: fragment.OpaqueWireType, Extra: fragment.Extra})
+	}
+	if reasoning := model.ReasoningText(delta.MessageExtra, parts); reasoning != "" {
+		s.emit(FactReasoningDelta, 0, reasoning)
 	}
 	for _, fragment := range delta.ContentFragments {
 		if fragment.Kind == model.PartText && fragment.Text != "" {

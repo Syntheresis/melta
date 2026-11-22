@@ -463,6 +463,18 @@ func refusalDeltaEvent(scope protocol.Scope, content string) Event {
 	return event
 }
 
+// reasoningDeltaEvent builds one transient model-stream reasoning fragment
+// hint; reasoning carries the content without a position.
+func reasoningDeltaEvent(scope protocol.Scope, content string) Event {
+	var event Event
+	_ = event.FromReasoningDeltaEvent(protocol.ReasoningDeltaEvent{ // plain members; the marshal cannot fail
+		Kind:    protocol.ReasoningDelta,
+		Scope:   scope,
+		Content: content,
+	})
+	return event
+}
+
 // toolStartedEvent builds one dispatched tool-call hint.
 func toolStartedEvent(scope protocol.Scope, callID string, ordinal int64, name string) Event {
 	var event Event
@@ -648,6 +660,9 @@ func (a *observationAdapter) observe(fact harness.HarnessFact) {
 		case harness.FactRefusalDelta:
 			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
 			return []Event{refusalDeltaEvent(scope, fact.Content)}
+		case harness.FactReasoningDelta:
+			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
+			return []Event{reasoningDeltaEvent(scope, fact.Content)}
 		case harness.FactToolStarted:
 			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
 			return []Event{toolStartedEvent(scope, fact.CallID, fact.Ordinal, fact.Name)}

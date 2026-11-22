@@ -841,6 +841,34 @@ func TestObservationResponseRestartedProgress(t *testing.T) {
 	testassert.Require(t, scope.SessionId == sessionID && scope.OperationId == "op-restarted" && scope.Workspace != nil && *scope.Workspace != "", "restart event scope = %+v, want the real Session and Operation", scope)
 }
 
+// TestObservationReasoningDeltaProgress proves one reasoning fact reaches the
+// passive bus as one transient reasoning_delta event carrying the real
+// Operation scope and no position.
+func TestObservationReasoningDeltaProgress(t *testing.T) {
+	e := newOwnerEnv(t)
+	e.fixtureStore(storage.NewMemory())
+	r, err := e.open(context.Background())
+	testassert.NoError(t, err)
+	defer func() {
+		testassert.NoError(t, r.Close(context.Background()))
+	}()
+	record, err := r.createSession(context.Background(), e.dataDir, "solo")
+	testassert.NoError(t, err)
+	sessionID := record.Identity.SessionID
+	sub, err := r.Subscribe(4)
+	testassert.NoError(t, err)
+	r.passive.observe(harness.HarnessFact{Kind: harness.FactReasoningDelta, SessionID: sessionID, OperationID: "op-reasoning", Content: "considering"})
+	event, ok := nextEvent(t, sub)
+	testassert.Require(t, ok, "the subscription closed before the reasoning event")
+	testassert.Equal(t, eventKind(t, event), "reasoning_delta")
+	body, err := event.AsReasoningDeltaEvent()
+	testassert.NoError(t, err)
+	testassert.Equal(t, body.Content, "considering")
+	scope, err := body.Scope.AsOperationScope()
+	testassert.NoError(t, err)
+	testassert.Require(t, scope.SessionId == sessionID && scope.OperationId == "op-reasoning" && scope.Workspace != nil && *scope.Workspace != "", "reasoning event scope = %+v, want the real Session and Operation", scope)
+}
+
 // TestObservationObserverOverflowDetachesOnlyThatRegistration proves one
 // saturated observer registration detaches without blocking the producer or
 // the healthy sibling: the later fact reaches the healthy observer only.

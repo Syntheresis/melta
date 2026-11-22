@@ -35,6 +35,10 @@
     {
      "name": "refusal-only",
      "json": "{\"item_id\":\"assistant-item\",\"kind\":\"assistant\",\"committed_at\":\"2026-01-02T03:04:07Z\",\"operation_id\":\"op-1\",\"status\":\"completed\",\"source\":\"prov/m\",\"content\":[{\"kind\":\"text\",\"text\":\"hello\"}],\"refusal\":\"no\",\"tool_calls\":[],\"extra\":{\"reasoning\":\"completed\"}}"
+    },
+    {
+     "name": "reasoning",
+     "json": "{\"item_id\":\"assistant-item\",\"kind\":\"assistant\",\"committed_at\":\"2026-01-02T03:04:07Z\",\"operation_id\":\"op-1\",\"status\":\"completed\",\"source\":\"prov/m\",\"content\":[{\"kind\":\"text\",\"text\":\"hello\"}],\"tool_calls\":[],\"reasoning\":\"thought it through\"}"
     }
    ],
    "reject": [
@@ -648,6 +652,10 @@
      "json": "{\"kind\":\"refusal_delta\",\"scope\":{\"kind\":\"runtime\"},\"content\":\"fixture\"}"
     },
     {
+     "name": "ReasoningDeltaEvent",
+     "json": "{\"kind\":\"reasoning_delta\",\"scope\":{\"kind\":\"runtime\"},\"content\":\"fixture\"}"
+    },
+    {
      "name": "ToolStartedEvent",
      "json": "{\"kind\":\"tool_started\",\"scope\":{\"kind\":\"runtime\"},\"call_id\":\"fixture\",\"ordinal\":0,\"name\":\"fixture\"}"
     },
@@ -715,7 +723,7 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"20\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"21\"}"
     }
    ],
    "reject": [
@@ -725,20 +733,20 @@
     },
     {
      "name": "previous-version",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"19\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"20\"}"
     },
     {
      "name": "bad-instance-pattern",
-     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"20\"}",
+     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"21\"}",
      "typescript": false
     },
     {
      "name": "missing-instance",
-     "json": "{\"protocol_version\":\"20\"}"
+     "json": "{\"protocol_version\":\"21\"}"
     },
     {
      "name": "unknown-member",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"20\",\"extra\":true}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"21\",\"extra\":true}"
     }
    ]
   },
@@ -1401,6 +1409,30 @@
      "name": "empty-content",
      "json": "{\"kind\":\"refusal_delta\",\"scope\":{\"kind\":\"session\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"},\"content\":\"\"}",
      "typescript": false
+    }
+   ]
+  },
+  {
+   "schema": "ReasoningDeltaEvent",
+   "accept": [
+    {
+     "name": "progress",
+     "json": "{\"kind\":\"reasoning_delta\",\"scope\":{\"kind\":\"operation\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\"},\"content\":\"considering\"}"
+    }
+   ],
+   "reject": [
+    {
+     "name": "duplicate-top-level-instance-id",
+     "json": "{\"kind\":\"reasoning_delta\",\"scope\":{\"kind\":\"session\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"},\"content\":\"considered\",\"instance_id\":\"0123456789abcdef0123456789abcdef\"}"
+    },
+    {
+     "name": "empty-content",
+     "json": "{\"kind\":\"reasoning_delta\",\"scope\":{\"kind\":\"session\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"},\"content\":\"\"}",
+     "typescript": false
+    },
+    {
+     "name": "unknown-member",
+     "json": "{\"kind\":\"reasoning_delta\",\"scope\":{\"kind\":\"runtime\"},\"content\":\"considered\",\"extra\":true}"
     }
    ]
   },
