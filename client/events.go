@@ -369,13 +369,6 @@ func decodeNotification(raw []byte, instance string) (protocol.Event, error) {
 		if err := validateScope(members["scope"]); err != nil {
 			return protocol.Event{}, err
 		}
-		scope, err := event.Scope.AsJobScope()
-		if err != nil {
-			return protocol.Event{}, err
-		}
-		if scope.Kind != protocol.JobScopeKindJob {
-			return protocol.Event{}, fmt.Errorf("job_output_changed carries a %q scope, want job", scope.Kind)
-		}
 		var out protocol.Event
 		if err := out.FromJobOutputChangedEvent(event); err != nil {
 			return protocol.Event{}, err

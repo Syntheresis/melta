@@ -64,8 +64,8 @@ func ContentPartHasPayload(p ContentPart) bool {
 	return p.Text != "" || p.URL != "" || p.OpaqueWireType != "" || p.Extra.HasValues()
 }
 
-// HasAssistantContent reports whether an assistant message carries model-visible content under the finalization view: at least one finalized non-empty content part, a non-empty refusal, or at least one surviving message extra. Role, source, name, finish reason and usage never count as content here (they are not fields of this value). A nil message reports false. The query validates, retains or mutates nothing.
-func HasAssistantContent(m *Message) bool {
+// hasAssistantContent reports whether an assistant message carries model-visible content under the finalization view: at least one finalized non-empty content part, a non-empty refusal, or at least one surviving message extra. Role, source, name, finish reason and usage never count as content here (they are not fields of this value). A nil message reports false. The query validates, retains or mutates nothing.
+func hasAssistantContent(m *Message) bool {
 	if m == nil {
 		return false
 	}
@@ -80,9 +80,9 @@ func HasAssistantContent(m *Message) bool {
 	return m.Extra.HasValues()
 }
 
-// hasAssistantPayload reports whether an assistant message carries model-visible payload under the finalization view: the content of HasAssistantContent plus at least one tool call. A nil message reports false. It is the private completed-output rule shared with ValidateOutput; the public content-only and part-level queries stay exported for their cross-package consumers. The query validates, retains or mutates nothing.
+// hasAssistantPayload reports whether an assistant message carries model-visible payload under the finalization view: the content of hasAssistantContent plus at least one tool call. A nil message reports false. It is the private completed-output rule shared with ValidateOutput; ContentPartHasPayload stays exported for its cross-package consumer. The query validates, retains or mutates nothing.
 func hasAssistantPayload(m *Message) bool {
-	return HasAssistantContent(m) || m != nil && len(m.ToolCalls) > 0
+	return hasAssistantContent(m) || m != nil && len(m.ToolCalls) > 0
 }
 
 // ValidateOutput applies exactly the NewOutput accepting rules — closed status set; complete nonzero output source; present messages re-validated at this trust boundary (closed role, per-role field combinations) and assistant-role carrying exactly the output's own source identity; completed requires one message with an eligible payload plus empty detail; errored requires no message and non-empty detail; interrupted requires non-empty detail and a tool-call-free optional partial message — and returns the first violation with the constructor's exact error identity, precedence and detail. It retains and mutates nothing: it is the validation-only read of the same contract, for callers that keep their original value.

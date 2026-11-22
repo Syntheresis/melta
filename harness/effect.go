@@ -261,10 +261,11 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 		// Result and terminal transactions run without cancellation so an
 		// already-produced result or required terminal settlement publishes.
 		settleCtx := context.WithoutCancel(h.ctx)
-		settle := func(cause error) (agent.ModelSettlement, error) {
+		settle := func(cause error, usage attemptUsage) (agent.ModelSettlement, error) {
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
 				terminal: OperationFailure,
 				detail:   failureDetail(cause),
+				usage:    usage,
 			}); err != nil {
 				return agent.ModelSettlement{}, err
 			}
@@ -294,7 +295,7 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 		case attemptInterrupted:
 			return d.interruptModelEffect(intent, attemptRes.usage, nil)
 		case attemptInvalid:
-			return settle(attemptRes.err)
+			return settle(attemptRes.err, attemptRes.usage)
 		case attemptFailed:
 			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(attemptRes.err)}
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
@@ -309,7 +310,7 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 		set := derivedSettlement(output)
 		owned, err := agent.ValidateModelSettlement(intent.expected, set)
 		if err != nil {
-			return settle(err)
+			return settle(err, attemptRes.usage)
 		}
 		// A completed call whose identity the Operation already published can
 		// never commit: one published call is one settlement unit, and a
@@ -318,7 +319,7 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 			published := publishedCallIDs(d.coordinator, d.operationID)
 			for _, call := range owned.Output.Message.ToolCalls {
 				if published[call.ID] {
-					return settle(&agent.ProtocolError{Boundary: "model", Detail: fmt.Sprintf("completed output repeats tool call id %q already published by operation %q", call.ID, d.operationID)})
+					return settle(&agent.ProtocolError{Boundary: "model", Detail: fmt.Sprintf("completed output repeats tool call id %q already published by operation %q", call.ID, d.operationID)}, attemptRes.usage)
 				}
 			}
 		}

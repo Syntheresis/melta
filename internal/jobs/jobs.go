@@ -248,14 +248,14 @@ func (j *Manager) Start(req StartRequest) error {
 	rec, ok := j.jobs[req.JobID]
 	if !ok {
 		j.mu.Unlock()
-		return unknownJobID(req.JobID)
+		return fmt.Errorf("process: no process with ID %q", req.JobID)
 	}
 	rec.mu.Lock()
 	reserved := rec.state == stateReserved
 	rec.mu.Unlock()
 	if !reserved {
 		j.mu.Unlock()
-		return unknownJobID(req.JobID)
+		return fmt.Errorf("process: no process with ID %q", req.JobID)
 	}
 	s, err := decodeSettings(req.Config)
 	if err != nil {
@@ -400,8 +400,8 @@ func (j *Manager) timeoutLoop(rec *jobRecord, cmd *exec.Cmd, timeoutSec int) {
 	}
 }
 
-// unknownJobID is the one unknown-ID error an absent, reserved, or foreign job
-// identity reads as.
+// unknownJobID is the unknown-ID error ownedCapture and Preview read for an
+// absent, reserved, or foreign job identity.
 func unknownJobID(jobID string) error {
 	return fmt.Errorf("process: no process with ID %q", jobID)
 }
@@ -464,13 +464,13 @@ func (j *Manager) Kill(sessionID, jobID string) error {
 	rec, ok := j.jobs[jobID]
 	j.mu.Unlock()
 	if !ok {
-		return unknownJobID(jobID)
+		return fmt.Errorf("process: no process with ID %q", jobID)
 	}
 	rec.mu.Lock()
 	switch {
 	case rec.state == stateReserved || rec.sessionID != sessionID:
 		rec.mu.Unlock()
-		return unknownJobID(jobID)
+		return fmt.Errorf("process: no process with ID %q", jobID)
 	case rec.state == stateExited:
 		rec.mu.Unlock()
 		return nil

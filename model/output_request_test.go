@@ -159,7 +159,7 @@ func TestAssistantContentAndPayloadQueries(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			{
-				got := HasAssistantContent(tc.msg)
+				got := hasAssistantContent(tc.msg)
 				testassert.Equal(t, got, tc.content)
 			}
 			{

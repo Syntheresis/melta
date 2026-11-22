@@ -441,7 +441,8 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		// Result and terminal transactions run without cancellation so an
 		// already-produced result or required terminal settlement publishes.
 		settleCtx := context.WithoutCancel(h.ctx)
-		settle := func(cause error) (agent.ModelSettlement, error) {
+		settle := func(cause error, usage attemptUsage) (agent.ModelSettlement, error) {
+			facts.retainUsage(usage)
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
 				terminal:      OperationFailure,
 				detail:        failureDetail(cause),
@@ -477,7 +478,7 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 			facts.retainUsage(attemptRes.usage)
 			return d.interruptModelEffect(intent, attemptUsage{}, facts)
 		case attemptInvalid:
-			return settle(attemptRes.err)
+			return settle(attemptRes.err, attemptRes.usage)
 		case attemptFailed:
 			// The attempts' reported usage lands on the request's maintenance
 			// fact before the terminal settlement; a pre-acceptance failure has none.

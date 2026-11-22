@@ -559,7 +559,6 @@ func TestEventsFrames(t *testing.T) {
 		{"tool_output_changed unknown member", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":"call-1","extra":true}`)},
 		{"job_output_changed without scope", rawNotification(`{"kind":"job_output_changed"}`)},
 		{"job_output_changed unknown member", rawNotification(`{"kind":"job_output_changed","scope":{"kind":"job","session_id":"` + strings.Repeat("a", 32) + `","job_id":"job-1"},"extra":true}`)},
-		{"job_output_changed with an operation scope", rawNotification(fmt.Sprintf(`{"kind":"job_output_changed","scope":{"kind":"operation","session_id":%q,"operation_id":"op-1"}}`, testInstance))},
 		{"job_output_changed job scope without the job identity", rawNotification(fmt.Sprintf(`{"kind":"job_output_changed","scope":{"kind":"job","session_id":%q}}`, testInstance))},
 		{"wrong event name", "event: other\ndata: {}\n\n"},
 		{"unexpected stream field", "id: 7\nevent: notification\ndata: {}\n\n"},

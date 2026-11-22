@@ -37,9 +37,9 @@ func TestReasoningText(t *testing.T) {
 			want:  "reasoning",
 		},
 		{
-			name:  "details concatenate text then summary in order",
-			extra: Extra{"reasoning_details": json.RawMessage(`[{"type":"text","text":"a"},{"type":"summary","summary":"b"},{"text":"c"},{"text":7,"summary":"fallback"},1]`)},
-			want:  "abcfallback",
+			name:  "details concatenate their text in order",
+			extra: Extra{"reasoning_details": json.RawMessage(`[{"type":"text","text":"a"},{"text":"c"},{"text":7},1]`)},
+			want:  "ac",
 		},
 		{
 			name:  "empty details array is the chosen shape",

@@ -745,6 +745,96 @@ func TestModelEffectOneAssemblyAndClose(t *testing.T) {
 	testassert.Require(t, assistant.Status == model.OutputCompleted && assistant.Content[0].Text == "done", "assistant entry = %+v, want the single assembled payload", assistant)
 }
 
+// TestModelEffectBoundaryFailureKeepsAcceptedUsage proves the boundary row
+// after an accepted attempt: a stream that breaks before its finish reason
+// reports usage and the policy grants another attempt, then a callback
+// returning neither a stream nor an error settles the boundary failure with
+// the accepted attempt's report naming the conversation model and counting in
+// both totals. An invalid first attempt has no accepted usage to keep.
+func TestModelEffectBoundaryFailureKeepsAcceptedUsage(t *testing.T) {
+	t.Run("accepted attempt then invalid attempt", func(t *testing.T) {
+		calls := 0
+		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+			calls++
+			if calls == 1 {
+				return brokenBeforeFinishStream(), nil
+			}
+			return nil, nil
+		}
+		spy := &retrySpy{limit: 1}
+		h, store, c, sessionID := newEffectHarness(t, nil)
+		exec := effectExecution(modelFn, nil)
+		exec.Retry = spy.retry
+		err := executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+			return exec, nil
+		}))
+		testassert.Require(t, err != nil && strings.Contains(err.Error(), "neither exactly one stream nor one error"), "run = %v, want the invalid second attempt's boundary failure", err)
+		testassert.Require(t, calls == 2 && len(spy.attempts) == 1 && spy.attempts[0] == 1, "physical attempts = %d policy consultations = %v, want the broken attempt retried once and the invalid attempt never classified", calls, spy.attempts)
+		requireIntentAndResultCounts(t, h, store, sessionID, false)
+		graph, gerr := validateFixture(t, store, sessionID)
+		testassert.NoError(t, gerr)
+		settlement := settlementEntryOf(t, graph)
+		testassert.Require(t, settlement.Status == OperationFailure && settlement.Model != nil && *settlement.Model == testModelRef(), "settlement = %+v, want the conversation model producer", settlement)
+		testassert.Require(t, settlement.Usage != nil && *settlement.Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}) && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement usage = %+v retry usage = %+v (unknown %v), want the accepted attempt's report alone", settlement.Usage, settlement.RetryUsage, settlement.RetryUsageUnknown)
+		want := UsageTotals{ByModel: []ModelUsage{{Model: testModelRef(), Usage: UsageCount{InputTokens: 5, OutputTokens: 7}}}}
+		rec, rerr := h.ReadOperation(context.Background(), sessionID, testOpID)
+		testassert.NoError(t, rerr)
+		testassert.Require(t, usageTotalsEqual(rec.State.Usage, want), "operation usage = %+v, want the accepted attempt's report", rec.State.Usage)
+		view, verr := h.ReadSessionView(context.Background(), sessionID)
+		testassert.NoError(t, verr)
+		testassert.Require(t, usageTotalsEqual(view.TotalUsage, want), "session usage = %+v, want the accepted attempt's report", view.TotalUsage)
+	})
+
+	t.Run("invalid first attempt", func(t *testing.T) {
+		h, store, c, sessionID := newEffectHarness(t, nil)
+		exec := effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+			return nil, nil
+		}, nil)
+		err := executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+			return exec, nil
+		}))
+		testassert.Require(t, err != nil, "run = nil, want the physical-request boundary failure")
+		requireIntentAndResultCounts(t, h, store, sessionID, false)
+		graph, gerr := validateFixture(t, store, sessionID)
+		testassert.NoError(t, gerr)
+		settlement := settlementEntryOf(t, graph)
+		testassert.Require(t, settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement usage/retry usage = %+v/%+v (unknown %v), want no usage without an accepted attempt", settlement.Usage, settlement.RetryUsage, settlement.RetryUsageUnknown)
+	})
+}
+
+// TestModelEffectRetryBudgetSpansFailureKinds proves the one shared budget:
+// attempts alternating a pre-acceptance 429 and an accepted stream that breaks
+// before its finish reason are classified by the same policy count, which
+// observes 1, 2, 3 and 4 in order and stops the effect after the fourth
+// attempt.
+func TestModelEffectRetryBudgetSpansFailureKinds(t *testing.T) {
+	calls := 0
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+		calls++
+		if calls%2 == 1 {
+			return nil, &model.HTTPStatusError{StatusCode: http.StatusTooManyRequests, StatusText: "429"}
+		}
+		return brokenBeforeFinishStream(), nil
+	}
+	spy := &retrySpy{limit: 3}
+	h, store, c, sessionID := newEffectHarness(t, nil)
+	exec := effectExecution(modelFn, nil)
+	exec.Retry = spy.retry
+	err := executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+		return exec, nil
+	}))
+	testassert.NoError(t, err)
+	testassert.Require(t, calls == 4, "physical attempts = %d, want the policy to stop after the fourth", calls)
+	testassert.Require(t, len(spy.attempts) == 4 && spy.attempts[0] == 1 && spy.attempts[1] == 2 && spy.attempts[2] == 3 && spy.attempts[3] == 4, "policy attempt numbers = %v, want 1, 2, 3, 4 across both failure kinds", spy.attempts)
+	var status *model.HTTPStatusError
+	var streamErr *agent.StreamError
+	testassert.Require(t, errors.As(spy.seen[0], &status) && errors.As(spy.seen[1], &streamErr) && errors.As(spy.seen[2], &status) && errors.As(spy.seen[3], &streamErr), "classified failures = %v, want the alternating status and broken-stream errors", spy.seen)
+	requireIntentAndResultCounts(t, h, store, sessionID, false)
+	graph, gerr := validateFixture(t, store, sessionID)
+	testassert.NoError(t, gerr)
+	testassert.Require(t, settlementEntryOf(t, graph).Status == OperationFailure, "settlement = %+v, want the failure terminal", settlementEntryOf(t, graph))
+}
+
 // TestModelEffectInvalidAttemptOutcomeSettlesBoundaryFailure proves the
 // physical-request boundary: a callback returning both a stream and an error
 // closes the supplied stream exactly once and settles the boundary failure,

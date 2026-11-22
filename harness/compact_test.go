@@ -375,6 +375,42 @@ func TestCompactModelEffectSettlements(t *testing.T) {
 		testassert.Require(t, usageTotalsEqual(graph.Session.State.Usage, want), "session usage = %+v, want both summary attempts counted", graph.Session.State.Usage)
 	})
 
+	t.Run("boundary failure keeps an accepted attempt's usage", func(t *testing.T) {
+		calls := 0
+		compact := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+			calls++
+			if calls == 1 {
+				return failStream(errors.New("provider failure"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7})), nil
+			}
+			return nil, nil
+		}
+		_, store, _, sessionID, err := run(t, compact, (&retrySpy{limit: 1}).retry, nil)
+		testassert.Require(t, err != nil && strings.Contains(err.Error(), "neither exactly one stream nor one error"), "run = %v, want the invalid second attempt's boundary failure", err)
+		testassert.Equal(t, calls, 2)
+		graph, gerr := validateFixture(t, store, sessionID)
+		testassert.NoError(t, gerr)
+		settlement := settlementEntryOfOperation(t, graph, "compact-1")
+		testassert.Require(t, settlement.Status == OperationFailure && len(settlement.Facts) == 1, "settlement = %+v, want the failure terminal with one request fact", settlement)
+		fact := settlement.Facts[0]
+		testassert.Require(t, fact.Usage != nil && *fact.Usage == (UsageCount{InputTokens: 5, OutputTokens: 7}), "fact usage = %+v, want the accepted attempt's report", fact.Usage)
+		testassert.Require(t, settlement.Model == nil && settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement model/usage/retry usage = %+v/%+v/%+v (unknown %v), want no model or usage on the settlement", settlement.Model, settlement.Usage, settlement.RetryUsage, settlement.RetryUsageUnknown)
+		want := UsageTotals{ByModel: []ModelUsage{{Model: compactRef, Usage: UsageCount{InputTokens: 5, OutputTokens: 7}}}}
+		testassert.Require(t, usageTotalsEqual(graph.Session.State.Usage, want), "session usage = %+v, want the accepted attempt's report", graph.Session.State.Usage)
+	})
+
+	t.Run("invalid first attempt leaves no usage", func(t *testing.T) {
+		compact := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+			return nil, nil
+		}
+		_, store, _, sessionID, err := run(t, compact, nil, nil)
+		testassert.Require(t, err != nil && strings.Contains(err.Error(), "neither exactly one stream nor one error"), "run = %v, want the physical-request boundary failure", err)
+		graph, gerr := validateFixture(t, store, sessionID)
+		testassert.NoError(t, gerr)
+		settlement := settlementEntryOfOperation(t, graph, "compact-1")
+		testassert.Require(t, len(settlement.Facts) == 1 && settlement.Facts[0].Usage == nil && settlement.Facts[0].RetryUsage == nil && !settlement.Facts[0].RetryUsageUnknown, "fact = %+v, want no usage without an accepted attempt", settlement.Facts[0])
+		testassert.Require(t, settlement.Usage == nil && settlement.RetryUsage == nil && !settlement.RetryUsageUnknown, "settlement usage/retry usage = %+v/%+v (unknown %v), want no usage", settlement.Usage, settlement.RetryUsage, settlement.RetryUsageUnknown)
+	})
+
 	t.Run("broken summary retried records both usages on the failure settlement", func(t *testing.T) {
 		calls := 0
 		compact := func(ctx context.Context, req model.Request, _ model.Extra) (model.Stream, error) {

@@ -701,15 +701,15 @@ func TestEntryPayloadOperationlessRules(t *testing.T) {
 	}
 }
 
-// TestRetryUsageUnknownMemberOnlyTrue proves the shared retried-attempt member
-// rule on a decoded record: retry_usage_unknown may only be present as true,
-// while an absent member leaves it unset.
-func TestRetryUsageUnknownMemberOnlyTrue(t *testing.T) {
+// TestRetryUsageUnknownMemberShapes proves the shared retried-attempt member
+// shapes on a decoded record: null and non-boolean retry_usage_unknown values
+// and a malformed retry_usage reject, and true decodes as the unknown marker
+// alone.
+func TestRetryUsageUnknownMemberShapes(t *testing.T) {
 	raw, err := encodeAssistantEntry(validAssistantEntry(testOpID))
 	testassert.NoError(t, err)
 	env := Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Sequence: 1, CommittedAt: testTime}
 	for name, payload := range map[string]json.RawMessage{
-		"false":     setKey(raw, "retry_usage_unknown", json.RawMessage(`false`)),
 		"null":      setKey(raw, "retry_usage_unknown", json.RawMessage(`null`)),
 		"non-bool":  setKey(raw, "retry_usage_unknown", json.RawMessage(`1`)),
 		"bad retry": setKey(raw, "retry_usage", json.RawMessage(`{"input_tokens":1}`)),

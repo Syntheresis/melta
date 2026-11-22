@@ -1978,7 +1978,7 @@ func decodeUsageCount(obj map[string]json.RawMessage) (UsageCount, error) {
 
 // decodeRetryUsage reads the optional retried-attempt usage members shared by
 // assistant entries, settlements and maintenance facts: a present retry_usage
-// object and a present retry_usage_unknown boolean, which may only be true.
+// object and a present retry_usage_unknown boolean.
 func decodeRetryUsage(obj map[string]json.RawMessage) (*UsageCount, bool, error) {
 	var retryUsage *UsageCount
 	if _, present := obj["retry_usage"]; present {
@@ -1992,16 +1992,9 @@ func decodeRetryUsage(obj map[string]json.RawMessage) (*UsageCount, bool, error)
 		}
 		retryUsage = &counts
 	}
-	var retryUsageUnknown bool
-	if _, present := obj["retry_usage_unknown"]; present {
-		value, err := boolMember(obj, "retry_usage_unknown", false)
-		if err != nil {
-			return nil, false, err
-		}
-		if !value {
-			return nil, false, errors.New("retry_usage_unknown may only be present as true")
-		}
-		retryUsageUnknown = true
+	retryUsageUnknown, err := boolMember(obj, "retry_usage_unknown", false)
+	if err != nil {
+		return nil, false, err
 	}
 	return retryUsage, retryUsageUnknown, nil
 }
