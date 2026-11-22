@@ -19,6 +19,7 @@ interface OperationContract {
   session_id: Mode;
   operation_id: Mode;
   call_id: Mode;
+  job_id: Mode;
   field: Mode;
   query: Mode;
   body: Mode;
@@ -26,7 +27,7 @@ interface OperationContract {
 }
 
 const contracts = metadata as Record<string, OperationContract>;
-const ENVELOPE_MEMBERS = ['session_id', 'operation_id', 'call_id', 'field', 'query', 'body'] as const;
+const ENVELOPE_MEMBERS = ['session_id', 'operation_id', 'call_id', 'job_id', 'field', 'query', 'body'] as const;
 
 // own reports one object's own-property membership: an inherited name such as
 // toString, constructor or __proto__ can never impersonate a declared
@@ -70,7 +71,7 @@ export function assertNativeInvocations(calls: ReadonlyArray<readonly unknown[]>
       if (value === null) {
         throw new Error(`native invocation ${operation}: envelope member ${name} must not be null`);
       }
-      if (name === 'session_id' || name === 'operation_id' || name === 'call_id' || name === 'field') {
+      if (name === 'session_id' || name === 'operation_id' || name === 'call_id' || name === 'job_id' || name === 'field') {
         if (typeof value !== 'string') {
           throw new Error(`native invocation ${operation}: envelope member ${name} must be a string`);
         }

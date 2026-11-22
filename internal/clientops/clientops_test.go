@@ -292,6 +292,12 @@ var dispatchCases = []dispatchCase{
 		method: "GET", path: "/v1/sessions/s1/operations/op-1/tool-calls/call-1/output",
 	},
 	{
+		name: "GetSessionJobOutput", operation: "GetSessionJobOutput",
+		params: `{"session_id":"s1","job_id":"job-1"}`,
+		status: 200, response: `{"output":"running job output"}`,
+		method: "GET", path: "/v1/sessions/s1/jobs/job-1/output",
+	},
+	{
 		name: "GetSessionCodeSnapshots", operation: "GetSessionCodeSnapshots",
 		params: `{"session_id":"s1"}`,
 		status: 200, response: `[]`,
@@ -541,6 +547,10 @@ func TestCallRejectsForbiddenEnvelope(t *testing.T) {
 		{"missing field", "ResetProviderField", `{"query":{"provider_id":"prov"}}`},
 		{"null field", "ResetProviderField", `{"field":null,"query":{"provider_id":"prov"}}`},
 		{"numeric field", "ResetProviderField", `{"field":5,"query":{"provider_id":"prov"}}`},
+		{"undeclared job_id", "GetHealth", `{"job_id":"job-1"}`},
+		{"missing job_id", "GetSessionJobOutput", `{"session_id":"s1"}`},
+		{"null job_id", "GetSessionJobOutput", `{"session_id":"s1","job_id":null}`},
+		{"numeric job_id", "GetSessionJobOutput", `{"session_id":"s1","job_id":5}`},
 		{"undeclared query", "GetHealth", `{"query":{}}`},
 		{"missing query", "ListSessions", `{}`},
 		{"null query", "ListSessions", `{"query":null}`},

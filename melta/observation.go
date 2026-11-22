@@ -527,6 +527,25 @@ func toolOutputChangedEvent(scope protocol.Scope, callID string) Event {
 	return event
 }
 
+// jobOutputChangedEvent builds one transient background job output hint: the
+// addressed job's output grew.
+func jobOutputChangedEvent(scope protocol.Scope) Event {
+	var event Event
+	_ = event.FromJobOutputChangedEvent(protocol.JobOutputChangedEvent{ // plain members; the marshal cannot fail
+		Kind:  protocol.JobOutputChanged,
+		Scope: scope,
+	})
+	return event
+}
+
+// publishJobOutputChanged publishes one job_output_changed notice for a
+// running background job on its job scope.
+func publishJobOutputChanged(obs *observation, workspace, sessionID, jobID string) {
+	obs.publish(func() []Event {
+		return []Event{jobOutputChangedEvent(jobEventScope(workspace, sessionID, jobID))}
+	})
+}
+
 // toolOutputIdentity addresses one foreground tool call's running output: the
 // Operation is part of the identity because call IDs are unique only within
 // an Operation.

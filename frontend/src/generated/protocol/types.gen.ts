@@ -179,7 +179,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '22';
+    protocol_version: '23';
 };
 
 /**
@@ -951,6 +951,11 @@ export type ToolOutputChangedEvent = {
     call_id: string;
 };
 
+export type JobOutputChangedEvent = {
+    kind: 'job_output_changed';
+    scope: Scope;
+};
+
 export type Event = ({
     kind: 'configuration_changed';
 } & ConfigurationChangedEvent) | ({
@@ -973,13 +978,17 @@ export type Event = ({
     kind: 'response_restarted';
 } & ResponseRestartedEvent) | ({
     kind: 'tool_output_changed';
-} & ToolOutputChangedEvent);
+} & ToolOutputChangedEvent) | ({
+    kind: 'job_output_changed';
+} & JobOutputChangedEvent);
 
 export type SessionId = string;
 
 export type OperationId = string;
 
 export type ToolCallId = string;
+
+export type JobId = string;
 
 export type WorkspaceQuery = string;
 
@@ -1475,6 +1484,34 @@ export type GetSessionToolOutputResponses = {
 };
 
 export type GetSessionToolOutputResponse = GetSessionToolOutputResponses[keyof GetSessionToolOutputResponses];
+
+export type GetSessionJobOutputData = {
+    body?: never;
+    path: {
+        id: string;
+        job_id: string;
+    };
+    query?: never;
+    url: '/v1/sessions/{id}/jobs/{job_id}/output';
+};
+
+export type GetSessionJobOutputErrors = {
+    /**
+     * One schema-defined typed error.
+     */
+    default: Error;
+};
+
+export type GetSessionJobOutputError = GetSessionJobOutputErrors[keyof GetSessionJobOutputErrors];
+
+export type GetSessionJobOutputResponses = {
+    /**
+     * One running background job's bounded current output.
+     */
+    200: CommandOutput;
+};
+
+export type GetSessionJobOutputResponse = GetSessionJobOutputResponses[keyof GetSessionJobOutputResponses];
 
 export type GetSessionCodeSnapshotsData = {
     body?: never;

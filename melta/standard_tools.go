@@ -345,11 +345,13 @@ func (t editTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall
 // conclusive simple commands into one command.run target per complete
 // segment, falls back to one complete target for everything else, and always
 // executes through the shell. background=true starts a job through the
-// background bridge and returns the retained immediate text; every start
-// failure renders through the one wrapper. Its own fields are the file-tool
-// state (for the spill directory and settings), the jobs service the
-// background start calls, and the live-output registry the foreground run
-// registers with.
+// background bridge, returns the retained immediate text, and names the job in
+// the result metadata; every start failure renders through the one wrapper. Its
+// own fields are the file-tool state (for the spill directory and settings), the
+// jobs service the background start calls, and the live-output registry that
+// tracks running foreground captures and publishes their `tool_output_changed`
+// notices; the background start publishes `job_output_changed` through the same
+// observation.
 type runCommandTool struct {
 	inst       *standardTools
 	jobs       jobs.Jobs
@@ -472,8 +474,9 @@ func commandEnvironmentFailure(callID string, cause error) harness.ToolOutcome {
 // reserves the identity, hands the spawn to the background bridge, resolves
 // the job's exact environment at the admitted Jobs start handoff, aborts the
 // reservation when the bridge or the start rejects, and returns the retained
-// immediate template on success. Every start failure — reserve, handoff, or
-// spawn — renders through the one legacy wrapper.
+// immediate template with the job ID in the result metadata on success. Every
+// start failure — reserve, handoff, or spawn — renders through the one legacy
+// wrapper.
 func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command string, timeoutSec int, tc ToolContext) harness.ToolOutcome {
 	if tc.SubprocessEnv == nil {
 		return commandEnvironmentFailure(callID, errNoSubprocessEnv)
@@ -503,18 +506,24 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 			OnExit: func(er jobs.ExitResult) {
 				_ = deliver(legacyCompletionText(er)) // terminal for the job's completion; the exit callback has nowhere to propagate
 			},
+			OnChange: func() {
+				publishJobOutputChanged(t.toolOutput.obs, tc.Workspace, sessionID, jobID)
+			},
 		})
 	})
 	if err != nil {
 		jobsInst.Abort(jobID) // idempotent: removes the reservation if it still exists
 		return backgroundStartOutcome(callID, err)
 	}
-	return harness.ToolOutcome{Result: model.ToolResult{
-		CallID: callID,
-		Status: model.ResultSuccess,
-		Content: fmt.Sprintf("Command running in the background with ID: `%s`. You will be notified when it finishes. If your next steps do not depend on its output, continue with them; otherwise use sleep to wait and process to read the output.\nRunning in the background: `%s`.",
-			jobID, strings.Join(jobsInst.Live(sessionID), ", ")),
-	}}
+	return harness.ToolOutcome{
+		Result: model.ToolResult{
+			CallID: callID,
+			Status: model.ResultSuccess,
+			Content: fmt.Sprintf("Command running in the background with ID: `%s`. You will be notified when it finishes. If your next steps do not depend on its output, continue with them; otherwise use sleep to wait and process to read the output.\nRunning in the background: `%s`.",
+				jobID, strings.Join(jobsInst.Live(sessionID), ", ")),
+		},
+		Metadata: json.RawMessage(fmt.Sprintf(`{"job_id":%q}`, jobID)),
+	}
 }
 
 // backgroundStartOutcome renders one background start failure through the

@@ -572,6 +572,17 @@ func (rt *protocolHandlers) GetSessionToolOutput(w http.ResponseWriter, r *http.
 	rt.writeJSON(w, http.StatusOK, &output)
 }
 
+// GetSessionJobOutput serves one running background job's bounded current
+// output under the owning Session's read authority.
+func (rt *protocolHandlers) GetSessionJobOutput(w http.ResponseWriter, r *http.Request, id protocol.SessionID, jobId protocol.JobID) {
+	output, err := rt.owner.GetSessionJobOutput(r.Context(), rt.server.caller, id, jobId)
+	if err != nil {
+		writeProtocolError(w, err)
+		return
+	}
+	rt.writeJSON(w, http.StatusOK, &output)
+}
+
 // GetSessionCodeSnapshots serves the per-Operation snapshot groups.
 func (rt *protocolHandlers) GetSessionCodeSnapshots(w http.ResponseWriter, r *http.Request, id protocol.SessionID) {
 	groups, err := rt.owner.ListSessionCodeSnapshots(r.Context(), rt.server.caller, id)

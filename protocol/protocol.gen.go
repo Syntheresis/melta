@@ -262,13 +262,13 @@ func (e ExtensionSuccessKind) Valid() bool {
 
 // Defines values for HealthProtocolVersion.
 const (
-	N22 HealthProtocolVersion = "22"
+	N23 HealthProtocolVersion = "23"
 )
 
 // Valid indicates whether the value is a known member of the HealthProtocolVersion enum.
 func (e HealthProtocolVersion) Valid() bool {
 	switch e {
-	case N22:
+	case N23:
 		return true
 	default:
 		return false
@@ -377,6 +377,21 @@ func (e InvocationScopePurpose) Valid() bool {
 	case Conversation:
 		return true
 	case Maintenance:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for JobOutputChangedEventKind.
+const (
+	JobOutputChanged JobOutputChangedEventKind = "job_output_changed"
+)
+
+// Valid indicates whether the value is a known member of the JobOutputChangedEventKind enum.
+func (e JobOutputChangedEventKind) Valid() bool {
+	switch e {
+	case JobOutputChanged:
 		return true
 	default:
 		return false
@@ -1436,6 +1451,17 @@ type InvocationScopePurpose string
 // JSONObject One validated JSON object of arbitrary members, carried with its raw values intact: no member's JSON kind is constrained.
 type JSONObject = map[string]json.RawMessage
 
+// JobOutputChangedEvent defines model for JobOutputChangedEvent.
+type JobOutputChangedEvent struct {
+	Kind JobOutputChangedEventKind `json:"kind"`
+
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: workspace carries workspace, session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	Scope Scope `json:"scope"`
+}
+
+// JobOutputChangedEventKind defines model for JobOutputChangedEvent.Kind.
+type JobOutputChangedEventKind string
+
 // JobScope defines model for JobScope.
 type JobScope struct {
 	JobId       string       `json:"job_id"`
@@ -2193,6 +2219,9 @@ type WorkspaceScope struct {
 
 // WorkspaceScopeKind defines model for WorkspaceScope.Kind.
 type WorkspaceScopeKind string
+
+// JobID defines model for JobID.
+type JobID = string
 
 // LifecycleQuery defines model for LifecycleQuery.
 type LifecycleQuery = SessionLifecycle
@@ -3036,6 +3065,32 @@ func (t *Event) MergeToolOutputChangedEvent(v ToolOutputChangedEvent) error {
 	return err
 }
 
+// AsJobOutputChangedEvent returns the union data inside the Event as a JobOutputChangedEvent
+func (t Event) AsJobOutputChangedEvent() (JobOutputChangedEvent, error) {
+	var body JobOutputChangedEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromJobOutputChangedEvent overwrites any union data inside the Event as the provided JobOutputChangedEvent
+func (t *Event) FromJobOutputChangedEvent(v JobOutputChangedEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeJobOutputChangedEvent performs a merge with any union data inside the Event, using the provided JobOutputChangedEvent
+func (t *Event) MergeJobOutputChangedEvent(v JobOutputChangedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 func (t Event) Discriminator() (string, error) {
 	var discriminator struct {
 		Discriminator string `json:"kind"`
@@ -3052,6 +3107,8 @@ func (t Event) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "configuration_changed":
 		return t.AsConfigurationChangedEvent()
+	case "job_output_changed":
+		return t.AsJobOutputChangedEvent()
 	case "reasoning_delta":
 		return t.AsReasoningDeltaEvent()
 	case "refusal_delta":
@@ -3637,6 +3694,9 @@ type ClientInterface interface {
 
 	// InterruptSession performs a POST /v1/sessions/{id}/interrupt (the `InterruptSession` operationId) request.
 	InterruptSession(ctx context.Context, id SessionID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetSessionJobOutput performs a GET /v1/sessions/{id}/jobs/{job_id}/output (the `GetSessionJobOutput` operationId) request.
+	GetSessionJobOutput(ctx context.Context, id SessionID, jobId JobID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// SetSessionModelWithBody performs a PUT /v1/sessions/{id}/model (the `SetSessionModel` operationId) request,
 	// with any type of body and a specified content type.
@@ -4327,6 +4387,19 @@ func (c *Client) SetSessionInputs(ctx context.Context, id SessionID, body SetSes
 // InterruptSession performs a POST /v1/sessions/{id}/interrupt (the `InterruptSession` operationId) request.
 func (c *Client) InterruptSession(ctx context.Context, id SessionID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewInterruptSessionRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetSessionJobOutput performs a GET /v1/sessions/{id}/jobs/{job_id}/output (the `GetSessionJobOutput` operationId) request.
+func (c *Client) GetSessionJobOutput(ctx context.Context, id SessionID, jobId JobID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetSessionJobOutputRequest(c.Server, id, jobId)
 	if err != nil {
 		return nil, err
 	}
@@ -6113,6 +6186,47 @@ func NewInterruptSessionRequest(server string, id SessionID) (*http.Request, err
 	return req, nil
 }
 
+// NewGetSessionJobOutputRequest constructs an http.Request for the GetSessionJobOutput method
+func NewGetSessionJobOutputRequest(server string, id SessionID, jobId JobID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "job_id", jobId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/sessions/%s/jobs/%s/output", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewSetSessionModelRequest calls the generic SetSessionModel builder with application/json body
 func NewSetSessionModelRequest(server string, id SessionID, body SetSessionModelJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -6788,6 +6902,11 @@ type ClientWithResponsesInterface interface {
 	//
 	// Returns a wrapper object for the known response body format(s).
 	InterruptSessionWithResponse(ctx context.Context, id SessionID, reqEditors ...RequestEditorFn) (*InterruptSessionResponse, error)
+
+	// GetSessionJobOutputWithResponse performs a GET /v1/sessions/{id}/jobs/{job_id}/output (the `GetSessionJobOutput` operationId) request.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	GetSessionJobOutputWithResponse(ctx context.Context, id SessionID, jobId JobID, reqEditors ...RequestEditorFn) (*GetSessionJobOutputResponse, error)
 
 	// SetSessionModelWithBodyWithResponse performs a PUT /v1/sessions/{id}/model (the `SetSessionModel` operationId) request,
 	// with any type of body and a specified content type.
@@ -8574,6 +8693,54 @@ func (r InterruptSessionResponse) ContentType() string {
 	return ""
 }
 
+type GetSessionJobOutputResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *CommandOutput
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetSessionJobOutputResponse) GetJSON200() *CommandOutput {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetSessionJobOutputResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetSessionJobOutputResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetSessionJobOutputResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetSessionJobOutputResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetSessionJobOutputResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type SetSessionModelResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -9573,6 +9740,17 @@ func (c *ClientWithResponses) InterruptSessionWithResponse(ctx context.Context, 
 		return nil, err
 	}
 	return ParseInterruptSessionResponse(rsp)
+}
+
+// GetSessionJobOutputWithResponse performs a GET /v1/sessions/{id}/jobs/{job_id}/output (the `GetSessionJobOutput` operationId) request.
+//
+// Returns a wrapper object for the known response body format(s).
+func (c *ClientWithResponses) GetSessionJobOutputWithResponse(ctx context.Context, id SessionID, jobId JobID, reqEditors ...RequestEditorFn) (*GetSessionJobOutputResponse, error) {
+	rsp, err := c.GetSessionJobOutput(ctx, id, jobId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetSessionJobOutputResponse(rsp)
 }
 
 // SetSessionModelWithBodyWithResponse performs a PUT /v1/sessions/{id}/model (the `SetSessionModel` operationId) request,
@@ -10909,6 +11087,39 @@ func ParseInterruptSessionResponse(rsp *http.Response) (*InterruptSessionRespons
 	return response, nil
 }
 
+// ParseGetSessionJobOutputResponse parses an HTTP response from a GetSessionJobOutputWithResponse call
+func ParseGetSessionJobOutputResponse(rsp *http.Response) (*GetSessionJobOutputResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetSessionJobOutputResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest CommandOutput
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseSetSessionModelResponse parses an HTTP response from a SetSessionModelWithResponse call
 func ParseSetSessionModelResponse(rsp *http.Response) (*SetSessionModelResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -11345,6 +11556,9 @@ type ServerInterface interface {
 
 	// (POST /v1/sessions/{id}/interrupt)
 	InterruptSession(w http.ResponseWriter, r *http.Request, id SessionID)
+
+	// (GET /v1/sessions/{id}/jobs/{job_id}/output)
+	GetSessionJobOutput(w http.ResponseWriter, r *http.Request, id SessionID, jobId JobID)
 
 	// (PUT /v1/sessions/{id}/model)
 	SetSessionModel(w http.ResponseWriter, r *http.Request, id SessionID)
@@ -12350,6 +12564,41 @@ func (siw *ServerInterfaceWrapper) InterruptSession(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
+// GetSessionJobOutput operation middleware
+func (siw *ServerInterfaceWrapper) GetSessionJobOutput(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id SessionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId JobID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", r.PathValue("job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSessionJobOutput(w, r, id, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // SetSessionModel operation middleware
 func (siw *ServerInterfaceWrapper) SetSessionModel(w http.ResponseWriter, r *http.Request) {
 
@@ -12739,6 +12988,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/history", wrapper.GetSessionHistory)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/operations/{operation_id}", wrapper.GetSessionOperation)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/operations/{operation_id}/tool-calls/{call_id}/output", wrapper.GetSessionToolOutput)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/jobs/{job_id}/output", wrapper.GetSessionJobOutput)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/code-snapshots", wrapper.GetSessionCodeSnapshots)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/sessions/{id}/revert-code", wrapper.RevertSessionCode)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/workspaces", wrapper.ListWorkspaces)

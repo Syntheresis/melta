@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Syntheresis/melta/internal/cmdoutput"
 	"github.com/Syntheresis/melta/internal/testassert"
 )
 
@@ -214,6 +215,90 @@ func TestStartReadKillListLiveRetainedTexts(t *testing.T) {
 	{
 		got := j.Live(sid)
 		testassert.Require(t, len(got) == 0, "Live = %v, want no jobs", got)
+	}
+}
+
+// TestPreviewTracksRunningOutputAndFollowsReadOwnership proves the bounded
+// live preview: empty before the first write (never the read placeholder),
+// growing while the job runs with the capture's change callback firing, and the
+// same unknown-ID error for every identity Read hides — reserved, foreign,
+// absent, removed, and a capture that is no longer open.
+func TestPreviewTracksRunningOutputAndFollowsReadOwnership(t *testing.T) {
+	j := openJobs(t, t.TempDir())
+	const sid = "session-preview"
+
+	changes := make(chan struct{}, 8)
+	runningID := reserveStart(t, j, StartRequest{
+		SessionID: sid, Command: "sleep 1; printf first; sleep 0.3; printf second; sleep 30", Env: os.Environ(),
+		OnChange: func() {
+			select {
+			case changes <- struct{}{}:
+			default:
+			}
+		},
+	})
+	{
+		preview, err := j.Preview(sid, runningID)
+		testassert.Require(t, err == nil && preview == "", "Preview before the first write = (%q, %v), want the empty text", preview, err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var seenFirst bool
+	var preview string
+	for {
+		value, err := j.Preview(sid, runningID)
+		testassert.Require(t, err == nil, "Preview while running = (%q, %v)", value, err)
+		preview = value
+		seenFirst = seenFirst || strings.Contains(value, "first")
+		if seenFirst && strings.Contains(value, "second") {
+			break
+		}
+		testassert.Require(t, time.Now().Before(deadline), "running job preview never grew (last %q)", preview)
+		time.Sleep(5 * time.Millisecond)
+	}
+	testassert.Require(t, preview == "firstsecond", "running job preview = %q, want the output so far", preview)
+	select {
+	case <-changes:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the job capture's change callback never ran")
+	}
+
+	reserved, err := j.Reserve()
+	testassert.NoError(t, err)
+	for _, row := range []struct {
+		name      string
+		sessionID string
+		jobID     string
+	}{
+		{"absent", sid, "deadbeef"},
+		{"reserved", sid, reserved},
+		{"foreign session", "other-session", runningID},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			_, err := j.Preview(row.sessionID, row.jobID)
+			testassert.Require(t, err != nil && err.Error() == unknownIDText(row.jobID), "Preview = %v, want %q", err, unknownIDText(row.jobID))
+		})
+	}
+
+	exit := make(chan ExitResult, 1)
+	shortID := reserveStart(t, j, StartRequest{
+		SessionID: sid, Command: "printf done", Env: os.Environ(),
+		OnExit: func(r ExitResult) { exit <- r },
+	})
+	waitExit(t, exit)
+	waitRemoved(t, j, shortID)
+	if _, err := j.Preview(sid, shortID); err == nil || err.Error() != unknownIDText(shortID) {
+		t.Fatalf("Preview after removal = %v, want %q", err, unknownIDText(shortID))
+	}
+
+	closed := cmdoutput.NewCapture(cmdoutput.Options{
+		Directory: t.TempDir(), SpillPrefix: "preview_", MaxBytes: 1024, MaxLineChars: 100,
+	})
+	closed.Close()
+	j.mu.Lock()
+	j.jobs["c105ed00"] = &jobRecord{id: "c105ed00", state: stateExited, sessionID: sid, capture: closed}
+	j.mu.Unlock()
+	if _, err := j.Preview(sid, "c105ed00"); err == nil || err.Error() != unknownIDText("c105ed00") {
+		t.Fatalf("Preview of a closed capture = %v, want %q", err, unknownIDText("c105ed00"))
 	}
 }
 

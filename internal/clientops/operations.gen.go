@@ -184,6 +184,16 @@ var operationDescriptors = map[string]descriptor{
 			return c.GetSessionHydration(ctx, pathValue)
 		},
 	},
+	"GetSessionJobOutput": {
+		session: memberRequired,
+		jobID:   memberRequired,
+		status:  200,
+		call: func(ctx context.Context, c protocol.ClientInterface, env envelope) (*http.Response, error) {
+			pathValue := protocol.SessionID(env.session)
+			jobValue := protocol.JobID(env.jobID)
+			return c.GetSessionJobOutput(ctx, pathValue, jobValue)
+		},
+	},
 	"GetSessionOperation": {
 		session:   memberRequired,
 		operation: memberRequired,

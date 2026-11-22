@@ -32,7 +32,7 @@ func (r *Melta) Health(ctx context.Context, c Caller) (protocol.Health, error) {
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return protocol.Health{}, err
 	}
-	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N22}, nil
+	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N23}, nil
 }
 
 // ListSessions projects Session headers under one required workspace and
@@ -916,6 +916,28 @@ func (r *Melta) GetSessionToolOutput(ctx context.Context, c Caller, sessionID, o
 		preview, ok := r.toolOutput.preview(sessionID, operationID, callID)
 		if !ok {
 			return fmt.Errorf("tool call %q in operation %q of session %q has no live output: %w", callID, operationID, sessionID, harness.ErrNotFound)
+		}
+		out.Output = preview
+		return nil
+	}); err != nil {
+		return protocol.CommandOutput{}, err
+	}
+	return out, nil
+}
+
+// GetSessionJobOutput reads one running background job's bounded current
+// output under the owning Session's read authority. Any identity without live
+// output — absent, removed, reserved, foreign or malformed — is the same
+// not-found class an unknown Operation reads as.
+func (r *Melta) GetSessionJobOutput(ctx context.Context, c Caller, sessionID, jobID string) (protocol.CommandOutput, error) {
+	var out protocol.CommandOutput
+	if err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
+		if err := r.authorize(c, ctx, h, CallerScope{Kind: CallerScopeSession, SessionID: sessionID}); err != nil {
+			return err
+		}
+		preview, err := r.jobs.Preview(sessionID, jobID)
+		if err != nil {
+			return fmt.Errorf("job %q of session %q has no live output: %w", jobID, sessionID, harness.ErrNotFound)
 		}
 		out.Output = preview
 		return nil

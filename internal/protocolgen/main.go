@@ -73,6 +73,8 @@ type operation struct {
 	operationType string
 	callID        string
 	callIDType    string
+	jobID         string
+	jobIDType     string
 	field         string
 	fieldType     string
 	query         string
@@ -397,10 +399,10 @@ func isDigits(value string) bool {
 // projectOperation derives one native operation's addressing from its SDK
 // combined path/query parameter records and its resolved request body. A
 // single referenced path-parameter schema binds the envelope's field member;
-// inline string parameters named id, operation_id and call_id bind session_id,
-// operation_id and call_id. Every path parameter must resolve to the string
-// type. All query parameters must be string or boolean primitives, and a body
-// must be exactly one required application/json object.
+// inline string parameters named id, operation_id, call_id and job_id bind
+// session_id, operation_id, call_id and job_id. Every path parameter must
+// resolve to the string type. All query parameters must be string or boolean
+// primitives, and a body must be exactly one required application/json object.
 func projectOperation(definition codegen.OperationDefinition, name string, status int) (operation, error) {
 	op := operation{
 		id:        name,
@@ -409,6 +411,7 @@ func projectOperation(definition codegen.OperationDefinition, name string, statu
 		session:   modeForbidden,
 		operation: modeForbidden,
 		callID:    modeForbidden,
+		jobID:     modeForbidden,
 		field:     modeForbidden,
 		query:     modeForbidden,
 		body:      modeForbidden,
@@ -439,6 +442,9 @@ func projectOperation(definition codegen.OperationDefinition, name string, statu
 		case "call_id":
 			op.callID = modeRequired
 			op.callIDType = emitted
+		case "job_id":
+			op.jobID = modeRequired
+			op.jobIDType = emitted
 		default:
 			if len(definition.PathParams) == 1 && parameter.Spec != nil && parameter.Spec.Schema != nil && parameter.Spec.Schema.Ref != "" {
 				op.field = modeRequired
@@ -547,6 +553,9 @@ var operationDescriptors = map[string]descriptor{
 {{- if .CallID}}
 		callID: memberRequired,
 {{- end}}
+{{- if .JobID}}
+		jobID: memberRequired,
+{{- end}}
 {{- if .Field}}
 		field: memberRequired,
 {{- end}}
@@ -566,6 +575,9 @@ var operationDescriptors = map[string]descriptor{
 {{- end}}
 {{- if .CallID}}
 			callValue := {{.CallIDType}}(env.callID)
+{{- end}}
+{{- if .JobID}}
+			jobValue := {{.JobIDType}}(env.jobID)
 {{- end}}
 {{- if .Field}}
 			pathValue := {{.FieldType}}(env.field)
@@ -600,6 +612,8 @@ type armView struct {
 	OperationType string
 	CallID        bool
 	CallIDType    string
+	JobID         bool
+	JobIDType     string
 	Field         bool
 	FieldType     string
 	Query         bool
@@ -630,6 +644,8 @@ func renderSource(operations []operation) ([]byte, error) {
 			OperationType: op.operationType,
 			CallID:        op.callID != modeForbidden,
 			CallIDType:    op.callIDType,
+			JobID:         op.jobID != modeForbidden,
+			JobIDType:     op.jobIDType,
 			Field:         op.field != modeForbidden,
 			FieldType:     op.fieldType,
 			Query:         op.query != modeForbidden,
@@ -682,6 +698,9 @@ func callExpression(op operation) string {
 	if op.callID != modeForbidden {
 		arguments = append(arguments, "callValue")
 	}
+	if op.jobID != modeForbidden {
+		arguments = append(arguments, "jobValue")
+	}
 	if op.query != modeForbidden {
 		arguments = append(arguments, "&query")
 	}
@@ -724,6 +743,7 @@ func renderContract(operations []operation) ([]byte, error) {
 		entry := map[string]any{
 			"session_id":    op.session,
 			"call_id":       op.callID,
+			"job_id":        op.jobID,
 			"field":         op.field,
 			"query":         op.query,
 			"body":          op.body,

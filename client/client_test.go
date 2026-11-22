@@ -29,7 +29,7 @@ const (
 	testCredential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	// testVersion is the current wire identity every compatible fixture
 	// speaks; the incompatible rows keep the literal old "1".
-	testVersion = string(protocol.N22)
+	testVersion = string(protocol.N23)
 )
 
 // recordContent builds one private four-field discovery document.
@@ -459,14 +459,18 @@ func TestEventsFrames(t *testing.T) {
 		testassert.NoError(t, outputChanged.FromToolOutputChangedEvent(protocol.ToolOutputChangedEvent{
 			Kind: protocol.ToolOutputChanged, Scope: operationEventScope(), CallId: "call-1",
 		}))
-		frames := notificationFrame(t, delta) + notificationFrame(t, reasoning) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) + notificationFrame(t, restarted) + notificationFrame(t, outputChanged)
+		var jobOutputChanged protocol.Event
+		testassert.NoError(t, jobOutputChanged.FromJobOutputChangedEvent(protocol.JobOutputChangedEvent{
+			Kind: protocol.JobOutputChanged, Scope: jobEventScope(),
+		}))
+		frames := notificationFrame(t, delta) + notificationFrame(t, reasoning) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) + notificationFrame(t, restarted) + notificationFrame(t, outputChanged) + notificationFrame(t, jobOutputChanged)
 		server := newFixture(t, jsonHealth(testInstance, testVersion), writeFrames(frames))
 		c := connectFixture(t, writeDiscovery(t, server.URL, testInstance, testVersion, testCredential))
 		events, errs := c.Events(context.Background())
 		delivered, err := drainEvents(events, errs)
 		testassert.Require(t, errors.Is(err, client.ErrResyncRequired), "disconnect error = %v, want ErrResyncRequired", err)
-		testassert.Equal(t, len(delivered), 7)
-		for i, want := range []string{"text_delta", "reasoning_delta", "refusal_delta", "tool_started", "tool_finished", "response_restarted", "tool_output_changed"} {
+		testassert.Equal(t, len(delivered), 8)
+		for i, want := range []string{"text_delta", "reasoning_delta", "refusal_delta", "tool_started", "tool_finished", "response_restarted", "tool_output_changed", "job_output_changed"} {
 			{
 				kind, _ := delivered[i].Discriminator()
 				testassert.Require(t, kind == want, "event %d kind = %q, want %q", i, kind, want)
@@ -480,6 +484,10 @@ func TestEventsFrames(t *testing.T) {
 		testassert.Require(t, err == nil && finishedBody.Evidence != nil && *finishedBody.Evidence == protocol.Unknown, "delivered tool finished = (%+v, %v), want its unknown evidence carried through", finishedBody, err)
 		outputBody, err := delivered[6].AsToolOutputChangedEvent()
 		testassert.Require(t, err == nil && outputBody.CallId == "call-1", "delivered tool output change = (%+v, %v), want its call identity", outputBody, err)
+		jobOutputBody, err := delivered[7].AsJobOutputChangedEvent()
+		testassert.Require(t, err == nil, "delivered job output change = (%+v, %v)", jobOutputBody, err)
+		jobScope, err := jobOutputBody.Scope.AsJobScope()
+		testassert.Require(t, err == nil && jobScope.Kind == protocol.JobScopeKindJob && jobScope.JobId == "job-1", "delivered job output change scope = (%+v, %v), want its job identity", jobScope, err)
 	})
 
 	// Every non-global scope kind delivers through its real producer shape:
@@ -549,6 +557,10 @@ func TestEventsFrames(t *testing.T) {
 		{"tool_output_changed missing call_id", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"}}`)},
 		{"tool_output_changed empty call_id", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":""}`)},
 		{"tool_output_changed unknown member", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":"call-1","extra":true}`)},
+		{"job_output_changed without scope", rawNotification(`{"kind":"job_output_changed"}`)},
+		{"job_output_changed unknown member", rawNotification(`{"kind":"job_output_changed","scope":{"kind":"job","session_id":"` + strings.Repeat("a", 32) + `","job_id":"job-1"},"extra":true}`)},
+		{"job_output_changed with an operation scope", rawNotification(fmt.Sprintf(`{"kind":"job_output_changed","scope":{"kind":"operation","session_id":%q,"operation_id":"op-1"}}`, testInstance))},
+		{"job_output_changed job scope without the job identity", rawNotification(fmt.Sprintf(`{"kind":"job_output_changed","scope":{"kind":"job","session_id":%q}}`, testInstance))},
 		{"wrong event name", "event: other\ndata: {}\n\n"},
 		{"unexpected stream field", "id: 7\nevent: notification\ndata: {}\n\n"},
 		{"unknown stream line", "garbage\n\n"},
