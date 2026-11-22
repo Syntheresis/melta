@@ -71,10 +71,6 @@ type operation struct {
 	operation     string
 	operationName string
 	operationType string
-	callID        string
-	callIDType    string
-	jobID         string
-	jobIDType     string
 	field         string
 	fieldType     string
 	query         string
@@ -398,11 +394,10 @@ func isDigits(value string) bool {
 
 // projectOperation derives one native operation's addressing from its SDK
 // combined path/query parameter records and its resolved request body. A
-// single referenced path-parameter schema binds the envelope's field member;
-// inline string parameters named id, operation_id, call_id and job_id bind
-// session_id, operation_id, call_id and job_id. Every path parameter must
-// resolve to the string type. All query parameters must be string or boolean
-// primitives, and a body must be exactly one required application/json object.
+// referenced path-parameter schema binds the envelope's field member; an
+// inline string parameter named id binds session_id. Both must resolve to the
+// string type. All query parameters must be string or boolean primitives, and
+// a body must be exactly one required application/json object.
 func projectOperation(definition codegen.OperationDefinition, name string, status int) (operation, error) {
 	op := operation{
 		id:        name,
@@ -410,8 +405,6 @@ func projectOperation(definition codegen.OperationDefinition, name string, statu
 		status:    status,
 		session:   modeForbidden,
 		operation: modeForbidden,
-		callID:    modeForbidden,
-		jobID:     modeForbidden,
 		field:     modeForbidden,
 		query:     modeForbidden,
 		body:      modeForbidden,
@@ -422,7 +415,10 @@ func projectOperation(definition codegen.OperationDefinition, name string, statu
 	if len(definition.CookieParams) != 0 {
 		return operation{}, fmt.Errorf("declares %d cookie parameters, want none", len(definition.CookieParams))
 	}
-	for _, parameter := range definition.PathParams {
+	switch len(definition.PathParams) {
+	case 0:
+	case 1:
+		parameter := definition.PathParams[0]
 		schema := parameter.Schema.OAPISchema
 		if schema == nil || schema.Type == nil || !schema.Type.Is("string") {
 			return operation{}, fmt.Errorf("path parameter %q is not the string type", parameter.ParamName)
@@ -431,28 +427,39 @@ func projectOperation(definition codegen.OperationDefinition, name string, statu
 		if err != nil {
 			return operation{}, fmt.Errorf("path parameter %q: %w", parameter.ParamName, err)
 		}
-		switch parameter.ParamName {
-		case "id":
+		if parameter.Spec != nil && parameter.Spec.Schema != nil && parameter.Spec.Schema.Ref != "" {
+			op.field = modeRequired
+			op.fieldType = emitted
+		} else if parameter.ParamName == "id" {
 			op.session = modeRequired
 			op.sessionType = emitted
-		case "operation_id":
-			op.operation = modeRequired
-			op.operationName = parameter.ParamName
-			op.operationType = emitted
-		case "call_id":
-			op.callID = modeRequired
-			op.callIDType = emitted
-		case "job_id":
-			op.jobID = modeRequired
-			op.jobIDType = emitted
-		default:
-			if len(definition.PathParams) == 1 && parameter.Spec != nil && parameter.Spec.Schema != nil && parameter.Spec.Schema.Ref != "" {
-				op.field = modeRequired
-				op.fieldType = emitted
-				continue
-			}
+		} else {
 			return operation{}, fmt.Errorf("path parameter %q has no supported addressing", parameter.ParamName)
 		}
+	case 2:
+		for _, parameter := range definition.PathParams {
+			schema := parameter.Schema.OAPISchema
+			if schema == nil || schema.Type == nil || !schema.Type.Is("string") {
+				return operation{}, fmt.Errorf("path parameter %q is not the string type", parameter.ParamName)
+			}
+			emitted, err := pathType(parameter.Schema.TypeDecl())
+			if err != nil {
+				return operation{}, fmt.Errorf("path parameter %q: %w", parameter.ParamName, err)
+			}
+			switch parameter.ParamName {
+			case "id":
+				op.session = modeRequired
+				op.sessionType = emitted
+			case "operation_id":
+				op.operation = modeRequired
+				op.operationName = parameter.ParamName
+				op.operationType = emitted
+			default:
+				return operation{}, fmt.Errorf("path parameter %q has no supported addressing", parameter.ParamName)
+			}
+		}
+	default:
+		return operation{}, fmt.Errorf("declares %d path parameters, want at most two", len(definition.PathParams))
 	}
 	for _, parameter := range definition.QueryParams {
 		schema := parameter.Schema.OAPISchema
@@ -550,12 +557,6 @@ var operationDescriptors = map[string]descriptor{
 {{- if .Operation}}
 		operation: memberRequired,
 {{- end}}
-{{- if .CallID}}
-		callID: memberRequired,
-{{- end}}
-{{- if .JobID}}
-		jobID: memberRequired,
-{{- end}}
 {{- if .Field}}
 		field: memberRequired,
 {{- end}}
@@ -572,12 +573,6 @@ var operationDescriptors = map[string]descriptor{
 {{- end}}
 {{- if .Operation}}
 			operationValue := {{.OperationType}}(env.operation)
-{{- end}}
-{{- if .CallID}}
-			callValue := {{.CallIDType}}(env.callID)
-{{- end}}
-{{- if .JobID}}
-			jobValue := {{.JobIDType}}(env.jobID)
 {{- end}}
 {{- if .Field}}
 			pathValue := {{.FieldType}}(env.field)
@@ -610,10 +605,6 @@ type armView struct {
 	SessionType   string
 	Operation     bool
 	OperationType string
-	CallID        bool
-	CallIDType    string
-	JobID         bool
-	JobIDType     string
 	Field         bool
 	FieldType     string
 	Query         bool
@@ -642,10 +633,6 @@ func renderSource(operations []operation) ([]byte, error) {
 			SessionType:   op.sessionType,
 			Operation:     op.operation != modeForbidden,
 			OperationType: op.operationType,
-			CallID:        op.callID != modeForbidden,
-			CallIDType:    op.callIDType,
-			JobID:         op.jobID != modeForbidden,
-			JobIDType:     op.jobIDType,
 			Field:         op.field != modeForbidden,
 			FieldType:     op.fieldType,
 			Query:         op.query != modeForbidden,
@@ -695,12 +682,6 @@ func callExpression(op operation) string {
 	if op.operation != modeForbidden {
 		arguments = append(arguments, "operationValue")
 	}
-	if op.callID != modeForbidden {
-		arguments = append(arguments, "callValue")
-	}
-	if op.jobID != modeForbidden {
-		arguments = append(arguments, "jobValue")
-	}
 	if op.query != modeForbidden {
 		arguments = append(arguments, "&query")
 	}
@@ -742,8 +723,6 @@ func renderContract(operations []operation) ([]byte, error) {
 		}
 		entry := map[string]any{
 			"session_id":    op.session,
-			"call_id":       op.callID,
-			"job_id":        op.jobID,
 			"field":         op.field,
 			"query":         op.query,
 			"body":          op.body,

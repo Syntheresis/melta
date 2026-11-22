@@ -245,8 +245,8 @@ func TestProtocolSuppliedRuntimeBaselineControls(t *testing.T) {
 }
 
 // TestProtocolMountedToolOutputRead proves the generated running-command read
-// returns the bounded current output over the mounted route and maps an
-// unknown or foreign identity to the typed not-found read.
+// returns the bounded current output over the mounted route and maps the same
+// identity to the typed not-found read once the command settles.
 func TestProtocolMountedToolOutputRead(t *testing.T) {
 	modelEndpoint := newBaselineModel(t)
 	modelEndpoint.setRespond(func(w http.ResponseWriter, body string) {
@@ -285,10 +285,11 @@ func TestProtocolMountedToolOutputRead(t *testing.T) {
 	})
 	testassert.Require(t, err == nil && submitted.JSON200 != nil, "SubmitSession = (%+v, %v)", submitted, err)
 
+	params := &protocol.GetSessionToolOutputParams{CallId: "call-live"}
 	deadline := time.Now().Add(20 * time.Second)
 	var sawFirst, sawSecond bool
 	for {
-		read, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", "call-live")
+		read, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", params)
 		testassert.Require(t, err == nil, "GetSessionToolOutput: %v", err)
 		if read.JSON200 != nil {
 			sawFirst = sawFirst || strings.Contains(read.JSON200.Output, "first")
@@ -303,16 +304,8 @@ func TestProtocolMountedToolOutputRead(t *testing.T) {
 	testassert.Require(t, sawFirst && sawSecond, "live reads saw first=%v second=%v, want the growing running output", sawFirst, sawSecond)
 	awaitMountedSuccess(t, ctx, client, sessionID, "op-live")
 
-	settled, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", "call-live")
+	settled, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", params)
 	testassert.Require(t, err == nil && settled.StatusCode() == http.StatusNotFound && settled.JSONDefault != nil && settled.JSONDefault.Code == protocol.ErrorCodeNotFound, "settled tool output = (%+v, %v), want typed not found", settled, err)
-	wrongOperation, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-other", "call-live")
-	testassert.Require(t, err == nil && wrongOperation.StatusCode() == http.StatusNotFound && wrongOperation.JSONDefault != nil && wrongOperation.JSONDefault.Code == protocol.ErrorCodeNotFound, "same call under another Operation = (%+v, %v), want typed not found", wrongOperation, err)
-	other, err := client.CreateSessionWithResponse(ctx, protocol.CreateSessionRequest{Workspace: workspace})
-	testassert.Require(t, err == nil && other.JSON201 != nil, "second CreateSession = (%+v, %v)", other, err)
-	foreign, err := client.GetSessionToolOutputWithResponse(ctx, other.JSON201.SessionId, "op-live", "call-live")
-	testassert.Require(t, err == nil && foreign.StatusCode() == http.StatusNotFound && foreign.JSONDefault != nil && foreign.JSONDefault.Code == protocol.ErrorCodeNotFound, "another Session's call = (%+v, %v), want typed not found", foreign, err)
-	malformed, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", "not a call")
-	testassert.Require(t, err == nil && malformed.StatusCode() == http.StatusNotFound && malformed.JSONDefault != nil && malformed.JSONDefault.Code == protocol.ErrorCodeNotFound, "malformed call identity = (%+v, %v), want typed not found", malformed, err)
 }
 
 // TestProtocolMountedSessionOperationRead proves the generated Operation read

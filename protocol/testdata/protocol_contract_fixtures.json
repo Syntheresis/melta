@@ -676,33 +676,6 @@
    ]
   },
   {
-   "schema": "JobOutputChangedEvent",
-   "accept": [
-    {
-     "name": "progress",
-     "json": "{\"kind\":\"job_output_changed\",\"scope\":{\"kind\":\"job\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"}}"
-    }
-   ],
-   "reject": [
-    {
-     "name": "duplicate-top-level-instance-id",
-     "json": "{\"kind\":\"job_output_changed\",\"scope\":{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"},\"instance_id\":\"0123456789abcdef0123456789abcdef\"}"
-    },
-    {
-     "name": "missing-job-id",
-     "json": "{\"kind\":\"job_output_changed\",\"scope\":{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"}}"
-    },
-    {
-     "name": "wrong-scope-kind",
-     "json": "{\"kind\":\"job_output_changed\",\"scope\":{\"kind\":\"galaxy\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"}}"
-    },
-    {
-     "name": "unknown-member",
-     "json": "{\"kind\":\"job_output_changed\",\"scope\":{\"kind\":\"runtime\"},\"extra\":true}"
-    }
-   ]
-  },
-  {
    "schema": "Event",
    "accept": [
     {
@@ -748,10 +721,6 @@
     {
      "name": "ToolOutputChangedEvent",
      "json": "{\"kind\":\"tool_output_changed\",\"scope\":{\"kind\":\"runtime\"},\"call_id\":\"fixture\"}"
-    },
-    {
-     "name": "JobOutputChangedEvent",
-     "json": "{\"kind\":\"job_output_changed\",\"scope\":{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"fixture\"}}"
     },
     {
      "name": "scope-closed",
@@ -809,7 +778,7 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"23\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"24\"}"
     }
    ],
    "reject": [
@@ -819,20 +788,20 @@
     },
     {
      "name": "previous-version",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"22\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"23\"}"
     },
     {
      "name": "bad-instance-pattern",
-     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"23\"}",
+     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"24\"}",
      "typescript": false
     },
     {
      "name": "missing-instance",
-     "json": "{\"protocol_version\":\"23\"}"
+     "json": "{\"protocol_version\":\"24\"}"
     },
     {
      "name": "unknown-member",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"23\",\"extra\":true}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"24\",\"extra\":true}"
     }
    ]
   },
@@ -2730,17 +2699,7 @@
   {
    "operation_id": "GetSessionToolOutput",
    "method": "get",
-   "path": "/v1/sessions/{id}/operations/{operation_id}/tool-calls/{call_id}/output",
-   "request": null,
-   "responses": {
-    "200": "CommandOutput",
-    "default": "Error"
-   }
-  },
-  {
-   "operation_id": "GetSessionJobOutput",
-   "method": "get",
-   "path": "/v1/sessions/{id}/jobs/{job_id}/output",
+   "path": "/v1/sessions/{id}/operations/{operation_id}/output",
    "request": null,
    "responses": {
     "200": "CommandOutput",

@@ -53,9 +53,7 @@ func (s *stubStopper) Start(jobs.StartRequest) error {
 func (s *stubStopper) Read(string, string) (string, error) {
 	return "", errors.New("stub jobs service reads nothing")
 }
-func (s *stubStopper) Preview(string, string) (string, error) {
-	return "", errors.New("stub jobs service previews nothing")
-}
+func (s *stubStopper) Preview(string, string) (string, bool) { return "", false }
 func (s *stubStopper) Kill(string, string) error {
 	return errors.New("stub jobs service kills nothing")
 }

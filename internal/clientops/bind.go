@@ -33,8 +33,6 @@ func invalidParams(format string, args ...any) error {
 type descriptor struct {
 	session   memberRule
 	operation memberRule
-	callID    memberRule
-	jobID     memberRule
 	field     memberRule
 	query     memberRule
 	body      memberRule
@@ -52,7 +50,7 @@ func invokeGenerated(ctx context.Context, c protocol.ClientInterface, operation 
 	if !ok {
 		return nil, 0, invalidParams("unknown operation %q", operation)
 	}
-	env, err := bindEnvelope(params, declared.session, declared.operation, declared.callID, declared.jobID, declared.field, declared.query, declared.body)
+	env, err := bindEnvelope(params, declared.session, declared.operation, declared.field, declared.query, declared.body)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -77,8 +75,6 @@ func OperationNames() []string {
 type envelope struct {
 	session   string
 	operation string
-	callID    string
-	jobID     string
 	field     string
 	query     json.RawMessage
 	body      json.RawMessage
@@ -99,8 +95,6 @@ const (
 type envelopeDoc struct {
 	SessionID   json.RawMessage `json:"session_id"`
 	OperationID json.RawMessage `json:"operation_id"`
-	CallID      json.RawMessage `json:"call_id"`
-	JobID       json.RawMessage `json:"job_id"`
 	Field       json.RawMessage `json:"field"`
 	Query       json.RawMessage `json:"query"`
 	Body        json.RawMessage `json:"body"`
@@ -112,7 +106,7 @@ type envelopeDoc struct {
 // are absent or present and non-null, and members the operation does not
 // declare must be absent. Missing params is the empty envelope; a supplied
 // null is invalid params like every other non-object form.
-func bindEnvelope(params json.RawMessage, session, operation, callID, jobID, field, query, body memberRule) (envelope, error) {
+func bindEnvelope(params json.RawMessage, session, operation, field, query, body memberRule) (envelope, error) {
 	if len(params) == 0 {
 		params = []byte("{}")
 	}
@@ -146,24 +140,6 @@ func bindEnvelope(params json.RawMessage, session, operation, callID, jobID, fie
 	if rawOperation != nil {
 		if err := json.Unmarshal(rawOperation, &env.operation); err != nil {
 			return envelope{}, invalidParams("operation_id: %v", err)
-		}
-	}
-	rawCallID, err := takeMember(doc.CallID, "call_id", callID)
-	if err != nil {
-		return envelope{}, err
-	}
-	if rawCallID != nil {
-		if err := json.Unmarshal(rawCallID, &env.callID); err != nil {
-			return envelope{}, invalidParams("call_id: %v", err)
-		}
-	}
-	rawJobID, err := takeMember(doc.JobID, "job_id", jobID)
-	if err != nil {
-		return envelope{}, err
-	}
-	if rawJobID != nil {
-		if err := json.Unmarshal(rawJobID, &env.jobID); err != nil {
-			return envelope{}, invalidParams("job_id: %v", err)
 		}
 	}
 	rawField, err := takeMember(doc.Field, "field", field)

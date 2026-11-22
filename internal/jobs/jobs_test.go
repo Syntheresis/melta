@@ -220,9 +220,9 @@ func TestStartReadKillListLiveRetainedTexts(t *testing.T) {
 
 // TestPreviewTracksRunningOutputAndFollowsReadOwnership proves the bounded
 // live preview: empty before the first write (never the read placeholder),
-// growing while the job runs with the capture's change callback firing, and the
-// same unknown-ID error for every identity Read hides — reserved, foreign,
-// absent, removed, and a capture that is no longer open.
+// growing while the job runs with the capture's change callback firing, and
+// absent for every identity Read hides — reserved, foreign, absent, removed —
+// and for a capture that is no longer open.
 func TestPreviewTracksRunningOutputAndFollowsReadOwnership(t *testing.T) {
 	j := openJobs(t, t.TempDir())
 	const sid = "session-preview"
@@ -238,15 +238,15 @@ func TestPreviewTracksRunningOutputAndFollowsReadOwnership(t *testing.T) {
 		},
 	})
 	{
-		preview, err := j.Preview(sid, runningID)
-		testassert.Require(t, err == nil && preview == "", "Preview before the first write = (%q, %v), want the empty text", preview, err)
+		preview, ok := j.Preview(sid, runningID)
+		testassert.Require(t, ok && preview == "", "Preview before the first write = (%q, %v), want the empty text", preview, ok)
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	var seenFirst bool
 	var preview string
 	for {
-		value, err := j.Preview(sid, runningID)
-		testassert.Require(t, err == nil, "Preview while running = (%q, %v)", value, err)
+		value, ok := j.Preview(sid, runningID)
+		testassert.Require(t, ok, "Preview while running = (%q, %v)", value, ok)
 		preview = value
 		seenFirst = seenFirst || strings.Contains(value, "first")
 		if seenFirst && strings.Contains(value, "second") {
@@ -274,8 +274,8 @@ func TestPreviewTracksRunningOutputAndFollowsReadOwnership(t *testing.T) {
 		{"foreign session", "other-session", runningID},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			_, err := j.Preview(row.sessionID, row.jobID)
-			testassert.Require(t, err != nil && err.Error() == unknownIDText(row.jobID), "Preview = %v, want %q", err, unknownIDText(row.jobID))
+			_, ok := j.Preview(row.sessionID, row.jobID)
+			testassert.Require(t, !ok, "Preview = present, want absent")
 		})
 	}
 
@@ -286,8 +286,8 @@ func TestPreviewTracksRunningOutputAndFollowsReadOwnership(t *testing.T) {
 	})
 	waitExit(t, exit)
 	waitRemoved(t, j, shortID)
-	if _, err := j.Preview(sid, shortID); err == nil || err.Error() != unknownIDText(shortID) {
-		t.Fatalf("Preview after removal = %v, want %q", err, unknownIDText(shortID))
+	if _, ok := j.Preview(sid, shortID); ok {
+		t.Fatal("Preview after removal = present, want absent")
 	}
 
 	closed := cmdoutput.NewCapture(cmdoutput.Options{
@@ -297,8 +297,8 @@ func TestPreviewTracksRunningOutputAndFollowsReadOwnership(t *testing.T) {
 	j.mu.Lock()
 	j.jobs["c105ed00"] = &jobRecord{id: "c105ed00", state: stateExited, sessionID: sid, capture: closed}
 	j.mu.Unlock()
-	if _, err := j.Preview(sid, "c105ed00"); err == nil || err.Error() != unknownIDText("c105ed00") {
-		t.Fatalf("Preview of a closed capture = %v, want %q", err, unknownIDText("c105ed00"))
+	if _, ok := j.Preview(sid, "c105ed00"); ok {
+		t.Fatal("Preview of a closed capture = present, want absent")
 	}
 }
 

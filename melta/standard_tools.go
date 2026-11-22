@@ -346,12 +346,11 @@ func (t editTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall
 // segment, falls back to one complete target for everything else, and always
 // executes through the shell. background=true starts a job through the
 // background bridge, returns the retained immediate text, and names the job in
-// the result metadata; every start failure renders through the one wrapper. Its
+// the result content; every start failure renders through the one wrapper. Its
 // own fields are the file-tool state (for the spill directory and settings), the
 // jobs service the background start calls, and the live-output registry that
-// tracks running foreground captures and publishes their `tool_output_changed`
-// notices; the background start publishes `job_output_changed` through the same
-// observation.
+// tracks the starting call's output preview and publishes its
+// `tool_output_changed` notices for both foreground and background commands.
 type runCommandTool struct {
 	inst       *standardTools
 	jobs       jobs.Jobs
@@ -471,12 +470,14 @@ func commandEnvironmentFailure(callID string, cause error) harness.ToolOutcome {
 
 // backgroundOutcome starts one background job for the prepared call: it
 // refuses a missing subprocess-environment producer before any reservation,
-// reserves the identity, hands the spawn to the background bridge, resolves
-// the job's exact environment at the admitted Jobs start handoff, aborts the
-// reservation when the bridge or the start rejects, and returns the retained
-// immediate template with the job ID in the result metadata on success. Every
-// start failure — reserve, handoff, or spawn — renders through the one legacy
-// wrapper.
+// reserves the identity, registers the starting call's live output preview,
+// hands the spawn to the background bridge, resolves the job's exact
+// environment at the admitted Jobs start handoff, aborts the reservation and
+// removes the preview when the bridge or the start rejects, and returns the
+// retained immediate template on success. Its output is the same registry
+// entry and the same `tool_output_changed` notice a foreground command
+// publishes, addressed by the call that started the job. Every start failure —
+// reserve, handoff, or spawn — renders through the one legacy wrapper.
 func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command string, timeoutSec int, tc ToolContext) harness.ToolOutcome {
 	if tc.SubprocessEnv == nil {
 		return commandEnvironmentFailure(callID, errNoSubprocessEnv)
@@ -487,6 +488,9 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 	if err != nil {
 		return backgroundStartOutcome(callID, err)
 	}
+	t.toolOutput.register(sessionID, tc.OperationID, callID, func() (string, bool) {
+		return jobsInst.Preview(sessionID, jobID)
+	})
 	err = tc.Background.StartJob(jobID, func(ctx context.Context, deliver func(string) error) error {
 		// The environment resolves at the admitted start handoff — never at
 		// Prepare — and the exact slice is the job process's environment; a
@@ -505,14 +509,16 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 			Config:     tc.Invocation.jobsSettings(),
 			OnExit: func(er jobs.ExitResult) {
 				_ = deliver(legacyCompletionText(er)) // terminal for the job's completion; the exit callback has nowhere to propagate
+				t.toolOutput.remove(sessionID, tc.OperationID, callID)
 			},
 			OnChange: func() {
-				publishJobOutputChanged(t.toolOutput.obs, tc.Workspace, sessionID, jobID)
+				t.toolOutput.publishChanged(tc.Workspace, sessionID, tc.OperationID, callID)
 			},
 		})
 	})
 	if err != nil {
 		jobsInst.Abort(jobID) // idempotent: removes the reservation if it still exists
+		t.toolOutput.remove(sessionID, tc.OperationID, callID)
 		return backgroundStartOutcome(callID, err)
 	}
 	return harness.ToolOutcome{
@@ -522,7 +528,6 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 			Content: fmt.Sprintf("Command running in the background with ID: `%s`. You will be notified when it finishes. If your next steps do not depend on its output, continue with them; otherwise use sleep to wait and process to read the output.\nRunning in the background: `%s`.",
 				jobID, strings.Join(jobsInst.Live(sessionID), ", ")),
 		},
-		Metadata: json.RawMessage(fmt.Sprintf(`{"job_id":%q}`, jobID)),
 	}
 }
 
@@ -574,7 +579,7 @@ func truncateCompletionText(text string, limit int) string {
 }
 
 // foregroundOutcome constructs and registers the prepared foreground call's
-// output capture for live reads, publishes its throttled change notices on the
+// output preview for live reads, publishes its throttled change notices on the
 // Operation scope, and removes it after the runner returns.
 func (t runCommandTool) foregroundOutcome(ctx context.Context, callID, command string, tc ToolContext, timeoutSec int, s toolSettings, spillDir string, env []string) harness.ToolOutcome {
 	sessionID := tc.AdmittedEntry.SessionID
@@ -587,7 +592,7 @@ func (t runCommandTool) foregroundOutcome(ctx context.Context, callID, command s
 			t.toolOutput.publishChanged(tc.Workspace, sessionID, tc.OperationID, callID)
 		},
 	})
-	t.toolOutput.register(sessionID, tc.OperationID, callID, capture)
+	t.toolOutput.register(sessionID, tc.OperationID, callID, capture.Preview)
 	defer t.toolOutput.remove(sessionID, tc.OperationID, callID)
 	return commandOutcome(ctx, callID, command, tc.Workspace, timeoutSec, capture, env)
 }

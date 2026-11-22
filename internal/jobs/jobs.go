@@ -79,7 +79,7 @@ type Jobs interface {
 	Abort(jobID string)           // resolve a reservation that will not start; idempotent
 	Start(req StartRequest) error // start the reserved job; only its timeout or an explicit stop ends the process
 	Read(sessionID, jobID string) (string, error)
-	Preview(sessionID, jobID string) (string, error)
+	Preview(sessionID, jobID string) (string, bool)
 	Kill(sessionID, jobID string) error
 	List(sessionID string) string
 	Live(sessionID string) []string // the session's running job IDs, sorted
@@ -400,8 +400,8 @@ func (j *Manager) timeoutLoop(rec *jobRecord, cmd *exec.Cmd, timeoutSec int) {
 	}
 }
 
-// unknownJobID is the unknown-ID error ownedCapture and Preview read for an
-// absent, reserved, or foreign job identity.
+// unknownJobID is the unknown-ID error ownedCapture reports for an absent,
+// reserved, or foreign job identity.
 func unknownJobID(jobID string) error {
 	return fmt.Errorf("process: no process with ID %q", jobID)
 }
@@ -438,20 +438,15 @@ func (j *Manager) Read(sessionID, jobID string) (string, error) {
 	return capture.Format(), nil
 }
 
-// Preview returns the bounded current output text for one owned record without
-// the read placeholder: an empty string when the job has not written yet. It
-// follows Read's ownership and unknown-ID rules, and a capture that is no
-// longer previewable — closed — reads as the same unknown ID.
-func (j *Manager) Preview(sessionID, jobID string) (string, error) {
+// Preview returns the bounded current output of one owned record — empty
+// before the first write, never the read placeholder — and false for every
+// identity Read rejects and for a capture that is closed.
+func (j *Manager) Preview(sessionID, jobID string) (string, bool) {
 	capture, err := j.ownedCapture(sessionID, jobID)
 	if err != nil {
-		return "", err
+		return "", false
 	}
-	preview, ok := capture.Preview()
-	if !ok {
-		return "", unknownJobID(jobID)
-	}
-	return preview, nil
+	return capture.Preview()
 }
 
 // Kill is the user-facing termination: absent, foreign, or still-reserved

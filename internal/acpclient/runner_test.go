@@ -270,7 +270,7 @@ func startBridge(t *testing.T, f *fixture, workspace string) *bridge {
 func startBridgeWith(t *testing.T, f *fixture, workspace string, writer io.Writer) *bridge {
 	t.Helper()
 	dataDir := t.TempDir()
-	record := fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"23","credential":%q}`,
+	record := fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"24","credential":%q}`,
 		f.server.URL, testInstance, testCredential)
 	testassert.NoError(t, os.WriteFile(filepath.Join(dataDir, "runtime.json"), []byte(record), 0o600))
 	return startRunner(t, clienthost.Options{
@@ -492,16 +492,12 @@ func sessionChangedEvent(sessionID string) string {
 	return fmt.Sprintf(`{"kind":"session_changed","scope":{"kind":"session","session_id":%q},"session_revision":{"durable_revision":"1","local_revision":"0","instance_id":%q}}`, sessionID, testInstance)
 }
 
-func jobOutputChangedEvent(sessionID string) string {
-	return fmt.Sprintf(`{"kind":"job_output_changed","scope":{"kind":"job","workspace":"/ws/s1","session_id":%q,"job_id":"job-1"}}`, sessionID)
-}
-
 func sseFrame(document string) string {
 	return "event: notification\ndata: " + document + "\n\n"
 }
 
 func healthBody() string {
-	return fmt.Sprintf(`{"instance_id":%q,"protocol_version":"23"}`, testInstance)
+	return fmt.Sprintf(`{"instance_id":%q,"protocol_version":"24"}`, testInstance)
 }
 
 func hydrationBody(sessionID, workspace string) string {
@@ -939,7 +935,7 @@ func TestACPSelection(t *testing.T) {
 // notifications after a lost stream, and the fresh snapshot of the selected
 // Session.
 func TestACPEventsAndRepair(t *testing.T) {
-	event := jobOutputChangedEvent(testInstance)
+	event := sessionChangedEvent(testInstance)
 	release := make(chan struct{})
 	f := newFixture(t, map[string]http.HandlerFunc{
 		"/v1/sessions/s1/hydration": jsonHandler(200, hydrationBody("s1", "/ws/s1")),
@@ -994,7 +990,7 @@ func TestACPEventsAndRepair(t *testing.T) {
 	connected := b.awaitFrame(t, methodFrame("runtime/connected"))
 	var health map[string]any
 	testassert.NoError(t, json.Unmarshal(connected["params"], &health))
-	testassert.Require(t, health["instance_id"] == testInstance && health["protocol_version"] == "23", "runtime/connected params = %v, want the generated Health", health)
+	testassert.Require(t, health["instance_id"] == testInstance && health["protocol_version"] == "24", "runtime/connected params = %v, want the generated Health", health)
 	resync := b.awaitFrame(t, methodFrame("runtime/resync_required"))
 	{
 		params, ok := resync["params"]
@@ -1344,7 +1340,6 @@ func TestACPRuntimeForwarding(t *testing.T) {
 		},
 		"/v1/sessions/s1/revert-code":       jsonHandler(409, `{"error":{"code":"conflict","message":"partial restore"},"restored":["a.go"],"skipped":[{"path":"b.go","reason":"denied"}]}`),
 		"/v1/sessions/s1/hydration":         jsonHandler(500, "<html>broken</html>"),
-		"/v1/sessions/s1/jobs/job-1/output": jsonHandler(200, `{"output":"running job output"}`),
 		"/v1/extensions/invoke": jsonHandler(422, `{
   "kind": "failure",
   "error": {"code": "guest_code", "message": "guest message", "data": {"big": 9007199254740993, "whole": 1.0, "huge": 1e400, "text": "line\n<>&"}},
@@ -1434,10 +1429,6 @@ func TestACPRuntimeForwarding(t *testing.T) {
 		code, _, _ := errorFrame(t, malformed)
 		testassert.Equal(t, code, -32001)
 	}
-
-	jobOutput := b.call(t, "10", "runtime/GetSessionJobOutput", `{"session_id":"s1","job_id":"job-1"}`)
-	testassert.Require(t, resultOf(t, jobOutput) == `{"output":"running job output"}`, "runtime/GetSessionJobOutput = %s, want the exact raw body", resultOf(t, jobOutput))
-	testassert.Equal(t, f.count("/v1/sessions/s1/jobs/job-1/output"), 1)
 
 	unknownBefore := f.total()
 	testassert.Equal(t, errorCode(t, b.call(t, "6", "runtime/NoSuchOperation", `{}`)), -32602)

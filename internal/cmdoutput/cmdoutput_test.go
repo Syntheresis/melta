@@ -13,35 +13,6 @@ import (
 	"github.com/Syntheresis/melta/internal/testassert"
 )
 
-// TestCapturePreviewKeepsFormatTailWhenSpillFails proves the preview's
-// windows are measured over the kept output: when the spill cannot be created,
-// Format still shows the retained tail, and Preview must render the same lines
-// with only its running marker substituted.
-func TestCapturePreviewKeepsFormatTailWhenSpillFails(t *testing.T) {
-	home := t.TempDir()
-	blocker := filepath.Join(home, "home-file")
-	testassert.NoError(t, os.WriteFile(blocker, []byte("not a dir"), 0o600))
-	c := NewCapture(Options{
-		Directory:    filepath.Join(blocker, ".melta"),
-		SpillPrefix:  "cmd_output_",
-		MaxBytes:     100,
-		MaxLineChars: 1,
-	})
-	defer c.Close()
-	var full strings.Builder
-	for i := 0; i < 1000; i++ {
-		fmt.Fprintf(&full, "%c\n", 'a'+i%26)
-	}
-	_, _ = c.Stdout().Write([]byte(full.String()))
-
-	preview, ok := c.Preview()
-	testassert.Require(t, ok, "Preview reported absence while the capture was open")
-	testassert.Require(t, strings.Contains(preview, "\no\n") && strings.HasSuffix(preview, "\nx"), "Preview = %q, want the retained tail Format shows after the spill failure", preview)
-	format := c.Format()
-	testassert.Require(t, strings.Contains(format, "could not be saved"), "Format = %q, want the could-not-save marker", format)
-	testassert.Require(t, equalStrings(previewLines(preview), previewLines(format)), "Preview lines %v, want Format lines %v", previewLines(preview), previewLines(format))
-}
-
 // TestCaptureOnChangeThrottlesWithTrailingCall proves the change callback is
 // never invoked by Write, runs at most once per 250 ms, and fires once more
 // for a write that arrived while the previous call was running.
@@ -86,157 +57,126 @@ func TestCaptureOnChangeThrottlesWithTrailingCall(t *testing.T) {
 	}
 }
 
-// TestCaptureOnChangeStopsAtClose proves Close waits for an in-flight change
-// call and no call starts after it returns.
+// TestCaptureOnChangeStopsAtClose proves Close before the interval elapses
+// suppresses the armed call.
 func TestCaptureOnChangeStopsAtClose(t *testing.T) {
-	t.Run("in-flight call", func(t *testing.T) {
-		home := t.TempDir()
-		var calls atomic.Int64
-		started := make(chan struct{})
-		release := make(chan struct{})
-		c := NewCapture(Options{
-			Directory:    filepath.Join(home, ".melta"),
-			SpillPrefix:  "cmd_output_",
-			MaxLineChars: 80,
-			OnChange: func() {
-				if calls.Add(1) == 1 {
-					close(started)
-					<-release
-				}
+	var calls atomic.Int64
+	c := NewCapture(Options{
+		Directory:    filepath.Join(t.TempDir(), ".melta"),
+		SpillPrefix:  "cmd_output_",
+		MaxLineChars: 80,
+		OnChange:     func() { calls.Add(1) },
+	})
+	_, _ = c.Stdout().Write([]byte("one"))
+	c.Close()
+	time.Sleep(300 * time.Millisecond)
+	testassert.Equal(t, calls.Load(), int64(0))
+}
+
+// previewWrite is one TestCapturePreview row's stream-tagged write.
+type previewWrite struct {
+	stderr bool
+	text   string
+}
+
+// TestCapturePreview proves the live preview is the bounded write-order tail,
+// read only from captured memory.
+func TestCapturePreview(t *testing.T) {
+	cases := []struct {
+		name     string
+		maxBytes int
+		writes   []previewWrite
+		close    bool
+		want     string
+		wantOK   bool
+	}{
+		{
+			name:     "before any write",
+			maxBytes: 16,
+			wantOK:   true,
+		},
+		{
+			name:     "under bound in write order",
+			maxBytes: 64,
+			writes: []previewWrite{
+				{text: "out one\n"},
+				{stderr: true, text: "err one\n"},
+				{text: "out two\n"},
 			},
-		})
-		_, _ = c.Stdout().Write([]byte("one"))
-		select {
-		case <-started:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the change call never started")
-		}
-		closed := make(chan struct{})
-		go func() { c.Close(); close(closed) }()
-		select {
-		case <-closed:
-			t.Fatal("Close returned while the change call was in flight")
-		case <-time.After(100 * time.Millisecond):
-		}
-		close(release)
-		select {
-		case <-closed:
-		case <-time.After(5 * time.Second):
-			t.Fatal("Close never returned after the change call finished")
-		}
-		_, _ = c.Stdout().Write([]byte("two"))
-		time.Sleep(300 * time.Millisecond)
-		testassert.Equal(t, calls.Load(), int64(1))
-	})
-
-	t.Run("armed call", func(t *testing.T) {
-		home := t.TempDir()
-		var calls atomic.Int64
-		c := NewCapture(Options{
-			Directory:    filepath.Join(home, ".melta"),
-			SpillPrefix:  "cmd_output_",
-			MaxLineChars: 80,
-			OnChange:     func() { calls.Add(1) },
-		})
-		_, _ = c.Stdout().Write([]byte("one"))
-		c.Close()
-		time.Sleep(300 * time.Millisecond)
-		testassert.Equal(t, calls.Load(), int64(0))
-	})
-}
-
-// TestCapturePreviewMatchesFormat proves Preview renders the same lines as
-// Format under and over the cap, writes no visible file, and reports absence
-// after Close.
-func TestCapturePreviewMatchesFormat(t *testing.T) {
-	t.Run("under cap", func(t *testing.T) {
-		home := t.TempDir()
-		dir := filepath.Join(home, ".melta")
-		c := NewCapture(Options{Directory: dir, SpillPrefix: "cmd_output_", MaxBytes: 1024, MaxLineChars: 80})
-		defer c.Close()
-		_, _ = c.Stdout().Write([]byte("hello\n"))
-		_, _ = c.Stderr().Write([]byte("warn\n"))
-
-		preview, ok := c.Preview()
-		testassert.Require(t, ok && preview == "hello\nwarn\n", "Preview = (%q, %v), want the exact captured output", preview, ok)
-		testassert.Equal(t, c.Format(), preview)
-		assertNoFiles(t, dir)
-	})
-
-	t.Run("over cap within two windows", func(t *testing.T) {
-		home := t.TempDir()
-		dir := filepath.Join(home, ".melta")
-		c := NewCapture(Options{Directory: dir, SpillPrefix: "cmd_output_", MaxBytes: 10, MaxLineChars: 5})
-		defer c.Close()
-		_, _ = c.Stdout().Write([]byte("abcdefg\n1234567\n"))
-
-		before := dirEntries(t, dir)
-		preview, ok := c.Preview()
-		testassert.Require(t, ok, "Preview reported absence while the capture was open")
-		want := "abcde... [truncated 7 chars]\n12345... [truncated 7 chars]\n[Output truncated. 16 bytes so far.]"
-		testassert.Require(t, preview == want, "Preview = %q, want the bounded preview with the running marker %q", preview, want)
-		testassert.Require(t, equalStrings(before, dirEntries(t, dir)), "Preview changed the spill directory from %v to %v", before, dirEntries(t, dir))
-		format := c.Format()
-		testassert.Require(t, strings.Contains(format, "Full output (16 bytes) saved to: "), "Format = %q, want the full-output marker after Preview wrote nothing", format)
-		testassert.Require(t, equalStrings(previewLines(preview), previewLines(format)), "Preview lines %v, want Format lines %v", previewLines(preview), previewLines(format))
-	})
-
-	t.Run("over cap beyond two windows", func(t *testing.T) {
-		home := t.TempDir()
-		dir := filepath.Join(home, ".melta")
-		c := NewCapture(Options{Directory: dir, SpillPrefix: "cmd_output_", MaxBytes: 200, MaxLineChars: 10})
-		defer c.Close()
-		full := numberedLines(200)
-		_, _ = c.Stdout().Write([]byte(full))
-
-		before := dirEntries(t, dir)
-		preview, ok := c.Preview()
-		testassert.Require(t, ok, "Preview reported absence while the capture was open")
-		testassert.Require(t, strings.Contains(preview, "line 01") && strings.Contains(preview, "line 200") && !strings.Contains(preview, "line 11") && !strings.Contains(preview, "line 190"), "Preview = %q, want the first and last ten lines", preview)
-		testassert.Require(t, strings.Contains(preview, fmt.Sprintf("[Output truncated. %d bytes so far.]", len(full))), "Preview = %q, want the running marker", preview)
-		testassert.Require(t, equalStrings(before, dirEntries(t, dir)), "Preview changed the spill directory from %v to %v", before, dirEntries(t, dir))
-		format := c.Format()
-		testassert.Require(t, equalStrings(previewLines(preview), previewLines(format)), "Preview lines %v, want Format lines %v", previewLines(preview), previewLines(format))
-	})
-
-	t.Run("after close", func(t *testing.T) {
-		home := t.TempDir()
-		c := NewCapture(Options{Directory: filepath.Join(home, ".melta"), SpillPrefix: "cmd_output_", MaxBytes: 8, MaxLineChars: 5})
-		_, _ = c.Stdout().Write([]byte("abcdefghijkl"))
-		c.Close()
-		preview, ok := c.Preview()
-		testassert.Require(t, preview == "" && !ok, "Preview after Close = (%q, %v), want absence", preview, ok)
-	})
-}
-
-// TestCapturePreviewReadsBoundedSpillWindows proves Preview never reads more
-// than its two windows from a spill file, whatever the captured total.
-func TestCapturePreviewReadsBoundedSpillWindows(t *testing.T) {
-	for _, lines := range []int{5000, 50000} {
-		t.Run(fmt.Sprintf("%d lines", lines), func(t *testing.T) {
-			home := t.TempDir()
-			dir := filepath.Join(home, ".melta")
-			c := NewCapture(Options{Directory: dir, SpillPrefix: "cmd_output_", MaxBytes: 64, MaxLineChars: 4})
-			defer c.Close()
-			full := strings.Repeat("0123456789abcdef\n", lines)
-			_, _ = c.Stdout().Write([]byte(full))
-
-			var read atomic.Int64
-			original := openSpill
-			openSpill = func(path string) (spillFile, error) {
-				file, err := original(path)
-				if err != nil {
-					return nil, err
+			want:   "out one\nerr one\nout two\n",
+			wantOK: true,
+		},
+		{
+			name:     "disabled bound keeps every byte in write order",
+			maxBytes: 0,
+			writes: []previewWrite{
+				{text: "first"},
+				{stderr: true, text: "second"},
+			},
+			want:   "firstsecond",
+			wantOK: true,
+		},
+		{
+			name:     "past bound keeps the last bytes",
+			maxBytes: 8,
+			writes: []previewWrite{
+				{text: "abcdef"},
+				{stderr: true, text: "ghijkl"},
+			},
+			want:   "[Output truncated. 12 bytes so far.]\nefghijkl",
+			wantOK: true,
+		},
+		{
+			name:     "many small writes keep the last bounded bytes",
+			maxBytes: 8,
+			writes: []previewWrite{
+				{text: "a"}, {text: "b"}, {text: "c"}, {text: "d"}, {text: "e"}, {text: "f"},
+				{text: "g"}, {text: "h"}, {text: "i"}, {text: "j"}, {text: "k"}, {text: "l"},
+				{text: "m"}, {text: "n"}, {text: "o"}, {text: "p"}, {text: "q"}, {text: "r"},
+			},
+			want:   "[Output truncated. 18 bytes so far.]\nklmnopqr",
+			wantOK: true,
+		},
+		{
+			name:     "cut inside a rune starts at the next rune",
+			maxBytes: 3,
+			writes: []previewWrite{
+				{text: "éé"},
+			},
+			want:   "[Output truncated. 4 bytes so far.]\né",
+			wantOK: true,
+		},
+		{
+			name:     "after close",
+			maxBytes: 8,
+			writes: []previewWrite{
+				{text: "abcdefghijkl"},
+			},
+			close:  true,
+			wantOK: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".melta")
+			c := NewCapture(Options{Directory: dir, SpillPrefix: "cmd_output_", MaxBytes: tc.maxBytes, MaxLineChars: 80})
+			for _, write := range tc.writes {
+				target := c.Stdout()
+				if write.stderr {
+					target = c.Stderr()
 				}
-				return countingSpill{spillFile: file, read: &read}, nil
+				_, _ = target.Write([]byte(write.text))
 			}
-			defer func() { openSpill = original }()
+			if tc.close {
+				c.Close()
+			} else {
+				defer c.Close()
+			}
 
+			before := dirEntries(t, dir)
 			preview, ok := c.Preview()
-			testassert.Require(t, ok, "Preview reported absence while the capture was open")
-			testassert.Require(t, strings.Contains(preview, fmt.Sprintf("[Output truncated. %d bytes so far.]", len(full))), "Preview = %q, want the running marker with the full total", preview)
-			window := int64(10 * (4*4 + 1))
-			testassert.Require(t, read.Load() > 0 && read.Load() <= 2*window, "Preview read %d bytes from the spill, want within the two windows of %d", read.Load(), 2*window)
+			testassert.Require(t, ok == tc.wantOK && preview == tc.want, "Preview = (%q, %v), want (%q, %v)", preview, ok, tc.want, tc.wantOK)
+			testassert.Require(t, equalStrings(before, dirEntries(t, dir)), "Preview changed the spill directory from %v to %v", before, dirEntries(t, dir))
 		})
 	}
 }
@@ -251,19 +191,6 @@ func awaitChange(t *testing.T, called <-chan time.Time) time.Time {
 		t.Fatal("no change call arrived within the test budget")
 		return time.Time{}
 	}
-}
-
-// previewLines drops truncation marker lines and returns the rendered content
-// lines of one preview or formatted output.
-func previewLines(text string) []string {
-	var lines []string
-	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "[Output truncated.") {
-			continue
-		}
-		lines = append(lines, line)
-	}
-	return lines
 }
 
 func equalStrings(a, b []string) bool {
@@ -290,17 +217,6 @@ func dirEntries(t *testing.T, dir string) []string {
 		names = append(names, entry.Name())
 	}
 	return names
-}
-
-type countingSpill struct {
-	spillFile
-	read *atomic.Int64
-}
-
-func (c countingSpill) ReadAt(p []byte, off int64) (int, error) {
-	n, err := c.spillFile.ReadAt(p, off)
-	c.read.Add(int64(n))
-	return n, err
 }
 
 func TestCaptureBelowCapExactOutputNoSpill(t *testing.T) {

@@ -179,7 +179,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '23';
+    protocol_version: '24';
 };
 
 /**
@@ -951,11 +951,6 @@ export type ToolOutputChangedEvent = {
     call_id: string;
 };
 
-export type JobOutputChangedEvent = {
-    kind: 'job_output_changed';
-    scope: Scope;
-};
-
 export type Event = ({
     kind: 'configuration_changed';
 } & ConfigurationChangedEvent) | ({
@@ -978,17 +973,11 @@ export type Event = ({
     kind: 'response_restarted';
 } & ResponseRestartedEvent) | ({
     kind: 'tool_output_changed';
-} & ToolOutputChangedEvent) | ({
-    kind: 'job_output_changed';
-} & JobOutputChangedEvent);
+} & ToolOutputChangedEvent);
 
 export type SessionId = string;
 
 export type OperationId = string;
-
-export type ToolCallId = string;
-
-export type JobId = string;
 
 export type WorkspaceQuery = string;
 
@@ -1461,10 +1450,11 @@ export type GetSessionToolOutputData = {
     path: {
         id: string;
         operation_id: string;
+    };
+    query: {
         call_id: string;
     };
-    query?: never;
-    url: '/v1/sessions/{id}/operations/{operation_id}/tool-calls/{call_id}/output';
+    url: '/v1/sessions/{id}/operations/{operation_id}/output';
 };
 
 export type GetSessionToolOutputErrors = {
@@ -1478,40 +1468,12 @@ export type GetSessionToolOutputError = GetSessionToolOutputErrors[keyof GetSess
 
 export type GetSessionToolOutputResponses = {
     /**
-     * One running foreground command's bounded current output.
+     * One running command's bounded current output.
      */
     200: CommandOutput;
 };
 
 export type GetSessionToolOutputResponse = GetSessionToolOutputResponses[keyof GetSessionToolOutputResponses];
-
-export type GetSessionJobOutputData = {
-    body?: never;
-    path: {
-        id: string;
-        job_id: string;
-    };
-    query?: never;
-    url: '/v1/sessions/{id}/jobs/{job_id}/output';
-};
-
-export type GetSessionJobOutputErrors = {
-    /**
-     * One schema-defined typed error.
-     */
-    default: Error;
-};
-
-export type GetSessionJobOutputError = GetSessionJobOutputErrors[keyof GetSessionJobOutputErrors];
-
-export type GetSessionJobOutputResponses = {
-    /**
-     * One running background job's bounded current output.
-     */
-    200: CommandOutput;
-};
-
-export type GetSessionJobOutputResponse = GetSessionJobOutputResponses[keyof GetSessionJobOutputResponses];
 
 export type GetSessionCodeSnapshotsData = {
     body?: never;

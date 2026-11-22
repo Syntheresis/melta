@@ -7,7 +7,7 @@
 openapi: "3.0.3"
 info:
   title: melta-protocol
-  version: "23"
+  version: "24"
 servers:
   - url: "http://127.0.0.1"
 # Every path requires the bearer credential; it is declared once here and
@@ -286,31 +286,21 @@ paths:
                 $ref: "#/components/schemas/SessionOperation"
         default:
           $ref: "#/components/responses/Error"
-  /v1/sessions/{id}/operations/{operation_id}/tool-calls/{call_id}/output:
+  /v1/sessions/{id}/operations/{operation_id}/output:
     get:
       operationId: GetSessionToolOutput
       parameters:
         - $ref: "#/components/parameters/SessionID"
         - $ref: "#/components/parameters/OperationID"
-        - $ref: "#/components/parameters/ToolCallID"
+        - name: call_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
       responses:
         "200":
-          description: One running foreground command's bounded current output.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CommandOutput"
-        default:
-          $ref: "#/components/responses/Error"
-  /v1/sessions/{id}/jobs/{job_id}/output:
-    get:
-      operationId: GetSessionJobOutput
-      parameters:
-        - $ref: "#/components/parameters/SessionID"
-        - $ref: "#/components/parameters/JobID"
-      responses:
-        "200":
-          description: One running background job's bounded current output.
+          description: One running command's bounded current output.
           content:
             application/json:
               schema:
@@ -818,20 +808,6 @@ components:
       schema:
         type: string
         minLength: 1
-    ToolCallID:
-      name: call_id
-      in: path
-      required: true
-      schema:
-        type: string
-        minLength: 1
-    JobID:
-      name: job_id
-      in: path
-      required: true
-      schema:
-        type: string
-        minLength: 1
     WorkspaceQuery:
       name: workspace
       in: query
@@ -1235,7 +1211,7 @@ components:
         protocol_version:
           type: string
           enum:
-            - "23"
+            - "24"
     Scope:
       description: >
         One SSE event's applicable scope, discriminated by kind. Every
@@ -3060,19 +3036,6 @@ components:
         call_id:
           type: string
           minLength: 1
-    JobOutputChangedEvent:
-      type: object
-      additionalProperties: false
-      required:
-        - kind
-        - scope
-      properties:
-        kind:
-          type: string
-          enum:
-            - job_output_changed
-        scope:
-          $ref: "#/components/schemas/Scope"
     Event:
       oneOf:
         - $ref: "#/components/schemas/ConfigurationChangedEvent"
@@ -3086,7 +3049,6 @@ components:
         - $ref: "#/components/schemas/ToolFinishedEvent"
         - $ref: "#/components/schemas/ResponseRestartedEvent"
         - $ref: "#/components/schemas/ToolOutputChangedEvent"
-        - $ref: "#/components/schemas/JobOutputChangedEvent"
       discriminator:
         propertyName: kind
         mapping:
@@ -3102,4 +3064,3 @@ components:
           tool_finished: "#/components/schemas/ToolFinishedEvent"
           response_restarted: "#/components/schemas/ResponseRestartedEvent"
           tool_output_changed: "#/components/schemas/ToolOutputChangedEvent"
-          job_output_changed: "#/components/schemas/JobOutputChangedEvent"

@@ -8,7 +8,6 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/cmdoutput"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
@@ -515,8 +514,8 @@ func responseRestartedEvent(scope protocol.Scope) Event {
 	return event
 }
 
-// toolOutputChangedEvent builds one transient foreground command output
-// hint: the addressed call's output grew.
+// toolOutputChangedEvent builds one transient command output hint: the
+// addressed call's output grew.
 func toolOutputChangedEvent(scope protocol.Scope, callID string) Event {
 	var event Event
 	_ = event.FromToolOutputChangedEvent(protocol.ToolOutputChangedEvent{ // plain members; the marshal cannot fail
@@ -527,71 +526,53 @@ func toolOutputChangedEvent(scope protocol.Scope, callID string) Event {
 	return event
 }
 
-// jobOutputChangedEvent builds one transient background job output hint: the
-// addressed job's output grew.
-func jobOutputChangedEvent(scope protocol.Scope) Event {
-	var event Event
-	_ = event.FromJobOutputChangedEvent(protocol.JobOutputChangedEvent{ // plain members; the marshal cannot fail
-		Kind:  protocol.JobOutputChanged,
-		Scope: scope,
-	})
-	return event
-}
-
-// publishJobOutputChanged publishes one job_output_changed notice for a
-// running background job on its job scope.
-func publishJobOutputChanged(obs *observation, workspace, sessionID, jobID string) {
-	obs.publish(func() []Event {
-		return []Event{jobOutputChangedEvent(jobEventScope(workspace, sessionID, jobID))}
-	})
-}
-
-// toolOutputIdentity addresses one foreground tool call's running output: the
-// Operation is part of the identity because call IDs are unique only within
-// an Operation.
+// toolOutputIdentity addresses one tool call's running output: the Operation
+// is part of the identity because call IDs are unique only within an
+// Operation.
 type toolOutputIdentity struct {
 	sessionID   string
 	operationID string
 	callID      string
 }
 
-// liveToolOutput is the owner's per-instance registry of running foreground
-// commands' output captures: the run_command executor registers one capture
-// under its call identity before the process starts and removes it after the
-// runner returns, so a client can read the bounded current output while the
-// command runs and repair from reads after every notice.
+// liveToolOutput is the owner's per-instance registry of running commands'
+// output previews: the run_command executor registers one preview under its
+// call identity around the command's lifetime, so a client can read the
+// bounded current output while the call runs and repair from reads after
+// every notice. The call's output is the same registry entry whether the
+// command runs in the foreground or as a background job.
 type liveToolOutput struct {
 	obs      *observation
 	mu       sync.Mutex
-	captures map[toolOutputIdentity]*cmdoutput.Capture
+	previews map[toolOutputIdentity]func() (string, bool)
 }
 
 func newLiveToolOutput(obs *observation) *liveToolOutput {
-	return &liveToolOutput{obs: obs, captures: make(map[toolOutputIdentity]*cmdoutput.Capture)}
+	return &liveToolOutput{obs: obs, previews: make(map[toolOutputIdentity]func() (string, bool))}
 }
 
-func (l *liveToolOutput) register(sessionID, operationID, callID string, capture *cmdoutput.Capture) {
+func (l *liveToolOutput) register(sessionID, operationID, callID string, preview func() (string, bool)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.captures[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}] = capture
+	l.previews[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}] = preview
 }
 
 func (l *liveToolOutput) remove(sessionID, operationID, callID string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.captures, toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID})
+	delete(l.previews, toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID})
 }
 
-// preview reads one registered capture's bounded current output; an absent or
-// already closed capture reports absence.
+// preview reads one registered preview's bounded current output; an absent
+// registration reports absence.
 func (l *liveToolOutput) preview(sessionID, operationID, callID string) (string, bool) {
 	l.mu.Lock()
-	capture := l.captures[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}]
+	read := l.previews[toolOutputIdentity{sessionID: sessionID, operationID: operationID, callID: callID}]
 	l.mu.Unlock()
-	if capture == nil {
+	if read == nil {
 		return "", false
 	}
-	return capture.Preview()
+	return read()
 }
 
 // publishChanged publishes one tool_output_changed notice for the running

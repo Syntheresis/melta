@@ -561,21 +561,11 @@ func (rt *protocolHandlers) GetSessionOperation(w http.ResponseWriter, r *http.R
 	rt.writeJSON(w, http.StatusOK, &operation)
 }
 
-// GetSessionToolOutput serves one running foreground command's bounded current
-// output under the owning Session's read authority.
-func (rt *protocolHandlers) GetSessionToolOutput(w http.ResponseWriter, r *http.Request, id protocol.SessionID, operationId protocol.OperationID, callId protocol.ToolCallID) {
-	output, err := rt.owner.GetSessionToolOutput(r.Context(), rt.server.caller, id, operationId, callId)
-	if err != nil {
-		writeProtocolError(w, err)
-		return
-	}
-	rt.writeJSON(w, http.StatusOK, &output)
-}
-
-// GetSessionJobOutput serves one running background job's bounded current
-// output under the owning Session's read authority.
-func (rt *protocolHandlers) GetSessionJobOutput(w http.ResponseWriter, r *http.Request, id protocol.SessionID, jobId protocol.JobID) {
-	output, err := rt.owner.GetSessionJobOutput(r.Context(), rt.server.caller, id, jobId)
+// GetSessionToolOutput serves one running command's bounded current output
+// under the owning Session's read authority, whether the command runs in the
+// foreground or as a background job.
+func (rt *protocolHandlers) GetSessionToolOutput(w http.ResponseWriter, r *http.Request, id protocol.SessionID, operationId protocol.OperationID, params protocol.GetSessionToolOutputParams) {
+	output, err := rt.owner.GetSessionToolOutput(r.Context(), rt.server.caller, id, operationId, params.CallId)
 	if err != nil {
 		writeProtocolError(w, err)
 		return
