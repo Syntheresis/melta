@@ -321,8 +321,8 @@ func TestRunInfraErrorsWinOverCancellation(t *testing.T) {
 	})
 }
 
-// TestRunCancelledAfterManyContinuations proves a long run still stops before the next effect.
-func TestRunCancelledAfterManyContinuations(t *testing.T) {
+// TestRunCancelledAfterManyEffects proves a long run still stops before the next tool dispatch.
+func TestRunCancelledAfterManyEffects(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f := &runFakes{}
@@ -330,12 +330,13 @@ func TestRunCancelledAfterManyContinuations(t *testing.T) {
 		if call == 30 {
 			cancel()
 		}
-		return erroredContinue(call), nil
+		return readyCall(fmt.Sprintf("c%d", call)), nil
 	}
 
 	res, err := Run(ctx, f.invocation())
 	requireRunInterrupted(t, res, err, "agent interrupted")
-	// the last settlement was errored, which no interruption terminal may carry.
-	testassert.Require(t, res.LastOutput == nil, "interruption carried %#v, want no output", res.LastOutput)
-	testassert.Require(t, f.modelCalls == 30 && f.sourceCalls == 30, "model=%d source=%d, want 30/30", f.modelCalls, f.sourceCalls)
+	// the last settlement was a completed response whose call never started.
+	testassert.Require(t, res.LastOutput != nil && res.LastOutput.Status == model.OutputCompleted, "interruption carried %#v, want the completed output", res.LastOutput)
+	testassert.Require(t, len(res.UnstartedCalls) == 1 && res.UnstartedCalls[0].ID == "c30", "unstarted calls = %#v, want the cancelled round's call", res.UnstartedCalls)
+	testassert.Require(t, f.modelCalls == 30 && f.sourceCalls == 30 && f.toolCalls == 29, "model=%d source=%d tool=%d, want 30/30/29", f.modelCalls, f.sourceCalls, f.toolCalls)
 }

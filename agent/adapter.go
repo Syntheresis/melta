@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/Syntheresis/melta/model"
@@ -32,7 +33,7 @@ func AdaptTools(tools map[string]ToolFunc) ToolEffect {
 	}
 }
 
-// AdaptModelEffect builds the ordinary standalone ModelEffect over one model.Transport: exactly one physical Stream attempt with the request Run hands it and no per-call runtime extras, assembled with exactly the given source identity through Run's assembly callback. Before any dispatch, a nil transport or an incomplete source identity returns the typed boundary-protocol violation naming the "model" boundary. A pre-acceptance transport failure that is cancellation-shaped under a genuinely done run context settles the interruption disposition with the shared interruption detail — an active model effect never reports cancellation as a Go error — while every other transport failure settles the failure disposition carrying that error's text with no output. On an accepted stream the assembler's error is returned verbatim as a Go error, and the finalized output maps through the existing settlement algebra: completed becomes ready, errored becomes failure retaining the partial output and its detail, interrupted becomes interruption carrying its output and detail. The transport's protocol-warning diagnostics are discarded here because ModelEffect has no diagnostics channel; direct transport callers retain that API. The adapter owns no retry: one attempt per model effect.
+// AdaptModelEffect builds the ordinary standalone ModelEffect over one model.Transport: exactly one physical Stream attempt with the request Run hands it and no per-call runtime extras, assembled with exactly the given source identity through Run's assembly callback. Before any dispatch, a nil transport or an incomplete source identity returns the typed boundary-protocol violation naming the "model" boundary. A pre-acceptance transport failure that is cancellation-shaped under a genuinely done run context settles the interruption disposition with the shared interruption detail — an active model effect never reports cancellation as a Go error — while every other transport failure settles the failure disposition carrying that error's text with no output. On an accepted stream a *StreamError settles the failure disposition carrying its message and no output, every other assembler error is returned verbatim as a Go error, and the finalized output maps through the existing settlement algebra: completed becomes ready, errored becomes failure carrying the errored output and its detail, interrupted becomes interruption carrying its output and detail. The transport's protocol-warning diagnostics are discarded here because ModelEffect has no diagnostics channel; direct transport callers retain that API. The adapter owns no retry: one attempt per model effect.
 func AdaptModelEffect(source model.ModelRef, t *model.Transport) ModelEffect {
 	return func(ctx context.Context, req model.Request, cb AssemblyCallback) (ModelSettlement, error) {
 		if t == nil || !nonzeroSource(source) {
@@ -47,8 +48,12 @@ func AdaptModelEffect(source model.ModelRef, t *model.Transport) ModelEffect {
 		}
 		out, err := cb(source, stream)
 		if err != nil {
-			_ = stream.Close()            // cleanup-only: a callback that rejects the stream never takes ownership, and the exactly-once idempotent Close makes this safe whether or not the assembler already released it.
-			return ModelSettlement{}, err // assembler failures are preserved verbatim.
+			_ = stream.Close() // cleanup-only: a callback that rejects the stream never takes ownership, and the exactly-once idempotent Close makes this safe whether or not the assembler already released it.
+			var streamErr *StreamError
+			if errors.As(err, &streamErr) { // the one accepted attempt failed before the provider ended the response: failure with its message and no output.
+				return ModelSettlement{Disposition: DispoFailure, Detail: streamErr.Error()}, nil
+			}
+			return ModelSettlement{}, err // every other callback error is preserved verbatim.
 		}
 		switch out.Status {
 		case model.OutputCompleted:

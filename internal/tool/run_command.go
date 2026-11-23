@@ -20,16 +20,19 @@ var waitCommand = func(cmd *exec.Cmd) error { return cmd.Wait() }
 // RunForegroundCommand is the one foreground execution body the target
 // tools plugin composes. It runs command
 // through "sh -c" with the given environment in dir (empty means the
-// current directory), captures combined output within the given limits,
-// spills overflow into spillDir, and converges the process group with
+// current directory), captures combined output into the caller-supplied
+// capture, and converges the process group with
 // SIGTERM/500ms/SIGKILL. timeoutSec at most zero disables the timeout;
-// a positive value is converted to a duration only within bounds.
+// a positive value is converted to a duration only within bounds. It closes
+// the capture on every return and formats it once the command has run; the
+// caller may still read the capture's preview after Close.
 //
 // Classification follows the cause, never which wait channel fired: a
 // Wait-returned command keeps its real result, a timeout exists only when a
 // timeout was configured and its own timer fired, and a parent-context
 // deadline or cancellation is always cancellation.
-func RunForegroundCommand(ctx context.Context, command, dir string, timeoutSec, maxBytes, maxLineChars int, spillDir string, env []string) (string, error) {
+func RunForegroundCommand(ctx context.Context, command, dir string, timeoutSec int, capture *cmdoutput.Capture, env []string) (string, error) {
+	defer capture.Close()
 	parent := ctx
 	if timeoutSec > 0 {
 		if int64(timeoutSec) > int64(math.MaxInt64/time.Second) {
@@ -47,12 +50,6 @@ func RunForegroundCommand(ctx context.Context, command, dir string, timeoutSec, 
 	}
 	cmd.SysProcAttr = childProcAttr()
 
-	capture := cmdoutput.NewCapture(cmdoutput.Options{
-		Directory:    spillDir,
-		SpillPrefix:  "cmd_output_",
-		MaxBytes:     maxBytes,
-		MaxLineChars: maxLineChars,
-	})
 	cmd.Stdout = capture.Stdout()
 	cmd.Stderr = capture.Stderr()
 
@@ -60,7 +57,6 @@ func RunForegroundCommand(ctx context.Context, command, dir string, timeoutSec, 
 	if err != nil {
 		return "", fmt.Errorf("run_command: start: %w", err)
 	}
-	defer capture.Close()
 
 	done := make(chan error, 1)
 	waitDone := make(chan struct{})

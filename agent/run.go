@@ -33,7 +33,7 @@ func Run(ctx context.Context, inv Invocation) (TerminalResult, error) {
 
 	for {
 		if ctx.Err() != nil {
-			return retainedInterruption(lastSettled, nil)
+			return interruptionTerminal(detailInterrupted, lastSettled, nil)
 		}
 
 		req, err := inv.Request(ctx)
@@ -44,7 +44,7 @@ func Run(ctx context.Context, inv Invocation) (TerminalResult, error) {
 			return TerminalResult{}, newBoundaryViolation("agent", "request source requires exactly one outcome")
 		}
 		if req.Interrupted {
-			return retainedInterruption(lastSettled, nil)
+			return interruptionTerminal(detailInterrupted, lastSettled, nil)
 		}
 		owned, err := model.NewRequest(*req.Request) // one validation point per round covering the supplied messages and tools; the owned deep copy is independent of everything the source retains.
 		if err != nil {
@@ -56,7 +56,7 @@ func Run(ctx context.Context, inv Invocation) (TerminalResult, error) {
 		}
 
 		if ctx.Err() != nil {
-			return retainedInterruption(lastSettled, nil)
+			return interruptionTerminal(detailInterrupted, lastSettled, nil)
 		}
 		cb := &callbackProtocol{ctx: ctx, expected: inv.ExpectedModel} // one observation scope per logical model effect; its callback closes over the run context so no caller can substitute another cancellation channel.
 		set, err := inv.ModelEffect(ctx, owned, cb.assemble)
@@ -73,21 +73,18 @@ func Run(ctx context.Context, inv Invocation) (TerminalResult, error) {
 		switch set.Disposition {
 		case DispoFailure:
 			return finishTerminal(TerminalResult{Status: TerminalFailure, LastOutput: set.Output, Detail: set.Detail})
-		case DispoInterruption: // the matching terminal preserves the settlement's own detail; a retained completed response has established its completion, so all of its — so far undispatched — calls come back unstarted in message order.
+		case DispoInterruption: // the matching terminal preserves the settlement's own detail; a retained completed response is final, so all of its — so far undispatched — calls come back unstarted in message order.
 			var unstarted []model.ToolCall
 			if set.Output != nil && set.Output.Status == model.OutputCompleted {
 				unstarted = set.Output.Message.ToolCalls
 			}
 			return interruptionTerminal(set.Detail, set.Output, unstarted)
-		case DispoContinue:
-			lastSettled = set.Output // the latest settled output rides later checkpoints; an errored one can never appear on an interruption terminal, so a checkpoint before any completed settlement simply carries nothing.
-			continue
 		}
 
 		lastSettled = set.Output
 		calls := set.Output.Message.ToolCalls // validation guarantees a ready disposition carries a completed output, and completed guarantees its message.
 		if len(calls) == 0 {
-			if ctx.Err() != nil { // the established completion is not discarded: the interruption carries exactly the output a success would have.
+			if ctx.Err() != nil { // the completed settlement is not discarded: the interruption carries exactly the output a success would have.
 				return interruptionTerminal(detailInterrupted, set.Output, nil)
 			}
 			return finishTerminal(TerminalResult{Status: TerminalSuccess, LastOutput: set.Output})
@@ -119,21 +116,20 @@ func isCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// callbackProtocol observes one logical model effect's use of the assembly callback it was handed: the expected identity is enforced before anything assembles, a second attempt never enters another assembly path, and any protocol or invalid-call failure is remembered so the effect cannot ignore it and settle anyway.
+// callbackProtocol observes one logical model effect's use of the assembly callback it was handed: the expected identity is enforced before anything assembles, a fresh invocation after one that returned a *StreamError is another attempt while an invocation after one that produced an output is a protocol violation, and any boundary or invalid-call failure is remembered so the effect cannot ignore it and settle anyway.
 type callbackProtocol struct {
 	ctx      context.Context
 	expected model.ModelRef
-	calls    int
-	failure  error // sticky first violation or assembler invalid-call error.
+	produced bool  // the most recent invocation returned an output.
+	failure  error // sticky first protocol violation or assembler invalid-call error.
 }
 
-// assemble is the AssemblyCallback handed to one model effect; stream ownership transfers into the assembler exactly like the callback contract says, but only for a correctly identified first attempt.
+// assemble is the AssemblyCallback handed to one model effect; stream ownership transfers into the assembler exactly like the callback contract says, but only for a correctly identified attempt that follows no produced output.
 func (p *callbackProtocol) assemble(source model.ModelRef, stream model.Stream) (model.Output, error) {
-	p.calls++
 	var fail error
 	switch {
-	case p.calls > 1: // exactly one callback invocation accepts model work for one logical effect.
-		fail = newBoundaryViolation("model", "assembly callback invoked more than once for one logical model effect")
+	case p.produced: // an attempt that produced an output is final: nothing follows it.
+		fail = newBoundaryViolation("model", "assembly callback invoked after a previous invocation produced an output")
 	case source != p.expected: // the callback carries no authority to substitute another model identity.
 		fail = newBoundaryViolation("model", fmt.Sprintf("assembly callback source %q does not equal invocation expected model identity %q", source.String(), p.expected.String()))
 	}
@@ -143,9 +139,14 @@ func (p *callbackProtocol) assemble(source model.ModelRef, stream model.Stream) 
 	}
 	out, err := Assemble(p.ctx, source, stream)
 	if err != nil {
-		p.remember(err) // an invalid-call failure is the effect's own protocol breach to answer for, not a discarded attempt.
+		var streamErr *StreamError
+		if !errors.As(err, &streamErr) { // a stream failure is another attempt's business; every other failure is the effect's own protocol breach to answer for.
+			p.remember(err)
+		}
+		return out, err
 	}
-	return out, err
+	p.produced = true
+	return out, nil
 }
 
 func (p *callbackProtocol) remember(err error) {
@@ -154,26 +155,18 @@ func (p *callbackProtocol) remember(err error) {
 	}
 }
 
-// settlementFailure gates an authoritative settlement on the callback discipline behind it: any remembered failure ends the run, and the settlement's output presence must match the callback count exactly — every settled output came from one accepted callback, and no output means nothing was accepted. Callback and settlement outputs are deliberately not compared for content: substituting different otherwise-valid content is a broken trusted caller, not another protocol path.
+// settlementFailure gates an authoritative settlement on the callback discipline behind it: any remembered failure ends the run, and an output is carried exactly when the most recent invocation returned one — every settled output came from one accepted callback, and no output means the latest attempt failed. Callback and settlement outputs are deliberately not compared for content: substituting different otherwise-valid content is a broken trusted caller, not another protocol path.
 func (p *callbackProtocol) settlementFailure(out *model.Output) error {
 	if p.failure != nil {
 		return p.failure
 	}
-	if out != nil && p.calls != 1 {
-		return newBoundaryViolation("model", fmt.Sprintf("settlement carries an output from %d assembly callback invocations, exactly one is required", p.calls))
+	if out != nil && !p.produced {
+		return newBoundaryViolation("model", "settlement carries an output no assembly callback invocation produced")
 	}
-	if out == nil && p.calls != 0 {
-		return newBoundaryViolation("model", fmt.Sprintf("settlement carries no output but the assembly callback ran %d times, zero are required", p.calls))
+	if out == nil && p.produced {
+		return newBoundaryViolation("model", "settlement carries no output but the most recent assembly callback invocation produced one")
 	}
 	return nil
-}
-
-// retainedInterruption ends the run under Agent-observed cancellation at a checkpoint: a completed last settlement survives as-is together with the given undispatched calls, while an errored one cannot appear on an interruption terminal, so nothing is carried.
-func retainedInterruption(out *model.Output, unstarted []model.ToolCall) (TerminalResult, error) {
-	if out != nil && out.Status != model.OutputCompleted {
-		out, unstarted = nil, nil
-	}
-	return interruptionTerminal(detailInterrupted, out, unstarted)
 }
 
 // interruptionTerminal builds one interruption result; unstarted calls are an owned copy of the retained output's own ordered suffix, so the returned terminal never aliases LastOutput's message through its call slice.

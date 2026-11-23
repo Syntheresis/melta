@@ -20,7 +20,7 @@ func Assemble(ctx context.Context, source model.ModelRef, stream model.Stream) (
 
 	st := newAssemblyState(source)
 	defer func() { _ = stream.Close() }() // exactly-once close on every return path below; a post-consumption close error is cleanup-only and never replaces the output.
-	return st.assemble(ctx, stream), nil
+	return st.assemble(ctx, stream)
 }
 
 func nonzeroSource(r model.ModelRef) bool { return r.Provider != "" && r.Model != "" }
@@ -31,7 +31,6 @@ type assemblyState struct {
 	role           string         // first supplied non-empty raw role; later values must agree with it or the conflict is pinned.
 	finishReason   string         // first accepted non-empty finish reason, kept verbatim for classification.
 	conflictDetail string         // set once, in wire order: whichever structural violation fired earliest decides any errored detail.
-	established    bool           // a successful explicit finish/payload combination was observed; read errors and cancellation after it no longer downgrade completion (semantic conflicts still do).
 	usage          *model.Usage   // last reported usage wins by value replacement per arrival order; nil means unknown/not reported.
 	msgExtra       *model.ExtraAccumulator
 	content        map[int]*partAcc // one positioned content accumulator keyed by fragment position, first-seen order below.
@@ -46,14 +45,14 @@ func newAssemblyState(source model.ModelRef) *assemblyState {
 	return &assemblyState{source: source, msgExtra: model.NewExtraAccumulator(), lastToolIdx: -1}
 }
 
-func (st *assemblyState) assemble(ctx context.Context, stream model.Stream) model.Output {
-	var readErr error // nil means clean termination through EOF; set exactly once on an accepted-stream read failure.
+func (st *assemblyState) assemble(ctx context.Context, stream model.Stream) (model.Output, error) {
+	var readErr error // nil means clean termination through io.EOF; set exactly once on an accepted-stream read failure.
 	for {
 		delta, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
-			break // normal termination ([DONE] or raw body EOF); processed before checking cancellation.
+			break // normal termination ([DONE]); processed before checking cancellation.
 		}
-		if err != nil { // non-EOF read error: no further reads happen; finalization decides interrupted vs errored from the run context at this instant.
+		if err != nil { // non-EOF read error: no further reads happen; finalization decides from the finish reason and the run context at this instant.
 			readErr = err
 			break
 		}
@@ -82,7 +81,7 @@ func (st *assemblyState) applyDelta(d model.StreamDelta) {
 		st.noteRole(d.Role)
 	}
 
-	if fr := d.FinishReason; fr != "" { // at most one non-empty finish reason is accepted: identical repeats pass silently, any different value pins a conflict even when completion was already established earlier.
+	if fr := d.FinishReason; fr != "" { // at most one non-empty finish reason is accepted: identical repeats pass silently, any different value pins a conflict.
 		switch {
 		case st.finishReason == "":
 			st.finishReason = fr
@@ -106,8 +105,6 @@ func (st *assemblyState) applyDelta(d model.StreamDelta) {
 	if len(d.ToolFragments) > 0 { // retained index/ID/anonymous-continuation correlation for this event's fragments.
 		st.applyToolEvent(d.ToolFragments)
 	}
-
-	st.checkEstablishment() // re-checked on every delta so a late half of the finish/payload combination can still establish before stream end.
 }
 
 func (st *assemblyState) noteRole(r string) {

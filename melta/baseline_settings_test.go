@@ -54,7 +54,7 @@ func TestBaselineSettingsDriveToolsJobsAndCompaction(t *testing.T) {
 	invocation := Invocation{snapshot: snapshot}
 
 	// The real read tool consumes the top-level tools section.
-	byID := newStandardTools(t.TempDir(), &fakeJobs{})
+	byID := newStandardTools(t.TempDir(), &fakeJobs{}, newLiveToolOutput(newObservation()))
 	readTool := byID["read_file"]
 	call, err := model.NewToolCall(model.ToolCall{ID: "call-1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.txt"}`)})
 	testassert.NoError(t, err)
@@ -64,7 +64,7 @@ func TestBaselineSettingsDriveToolsJobsAndCompaction(t *testing.T) {
 
 	// The real background command path forwards the top-level jobs section.
 	jobsInst := &fakeJobs{}
-	tools := newStandardTools(t.TempDir(), jobsInst)
+	tools := newStandardTools(t.TempDir(), jobsInst, newLiveToolOutput(newObservation()))
 	backgroundCall, err := model.NewToolCall(model.ToolCall{ID: "call-2", Name: "run_command", Arguments: json.RawMessage(`{"command":"true","background":true}`)})
 	testassert.NoError(t, err)
 	plan := tools["run_command"].Prepare(context.Background(), ToolContext{
@@ -198,7 +198,7 @@ func prepareCompactSelection(t *testing.T, prep *preparation, sel selection) har
 func startBackgroundForTest(t *testing.T, invocation Invocation) jobs.StartRequest {
 	t.Helper()
 	recorder := &fakeJobs{}
-	values := newStandardTools(t.TempDir(), recorder)
+	values := newStandardTools(t.TempDir(), recorder, newLiveToolOutput(newObservation()))
 	call, err := model.NewToolCall(model.ToolCall{ID: "call-bg", Name: "run_command", Arguments: json.RawMessage(`{"command":"true","background":true}`)})
 	testassert.NoError(t, err)
 	plan := values["run_command"].Prepare(context.Background(), ToolContext{
@@ -230,7 +230,7 @@ func TestBaselineCapturesStayFrozenAcrossSettingsPublication(t *testing.T) {
 	testassert.NoError(t, os.WriteFile(filepath.Join(workspace, "big.txt"), []byte(strings.Join(lines, "\n")), 0o644))
 	readCall, err := model.NewToolCall(model.ToolCall{ID: "call-read", Name: "read_file", Arguments: json.RawMessage(`{"path":"big.txt"}`)})
 	testassert.NoError(t, err)
-	readTool := newStandardTools(sh.dataDir, &fakeJobs{})["read_file"]
+	readTool := newStandardTools(sh.dataDir, &fakeJobs{}, newLiveToolOutput(newObservation()))["read_file"]
 	read := func(t *testing.T, invocation Invocation) string {
 		t.Helper()
 		normalized, err := readTool.Normalize(context.Background(), ToolContext{Invocation: invocation}, readCall)
@@ -293,7 +293,7 @@ func TestBaselinePartialObjectSettingsUseAbsentDefaults(t *testing.T) {
 	testassert.NoError(t, err)
 	invocation := Invocation{snapshot: fresh.snapshot}
 
-	readTool := newStandardTools(sh.dataDir, &fakeJobs{})["read_file"]
+	readTool := newStandardTools(sh.dataDir, &fakeJobs{}, newLiveToolOutput(newObservation()))["read_file"]
 	call, err := model.NewToolCall(model.ToolCall{ID: "call-read", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.txt"}`)})
 	testassert.NoError(t, err)
 	normalized, err := readTool.Normalize(context.Background(), ToolContext{Invocation: invocation}, call)

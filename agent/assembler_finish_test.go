@@ -9,7 +9,7 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// TestAssembleFinishReasonMatrix pins the exact finish/payload validation table: valid completions with and without a finish reason, stop requiring payload, tool_calls requiring at least one valid call, unsupported reasons erroring, identical repeat pass silently, and a later conflicting reason pinning an errored output even after completion was already established.
+// TestAssembleFinishReasonMatrix pins the exact finish/payload validation table: valid completions with and without a finish reason, stop requiring payload, tool_calls requiring at least one valid call, unsupported reasons erroring, identical repeat pass silently, and a later conflicting reason pinning an errored output even after a valid finish reason arrived.
 func TestAssembleFinishReasonMatrix(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -46,7 +46,7 @@ func TestAssembleFinishReasonMatrix(t *testing.T) {
 		{"finish-reason-conflict-late", []func() (model.StreamDelta, error){
 			deltaStep(choiceDelta(txtPos(0, "x"))),
 			deltaStep(stopDelta()),
-			deltaStep(model.StreamDelta{HasChoice: true, FinishReason: "length"}), // A different finish reason after establishment is a conflict.
+			deltaStep(model.StreamDelta{HasChoice: true, FinishReason: "length"}), // A different later finish reason is a conflict.
 		}},
 	}
 
@@ -83,7 +83,7 @@ func TestAssembleRepeatedAgreeingRoleAndFinishReason(t *testing.T) {
 		deltaStep(roleText),
 		deltaStep(repeatRole),  // identical non-empty role repeats silently.
 		deltaStep(stopDelta()), // first finish reason is accepted.
-		deltaStep(stopDelta()), // identical finish reason repeats silently, even after establishment.
+		deltaStep(stopDelta()), // identical finish reason repeats silently.
 	)
 
 	expectStatus(t, out, model.OutputCompleted)
@@ -93,7 +93,7 @@ func TestAssembleRepeatedAgreeingRoleAndFinishReason(t *testing.T) {
 	testassert.Require(t, len(parts) == 1 && parts[0].Text == "hi", "completed parts = %#v, want one text part %q", out.Message, "hi")
 }
 
-// TestAssembleResponseRoleRules pins absent and raw-assistant roles completing normally; any other supplied value errors even with a full stop/payload combination, retaining eligible partials under the canonical assistant identity.
+// TestAssembleResponseRoleRules pins absent and raw-assistant roles completing normally; any other supplied value errors even with a full stop/payload combination.
 func TestAssembleResponseRoleRules(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -113,9 +113,8 @@ func TestAssembleResponseRoleRules(t *testing.T) {
 			assertSingleClose(t, s)
 
 			if tc.want == model.OutputErrored {
-				parts := msgContent(out)
-				// Erroring must not drop eligible partial content.
-				testassert.Require(t, len(parts) == 1 && parts[0].Text == "hi", "errored output retained parts = %#v, want one text part %q", out.Message, "hi")
+				// Erroring never retains content: an errored output carries no message.
+				testassert.Require(t, out.Message == nil, "errored output unexpectedly carried a message: %#v", out.Message)
 			}
 		})
 	}

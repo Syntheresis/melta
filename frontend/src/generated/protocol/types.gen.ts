@@ -179,7 +179,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '19';
+    protocol_version: '24';
 };
 
 /**
@@ -340,6 +340,10 @@ export type SessionOperation = {
     inputs: OperationInputs;
 };
 
+export type CommandOutput = {
+    output: string;
+};
+
 export type OperationInputs = {
     model: ModelRef;
     prompt: string;
@@ -417,10 +421,11 @@ export type AssistantItem = {
     kind: 'assistant';
     committed_at: string;
     operation_id?: string;
-    status: 'completed' | 'errored' | 'interrupted';
+    status: 'completed' | 'interrupted';
     source: ModelRef;
     content: Array<ContentPart>;
     refusal?: string;
+    reasoning?: string;
     tool_calls: Array<ToolCallView>;
     extra?: JsonObject;
 };
@@ -430,7 +435,7 @@ export type SignalItem = {
     kind: 'signal';
     committed_at: string;
     operation_id?: string;
-    subtype: 'interruption' | 'model_failure_continuation' | 'background_completion';
+    subtype: 'interruption' | 'background_completion';
     content: string;
     related_member?: BackgroundMember;
 };
@@ -913,6 +918,12 @@ export type RefusalDeltaEvent = {
     content: string;
 };
 
+export type ReasoningDeltaEvent = {
+    kind: 'reasoning_delta';
+    scope: Scope;
+    content: string;
+};
+
 export type ToolStartedEvent = {
     kind: 'tool_started';
     scope: Scope;
@@ -929,6 +940,17 @@ export type ToolFinishedEvent = {
     evidence?: ExecutionEvidence;
 };
 
+export type ResponseRestartedEvent = {
+    kind: 'response_restarted';
+    scope: Scope;
+};
+
+export type ToolOutputChangedEvent = {
+    kind: 'tool_output_changed';
+    scope: Scope;
+    call_id: string;
+};
+
 export type Event = ({
     kind: 'configuration_changed';
 } & ConfigurationChangedEvent) | ({
@@ -942,10 +964,16 @@ export type Event = ({
 } & TextDeltaEvent) | ({
     kind: 'refusal_delta';
 } & RefusalDeltaEvent) | ({
+    kind: 'reasoning_delta';
+} & ReasoningDeltaEvent) | ({
     kind: 'tool_started';
 } & ToolStartedEvent) | ({
     kind: 'tool_finished';
-} & ToolFinishedEvent);
+} & ToolFinishedEvent) | ({
+    kind: 'response_restarted';
+} & ResponseRestartedEvent) | ({
+    kind: 'tool_output_changed';
+} & ToolOutputChangedEvent);
 
 export type SessionId = string;
 
@@ -1416,6 +1444,36 @@ export type GetSessionOperationResponses = {
 };
 
 export type GetSessionOperationResponse = GetSessionOperationResponses[keyof GetSessionOperationResponses];
+
+export type GetSessionToolOutputData = {
+    body?: never;
+    path: {
+        id: string;
+        operation_id: string;
+    };
+    query: {
+        call_id: string;
+    };
+    url: '/v1/sessions/{id}/operations/{operation_id}/output';
+};
+
+export type GetSessionToolOutputErrors = {
+    /**
+     * One schema-defined typed error.
+     */
+    default: Error;
+};
+
+export type GetSessionToolOutputError = GetSessionToolOutputErrors[keyof GetSessionToolOutputErrors];
+
+export type GetSessionToolOutputResponses = {
+    /**
+     * One running command's bounded current output.
+     */
+    200: CommandOutput;
+};
+
+export type GetSessionToolOutputResponse = GetSessionToolOutputResponses[keyof GetSessionToolOutputResponses];
 
 export type GetSessionCodeSnapshotsData = {
     body?: never;

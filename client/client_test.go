@@ -29,7 +29,7 @@ const (
 	testCredential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	// testVersion is the current wire identity every compatible fixture
 	// speaks; the incompatible rows keep the literal old "1".
-	testVersion = string(protocol.N19)
+	testVersion = string(protocol.N24)
 )
 
 // recordContent builds one private four-field discovery document.
@@ -447,14 +447,17 @@ func TestEventsFrames(t *testing.T) {
 		testassert.NoError(t, finished.FromToolFinishedEvent(protocol.ToolFinishedEvent{
 			Kind: protocol.ToolFinished, Scope: operationEventScope(), CallId: "call-1", Status: protocol.ToolCallStatusSuccess, Evidence: &evidence,
 		}))
-		frames := notificationFrame(t, delta) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished)
+		frames := notificationFrame(t, delta) + notificationFrame(t, refusal) + notificationFrame(t, started) + notificationFrame(t, finished) +
+			rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"},"content":"considered"}`) +
+			rawNotification(`{"kind":"response_restarted","scope":{"kind":"runtime"}}`) +
+			rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":"call-1"}`)
 		server := newFixture(t, jsonHealth(testInstance, testVersion), writeFrames(frames))
 		c := connectFixture(t, writeDiscovery(t, server.URL, testInstance, testVersion, testCredential))
 		events, errs := c.Events(context.Background())
 		delivered, err := drainEvents(events, errs)
 		testassert.Require(t, errors.Is(err, client.ErrResyncRequired), "disconnect error = %v, want ErrResyncRequired", err)
-		testassert.Equal(t, len(delivered), 4)
-		for i, want := range []string{"text_delta", "refusal_delta", "tool_started", "tool_finished"} {
+		testassert.Equal(t, len(delivered), 7)
+		for i, want := range []string{"text_delta", "refusal_delta", "tool_started", "tool_finished", "reasoning_delta", "response_restarted", "tool_output_changed"} {
 			{
 				kind, _ := delivered[i].Discriminator()
 				testassert.Require(t, kind == want, "event %d kind = %q, want %q", i, kind, want)
@@ -517,12 +520,22 @@ func TestEventsFrames(t *testing.T) {
 		{"empty scope member", rawNotification(`{"kind":"scope_opened","scope":{"kind":"runtime","workspace":""}}`)},
 		{"negative text position", rawNotification(`{"kind":"text_delta","scope":{"kind":"runtime"},"position":-1,"content":"x"}`)},
 		{"empty text content", rawNotification(`{"kind":"text_delta","scope":{"kind":"runtime"},"position":0,"content":""}`)},
+		{"missing reasoning content", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"}}`)},
+		{"empty reasoning content", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"},"content":""}`)},
+		{"reasoning_delta without scope", rawNotification(`{"kind":"reasoning_delta","content":"considered"}`)},
+		{"reasoning_delta unknown member", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"},"content":"considered","extra":true}`)},
 		{"empty refusal content", rawNotification(`{"kind":"refusal_delta","scope":{"kind":"runtime"},"content":""}`)},
 		{"missing refusal content", rawNotification(`{"kind":"refusal_delta","scope":{"kind":"runtime"}}`)},
 		{"position member on refusal_delta", rawNotification(`{"kind":"refusal_delta","scope":{"kind":"runtime"},"content":"x","position":0}`)},
 		{"unknown tool status", rawNotification(`{"kind":"tool_finished","scope":{"kind":"runtime"},"call_id":"c","status":"pending"}`)},
 		{"unknown tool evidence", rawNotification(`{"kind":"tool_finished","scope":{"kind":"runtime"},"call_id":"c","status":"success","evidence":"pending"}`)},
 		{"negative tool ordinal", rawNotification(`{"kind":"tool_started","scope":{"kind":"runtime"},"call_id":"c","ordinal":-1,"name":"n"}`)},
+		{"response_restarted without scope", rawNotification(`{"kind":"response_restarted"}`)},
+		{"response_restarted unknown member", rawNotification(`{"kind":"response_restarted","scope":{"kind":"runtime"},"extra":true}`)},
+		{"tool_output_changed without scope", rawNotification(`{"kind":"tool_output_changed","call_id":"call-1"}`)},
+		{"tool_output_changed missing call_id", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"}}`)},
+		{"tool_output_changed empty call_id", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":""}`)},
+		{"tool_output_changed unknown member", rawNotification(`{"kind":"tool_output_changed","scope":{"kind":"runtime"},"call_id":"call-1","extra":true}`)},
 		{"wrong event name", "event: other\ndata: {}\n\n"},
 		{"unexpected stream field", "id: 7\nevent: notification\ndata: {}\n\n"},
 		{"unknown stream line", "garbage\n\n"},

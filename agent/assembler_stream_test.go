@@ -2,33 +2,51 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
 
-// TestAssembleReadErrorLiveContext pins a non-EOF read failure on an accepted stream under a live run context: the output is errored with non-empty detail, eligible partial content accumulated before the failure is retained, and close still lands exactly once.
+// TestAssembleReadErrorLiveContext pins a non-EOF read failure before any finish reason under a live run context: no output, a *StreamError carrying the last reported usage, and exactly-once close.
 func TestAssembleReadErrorLiveContext(t *testing.T) {
-	out, s := assemble(t, context.Background(), testRef, deltaStep(choiceDelta(txtPos(0, "x"))), errStep(errors.New("boom")))
-	expectStatus(t, out, model.OutputErrored)
-	assertSingleClose(t, s)
-
-	parts := msgContent(out)
-	// A read error must not discard content accumulated before it fired.
-	testassert.Require(t, len(parts) == 1 && parts[0].Text == "x", "read-error output retained parts = %#v, want one text part %q", out.Message, "x")
+	streamErr := assembleFailure(t, context.Background(), testRef,
+		deltaStep(choiceDelta(txtPos(0, "x"))),
+		usageStep(model.Usage{InputTokens: 1, OutputTokens: 2}),
+		errStep(errors.New("boom")),
+	)
+	testassert.Require(t, streamErr.Err != nil && streamErr.Err.Error() == "boom", "StreamError = %v, want the read failure verbatim", streamErr)
+	testassert.Require(t, streamErr.Usage != nil && *streamErr.Usage == (model.Usage{InputTokens: 1, OutputTokens: 2}), "StreamError usage = %#v, want the last reported usage", streamErr.Usage)
 }
 
-// TestAssembleReadErrorCancelledContext pins the same read failure observed while the run context was already cancelled: classification flips to interrupted (not errored) with non-empty detail, and partial retention follows the ordinary tool-call-free rules in both payload-less and payload-carrying shapes.
+// TestAssembleReadErrorRoleConflictLiveContext pins that a role conflict does not preempt the live-context stream failure.
+func TestAssembleReadErrorRoleConflictLiveContext(t *testing.T) {
+	streamErr := assembleFailure(t, context.Background(), testRef,
+		deltaStep(model.StreamDelta{HasChoice: true, Role: "assistant"}),
+		deltaStep(model.StreamDelta{HasChoice: true, Role: "user"}),
+		errStep(errors.New("boom")),
+	)
+	testassert.Require(t, streamErr.Err != nil && streamErr.Err.Error() == "boom", "StreamError = %v, want the read failure verbatim", streamErr)
+}
+
+// TestAssembleReadErrorCancelledContext pins the same read failure before any finish reason under a done context: interrupted with a message only when text or refusal started — reasoning, extras and opaque parts alone retain nothing.
 func TestAssembleReadErrorCancelledContext(t *testing.T) {
 	cases := []struct {
-		name  string
-		steps []func() (model.StreamDelta, error)
+		name     string
+		steps    []func() (model.StreamDelta, error)
+		text     string
+		extra    model.Extra // the message extras the interrupted message keeps
+		thinking bool        // whether the thinking opaque part is kept after the text part
 	}{
-		{"no-payload", []func() (model.StreamDelta, error){errStep(errors.New("boom"))}},
-		{"with-payload", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), errStep(errors.New("boom"))}}, // second row: full text payload accumulated BEFORE the read failure fires — finalization must retain that eligible partial content alongside its interrupted classification
+		{"no-payload", []func() (model.StreamDelta, error){errStep(errors.New("boom"))}, "", nil, false},
+		{"with-payload", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), errStep(errors.New("boom"))}, "x", nil, false},
+		{"text-with-reasoning", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`), "annotations": json.RawMessage(`"drop"`)}}), deltaStep(choiceDelta(model.ContentFragment{Position: 1, Kind: model.PartOpaque, OpaqueWireType: "server_tool_use"})), errStep(errors.New("boom"))}, "x", model.Extra{"reasoning_content": json.RawMessage(`"thinking"`)}, false},
+		{"text-with-all-reasoning", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"content"`), "reasoning": json.RawMessage(`"reason"`), "reasoning_details": json.RawMessage(`[{"text":"details"}]`)}}), deltaStep(choiceDelta(model.ContentFragment{Position: 1, Kind: model.PartOpaque, OpaqueWireType: "thinking"}, model.ContentFragment{Position: 2, Kind: model.PartOpaque, OpaqueWireType: "redacted_thinking"})), errStep(errors.New("boom"))}, "x", model.Extra{"reasoning_content": json.RawMessage(`"content"`), "reasoning": json.RawMessage(`"reason"`), "reasoning_details": json.RawMessage(`[{"text":"details"}]`)}, true},
+		{"non-text-payload", []func() (model.StreamDelta, error){deltaStep(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`), "raw": json.RawMessage(`"keep"`)}}), deltaStep(choiceDelta(model.ContentFragment{Position: 0, Kind: model.PartOpaque, OpaqueWireType: "thinking"})), errStep(errors.New("boom"))}, "", nil, false},
 	}
 
 	for _, tc := range cases {
@@ -40,26 +58,39 @@ func TestAssembleReadErrorCancelledContext(t *testing.T) {
 			expectStatus(t, out, model.OutputInterrupted) // A cancelled read failure classifies as interrupted, not errored.
 			assertSingleClose(t, s)
 
-			if tc.name == "no-payload" {
-				testassert.Require(t, out.Message == nil, "no-payload interrupted output unexpectedly carried a message: %#v", out.Message)
+			if tc.text == "" {
+				testassert.Require(t, out.Message == nil, "payload-less interrupted output unexpectedly carried a message: %#v", out.Message)
 			} else {
 				parts := msgContent(out)
+				wantParts := 1
+				if tc.thinking {
+					wantParts = 2
+				}
 				// Interrupted classification must not discard the pre-failure payload.
-				testassert.Require(t, len(parts) == 1 && parts[0].Text == "x", "interrupted output retained parts = %#v, want one text part %q", out.Message, "x")
+				testassert.Require(t, len(parts) == wantParts && parts[0].Kind == model.PartText && parts[0].Text == tc.text, "interrupted output retained parts = %#v, want %d starting with text part %q", out.Message, wantParts, tc.text)
+				if tc.thinking {
+					testassert.Require(t, parts[1].Kind == model.PartOpaque && parts[1].OpaqueWireType == "thinking", "interrupted output retained part = %#v, want the thinking part", parts[1])
+				}
+				if tc.extra != nil {
+					testassert.Require(t, len(out.Message.Extra) == len(tc.extra), "interrupted message extras = %#v, want %#v", out.Message.Extra, tc.extra)
+					for key, want := range tc.extra {
+						testassert.Require(t, string(out.Message.Extra[key]) == string(want), "interrupted message extra %q = %s, want %s", key, out.Message.Extra[key], want)
+					}
+				}
+				testassert.Require(t, len(msgCalls(out)) == 0, "interrupted output retained tool calls: %#v", msgCalls(out))
 			}
 		})
 	}
 }
 
-// TestEstablishmentProtection pins the establishment rule end to end: once a successful explicit finish/payload combination was observed, later read errors and cancellation no longer downgrade completion — semantic conflicts are the only things that still can.
+// TestEstablishmentProtection pins that a non-empty finish reason makes later read errors and cancellation use the final-state verdict: a valid stop/text state stays completed.
 func TestEstablishmentProtection(t *testing.T) {
 	cases := []struct {
 		name   string
-		steps  []func() (model.StreamDelta, error)
 		cancel bool
 	}{
-		{"live-ctx", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(stopDelta()), errStep(errors.New("late-boom"))}, false},     // The run context stays live through the stream.
-		{"cancelled-ctx", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(stopDelta()), errStep(errors.New("late-boom"))}, true}, // Cancellation still loses to an established completion.
+		{"live-ctx", false},     // The run context stays live through the stream.
+		{"cancelled-ctx", true}, // Cancellation still loses to an arrived finish reason.
 	}
 
 	for _, tc := range cases {
@@ -70,7 +101,7 @@ func TestEstablishmentProtection(t *testing.T) {
 				cancel()
 			}
 
-			out, s := assemble(t, ctx, testRef, tc.steps...)
+			out, s := assemble(t, ctx, testRef, deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(stopDelta()), errStep(errors.New("late-boom")))
 			expectStatus(t, out, model.OutputCompleted)
 			assertSingleClose(t, s)
 
@@ -104,7 +135,7 @@ func TestAssembleUsagePropagation(t *testing.T) {
 	})
 }
 
-// TestAssembleCancelledReadErrorDropsIncompleteCalls pins interruption classification ahead of the incomplete-tool-call final validation: when no completed output was established and a non-EOF read fails while the run context is done, the output is interrupted, eligible assistant content is retained, and every tool-call block is discarded.
+// TestAssembleCancelledReadErrorDropsIncompleteCalls pins interruption classification ahead of the incomplete-tool-call final validation: an error before any finish reason under a done context interrupts, retains started assistant content, and discards every tool-call block.
 func TestAssembleCancelledReadErrorDropsIncompleteCalls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancelled so the cancellation observation at finalization is fully deterministic.
@@ -138,43 +169,39 @@ func TestAssembleCleanEOFBeatsPreCancellation(t *testing.T) {
 	assertSingleClose(t, s)
 }
 
-// TestAssembleStopWithIncompleteCallStaysUnestablished pins that an observed incomplete tool slot blocks stop establishment: completion may only be established from a fully valid finish/payload state over every observed slot, so a cancelled non-EOF read failure still classifies as interrupted, retaining eligible partial content and discarding the unfinished call block.
-func TestAssembleStopWithIncompleteCallStaysUnestablished(t *testing.T) {
+// TestAssembleStopWithIncompleteCallErrorsAtFinalState pins that a finish reason sends a later read error through the final-state verdict: stop beside an observed incomplete call slot errors rather than interrupting.
+func TestAssembleStopWithIncompleteCallErrorsAtFinalState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancelled so the cancellation observation at finalization is fully deterministic.
 
 	out, s := assemble(t, ctx, testRef,
 		deltaStep(choiceDelta(txtPos(0, "half"))),
 		deltaStep(toolDelta(model.ToolCallFragment{ID: "a"})), // identity only: the slot is observed but structurally incomplete.
-		deltaStep(stopDelta()),                                // stop beside an observed slot is not yet a valid completion state.
+		deltaStep(stopDelta()),                                // stop beside an observed slot is a final-state mismatch.
 		errStep(errors.New("boom")),
 	)
 
-	expectStatus(t, out, model.OutputInterrupted) // a bogus establishment must not route the cancelled failure through the final-state conflict instead of the interruption's call-discarding partial.
+	expectStatus(t, out, model.OutputErrored) // The final-state verdict decides, not the cancellation.
 	assertSingleClose(t, s)
 
-	parts := msgContent(out)
-	testassert.Require(t, len(parts) == 1 && parts[0].Text == "half", "interrupted output retained parts = %#v, want one text part %q", out.Message, "half")
-
-	if len(msgCalls(out)) != 0 {
-		t.Fatalf("interrupted output unexpectedly retained tool calls: %#v", out.Message.ToolCalls)
-	}
+	testassert.Require(t, out.Message == nil, "errored output unexpectedly carried a message: %#v", out.Message)
+	testassert.Require(t, strings.Contains(out.Detail, "tool call at position 0 is incomplete"), "detail = %q, want the incomplete tool-call conflict", out.Detail)
 }
 
-// TestAssembleEstablishmentResumesAfterSlotCompletes pins the positive sibling: a slot that completes on a later delta passes the same shared establishment check, and the established tool_calls completion is then protected from a cancelled read failure.
-func TestAssembleEstablishmentResumesAfterSlotCompletes(t *testing.T) {
+// TestAssembleCompletedSlotSurvivesCancelledReadError pins the positive sibling: a slot that completes on a later delta makes the tool_calls finish reason valid, and that completion then survives a cancelled read failure.
+func TestAssembleCompletedSlotSurvivesCancelledReadError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	out, s := assemble(t, ctx, testRef,
 		deltaStep(choiceDelta(txtPos(0, "x"))),
-		deltaStep(toolDelta(model.ToolCallFragment{ID: "a"})),            // incomplete at this instant: no establishment.
+		deltaStep(toolDelta(model.ToolCallFragment{ID: "a"})),            // incomplete at this instant: the finish reason would not be valid yet.
 		deltaStep(toolDelta(model.ToolCallFragment{ID: "a", Name: "n"})), // same identity correlates back to the slot and completes it.
-		deltaStep(toolCallsDelta()),                                      // the shared check now sees every observed slot complete with one valid call.
+		deltaStep(toolCallsDelta()),                                      // the final-state verdict sees every observed slot complete with one valid call.
 		errStep(errors.New("late-boom")),
 	)
 
-	expectStatus(t, out, model.OutputCompleted) // establishment protects the now-valid completion from the cancelled read failure.
+	expectStatus(t, out, model.OutputCompleted) // the valid finish reason protects the completion from the cancelled read failure.
 	assertSingleClose(t, s)
 
 	calls := msgCalls(out)
@@ -213,13 +240,12 @@ func TestAssembleRefusalAccumulationAndRetention(t *testing.T) {
 	})
 }
 
-// TestAssembleAcceptedProtocolReadError pins that accepted-stream protocol failures (read errors wrapping model.ErrProtocol) flow through the same read-error classification as every other non-EOF failure: live context classifies errored, cancelled context interrupted — no special-casing of this error class anywhere in assembly itself.
+// TestAssembleAcceptedProtocolReadError pins that accepted-stream protocol failures (complete events wrapping model.ErrProtocol) flow through the same read-error classification as every other non-EOF failure: live context is a *StreamError, cancelled context an interruption — no special-casing of this error class anywhere in assembly itself.
 func TestAssembleAcceptedProtocolReadError(t *testing.T) {
 	protoErr := fmt.Errorf("%w: malformed sse framing on event 3", model.ErrProtocol)
-	t.Run("live-context-errored", func(t *testing.T) {
-		out, s := assemble(t, context.Background(), testRef, deltaStep(choiceDelta(txtPos(0, "x"))), errStep(protoErr))
-		expectStatus(t, out, model.OutputErrored) // A protocol read failure under a live context is an ordinary stream error.
-		assertSingleClose(t, s)
+	t.Run("live-context-stream-error", func(t *testing.T) {
+		streamErr := assembleFailure(t, context.Background(), testRef, deltaStep(choiceDelta(txtPos(0, "x"))), errStep(protoErr))
+		testassert.Require(t, errors.Is(streamErr, model.ErrProtocol), "StreamError = %v, want the protocol class reachable", streamErr)
 	})
 
 	t.Run("cancelled-context-interrupted", func(t *testing.T) {
@@ -232,11 +258,11 @@ func TestAssembleAcceptedProtocolReadError(t *testing.T) {
 	})
 }
 
-// TestEstablishedCompletionRevalidatedAtFinalState pins the final-state re-validation rule for established outputs: a later read error or cancellation preserves completion ONLY while the finally accumulated semantic state still matches the finish reason that established it — tool calls landing after a stop establishment are exactly such a mismatch, so both protection variants must flip to errored instead of trusting the earlier flag.
+// TestEstablishedCompletionRevalidatedAtFinalState pins the final-state re-validation rule: a later read error or cancellation preserves completion ONLY while the finally accumulated semantic state still matches the finish reason — tool calls landing after a stop are such a mismatch, so both variants flip to errored.
 func TestEstablishedCompletionRevalidatedAtFinalState(t *testing.T) {
 	cases := []struct {
 		name   string
-		cancel bool // true pre-cancels the run context before assembly begins — establishing protection must survive cancellation ONLY when final state still agrees with the established finish reason
+		cancel bool // true pre-cancels the run context before assembly begins — completion must survive cancellation ONLY when final state still agrees with the finish reason
 	}{
 		{"read-error-after-stop-with-late-call", false},  // The run context stays live through the stream.
 		{"cancellation-after-stop-with-late-call", true}, // Cancellation does not rescue a final state that contradicts its own finish reason.
@@ -250,12 +276,11 @@ func TestEstablishedCompletionRevalidatedAtFinalState(t *testing.T) {
 				cancel()
 			}
 
-			out, s := assemble(t, ctx, testRef, deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(stopDelta()), deltaStep(toolDelta(toolFrag("a", "fnA"))), errStep(errors.New("late-boom"))) // A tool call lands after completion was established by stop.
+			out, s := assemble(t, ctx, testRef, deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(stopDelta()), deltaStep(toolDelta(toolFrag("a", "fnA"))), errStep(errors.New("late-boom"))) // A tool call lands after the stop finish reason.
 			expectStatus(t, out, model.OutputErrored)                                                                                                                                         // The final state contradicts its finish reason, so completion must not be preserved.
 			assertSingleClose(t, s)
 
-			parts := msgContent(out)
-			testassert.Require(t, len(parts) == 1 && parts[0].Text == "x", "errored output retained parts = %#v, want one text part %q", out.Message, "x")
+			testassert.Require(t, out.Message == nil, "errored output unexpectedly carried a message: %#v", out.Message)
 			testassert.Require(t, len(msgCalls(out)) == 0, "errored output unexpectedly retained tool calls: %#v", out.Message)
 		})
 	}

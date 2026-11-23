@@ -164,26 +164,25 @@ func TestAssembleUnknownKindFragmentsAreRejectedAtAdmission(t *testing.T) {
 	knownWithExtras := model.ContentFragment{Position: 1, Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"d": json.RawMessage(`"x"`)}}
 
 	cases := []struct {
-		name      string
-		steps     []func() (model.StreamDelta, error)
-		wantDone  bool
-		wantTexts []string // eligible retained text parts on an errored output; nil means nothing was retained at all.
+		name     string
+		steps    []func() (model.StreamDelta, error)
+		wantDone bool
 	}{
-		{"unknown-kind-with-extras", []func() (model.StreamDelta, error){ // the invalid fragment is the stream's only data: classification must error through the shared conflict route — never panic through the output constructor — and the position must hold nothing.
+		{"unknown-kind-with-extras", []func() (model.StreamDelta, error){ // the invalid fragment is the stream's only data: classification must error through the shared conflict route — never panic through the output constructor — and the response carries no message.
 			deltaStep(choiceDelta(unknownWithExtras)),
 			deltaStep(stopDelta()),
-		}, false, nil},
+		}, false},
 
-		{"unknown-kind-alongside-valid-text", []func() (model.StreamDelta, error){ // a bare unknown-kind fragment beside a fully valid text part must still error while retention keeps only the eligible valid text.
+		{"unknown-kind-alongside-valid-text", []func() (model.StreamDelta, error){ // a bare unknown-kind fragment beside a fully valid text part must still error; an errored output never retains content.
 			deltaStep(choiceDelta(txtPos(0, "hi"))),
 			deltaStep(choiceDelta(unknownBare)),
 			deltaStep(stopDelta()),
-		}, false, []string{"hi"}},
+		}, false},
 
 		{"known-kind-with-extras-sibling", []func() (model.StreamDelta, error){ // nearest forbidden-sibling counter-check: the same fragment shape with a known kind keeps accumulating and completing normally.
 			deltaStep(choiceDelta(knownWithExtras)),
 			deltaStep(stopDelta()),
-		}, true, nil},
+		}, true},
 	}
 
 	for _, tc := range cases {
@@ -199,21 +198,12 @@ func TestAssembleUnknownKindFragmentsAreRejectedAtAdmission(t *testing.T) {
 			}
 
 			expectStatus(t, out, model.OutputErrored)
-			if tc.wantTexts == nil { // invalid-only stream: nothing may have been stored, so no message at all may ride the errored output.
-				testassert.Require(t, out.Message == nil, "errored output unexpectedly carried a message: %#v", out.Message)
-				return
-			}
-
-			parts := msgContent(out)
-			testassert.Require(t, len(parts) == len(tc.wantTexts), "errored retained parts = %#v, want only the eligible valid text", out.Message)
-			for i, want := range tc.wantTexts {
-				testassert.Require(t, parts[i].Kind == model.PartText && parts[i].Text == want, "retained part[%d] = %#v, want text %q", i, parts[i], want)
-			}
+			testassert.Require(t, out.Message == nil, "errored output unexpectedly carried a message: %#v", out.Message)
 		})
 	}
 }
 
-// TestAssembleContentStructuralConflicts pins every structural content conflict making the output errored with non-empty detail while retaining eligible partial assistant content (and dropping nothing from it) — or carrying no message when nothing was ever retained.
+// TestAssembleContentStructuralConflicts pins every structural content conflict making the output errored with non-empty detail and no message, whatever content had accumulated before the conflict.
 func TestAssembleContentStructuralConflicts(t *testing.T) {
 	cases := []struct { // the three structural-conflict shapes under test; each row names its script and pins expected retention in the shared loop below.
 		name  string
@@ -250,10 +240,8 @@ func TestAssembleContentStructuralConflicts(t *testing.T) {
 			expectStatus(t, out, model.OutputErrored)
 			assertSingleClose(t, s)
 
-			// Eligible partial content is retained alongside every structural-conflict error.
-			testassert.Require(t, out.Message != nil, "errored output dropped its eligible partial message entirely")
-			// Tool calls never ride an errored output's partial message.
-			testassert.Equal(t, len(out.Message.ToolCalls), 0)
+			// An errored output never retains content.
+			testassert.Require(t, out.Message == nil, "errored output unexpectedly carried a message: %#v", out.Message)
 		})
 	}
 }
@@ -265,9 +253,8 @@ func TestAssembleIncompleteOpaqueErrors(t *testing.T) {
 		expectStatus(t, out, model.OutputErrored) // Incomplete final-state opaque data errors despite the stop/payload pair.
 		assertSingleClose(t, s)
 
-		parts := msgContent(out)
-		// Only the eligible text part survives; the incomplete opaque position is dropped.
-		testassert.Require(t, len(parts) == 1 && parts[0].Kind == model.PartText && parts[0].Text == "keep", "errored output retained parts = %#v, want one text part %q", out.Message, "keep")
+		// An errored output carries no message, so the incomplete opaque position cannot ride out.
+		testassert.Require(t, out.Message == nil, "errored output unexpectedly carried a message: %#v", out.Message)
 	})
 
 	t.Run("with-extras", func(t *testing.T) {

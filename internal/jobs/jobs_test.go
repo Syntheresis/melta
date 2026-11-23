@@ -217,6 +217,24 @@ func TestStartReadKillListLiveRetainedTexts(t *testing.T) {
 	}
 }
 
+// TestPreviewFollowsReadOwnership proves Preview serves the owned capture tail,
+// forwards its change callback, and is empty for every identity Read rejects.
+func TestPreviewFollowsReadOwnership(t *testing.T) {
+	j := openJobs(t, t.TempDir())
+	const sid = "session-preview"
+	changes := make(chan struct{}, 8)
+	id := reserveStart(t, j, StartRequest{SessionID: sid, Command: "printf first; sleep 30", Env: os.Environ(), OnChange: func() { changes <- struct{}{} }})
+	select {
+	case <-changes:
+	case <-time.After(15 * time.Second):
+		t.Fatal("StartRequest.OnChange never reached the job's capture")
+	}
+	testassert.Require(t, j.Preview(sid, id) == "first", "Preview = %q, want the written output", j.Preview(sid, id))
+	reserved, err := j.Reserve()
+	testassert.NoError(t, err)
+	testassert.Require(t, j.Preview(sid, "deadbeef") == "" && j.Preview(sid, reserved) == "" && j.Preview("other", id) == "", "Preview of an absent, reserved, or foreign identity was not empty")
+}
+
 // TestKillExitedShortCircuits proves the retained Kill contract over an
 // exited record: nil while the record still exists, without disturbing the
 // gated callback's own cleanup.

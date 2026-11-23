@@ -38,7 +38,6 @@ func (e AssistantItemKind) Valid() bool {
 // Defines values for AssistantItemStatus.
 const (
 	AssistantItemStatusCompleted   AssistantItemStatus = "completed"
-	AssistantItemStatusErrored     AssistantItemStatus = "errored"
 	AssistantItemStatusInterrupted AssistantItemStatus = "interrupted"
 )
 
@@ -46,8 +45,6 @@ const (
 func (e AssistantItemStatus) Valid() bool {
 	switch e {
 	case AssistantItemStatusCompleted:
-		return true
-	case AssistantItemStatusErrored:
 		return true
 	case AssistantItemStatusInterrupted:
 		return true
@@ -265,13 +262,13 @@ func (e ExtensionSuccessKind) Valid() bool {
 
 // Defines values for HealthProtocolVersion.
 const (
-	N19 HealthProtocolVersion = "19"
+	N24 HealthProtocolVersion = "24"
 )
 
 // Valid indicates whether the value is a known member of the HealthProtocolVersion enum.
 func (e HealthProtocolVersion) Valid() bool {
 	switch e {
-	case N19:
+	case N24:
 		return true
 	default:
 		return false
@@ -662,6 +659,21 @@ func (e ProviderField) Valid() bool {
 	}
 }
 
+// Defines values for ReasoningDeltaEventKind.
+const (
+	ReasoningDelta ReasoningDeltaEventKind = "reasoning_delta"
+)
+
+// Valid indicates whether the value is a known member of the ReasoningDeltaEventKind enum.
+func (e ReasoningDeltaEventKind) Valid() bool {
+	switch e {
+	case ReasoningDelta:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RefusalDeltaEventKind.
 const (
 	RefusalDelta RefusalDeltaEventKind = "refusal_delta"
@@ -692,6 +704,21 @@ func (e RegisteredExtensionOperationTarget) Valid() bool {
 	case RegisteredExtensionOperationTargetSession:
 		return true
 	case RegisteredExtensionOperationTargetWorkspace:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ResponseRestartedEventKind.
+const (
+	ResponseRestarted ResponseRestartedEventKind = "response_restarted"
+)
+
+// Valid indicates whether the value is a known member of the ResponseRestartedEventKind enum.
+func (e ResponseRestartedEventKind) Valid() bool {
+	switch e {
+	case ResponseRestarted:
 		return true
 	default:
 		return false
@@ -796,9 +823,8 @@ func (e SignalItemKind) Valid() bool {
 
 // Defines values for SignalItemSubtype.
 const (
-	SignalItemSubtypeBackgroundCompletion     SignalItemSubtype = "background_completion"
-	SignalItemSubtypeInterruption             SignalItemSubtype = "interruption"
-	SignalItemSubtypeModelFailureContinuation SignalItemSubtype = "model_failure_continuation"
+	SignalItemSubtypeBackgroundCompletion SignalItemSubtype = "background_completion"
+	SignalItemSubtypeInterruption         SignalItemSubtype = "interruption"
 )
 
 // Valid indicates whether the value is a known member of the SignalItemSubtype enum.
@@ -807,8 +833,6 @@ func (e SignalItemSubtype) Valid() bool {
 	case SignalItemSubtypeBackgroundCompletion:
 		return true
 	case SignalItemSubtypeInterruption:
-		return true
-	case SignalItemSubtypeModelFailureContinuation:
 		return true
 	default:
 		return false
@@ -947,6 +971,21 @@ func (e ToolFinishedEventKind) Valid() bool {
 	}
 }
 
+// Defines values for ToolOutputChangedEventKind.
+const (
+	ToolOutputChanged ToolOutputChangedEventKind = "tool_output_changed"
+)
+
+// Valid indicates whether the value is a known member of the ToolOutputChangedEventKind enum.
+func (e ToolOutputChangedEventKind) Valid() bool {
+	switch e {
+	case ToolOutputChanged:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ToolStartedEventKind.
 const (
 	ToolStarted ToolStartedEventKind = "tool_started"
@@ -1002,6 +1041,7 @@ type AssistantItem struct {
 	ItemId      string            `json:"item_id"`
 	Kind        AssistantItemKind `json:"kind"`
 	OperationId *string           `json:"operation_id,omitempty"`
+	Reasoning   *string           `json:"reasoning,omitempty"`
 	Refusal     *string           `json:"refusal,omitempty"`
 
 	// Source A full model identity spelled as the "provider/model" string, split at the first slash; provider identifiers never contain a slash, so a slash-containing model suffix stays unambiguous.
@@ -1069,6 +1109,11 @@ type CodeSnapshotGroup struct {
 	Files       []SnapshotFile `json:"files"`
 	GroupItemId string         `json:"group_item_id"`
 	OperationId string         `json:"operation_id"`
+}
+
+// CommandOutput defines model for CommandOutput.
+type CommandOutput struct {
+	Output string `json:"output"`
 }
 
 // CompactRequest defines model for CompactRequest.
@@ -1693,6 +1738,18 @@ type ReadFileResult struct {
 	Truncated     bool   `json:"truncated"`
 }
 
+// ReasoningDeltaEvent defines model for ReasoningDeltaEvent.
+type ReasoningDeltaEvent struct {
+	Content string                  `json:"content"`
+	Kind    ReasoningDeltaEventKind `json:"kind"`
+
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: workspace carries workspace, session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	Scope Scope `json:"scope"`
+}
+
+// ReasoningDeltaEventKind defines model for ReasoningDeltaEvent.Kind.
+type ReasoningDeltaEventKind string
+
 // RefusalDeltaEvent defines model for RefusalDeltaEvent.
 type RefusalDeltaEvent struct {
 	Content string                `json:"content"`
@@ -1727,6 +1784,17 @@ type RegisteredExtensionOperation struct {
 
 // RegisteredExtensionOperationTarget defines model for RegisteredExtensionOperation.Target.
 type RegisteredExtensionOperationTarget string
+
+// ResponseRestartedEvent defines model for ResponseRestartedEvent.
+type ResponseRestartedEvent struct {
+	Kind ResponseRestartedEventKind `json:"kind"`
+
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: workspace carries workspace, session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	Scope Scope `json:"scope"`
+}
+
+// ResponseRestartedEventKind defines model for ResponseRestartedEvent.Kind.
+type ResponseRestartedEventKind string
 
 // RevertCodeRequest defines model for RevertCodeRequest.
 type RevertCodeRequest struct {
@@ -2005,6 +2073,18 @@ type ToolFinishedEventKind string
 // ToolMetadata Optional bounded tool-owned metadata: one complete non-null JSON value of any kind whose semantics belong to the producing tool and whose durable size the owning Session bounds. Carried verbatim for client display; the top-level null literal is not a value.
 type ToolMetadata = json.RawMessage
 
+// ToolOutputChangedEvent defines model for ToolOutputChangedEvent.
+type ToolOutputChangedEvent struct {
+	CallId string                     `json:"call_id"`
+	Kind   ToolOutputChangedEventKind `json:"kind"`
+
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: workspace carries workspace, session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	Scope Scope `json:"scope"`
+}
+
+// ToolOutputChangedEventKind defines model for ToolOutputChangedEvent.Kind.
+type ToolOutputChangedEventKind string
+
 // ToolStartedEvent defines model for ToolStartedEvent.
 type ToolStartedEvent struct {
 	CallId  string               `json:"call_id"`
@@ -2209,6 +2289,11 @@ type ListSessionsParams struct {
 // GetSessionHistoryParams defines parameters for GetSessionHistory.
 type GetSessionHistoryParams struct {
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+// GetSessionToolOutputParams defines parameters for GetSessionToolOutput.
+type GetSessionToolOutputParams struct {
+	CallId string `form:"call_id" json:"call_id"`
 }
 
 // UpdateConfigurationSettingsJSONRequestBody defines body for UpdateConfigurationSettings for application/json ContentType.
@@ -2823,6 +2908,32 @@ func (t *Event) MergeRefusalDeltaEvent(v RefusalDeltaEvent) error {
 	return err
 }
 
+// AsReasoningDeltaEvent returns the union data inside the Event as a ReasoningDeltaEvent
+func (t Event) AsReasoningDeltaEvent() (ReasoningDeltaEvent, error) {
+	var body ReasoningDeltaEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromReasoningDeltaEvent overwrites any union data inside the Event as the provided ReasoningDeltaEvent
+func (t *Event) FromReasoningDeltaEvent(v ReasoningDeltaEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeReasoningDeltaEvent performs a merge with any union data inside the Event, using the provided ReasoningDeltaEvent
+func (t *Event) MergeReasoningDeltaEvent(v ReasoningDeltaEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsToolStartedEvent returns the union data inside the Event as a ToolStartedEvent
 func (t Event) AsToolStartedEvent() (ToolStartedEvent, error) {
 	var body ToolStartedEvent
@@ -2875,6 +2986,58 @@ func (t *Event) MergeToolFinishedEvent(v ToolFinishedEvent) error {
 	return err
 }
 
+// AsResponseRestartedEvent returns the union data inside the Event as a ResponseRestartedEvent
+func (t Event) AsResponseRestartedEvent() (ResponseRestartedEvent, error) {
+	var body ResponseRestartedEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromResponseRestartedEvent overwrites any union data inside the Event as the provided ResponseRestartedEvent
+func (t *Event) FromResponseRestartedEvent(v ResponseRestartedEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeResponseRestartedEvent performs a merge with any union data inside the Event, using the provided ResponseRestartedEvent
+func (t *Event) MergeResponseRestartedEvent(v ResponseRestartedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsToolOutputChangedEvent returns the union data inside the Event as a ToolOutputChangedEvent
+func (t Event) AsToolOutputChangedEvent() (ToolOutputChangedEvent, error) {
+	var body ToolOutputChangedEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromToolOutputChangedEvent overwrites any union data inside the Event as the provided ToolOutputChangedEvent
+func (t *Event) FromToolOutputChangedEvent(v ToolOutputChangedEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeToolOutputChangedEvent performs a merge with any union data inside the Event, using the provided ToolOutputChangedEvent
+func (t *Event) MergeToolOutputChangedEvent(v ToolOutputChangedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 func (t Event) Discriminator() (string, error) {
 	var discriminator struct {
 		Discriminator string `json:"kind"`
@@ -2891,8 +3054,12 @@ func (t Event) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "configuration_changed":
 		return t.AsConfigurationChangedEvent()
+	case "reasoning_delta":
+		return t.AsReasoningDeltaEvent()
 	case "refusal_delta":
 		return t.AsRefusalDeltaEvent()
+	case "response_restarted":
+		return t.AsResponseRestartedEvent()
 	case "scope_closed":
 		return t.AsScopeEvent()
 	case "scope_opened":
@@ -2903,6 +3070,8 @@ func (t Event) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTextDeltaEvent()
 	case "tool_finished":
 		return t.AsToolFinishedEvent()
+	case "tool_output_changed":
+		return t.AsToolOutputChangedEvent()
 	case "tool_started":
 		return t.AsToolStartedEvent()
 	case "warning_changed":
@@ -3481,6 +3650,9 @@ type ClientInterface interface {
 
 	// GetSessionOperation performs a GET /v1/sessions/{id}/operations/{operation_id} (the `GetSessionOperation` operationId) request.
 	GetSessionOperation(ctx context.Context, id SessionID, operationId OperationID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetSessionToolOutput performs a GET /v1/sessions/{id}/operations/{operation_id}/output (the `GetSessionToolOutput` operationId) request.
+	GetSessionToolOutput(ctx context.Context, id SessionID, operationId OperationID, params *GetSessionToolOutputParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ReopenSession performs a POST /v1/sessions/{id}/reopen (the `ReopenSession` operationId) request.
 	ReopenSession(ctx context.Context, id SessionID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4198,6 +4370,19 @@ func (c *Client) SetSessionModel(ctx context.Context, id SessionID, body SetSess
 // GetSessionOperation performs a GET /v1/sessions/{id}/operations/{operation_id} (the `GetSessionOperation` operationId) request.
 func (c *Client) GetSessionOperation(ctx context.Context, id SessionID, operationId OperationID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetSessionOperationRequest(c.Server, id, operationId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetSessionToolOutput performs a GET /v1/sessions/{id}/operations/{operation_id}/output (the `GetSessionToolOutput` operationId) request.
+func (c *Client) GetSessionToolOutput(ctx context.Context, id SessionID, operationId OperationID, params *GetSessionToolOutputParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetSessionToolOutputRequest(c.Server, id, operationId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6018,6 +6203,70 @@ func NewGetSessionOperationRequest(server string, id SessionID, operationId Oper
 	return req, nil
 }
 
+// NewGetSessionToolOutputRequest constructs an http.Request for the GetSessionToolOutput method
+func NewGetSessionToolOutputRequest(server string, id SessionID, operationId OperationID, params *GetSessionToolOutputParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "operation_id", operationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/sessions/%s/operations/%s/output", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "call_id", params.CallId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewReopenSessionRequest constructs an http.Request for the ReopenSession method
 func NewReopenSessionRequest(server string, id SessionID) (*http.Request, error) {
 	var err error
@@ -6572,6 +6821,11 @@ type ClientWithResponsesInterface interface {
 	//
 	// Returns a wrapper object for the known response body format(s).
 	GetSessionOperationWithResponse(ctx context.Context, id SessionID, operationId OperationID, reqEditors ...RequestEditorFn) (*GetSessionOperationResponse, error)
+
+	// GetSessionToolOutputWithResponse performs a GET /v1/sessions/{id}/operations/{operation_id}/output (the `GetSessionToolOutput` operationId) request.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	GetSessionToolOutputWithResponse(ctx context.Context, id SessionID, operationId OperationID, params *GetSessionToolOutputParams, reqEditors ...RequestEditorFn) (*GetSessionToolOutputResponse, error)
 
 	// ReopenSessionWithResponse performs a POST /v1/sessions/{id}/reopen (the `ReopenSession` operationId) request.
 	//
@@ -8434,6 +8688,54 @@ func (r GetSessionOperationResponse) ContentType() string {
 	return ""
 }
 
+type GetSessionToolOutputResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *CommandOutput
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetSessionToolOutputResponse) GetJSON200() *CommandOutput {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetSessionToolOutputResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetSessionToolOutputResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetSessionToolOutputResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetSessionToolOutputResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetSessionToolOutputResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ReopenSessionResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -9322,6 +9624,17 @@ func (c *ClientWithResponses) GetSessionOperationWithResponse(ctx context.Contex
 		return nil, err
 	}
 	return ParseGetSessionOperationResponse(rsp)
+}
+
+// GetSessionToolOutputWithResponse performs a GET /v1/sessions/{id}/operations/{operation_id}/output (the `GetSessionToolOutput` operationId) request.
+//
+// Returns a wrapper object for the known response body format(s).
+func (c *ClientWithResponses) GetSessionToolOutputWithResponse(ctx context.Context, id SessionID, operationId OperationID, params *GetSessionToolOutputParams, reqEditors ...RequestEditorFn) (*GetSessionToolOutputResponse, error) {
+	rsp, err := c.GetSessionToolOutput(ctx, id, operationId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetSessionToolOutputResponse(rsp)
 }
 
 // ReopenSessionWithResponse performs a POST /v1/sessions/{id}/reopen (the `ReopenSession` operationId) request.
@@ -10680,6 +10993,39 @@ func ParseGetSessionOperationResponse(rsp *http.Response) (*GetSessionOperationR
 	return response, nil
 }
 
+// ParseGetSessionToolOutputResponse parses an HTTP response from a GetSessionToolOutputWithResponse call
+func ParseGetSessionToolOutputResponse(rsp *http.Response) (*GetSessionToolOutputResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetSessionToolOutputResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest CommandOutput
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseReopenSessionResponse parses an HTTP response from a ReopenSessionWithResponse call
 func ParseReopenSessionResponse(rsp *http.Response) (*ReopenSessionResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -11023,6 +11369,9 @@ type ServerInterface interface {
 
 	// (GET /v1/sessions/{id}/operations/{operation_id})
 	GetSessionOperation(w http.ResponseWriter, r *http.Request, id SessionID, operationId OperationID)
+
+	// (GET /v1/sessions/{id}/operations/{operation_id}/output)
+	GetSessionToolOutput(w http.ResponseWriter, r *http.Request, id SessionID, operationId OperationID, params GetSessionToolOutputParams)
 
 	// (POST /v1/sessions/{id}/reopen)
 	ReopenSession(w http.ResponseWriter, r *http.Request, id SessionID)
@@ -12080,6 +12429,57 @@ func (siw *ServerInterfaceWrapper) GetSessionOperation(w http.ResponseWriter, r 
 	handler.ServeHTTP(w, r)
 }
 
+// GetSessionToolOutput operation middleware
+func (siw *ServerInterfaceWrapper) GetSessionToolOutput(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id SessionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "operation_id" -------------
+	var operationId OperationID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "operation_id", r.PathValue("operation_id"), &operationId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "operation_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetSessionToolOutputParams
+
+	// ------------- Required query parameter "call_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "call_id", r.URL.Query(), &params.CallId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "call_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "call_id", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSessionToolOutput(w, r, id, operationId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ReopenSession operation middleware
 func (siw *ServerInterfaceWrapper) ReopenSession(w http.ResponseWriter, r *http.Request) {
 
@@ -12363,6 +12763,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/hydration", wrapper.GetSessionHydration)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/history", wrapper.GetSessionHistory)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/operations/{operation_id}", wrapper.GetSessionOperation)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/operations/{operation_id}/output", wrapper.GetSessionToolOutput)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/sessions/{id}/code-snapshots", wrapper.GetSessionCodeSnapshots)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/sessions/{id}/revert-code", wrapper.RevertSessionCode)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/workspaces", wrapper.ListWorkspaces)

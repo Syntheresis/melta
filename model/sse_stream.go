@@ -10,15 +10,18 @@ import (
 	"strings"
 )
 
-// ErrProtocol is returned for every accepted-stream failure: malformed SSE framing, invalid or wrong-typed chunk JSON, and body read failures all surface through it wrapping their cause. The transport/stream layer never classifies the retryability of these errors, skips a malformed event to keep going, or converts one into another physical request — that decision belongs to the caller above this boundary.
+// ErrProtocol is returned for a complete event that does not decode: invalid or wrong-typed chunk JSON. It never covers a body read failure or a body that ends before the provider's terminator — those are ErrStreamBroken. The transport/stream layer never classifies the retryability of these errors, skips a malformed event to keep going, or converts one into another physical request — that decision belongs to the caller above this boundary.
 var ErrProtocol = errors.New("streaming protocol violation")
+
+// ErrStreamBroken is returned when the accepted stream stops before the provider ended it: a body read failure, or a body that ends before the [DONE] terminator. The underlying cause stays reachable through errors.Is/errors.As.
+var ErrStreamBroken = errors.New("stream broken")
 
 // httpStream is the accepted-model stream returned by Transport.Stream over one 2xx response body: it owns exactly that body (no second reader exists), yields parsed StreamDelta values through Recv, and releases its resources through Close called exactly once by its single consumer.
 type httpStream struct {
 	body      io.ReadCloser // the 2xx response body; ownership transferred from Transport.Stream at acceptance.
 	reader    *bufio.Reader // buffered line framing over that one body only.
 	chunkPath string        // retained wire-diagnostics chunks artifact for this exchange; "" disables appending entirely.
-	done      bool          // terminal reached ([DONE], EOF, read failure) or Close called: Recv reports io.EOF from now on.
+	terminal  error         // io.EOF once [DONE] is decoded, otherwise the first non-EOF failure; every later Recv returns it as is.
 }
 
 // newStream wraps an accepted response body with its buffered reader and diagnostics sink. It performs no I/O beyond wrapping.
@@ -26,10 +29,13 @@ func newStream(body io.ReadCloser, chunkPath string) *httpStream {
 	return &httpStream{body: body, reader: bufio.NewReader(body), chunkPath: chunkPath}
 }
 
-// Recv yields the next parsed delta from this accepted stream following the fixed SSE behavior exactly: a blank line ends an event; all data lines of one event join with newlines into its payload; comment lines beginning ":" and other SSE fields are ignored; events without any data line are ignored; [DONE] returns io.EOF; raw body EOF first decodes a pending unterminated data event, if any, before the next receive reports io.EOF. Valid JSON is decoded without SDK types (only the first choice is used because requests fix n:1), every present non-null canonical field must carry its OpenAI-compatible type or parsing fails with ErrProtocol while null remains absent for optional fields, and unknown fields are preserved in extras at message/content-part/tool-call scope. Framing/JSON failures and body read errors return a typed protocol error wrapping their cause; this method never skips a malformed event nor converts an error into another request. Concurrent Recv calls are unsupported by contract; after Close it reports io.EOF.
+// Recv yields the next parsed delta from this accepted stream following the fixed SSE behavior exactly: a blank line ends an event; all data lines of one event join with newlines into its payload; comment lines beginning ":" and other SSE fields are ignored; events without any data line are ignored; [DONE] returns io.EOF and ends delivery; raw body EOF first decodes a pending unterminated data event, if any, and then reports ErrStreamBroken wrapping io.ErrUnexpectedEOF because no terminator arrived. Valid JSON is decoded without SDK types (only the first choice is used because requests fix n:1), every present non-null canonical field must carry its OpenAI-compatible type or parsing fails with ErrProtocol while null remains absent for optional fields, and unknown fields are preserved in extras at message/content-part/tool-call scope. A body read error reports ErrStreamBroken wrapping its cause. A decoded [DONE] and the first failure are both terminal results: every later Recv returns the stored result. This method never skips a malformed event nor converts an error into another request. Concurrent Recv calls are unsupported by contract; after Close it reports io.EOF.
 func (s *httpStream) Recv() (StreamDelta, error) {
-	if s == nil || s.body == nil || s.done { // closed or already terminal: EOF forever, exactly like the retained producer's done flag.
+	if s == nil || s.body == nil { // closed: EOF.
 		return StreamDelta{}, io.EOF
+	}
+	if s.terminal != nil { // [DONE] or the first failure is terminal and sticky.
+		return StreamDelta{}, s.terminal
 	}
 
 	var data []string // all data line values of the event being accumulated so far, in wire order; joined at its boundary.
@@ -40,20 +46,15 @@ func (s *httpStream) Recv() (StreamDelta, error) {
 		}
 
 		switch {
-		case line == "" && rerr != nil: // terminal read with no bytes this round (EOF or a body failure).
-			if rerr != io.EOF {
-				s.done = true
-				return StreamDelta{}, protocolReadError(rerr)
-			}
-			if len(data) > 0 {
-				return s.decode(data)
-			} // Only raw EOF flushes a pending unterminated event first.
-			s.done = true
-			return StreamDelta{}, io.EOF
+		case line == "" && rerr != nil: // terminal read with no bytes this round (EOF or a body failure): handled after the switch.
 
 		case line == "": // blank line ends an event; one without any data lines is ignored entirely (its other fields were discarded as they arrived).
 			if len(data) > 0 {
-				return s.decode(data)
+				delta, err := s.decode(data)
+				if err != nil {
+					return s.fail(err)
+				}
+				return delta, nil
 			}
 			continue
 
@@ -68,40 +69,59 @@ func (s *httpStream) Recv() (StreamDelta, error) {
 
 		if rerr != nil { // terminal read that still delivered a final unterminated fragment; it was processed above as an ordinary line.
 			if rerr != io.EOF {
-				s.done = true
-				return StreamDelta{}, protocolReadError(rerr)
+				return s.fail(streamBrokenError(rerr))
 			}
 			if len(data) > 0 {
-				return s.decode(data)
-			} // Only raw EOF flushes a final unterminated data fragment first.
-			s.done = true // no payload survived that final fragment: terminal from here on.
-			return StreamDelta{}, io.EOF
+				return s.flushPending(data)
+			}
+			return s.fail(streamBrokenEOF()) // no [DONE] arrived: the stream is broken.
 		}
 	}
 }
 
-// Close releases this accepted stream's response body exactly once; a second call is a no-op returning nil. Recv after close reports io.EOF through its error return per the public contract. A close failure does not retroactively change any delta already delivered and never becomes another physical request — it is cleanup-only for whoever consumed this stream.
+// flushPending delivers one pending unterminated event at raw body EOF: [DONE] ends the stream, a decode failure is a truncation, and a delivered event makes the next receive report the missing terminator.
+func (s *httpStream) flushPending(data []string) (StreamDelta, error) {
+	delta, err := s.decode(data)
+	if err == io.EOF {
+		return s.fail(io.EOF)
+	}
+	if err != nil {
+		return s.fail(streamBrokenEOF())
+	}
+	s.terminal = streamBrokenEOF()
+	return delta, nil
+}
+
+func (s *httpStream) fail(err error) (StreamDelta, error) {
+	s.terminal = err
+	return StreamDelta{}, err
+}
+
+// Close releases this accepted stream's response body exactly once; a second call is a no-op returning nil. Recv after close reports io.EOF through its error return per the public contract because the body is released. A close failure does not retroactively change any delta already delivered and never becomes another physical request — it is cleanup-only for whoever consumed this stream.
 func (s *httpStream) Close() error { // the single consumer calls this exactly once; repeated closes are absorbed so deferred cleanup cannot double-close a released body.
 	if s == nil || s.body == nil {
 		return nil
 	}
-	s.done = true // from now on Recv reports io.EOF even when the stream was closed before being fully consumed (early abort of an accepted stream).
 	body := s.body
 	s.body = nil // idempotence: a later Close has nothing left to release.
 	s.reader = nil
 	return body.Close()
 }
 
-// protocolReadError wraps one non-EOF body read failure in the typed protocol error, keeping both sentinels reachable through errors.Is/As — no retry classification is attached or implied here.
-func protocolReadError(cause error) error {
-	return fmt.Errorf("%w: stream body read failed: %w", ErrProtocol, cause)
+// streamBrokenError wraps one non-EOF body read failure, keeping both sentinels and the cause reachable through errors.Is/As — no retry classification is attached or implied here.
+func streamBrokenError(cause error) error {
+	return fmt.Errorf("%w: stream body read failed: %w", ErrStreamBroken, cause)
+}
+
+// streamBrokenEOF reports a body that ended before the provider's [DONE] terminator.
+func streamBrokenEOF() error {
+	return fmt.Errorf("%w: stream body ended before [DONE]: %w", ErrStreamBroken, io.ErrUnexpectedEOF)
 }
 
 // decode turns one accumulated event's data lines into the next delta or terminal marker: they join with newlines, [DONE] ends the stream (io.EOF), and any other payload must be complete valid JSON — its raw bytes are appended to this exchange's chunks artifact on successful decode before it is parsed. Malformed payloads return a typed protocol error wrapping their cause; they are never skipped nor retried by anything in this package.
-func (s *httpStream) decode(data []string) (StreamDelta, error) { // pure over its inputs apart from the diagnostics append — no framing state changes here except [DONE]'s done flag.
+func (s *httpStream) decode(data []string) (StreamDelta, error) { // pure over its inputs apart from the diagnostics append — no stream state changes here.
 	payload := strings.Join(data, "\n")         // all data lines of one event join with a single newline between values.
 	if strings.TrimSpace(payload) == "[DONE]" { // retained terminator check on the joined payload: "data:[DONE]", "data: [DONE]", and multi-line joins containing it all end the stream identically.
-		s.done = true
 		return StreamDelta{}, io.EOF
 	}
 
@@ -217,7 +237,7 @@ func parseStreamChunkRaw(raw json.RawMessage) (StreamDelta, error) { // shared b
 	return out, nil
 }
 
-// rawStreamUsage mirrors the OpenAI usage object's numeric fields exactly as signed ints; prompt_tokens_details.cached_tokens is the only nested value this parser consumes. Absent (null/missing) sub-objects leave their producers at zero — normalizing an absent cached count to zero IS the retained behavior, and total tokens have no Usage field here because usage totals are out of scope for this phase's values.
+// rawStreamUsage mirrors the OpenAI usage object's numeric fields exactly as signed ints; prompt_tokens_details.cached_tokens is the only nested value this parser consumes. Absent (null/missing) sub-objects leave their producers at zero — normalizing an absent cached count to zero IS the retained behavior, and total tokens have no Usage field here because usage totals are out of scope for these values.
 type rawStreamUsage struct {
 	PromptTokens        int `json:"prompt_tokens,omitempty"` // total prompt token count as reported (cached included per provider convention).
 	CompletionTokens    int `json:"completion_tokens,omitempty"`
@@ -228,7 +248,7 @@ type rawStreamUsage struct {
 }
 
 // decodeStringField decodes one raw value under the fixed parser rule for string-typed canonical fields: absent and null both yield "" (absence is never an error), a present non-null JSON string yields its value, and any other present non-null type fails with ErrProtocol naming the field — wrong types are protocol errors, not silent drops.
-func decodeStringField(raw json.RawMessage, field string) (string, error) { // retained legacy tolerance for null/absent plus the plan's strictness for anything that is actually supplied.
+func decodeStringField(raw json.RawMessage, field string) (string, error) { // retained legacy tolerance for null/absent plus the fixed strictness for anything that is actually supplied.
 	if len(raw) == 0 || isJSONNull(raw) {
 		return "", nil
 	}

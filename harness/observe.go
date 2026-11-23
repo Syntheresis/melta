@@ -22,6 +22,8 @@ const (
 	// concatenate in arrival order — and no authority: the committed
 	// assistant entry's refusal is the authoritative value.
 	FactRefusalDelta HarnessFactKind = "refusal_delta"
+	// FactReasoningDelta reports one nonempty transient reasoning fragment.
+	FactReasoningDelta HarnessFactKind = "reasoning_delta"
 	// FactToolStarted reports one dispatched tool call. It is emitted once at
 	// the live dispatcher entry, before any branch-specific validation, hook,
 	// permission decision, or execution.
@@ -40,6 +42,9 @@ const (
 	// Recovery settles before any Harness observer exists and therefore emits
 	// no settled fact.
 	FactOperationSettled HarnessFactKind = "operation_settled"
+	// FactResponseRestarted reports one retry granted for a logical model
+	// effect; it carries Session and Operation identities only.
+	FactResponseRestarted HarnessFactKind = "response_restarted"
 )
 
 // SessionRevision is the value identity of one Session's revision pair: the
@@ -56,12 +61,14 @@ type SessionRevision struct {
 // carries SessionID and the optional JobID of a job member admission or
 // finish; a text delta carries SessionID, OperationID, Position, and the
 // nonempty Content; a refusal delta carries SessionID, OperationID, and the
-// nonempty Content and no Position; a tool start carries SessionID,
-// OperationID, CallID, Ordinal, and Name; a tool finish carries SessionID,
-// OperationID, CallID, the closed Status, and the committed execution
-// Evidence; an admitted Operation carries SessionID and OperationID; a settled
-// Operation carries SessionID, OperationID and the closed terminal
-// OperationStatus. Every field a kind does not require stays zero. A fact
+// nonempty Content and no Position; a reasoning delta carries SessionID,
+// OperationID, and the nonempty Content and no Position; a tool start carries
+// SessionID, OperationID, CallID, Ordinal, and Name; a tool finish carries
+// SessionID, OperationID, CallID, the closed Status, and the committed
+// execution Evidence; an admitted Operation carries SessionID and
+// OperationID; a settled Operation carries SessionID, OperationID and the
+// closed terminal OperationStatus; a response restart carries SessionID and
+// OperationID. Every field a kind does not require stays zero. A fact
 // grants no authority: it can never alter an admission, an effect, a
 // settlement, or a lifecycle transition. A fact carries no revision pair: no
 // producer sample can become notification authority; passive publishers read
@@ -227,14 +234,11 @@ func (h *Harness) observeStream(sessionID, operationID string, stream model.Stre
 
 // observedStream is the one accepted-stream wrapper: Recv delegates unchanged,
 // Close delegates exactly once, and only a successfully parsed choice-bearing
-// delta contributes one fact per nonempty fragment. An empty, non-text, or
-// invalid delta emits nothing, and a delta returned together with an error
-// (EOF included) emits nothing; the original delta and error are always
-// returned exactly as received — the validation gate reads the same contract
-// the constructor enforces without building an owned copy. A delta's
-// positioned content-text fragments are emitted before its refusal fragment,
-// and refusal emits no position. No reasoning, tool, or finish fragment is
-// interpreted, and no second assembler or accumulator exists.
+// delta contributes facts — one reasoning fact for its reasoning text, emitted
+// before the delta's text facts, and one fact per nonempty positioned text or
+// refusal fragment. An invalid, empty, or error-bearing delta emits nothing;
+// the original delta and error are returned unchanged. No tool or finish
+// fragment is interpreted.
 type observedStream struct {
 	inner model.Stream
 	emit  func(kind HarnessFactKind, position int, content string)
@@ -247,6 +251,13 @@ func (s observedStream) Recv() (model.StreamDelta, error) {
 	}
 	if verr := model.ValidateStreamDelta(delta); verr != nil { // validation gate only; the original delta is returned unchanged
 		return delta, err
+	}
+	parts := make([]model.ContentPart, 0, len(delta.ContentFragments))
+	for _, fragment := range delta.ContentFragments {
+		parts = append(parts, model.ContentPart{Kind: fragment.Kind, OpaqueWireType: fragment.OpaqueWireType, Extra: fragment.Extra})
+	}
+	if reasoning := model.ReasoningText(delta.MessageExtra, parts); reasoning != "" {
+		s.emit(FactReasoningDelta, 0, reasoning)
 	}
 	for _, fragment := range delta.ContentFragments {
 		if fragment.Kind == model.PartText && fragment.Text != "" {

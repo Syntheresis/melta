@@ -55,7 +55,7 @@ func TestRunCommandUsesWorkspaceRoot(t *testing.T) {
 	other := t.TempDir()
 	t.Chdir(other)
 
-	out, err := RunForegroundCommand(context.Background(), "pwd", root, 2, 15360, 5000, t.TempDir(), os.Environ())
+	out, err := RunForegroundCommand(context.Background(), "pwd", root, 2, testCapture(t.TempDir(), 15360, 5000), os.Environ())
 	testassert.NoError(t, err)
 	testassert.Require(t, strings.TrimSpace(out) == root, "pwd = %q, want workspace root %q", out, root)
 }

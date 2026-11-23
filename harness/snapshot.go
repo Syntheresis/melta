@@ -578,6 +578,10 @@ func ownAssistantPayload(v assistantEntry) *assistantEntry {
 		usage := *v.Usage
 		out.Usage = &usage
 	}
+	if v.RetryUsage != nil {
+		usage := *v.RetryUsage
+		out.RetryUsage = &usage
+	}
 	out.Evidence = copyRequestEvidencePointer(v.Evidence)
 	return &out
 }
@@ -618,6 +622,10 @@ func ownSettlementPayload(v operationSettlementEntry) *operationSettlementEntry 
 	if v.Usage != nil {
 		usage := *v.Usage
 		out.Usage = &usage
+	}
+	if v.RetryUsage != nil {
+		usage := *v.RetryUsage
+		out.RetryUsage = &usage
 	}
 	out.Evidence = copyRequestEvidencePointer(v.Evidence)
 	out.Facts = cloneMaintenanceFacts(v.Facts)

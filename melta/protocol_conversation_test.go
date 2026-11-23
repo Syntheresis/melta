@@ -245,6 +245,27 @@ func TestConversationProjectionDeterministicItemKinds(t *testing.T) {
 	testassert.Require(t, string(first) == string(second), "second projection = %s, want the deterministic %s", second, first)
 }
 
+// TestConversationProjectionReasoning proves the committed assistant item's
+// reasoning is the message extra or the thinking parts' text, absent when
+// empty, while the raw extra and parts stay unchanged.
+func TestConversationProjectionReasoning(t *testing.T) {
+	entry := func(id string, status model.OutputStatus, parts []model.ContentPart, extra model.Extra) harness.HistoryFact {
+		return convAssistantFact(id, "op", harness.AssistantEntry{SessionID: convSessionID, EntryID: id, Status: status, Content: parts, Extra: extra})
+	}
+	items, err := projectConversation(convSessionID, []harness.HistoryFact{
+		entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa21", model.OutputCompleted, []model.ContentPart{{Kind: model.PartText, Text: "answer"}}, model.Extra{"reasoning_content": json.RawMessage(`"because"`), "vendor": json.RawMessage(`{"n":1}`)}),
+		entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa22", model.OutputInterrupted, []model.ContentPart{{Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"thinking": json.RawMessage(`[{"text":"step one"},{"text":" and two"}]`)}}}, nil),
+		entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa23", model.OutputCompleted, []model.ContentPart{{Kind: model.PartText, Text: "plain"}}, nil),
+	})
+	testassert.NoError(t, err)
+	for at, want := range []string{"because", "step one and two", ""} {
+		item, err := items[at].AsAssistantItem()
+		testassert.Require(t, err == nil && (item.Reasoning == nil && want == "" || item.Reasoning != nil && *item.Reasoning == want), "reasoning %d = %v, want %q", at, item.Reasoning, want)
+	}
+	raw, err := json.Marshal(items)
+	testassert.Require(t, err == nil && strings.Contains(string(raw), `"reasoning_content":"because"`) && strings.Contains(string(raw), `"vendor":{"n":1}`) && strings.Contains(string(raw), `"extra":{"thinking":[{"text":"step one"},{"text":" and two"}]}`), "projection = %s, want the raw extra and parts unchanged", raw)
+}
+
 // TestConversationProjectionSameCallIDAcrossOperations proves the tool-result
 // binding when two Operations of one Session publish the same call ID: call
 // identities are unique per Operation, while the reserved result entry
@@ -711,56 +732,27 @@ func TestConversationProjectionSyntheticInterruptedResult(t *testing.T) {
 	})
 }
 
-// TestConversationProjectionErroredPartialAssistant proves the errored
-// partial axis: a stream that fails after yielding its partial answer keeps
-// that content visible, rides the typed model_failure_continuation signal,
-// and the operation's later failure still ends the conversation in committed
-// order — distinct from both the interruption and the no-assistant failure.
-func TestConversationProjectionErroredPartialAssistant(t *testing.T) {
+// TestConversationProjectionMalformedStreamEventFailsWithoutAssistant proves a malformed stream event settles without an assistant item.
+func TestConversationProjectionMalformedStreamEventFailsWithoutAssistant(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
-		stopper := newLifecycleStopper()
-		bg := openBackgroundRuntime(t, store, stopper)
+		bg := openBackgroundRuntime(t, store, newLifecycleStopper())
 		defer closeProjectionRuntime(bg.r)
-		session := bg.session("errored")
-		bg.e.server.setScript(func(_ context.Context, body string) []string {
-			if strings.Contains(body, "The previous model response failed after partial output.") {
-				// The continuation request fails nonretryably: the operation
-				// settles failure carrying the provider's diagnostic.
-				return []string{"HTTP 400", `{"error":{"message":"model down"}}`}
-			}
-			// The first turn: the partial answer streams, then the malformed
-			// event fails the response after its accepted fragment.
-			return []string{
-				`{"choices":[{"delta":{"role":"assistant","content":"partial answer"},"finish_reason":null}]}`,
-				`{"choices":[{"delta":`,
-			}
+		bg.e.server.setScript(func(context.Context, string) []string {
+			return []string{`{"choices":[{"delta":{"role":"assistant","content":"partial answer"},"finish_reason":null}]}`, `{"choices":[{"delta":`}
 		})
+		session := bg.session("errored")
 		submitThroughRuntime(t, bg.r, session, "op-1", "work")
-		// Request 2's arrival is the rendezvous proving the errored partial
-		// assistant and its continuation signal committed.
-		bg.e.server.awaitRequests(2)
 		awaitOperation(t, bg.r, session, "op-1", harness.OperationFailure)
-
 		items := projectSessionItems(t, bg.r, session)
-		if len(items) != 4 ||
-			itemKind(t, items[0]) != "input" || itemKind(t, items[1]) != "assistant" ||
-			itemKind(t, items[2]) != "signal" || itemKind(t, items[3]) != "operation_end" {
-			t.Fatalf("items = %d (%s), want the committed order input, assistant, signal, end", len(items), itemKinds(t, items))
-		}
-		partial, err := items[1].AsAssistantItem()
-		testassert.Require(t, err == nil && partial.Status == protocol.AssistantItemStatusErrored, "partial assistant = %+v err %v, want the errored status", partial, err)
-		textPart, err := partial.Content[0].AsTextPart()
-		testassert.Require(t, err == nil && textPart.Text == "partial answer", "partial content = %+v, want the retained fragment", partial.Content)
-		continuation, err := items[2].AsSignalItem()
-		testassert.Require(t, err == nil && continuation.Subtype == protocol.SignalItemSubtypeModelFailureContinuation && continuation.Content == "The previous model response failed after partial output. Continue from the retained response.", "continuation signal = %+v err %v, want the typed signal with its required content", continuation, err)
-		end, err := items[3].AsOperationEndItem()
-		testassert.Require(t, err == nil && end.Status == protocol.OperationEndItemStatusFailure && strings.Contains(end.Detail, "model down"), "end = %+v err %v, want the failure detail", end, err)
+		testassert.Require(t, len(items) == 2 && itemKind(t, items[0]) == "input", "items = %s, want input, end", itemKinds(t, items))
+		end, err := items[1].AsOperationEndItem()
+		testassert.Require(t, err == nil && end.Status == protocol.OperationEndItemStatusFailure && strings.Contains(end.Detail, "streaming protocol violation"), "end = %+v err %v, want the protocol failure detail", end, err)
 	})
 }
 
 // TestConversationProjectionInterruptedPartialAssistant proves a stream
-// interruption after partial output keeps the errored/interrupted assistant
-// visible beside its typed signal and terminal end.
+// interruption after partial output keeps the interrupted assistant visible
+// beside its typed signal and terminal end.
 func TestConversationProjectionInterruptedPartialAssistant(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
 		stopper := newLifecycleStopper()

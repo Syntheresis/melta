@@ -242,6 +242,35 @@ func TestProtocolSuppliedRuntimeBaselineControls(t *testing.T) {
 	}
 }
 
+// TestProtocolMountedToolOutputRead proves the mounted authenticated route
+// returns a running foreground command's bounded output by call ID.
+func TestProtocolMountedToolOutputRead(t *testing.T) {
+	modelEndpoint := newBaselineModel(t)
+	modelEndpoint.setRespond(func(w http.ResponseWriter, _ string) {
+		shippedToolTurn(w, "call-live", "run_command", `{"command":"printf live; sleep 2"}`)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, client := shippedMount(t, ctx, t.TempDir(), baselineConfigDocument(modelEndpoint.URL, map[string]string{"m": "M"}, nil), nil)
+	sessionID := shippedCreateSession(t, ctx, client, t.TempDir())
+	tools, ref := []string{"run_command"}, protocol.ModelRef("prov/m")
+	selected, err := client.SetSessionInputsWithResponse(ctx, sessionID, protocol.SetSessionInputsRequest{Inputs: protocol.SessionInputs{Model: &ref, Tools: &tools}})
+	testassert.Require(t, err == nil && selected.JSON200 != nil, "SetSessionInputs = (%+v, %v)", selected, err)
+	submitted, err := client.SubmitSessionWithResponse(ctx, sessionID, protocol.SubmitRequest{OperationId: "op-live", Mode: protocol.SubmitRequestModeRegular, Content: []protocol.ContentPart{baselineTextPart(t, "live")}})
+	testassert.Require(t, err == nil && submitted.JSON200 != nil, "SubmitSession = (%+v, %v)", submitted, err)
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		read, err := client.GetSessionToolOutputWithResponse(ctx, sessionID, "op-live", &protocol.GetSessionToolOutputParams{CallId: "call-live"})
+		testassert.Require(t, err == nil, "GetSessionToolOutput: %v", err)
+		if read.JSON200 != nil && read.JSON200.Output == "live" {
+			return
+		}
+		testassert.Require(t, time.Now().Before(deadline), "running command output never appeared (status %d, response %s)", read.StatusCode(), read.Body)
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestProtocolMountedSessionOperationRead proves the generated Operation read
 // returns the captured inputs under Session authority and maps another
 // Session's Operation and an unknown ID to the same not-found read.

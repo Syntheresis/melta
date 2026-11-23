@@ -70,7 +70,6 @@
 
   function signalLabel(item) {
     if (item.subtype === 'interruption') return 'Interrupted';
-    if (item.subtype === 'model_failure_continuation') return 'Continuing after a model failure';
     if (item.subtype === 'background_completion') return 'Background completed';
     return 'Signal';
   }

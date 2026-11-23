@@ -168,8 +168,9 @@ func (s *publicScriptStream) Recv() (model.StreamDelta, error) {
 	return d, nil
 }
 
-// publicPartialTurnStream is one accepted stream whose assembly errors while
-// retaining the "partial" text: the fixture errored continuation turn.
+// publicPartialTurnStream is one accepted stream whose read fails before its
+// finish reason after carrying text and usage: the fixture broken summary
+// turn, which retains no partial output.
 func publicPartialTurnStream() *publicScriptStream {
 	return &publicScriptStream{
 		deltas: []model.StreamDelta{
@@ -5355,19 +5356,10 @@ func (s *corruptReadStore) ReadRegister(ctx context.Context, key harness.Registe
 	return s.Storage.ReadRegister(ctx, key)
 }
 
-// TestPublicForkCopiesPrefixAndAdmits proves the fork row's positive core
-// through public operations: an idle source forks at a committed input
-// boundary; the destination inherits the source Workspace and current Agent
-// type with informational source/boundary lineage and zero usage; only the
-// strict-before-boundary input, assistant, tool_result, and signal entries
-// are copied, under new operationless identities with cleared usage, the
-// rewritten result/assistant references, and the copied signal's source
-// Operation left as informational history; settlements and the boundary
-// itself are excluded; the fresh admission carries the caller's replacement
-// origin and provenance and owns a running message Operation; the source
-// stays byte-identical; and the
-// destination execution starts after the commit and projects the copied
-// prefix before the fork input.
+// TestPublicForkPrepareOwnsSelection proves fork preparation receives the
+// source Session's selected inputs and extension state, and that a callback
+// mutating them cannot rewrite the source or the destination's retained
+// selection.
 func TestPublicForkPrepareOwnsSelection(t *testing.T) {
 	for _, form := range []string{"instructions", "tools"} {
 		t.Run(form, func(t *testing.T) {
@@ -5433,30 +5425,52 @@ func TestPublicForkPreparationRefusalLeavesNoDestination(t *testing.T) {
 	testassert.Require(t, err == nil && len(sessions) == 1 && sessions[0].Identity.SessionID == source, "sessions after refusal = %+v, %v", sessions, err)
 }
 
+// TestPublicForkCopiesPrefixAndAdmits proves the fork row's positive core
+// through public operations: an idle source forks at a committed input
+// boundary; the destination inherits the source Workspace and current Agent
+// type with informational source/boundary lineage and zero usage; only the
+// strict-before-boundary input, assistant, tool_result, and signal entries
+// are copied, under new operationless identities with cleared usage, the
+// rewritten result/assistant references, and the copied signal's source
+// Operation left as informational history; settlements and the boundary
+// itself are excluded; the fresh admission carries the caller's replacement
+// origin and provenance and owns a running message Operation; the source
+// stays byte-identical; and the destination execution starts after the commit
+// and projects the copied prefix before the fork input.
 func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		script := newScriptModel(
-			publicTurn("call-1"),                             // turn 1 publishes a call
-			publicAttempt{stream: publicPartialTurnStream()}, // turn 2 continues from the errored partial with the continuation signal
-			publicFail("source turn terminal"),               // turn 3 settles op-1's model-originated terminal
-			publicTurn(),                                     // op-2 completes
-			publicTurn(),                                     // op-3 completes
+			publicTurn("call-1"),
+			publicTurn(),
+			publicTurn(),
 		)
+		parked := make(chan struct{}, 1)
+		attempts := 0
+		conversation := func(ctx context.Context, req model.Request, extra model.Extra) (model.Stream, error) {
+			switch attempts++; attempts {
+			case 1:
+				return publicPartialTurnStream(), nil
+			case 3:
+				parked <- struct{}{}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return script.effect(ctx, req, extra)
+		}
 		f := newPublicFixture(t, store, script, nil)
 		f.prepareHook = func(_ int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
+			exec := publicExecutionOver(conversation, conversation, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran " + call.ID},
+					Metadata: json.RawMessage(`{ "n" : [1, 1.0, 1e0, 9007199254740993], "s" : "<>&" }`),
+				}}
+			})
+			exec.Retry = func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 }
 			return harness.PreparedExecution{
 				Capture: publicCapture(),
 				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-					return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-						// the copied tool result carries tool-owned
-						// formatted metadata that the fork must preserve
-						// in its encoded durable form
-						return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
-							Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"},
-							Metadata: json.RawMessage(`{ "n" : [1, 1.0, 1e0, 9007199254740993], "s" : "<>&" }`),
-						}}
-					}), nil
+					return exec, nil
 				},
 			}, nil
 		}
@@ -5467,8 +5481,9 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		<-script.arrived // the published call
-		<-script.arrived // the continued partial turn
-		<-script.arrived // the terminal turn
+		<-parked         // the second attempt parks
+		testassert.NoError(t, f.h.Interrupt(ctx, source))
+		awaitTerminal(t, f.h, source, "op-1")
 		{
 			_, err := f.h.Submit(ctx, harness.SubmitRequest{
 				SessionID:   source,
@@ -5522,7 +5537,7 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		<-forkScript.arrived // the destination execution reached its model boundary
 		{
 			got := texts(forkScript.seen()[0])
-			testassert.Require(t, len(got) == 7 && got[0] == "system" && got[1] == "hello" && got[2] == "done" && got[3] == "ran call-1" && got[4] == "partial" && got[5] == "<system-signal>The previous model response failed after partial output. Continue from the retained response.</system-signal>" && got[6] == "fork input", "fork projection = %v, want the copied prefix before the fork input", got)
+			testassert.Require(t, len(got) == 6 && got[0] == "system" && got[1] == "hello" && got[2] == "done" && got[3] == "ran call-1" && got[4] == "<system-signal>Operation interrupted.</system-signal>" && got[5] == "fork input", "fork projection = %v, want the copied prefix before the fork input", got)
 		}
 		forkScript.releaseGate()
 		awaitTerminal(t, f2.h, dest, "fork-1") // the fork turn's settlement commits before the convergence cancellation
@@ -5540,20 +5555,20 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		// the destination carries exactly the copied prefix, then the fresh
 		// user-origin admission input and the fork's model-originated terminal
 		entries := recoverEntries(t, store, dest)
-		wantKinds := []harness.EntryKind{harness.EntryInput, harness.EntryAssistant, harness.EntryToolResult, harness.EntryAssistant, harness.EntrySignal, harness.EntryInput, harness.EntryOperationSettlement}
-		testassert.Require(t, len(entries) == len(wantKinds), "destination entries = %d, want the %d copied prefix entries, the fork admission, and the fork's settled turn", len(entries), 5)
+		wantKinds := []harness.EntryKind{harness.EntryInput, harness.EntryAssistant, harness.EntryToolResult, harness.EntrySignal, harness.EntryInput, harness.EntryOperationSettlement}
+		testassert.Require(t, len(entries) == len(wantKinds), "destination entries = %d, want the %d copied prefix entries, the fork admission, and the fork's settled turn", len(entries), 4)
 		sourceIDs := map[string]bool{}
 		for _, entry := range before.entries {
 			sourceIDs[entry.ID] = true
 		}
 		for i, entry := range entries {
 			testassert.Require(t, entry.Kind == wantKinds[i] && entry.SessionID == dest, "destination entry %d is a %s entry, want %s; destination entry %d addresses session %q", i, entry.Kind, wantKinds[i], i, entry.SessionID)
-			if i < 5 { // copied prefix entries are operationless and freshly identified
+			if i < 4 { // copied prefix entries are operationless and freshly identified
 				testassert.Require(t, entry.OperationID == "", "copied entry %s carries operation %q, want no source ownership", entry.ID, entry.OperationID)
 				testassert.Require(t, !sourceIDs[entry.ID], "copied entry %s reuses a source identity", entry.ID)
 			}
 		}
-		testassert.Require(t, entries[5].OperationID == "fork-1", "fork admission entry = %+v, want it owned by fork-1", entries[5])
+		testassert.Require(t, entries[4].OperationID == "fork-1", "fork admission entry = %+v, want it owned by fork-1", entries[4])
 		var copiedInput struct {
 			Origin string `json:"origin"`
 		}
@@ -5568,13 +5583,15 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 				ResultEntryID       string `json:"result_entry_id"`
 				NormalizedArguments []byte `json:"normalized_arguments_base64"`
 			} `json:"tool_calls"`
-			Usage *struct{} `json:"usage"`
+			Usage             *struct{} `json:"usage"`
+			RetryUsage        *struct{} `json:"retry_usage"`
+			RetryUsageUnknown bool      `json:"retry_usage_unknown"`
 		}
 		{
 			err := json.Unmarshal(entries[1].Payload, &copiedAssistant)
 			testassert.NoError(t, err)
 		}
-		testassert.Require(t, copiedAssistant.Usage == nil, "copied assistant carries source usage")
+		testassert.Require(t, copiedAssistant.Usage == nil && copiedAssistant.RetryUsage == nil && !copiedAssistant.RetryUsageUnknown, "copied assistant carries source usage, retry usage %v, or the unknown mark %v", copiedAssistant.RetryUsage, copiedAssistant.RetryUsageUnknown)
 		testassert.Require(t, len(copiedAssistant.ToolCalls) == 1 && copiedAssistant.ToolCalls[0].ID == "call-1" && copiedAssistant.ToolCalls[0].ResultEntryID == entries[2].ID, "copied call reservation = %+v, want it rewritten to the copied result entry %s", copiedAssistant.ToolCalls, entries[2].ID)
 		var copiedResult struct {
 			AssistantEntry struct {
@@ -5594,21 +5611,23 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		testassert.Require(t, string(copiedResult.NormalizedArguments) == `{"x":1}`, "copied result arguments = %s", copiedResult.NormalizedArguments)
 		testassert.Require(t, copiedResult.Implementation != nil && copiedResult.Implementation.ID == "echo", "copied implementation = %+v", copiedResult.Implementation)
 		var copiedSignal struct {
+			Signal           string `json:"signal"`
+			Content          string `json:"content"`
 			RelatedOperation struct {
 				SessionID   string `json:"session_id"`
 				OperationID string `json:"operation_id"`
 			} `json:"related_operation"`
 		}
 		{
-			err := json.Unmarshal(entries[4].Payload, &copiedSignal)
+			err := json.Unmarshal(entries[3].Payload, &copiedSignal)
 			testassert.NoError(t, err)
 		}
-		testassert.Require(t, copiedSignal.RelatedOperation.SessionID == source && copiedSignal.RelatedOperation.OperationID == "op-1", "copied signal related operation = %+v, want the source Operation kept as informational history", copiedSignal.RelatedOperation)
+		testassert.Require(t, copiedSignal.Signal == "interruption" && copiedSignal.Content == "Operation interrupted." && copiedSignal.RelatedOperation.SessionID == source && copiedSignal.RelatedOperation.OperationID == "op-1", "copied signal = %+v, want the interruption signal related to its source Operation", copiedSignal)
 		var admission struct {
 			Origin string `json:"origin"`
 		}
 		{
-			err := json.Unmarshal(entries[5].Payload, &admission)
+			err := json.Unmarshal(entries[4].Payload, &admission)
 			testassert.NoError(t, err)
 		}
 		testassert.Equal(t, admission.Origin, "user")
@@ -6593,9 +6612,18 @@ func TestPublicForkAcrossCompaction(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		conversation := newScriptModel(publicTurn(), publicTurn(), publicTurn()) // op-1, op-2, fork-1
-		compact := newScriptModel(summaryAttempt("summary one"))
+		compact := newScriptModel(publicAttempt{stream: publicPartialTurnStream()}, summaryAttempt("summary one"))
 		f := newPublicFixtureWithJobs(t, store, nil, conversation, nil, compact.effect)
 		f.defaultPrep.Capture = compactManualCapture()
+		policyCalls := 0
+		f.defaultPrep.Open = func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
+			exec := publicExecution(conversation.effect, compact.effect)
+			exec.Retry = func(error, int) (time.Duration, bool) {
+				policyCalls++
+				return 0, policyCalls == 1
+			}
+			return exec, nil
+		}
 		defer f.close()
 		source := createSession(t, f.h)
 
@@ -6638,7 +6666,9 @@ func TestPublicForkAcrossCompaction(t *testing.T) {
 				} `json:"content"`
 			} `json:"messages"`
 			Facts []struct {
-				Usage *harness.UsageCount `json:"usage"`
+				Usage             *harness.UsageCount `json:"usage"`
+				RetryUsage        *harness.UsageCount `json:"retry_usage"`
+				RetryUsageUnknown bool                `json:"retry_usage_unknown"`
 			} `json:"facts"`
 		}
 		var sourceWire compactionWire
@@ -6651,10 +6681,14 @@ func TestPublicForkAcrossCompaction(t *testing.T) {
 			sourceSummary = sourceWire.Messages[0].Content[0].Text
 		}
 		sourceUsage := (*harness.UsageCount)(nil)
+		sourceRetryUsage := (*harness.UsageCount)(nil)
+		sourceRetryUnknown := false
 		if len(sourceWire.Facts) > 0 {
 			sourceUsage = sourceWire.Facts[0].Usage
+			sourceRetryUsage = sourceWire.Facts[0].RetryUsage
+			sourceRetryUnknown = sourceWire.Facts[0].RetryUsageUnknown
 		}
-		testassert.Require(t, sourceWire.OperationID == "c-1" && sourceSummary == "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]" && sourceUsage != nil, "source compaction entry = %+v, want the c-1-owned committed summary with usage", sourceWire)
+		testassert.Require(t, sourceWire.OperationID == "c-1" && sourceSummary == "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]" && sourceUsage != nil && sourceRetryUsage != nil && *sourceRetryUsage == (harness.UsageCount{InputTokens: 5, OutputTokens: 7}) && !sourceRetryUnknown, "source compaction entry = %+v, want the c-1-owned committed summary with its usage and the broken attempt's retry usage", sourceWire)
 
 		res, err := f.h.Fork(ctx, harness.ForkRequest{Origin: harness.InputOriginUser,
 			SourceSessionID: source,
@@ -6712,10 +6746,14 @@ func TestPublicForkAcrossCompaction(t *testing.T) {
 			copiedSummary = copiedWire.Messages[0].Content[0].Text
 		}
 		copiedUsage := (*harness.UsageCount)(nil)
+		copiedRetryUsage := (*harness.UsageCount)(nil)
+		copiedRetryUnknown := false
 		if len(copiedWire.Facts) > 0 {
 			copiedUsage = copiedWire.Facts[0].Usage
+			copiedRetryUsage = copiedWire.Facts[0].RetryUsage
+			copiedRetryUnknown = copiedWire.Facts[0].RetryUsageUnknown
 		}
-		testassert.Require(t, copiedWire.OperationID == "" && copiedUsage == nil && copiedSummary == "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]", "got %v, want %v; copied compaction entry usage = %+v, want none; got %v, want %v", copiedWire.OperationID, "", copiedUsage, copiedSummary, "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]")
+		testassert.Require(t, copiedWire.OperationID == "" && copiedUsage == nil && copiedRetryUsage == nil && !copiedRetryUnknown && copiedSummary == "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]", "got %v, want %v; copied compaction entry usage = %+v/%+v (unknown %v), want none; got %v, want %v", copiedWire.OperationID, "", copiedUsage, copiedRetryUsage, copiedRetryUnknown, copiedSummary, "[Previous conversation summary]\n\nsummary one\n\n[End of summary. Continue from here.]")
 		expectedBoundary, ok := idMap[sourceWire.BoundaryEntryID]
 		testassert.Require(t, ok, "the source boundary %q is not inside the copied prefix", sourceWire.BoundaryEntryID)
 		testassert.Require(t, copiedWire.BoundaryEntryID == expectedBoundary && copiedWire.ConfigurationRevision == sourceWire.ConfigurationRevision, "got %v, want %v; got %v, want %v", copiedWire.BoundaryEntryID, expectedBoundary, copiedWire.ConfigurationRevision, sourceWire.ConfigurationRevision)

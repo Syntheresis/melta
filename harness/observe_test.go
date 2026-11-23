@@ -155,6 +155,30 @@ func TestObserveFactKinds(t *testing.T) {
 	testassert.Require(t, invalidations >= 2 && deltas == 2 && started == 1 && finished == 1 && settled == 1, "fact counts = invalidations %d deltas %d started %d finished %d settled %d", invalidations, deltas, started, finished, settled)
 }
 
+// TestObserveResponseRestarted proves the attempt loop reports a restart only after a granted retry and before the backoff wait.
+func TestObserveResponseRestarted(t *testing.T) {
+	attempt := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+		return nil, errors.New("provider dropped")
+	}
+	assemble := func(model.Stream) (model.Output, error) { return model.Output{Status: model.OutputCompleted}, nil }
+	for _, policy := range []RetryPolicy{
+		func(error, int) (time.Duration, bool) { return 0, false },
+		func(error, int) (time.Duration, bool) { return -time.Second, true },
+	} {
+		reports := 0
+		runModelAttempts(context.Background(), model.Request{}, nil, attempt, assemble, policy, func() { reports++ })
+		testassert.Equal(t, reports, 0)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	reports := 0
+	runModelAttempts(ctx, model.Request{}, nil, attempt, assemble, func(error, int) (time.Duration, bool) { return 10 * time.Second, true }, func() {
+		reports++
+		cancel()
+	})
+	testassert.Equal(t, reports, 1) // reported before the wait: the report cancels it
+}
+
 // TestObserveReservationClocks proves each reservation acquisition and release
 // emits one local-only invalidation and nothing durable.
 func TestObserveReservationClocks(t *testing.T) {
@@ -1116,6 +1140,17 @@ func TestObserveStreamFilter(t *testing.T) {
 		testassert.Require(t, len(*got) == 1 && (*got)[0].kind == FactTextDelta, "emitted = %+v, want the text fragment and no refusal emission", *got)
 	})
 
+	t.Run("reasoning emits once before the delta's text", func(t *testing.T) {
+		inner := streamOf(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`)}, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "working"}}})
+		wrapper, got := collect(t, inner)
+		{
+			_, err := wrapper.Recv()
+			testassert.NoError(t, err)
+		}
+		want := []emitted{{kind: FactReasoningDelta, position: 0, content: "thinking"}, {kind: FactTextDelta, position: 0, content: "working"}}
+		testassert.Require(t, slices.Equal(*got, want), "emitted = %+v, want the delta's reasoning fact before its text %+v", *got, want)
+	})
+
 	t.Run("original delta and error preserved", func(t *testing.T) {
 		delta := model.StreamDelta{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "x"}}}
 		inner := &duplexStream{delta: delta, err: errors.New("read failed")}
@@ -1196,6 +1231,11 @@ func TestObserveStreamFilter(t *testing.T) {
 				},
 			},
 			{
+				name:  "thinking content fragment emits one reasoning fact",
+				delta: model.StreamDelta{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartOpaque, OpaqueWireType: "thinking", Extra: model.Extra{"thinking": json.RawMessage(`"plan"`)}}}},
+				want:  []emitted{{kind: FactReasoningDelta, position: 0, content: "plan"}},
+			},
+			{
 				name:  "invalid tool position suppresses valid-looking text",
 				delta: model.StreamDelta{HasChoice: true, ContentFragments: []model.ContentFragment{{Position: 0, Kind: model.PartText, Text: "x"}}, ToolFragments: []model.ToolCallFragment{{ID: "c", Name: "f", Position: &[]int{-2}[0]}}},
 			},
@@ -1254,7 +1294,10 @@ func TestObserveStreamFilter(t *testing.T) {
 func TestObserveCompactAttribution(t *testing.T) {
 	store := idleFixture(t, validTestGraph(), hexID(20))
 	compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-		return completedTurnStream(), nil
+		return streamOf(
+			model.StreamDelta{HasChoice: true, Role: "assistant", MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"plan"`)}},
+			turnDelta("stop", "done"),
+		), nil
 	}
 	exec := compactionExecution(t, compactFn, nil)
 	prepared := compactPrepared(testCapture(), exec)
@@ -1262,15 +1305,19 @@ func TestObserveCompactAttribution(t *testing.T) {
 	c := leaseCoordinator(t, h, testSessionID)
 	col := observeHarness(h)
 	testassert.NoError(t, runManualCompact(t, h, c, testSessionID, "compact-1"))
-	deltas := 0
+	deltas, reasoning := 0, 0
 	for _, fact := range col.snapshot() {
-		if fact.Kind != FactTextDelta {
-			continue
+		switch fact.Kind {
+		case FactTextDelta:
+			deltas++
+			testassert.Require(t, fact.SessionID == testSessionID && fact.OperationID == "compact-1" && fact.Position == 0 && fact.Content == "done", "compact delta fact = %+v, want the enclosing Operation attribution", fact)
+		case FactReasoningDelta:
+			reasoning++
+			testassert.Require(t, fact.SessionID == testSessionID && fact.OperationID == "compact-1" && fact.Position == 0 && fact.Content == "plan", "compact reasoning fact = %+v, want the enclosing Operation attribution", fact)
 		}
-		deltas++
-		testassert.Require(t, fact.SessionID == testSessionID && fact.OperationID == "compact-1" && fact.Position == 0 && fact.Content == "done", "compact delta fact = %+v, want the enclosing Operation attribution", fact)
 	}
 	testassert.Equal(t, deltas, 1)
+	testassert.Equal(t, reasoning, 1)
 }
 
 // TestObserveRefusalFacts proves a real accepted refusal stream emits one

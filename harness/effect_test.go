@@ -200,14 +200,6 @@ func completedTurnStream(calls ...model.ToolCall) *scriptStream {
 	return streamOf(turnDelta(finish, "done", calls...), usageDelta(model.Usage{InputTokens: 3, CachedInputTokens: 1, OutputTokens: 2}))
 }
 
-// erroredTurnStream assembles to the fixture errored partial: text "partial"
-// with the fixture usage, then the read failure — an accepted stream whose
-// assembly errors while retaining the partial.
-func erroredTurnStream() *scriptStream {
-	return failStream(errors.New("provider failure"),
-		turnDelta("", "partial"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7}))
-}
-
 // TestModelEffectReadyRemainsRunning proves the ready transition: the
 // committed assistant consumes the effect's reserved identity, completed calls
 // receive their reservations, usage lands on the entry and both totals, and
@@ -299,65 +291,6 @@ func TestModelEffectReadyRemainsRunning(t *testing.T) {
 	testassert.Require(t, last.Role == model.RoleAssistant && last.Source == testModelRef() && last.TextContent() == "done" && len(last.ToolCalls) == 2, "second projection's last message = %+v, want the committed assistant", last)
 	testassert.Require(t, string(last.ToolCalls[0].Arguments) == `{"x":1}`, "projected call arguments = %s, want the exact raw bytes", last.ToolCalls[0].Arguments)
 	close(prepareGate)
-	testassert.NoError(t, <-done)
-}
-
-// TestModelEffectContinueRemainsRunning proves the continuation transition:
-// the retained partial assistant commits with the fixed continuation signal
-// and the Operation stays running.
-func TestModelEffectContinueRemainsRunning(t *testing.T) {
-	modelCalls := 0
-	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-		modelCalls++
-		if modelCalls == 1 {
-			return erroredTurnStream(), nil
-		}
-		return completedTurnStream(), nil
-	}
-	// The second request source runs after the continuation result and before
-	// its model intent; park there to observe the settled running state.
-	secondArrived := make(chan struct{}, 1)
-	secondGate := make(chan struct{})
-	hookRounds := 0
-	hook := RequestHook{ID: "park.second", ExtensionID: "park-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-		hookRounds++
-		if hookRounds == 2 {
-			secondArrived <- struct{}{}
-			<-secondGate
-		}
-		return RequestConsequence{}, nil
-	}}
-	h, store, c, sessionID := newEffectHarness(t, modelFn)
-	exec := requestHookFixtureExecution(modelFn, nil, hook)
-	prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return exec, nil
-	})
-	done := make(chan error, 1)
-	go func() { done <- executeDirect(h, c, h.ctx, testOpID, prepared) }()
-	<-secondArrived // the continuation committed and the next request is live
-	graph, err := validateFixture(t, store, sessionID)
-	testassert.NoError(t, err)
-	var assistant *assistantEntry
-	var signal *signalEntry
-	for i := range graph.Entries {
-		if graph.Entries[i].Assistant != nil {
-			assistant = graph.Entries[i].Assistant
-		}
-		if graph.Entries[i].Signal != nil {
-			signal = graph.Entries[i].Signal
-		}
-	}
-	testassert.Require(t, assistant != nil && assistant.Status == model.OutputErrored && len(assistant.Content) == 1 && assistant.Content[0].Text == "partial", "assistant entry = %+v, want the retained errored partial", assistant)
-	testassert.Require(t, signal != nil && signal.Signal == SignalModelFailureContinuation && signal.Content == signalModelFailureContinuationContent, "signal entry = %+v, want the fixed continuation signal", signal)
-	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
-	testassert.NoError(t, err)
-	testassert.Require(t, rec.State.Status == OperationRunning && rec.State.ActiveEffect == nil && len(rec.State.PendingToolCalls) == 0, "operation state = %+v, want running with the effect cleared and no pending calls", rec.State)
-	want := UsageTotals{ByModel: []ModelUsage{{Model: testModelRef(), Usage: UsageCount{InputTokens: 5, OutputTokens: 7}}}}
-	testassert.Require(t, usageTotalsEqual(rec.State.Usage, want), "operation usage = %+v, want %+v", rec.State.Usage, want)
-	view, err := h.ReadSessionView(context.Background(), sessionID)
-	testassert.NoError(t, err)
-	testassert.Require(t, view.Header.CurrentOperationID == testOpID && usageTotalsEqual(view.TotalUsage, want), "session view = %+v, want the running operation and updated usage", view)
-	close(secondGate)
 	testassert.NoError(t, <-done)
 }
 
@@ -485,21 +418,24 @@ func TestModelEffectRepeatedCallIDSettlesFailure(t *testing.T) {
 	requireSessionCleared(t, h, sessionID)
 }
 
-// TestModelEffectTerminalNoOutputUsageOnSettlement proves a terminal output
-// that reported usage without an eligible payload lands that usage on the
-// settlement entry and both totals.
+// TestModelEffectTerminalNoOutputUsageOnSettlement proves a completed errored response settles its usage without the policy.
 func TestModelEffectTerminalNoOutputUsageOnSettlement(t *testing.T) {
+	spy := &retrySpy{limit: 5}
 	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-		return failStream(errors.New("empty failure"), usageDelta(model.Usage{InputTokens: 4, CachedInputTokens: 2, OutputTokens: 6})), nil
+		return streamOf(turnDelta("length", "partial"), usageDelta(model.Usage{InputTokens: 4, CachedInputTokens: 2, OutputTokens: 6})), nil
 	}
 	h, store, c, sessionID := newEffectHarness(t, modelFn)
 	prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return effectExecution(modelFn, nil), nil
+		exec := effectExecution(modelFn, nil)
+		exec.Retry = spy.retry
+		return exec, nil
 	})
 	_ = executeDirect(h, c, h.ctx, testOpID, prepared) // the failure terminal is published by the effect
+	testassert.Equal(t, len(spy.attempts), 0)
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
 	for _, entry := range graph.Entries {
+		testassert.Require(t, entry.Assistant == nil, "assistant entry published for an errored response")
 		if entry.Settlement == nil {
 			continue
 		}
@@ -2510,7 +2446,7 @@ func TestExecuteBetweenEffectCancellationSettlesInterruption(t *testing.T) {
 			// and the run's next checkpoint settles the interruption
 			return &cancelOnCloseStream{scriptStream: completedTurnStream(), cancel: cancel}, nil
 		}
-		return erroredTurnStream(), nil
+		return completedTurnStream(testToolCall("call-1")), nil
 	}
 	h, store, c, sessionID, prepared, harnessCancel := newExecutionHarness(t, modelFn, func(ctx context.Context, call model.ToolCall) PreparedTool {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
@@ -2551,7 +2487,7 @@ func TestExecutePast25ModelEffectsSettlesSuccessAndDrainsSteering(t *testing.T) 
 		if n > 30 {
 			return completedTurnStream(), nil // the drained successor's own turn
 		}
-		return erroredTurnStream(), nil
+		return completedTurnStream(testToolCall(fmt.Sprintf("call-%d", n))), nil
 	}
 	h, store, c, sessionID, prepared, _ := newExecutionHarness(t, modelFn, func(ctx context.Context, call model.ToolCall) PreparedTool {
 		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
@@ -2584,7 +2520,7 @@ func TestExecutePast25ModelEffectsSettlesSuccessAndDrainsSteering(t *testing.T) 
 			signals++
 		}
 	}
-	testassert.Require(t, assistants == 30 && signals == 30, "%d assistants and %d signals committed, want 30 of each", assistants, signals)
+	testassert.Require(t, assistants == 30 && signals == 0, "%d assistants and %d signals committed, want 30 assistants and no signal", assistants, signals)
 	{
 		owner, _ := steeringInputOwner(t, store, sessionID, "s1")
 		testassert.Equal(t, owner, "op-2")
@@ -3563,7 +3499,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				committed, _, _, err := commitTerminalSettlement(tx, sessionID, testOpID, session, op, sreg.Revision, oreg.Revision, OperationSuccess, "", nil, model.ModelRef{}, nil, false, nil, "")
+				committed, _, _, err := commitTerminalSettlement(tx, sessionID, testOpID, session, op, sreg.Revision, oreg.Revision, OperationSuccess, "", nil, model.ModelRef{}, attemptUsage{}, false, nil, "")
 				if err != nil {
 					return err
 				}

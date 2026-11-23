@@ -286,6 +286,12 @@ var dispatchCases = []dispatchCase{
 		method: "GET", path: "/v1/sessions/s1/operations/op-1",
 	},
 	{
+		name: "GetSessionToolOutput", operation: "GetSessionToolOutput",
+		params: `{"session_id":"s1","operation_id":"op-1","query":{"call_id":"call-1"}}`,
+		status: 200, response: `{"output":"running output"}`,
+		method: "GET", path: "/v1/sessions/s1/operations/op-1/output", rawQuery: "call_id=call-1",
+	},
+	{
 		name: "GetSessionCodeSnapshots", operation: "GetSessionCodeSnapshots",
 		params: `{"session_id":"s1"}`,
 		status: 200, response: `[]`,

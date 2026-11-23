@@ -62,6 +62,7 @@ func TestNewOutputCases(t *testing.T) {
 		{"completed with text", Output{Status: OutputCompleted, Source: fullRef, Message: &textMsg}, false, nil, ""},
 		{"tool-call-only assistant is valid completed payload", Output{Status: OutputCompleted, Source: fullRef, Message: &msgWithCalls}, false, nil, ""},
 		{"errored without message", Output{Status: OutputErrored, Source: fullRef, Detail: "boom"}, false, nil, ""},
+		{"errored with message", Output{Status: OutputErrored, Source: fullRef, Detail: "boom", Message: &textMsg}, true, []error{ErrForbiddenField}, "errored output must not carry a message"},
 		{"interrupted with partial", Output{Status: OutputInterrupted, Source: fullRef, Message: &textMsg, Detail: "stopped"}, false, nil, ""},
 		{"image url only counts as payload", Output{Status: OutputCompleted, Source: fullRef, Message: &msgImage}, false, nil, ""},
 		{"opaque wire type alone counts as payload", Output{Status: OutputCompleted, Source: fullRef, Message: &msgOpaque}, false, nil, ""},
@@ -125,7 +126,7 @@ func TestNewOutputCases(t *testing.T) {
 
 	srcRaw := json.RawMessage(`"thinking"`)
 	extraMsgSrc := assistantMsg(t, func(m *Message) { m.Extra = Extra{"reasoning_content": srcRaw} })
-	gotExtraOut, err := NewOutput(Output{Status: OutputErrored, Source: fullRef, Message: &extraMsgSrc, Detail: "d"})
+	gotExtraOut, err := NewOutput(Output{Status: OutputInterrupted, Source: fullRef, Message: &extraMsgSrc, Detail: "stopped"})
 	testassert.Require(t, err == nil && gotExtraOut.Message != nil, "NewOutput returned error or dropped message: %v", err)
 	srcRaw[1] = 'X' // corrupt caller bytes after construction.
 	stored := string(gotExtraOut.Message.Extra["reasoning_content"])
@@ -158,7 +159,7 @@ func TestAssistantContentAndPayloadQueries(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			{
-				got := HasAssistantContent(tc.msg)
+				got := hasAssistantContent(tc.msg)
 				testassert.Equal(t, got, tc.content)
 			}
 			{

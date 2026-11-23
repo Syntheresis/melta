@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Syntheresis/melta/agent"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
@@ -161,11 +162,12 @@ func TestRequestBodyAttemptIsolation(t *testing.T) {
 			return nil, errors.New("retry")
 		}
 		return completedTurnStream(), nil
-	}, func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 })
-	if res.kind != attemptAccepted || calls != 2 || string(params["temperature"]) != "0.2" || params["leak"] != nil {
+	}, func(stream model.Stream) (model.Output, error) {
+		return agent.Assemble(context.Background(), testModelRef(), stream)
+	}, func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 }, func() {})
+	if res.kind != attemptSettled || calls != 2 || string(params["temperature"]) != "0.2" || params["leak"] != nil {
 		t.Fatalf("kind=%v calls=%d retained=%s", res.kind, calls, params)
 	}
-	_ = res.stream.Close()
 }
 
 func TestRequestHookAuthenticToolPairings(t *testing.T) {

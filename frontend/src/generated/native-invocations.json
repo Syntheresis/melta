@@ -190,6 +190,19 @@
     "query_members": {},
     "session_id": "required"
   },
+  "GetSessionToolOutput": {
+    "body": "forbidden",
+    "field": "forbidden",
+    "operation_id": "required",
+    "query": "required",
+    "query_members": {
+      "call_id": {
+        "required": true,
+        "type": "string"
+      }
+    },
+    "session_id": "required"
+  },
   "GetWarnings": {
     "body": "forbidden",
     "field": "forbidden",

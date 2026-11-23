@@ -18,10 +18,8 @@ func mkSettlementOutput(status model.OutputStatus, detail string) *model.Output 
 	case status == model.OutputCompleted: // the one mandatory-payload row: a single non-empty text part minimally satisfies the completed-output payload rule.
 		msg.Content = []model.ContentPart{{Kind: model.PartText, Text: "x"}}
 
-	case status == model.OutputInterrupted || detail != "": // optional partial message retained alongside its diagnostic text for the other two shapes — present-but-tool-call-free per their own closed-shape rules
+	case status == model.OutputInterrupted: // optional partial message retained alongside its diagnostic text — present-but-tool-call-free per its own closed-shape rule.
 		msg.Content = []model.ContentPart{{Kind: model.PartText, Text: "x"}}
-
-	default: // no message at all
 	}
 
 	if out.Message == nil && msg.Content != nil { // only wire up the pointer when we actually built payload content
@@ -42,22 +40,11 @@ func TestValidateSettlement(t *testing.T) {
 	errored := mkSettlementOutput(model.OutputErrored, "boom") // its errored sibling carrying non-empty diagnostic detail.
 	interrupted := mkSettlementOutput(model.OutputInterrupted, "stopped")
 
-	refusalMsg := &model.Message{Role: model.RoleAssistant, Source: testRef, Refusal: "declined"}
-	refusalErrored, ferr := model.NewOutput(model.Output{Status: model.OutputErrored, Source: testRef, Detail: "boom", Message: refusalMsg})
-	testassert.NoError(t, ferr)
-	extraMsg := &model.Message{Role: model.RoleAssistant, Source: testRef, Extra: model.Extra{"k": json.RawMessage(`1`)}}
-	extraErrored, ferr := model.NewOutput(model.Output{Status: model.OutputErrored, Source: testRef, Detail: "boom", Message: extraMsg})
-	testassert.NoError(t, ferr)
-
 	valid := []struct {
 		name string
 		set  ModelSettlement
 	}{
 		{"valid-ready", ModelSettlement{Disposition: DispoReady, Output: completed}},
-		{"valid-continue", ModelSettlement{Disposition: DispoContinue, Output: errored}},
-		{"valid-continue-completed-no-calls", ModelSettlement{Disposition: DispoContinue, Output: completed}},            // a completed output carrying no tool calls may settle as continue.
-		{"valid-continue-errored-refusal-payload", ModelSettlement{Disposition: DispoContinue, Output: &refusalErrored}}, // the refusal arm of the retained-payload rule.
-		{"valid-continue-errored-extra-payload", ModelSettlement{Disposition: DispoContinue, Output: &extraErrored}},     // the finalized-extra arm of the retained-payload rule.
 		{"valid-failure-no-output", ModelSettlement{Disposition: DispoFailure, Detail: "d"}},
 		{"valid-failure-with-errored", ModelSettlement{Disposition: DispoFailure, Output: errored, Detail: "d"}},
 		{"valid-interruption-no-output", ModelSettlement{Disposition: DispoInterruption, Detail: "d"}},
@@ -91,27 +78,20 @@ type forgedModelSettlement struct {
 
 func forgedModelSettlements() []forgedModelSettlement {
 	completed := &model.Output{Status: model.OutputCompleted, Source: testRef, Message: &model.Message{Role: model.RoleAssistant, Source: testRef, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}}}
-	errored := &model.Output{Status: model.OutputErrored, Source: testRef, Detail: "boom", Message: &model.Message{Role: model.RoleAssistant, Source: testRef, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}}}
-	interrupted := &model.Output{Status: model.OutputInterrupted, Source: testRef, Detail: "stopped", Message: &model.Message{Role: model.RoleAssistant, Source: testRef, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}}}
-	callsOut := &model.Output{Status: model.OutputCompleted, Source: testRef, Message: &model.Message{Role: model.RoleAssistant, Source: testRef, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}, ToolCalls: []model.ToolCall{{ID: "a", Name: "fnA"}, {ID: "b", Name: "fnB"}, {ID: "c", Name: "fnC"}}}}
-	bare := &model.Output{Status: model.OutputErrored, Source: testRef, Detail: "boom"}
+	errored := &model.Output{Status: model.OutputErrored, Source: testRef, Detail: "boom"}
 	foreign := &model.Output{Status: model.OutputCompleted, Source: model.ModelRef{Provider: "acme", Model: "m-other"}, Message: &model.Message{Role: model.RoleAssistant, Source: model.ModelRef{Provider: "acme", Model: "m-other"}, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}}}
 
 	return []forgedModelSettlement{
 		{"ready-nil-output", ModelSettlement{Disposition: DispoReady}},                      // Ready requires its callback output.
 		{"ready-errored-output", ModelSettlement{Disposition: DispoReady, Output: errored}}, // Ready requires completed; an errored output is the wrong direction.
 		{"ready-nonempty-detail", ModelSettlement{Disposition: DispoReady, Output: completed, Detail: "x"}},
-		{"continue-nil-output", ModelSettlement{Disposition: DispoContinue}},
-		{"continue-completed-with-calls", ModelSettlement{Disposition: DispoContinue, Output: callsOut}},  // A continue carrying tool calls would strand them: nothing dispatches after continue.
-		{"continue-errored-without-payload", ModelSettlement{Disposition: DispoContinue, Output: bare}},   // Nearest forbidden sibling of the errored-payload continue rows: nothing model-visible was retained.
-		{"continue-interrupted-output", ModelSettlement{Disposition: DispoContinue, Output: interrupted}}, // Nearest forbidden sibling of the completed continue row: an interrupted payload settles interruption only.
-		{"continue-nonempty-detail", ModelSettlement{Disposition: DispoContinue, Output: errored, Detail: "y"}},
 		{"failure-completed-output", ModelSettlement{Disposition: DispoFailure, Output: completed, Detail: "d"}}, // Failure permits no output or its errored one; completed is the nearest forbidden sibling of valid failure-with-errored.
 		{"failure-empty-detail", ModelSettlement{Disposition: DispoFailure}},
 		{"interruption-errored-output", ModelSettlement{Disposition: DispoInterruption, Output: errored, Detail: "d"}}, // Interruption admits no/interrupted/completed; errored is the nearest forbidden sibling of valid interruption-in-flight.
 		{"interruption-empty-detail", ModelSettlement{Disposition: DispoInterruption}},
-		{"unknown-disposition", ModelSettlement{Disposition: "bogus"}},                // Unknown dispositions fail before any other field is consulted.
-		{"foreign-source", ModelSettlement{Disposition: DispoReady, Output: foreign}}, // A present output must match the expected identity field-for-field.
+		{"continue-disposition", ModelSettlement{Disposition: ModelDisposition("continue"), Output: errored}}, // an unknown disposition value is rejected.
+		{"unknown-disposition", ModelSettlement{Disposition: "bogus"}},                                        // Unknown dispositions fail before any other field is consulted.
+		{"foreign-source", ModelSettlement{Disposition: DispoReady, Output: foreign}},                         // A present output must match the expected identity field-for-field.
 	}
 }
 

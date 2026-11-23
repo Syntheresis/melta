@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/cmdoutput"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/editpreview"
 	"github.com/Syntheresis/melta/internal/jobs"
@@ -346,11 +347,14 @@ func (t editTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall
 // executes through the shell. background=true starts a job through the
 // background bridge and returns the retained immediate text; every start
 // failure renders through the one wrapper. Its own fields are the file-tool
-// state (for the spill directory and settings) and the jobs service the
-// background start calls.
+// state (for the spill directory and settings), the jobs service the
+// background start calls, and the live-output registry that tracks the
+// starting call's output preview and publishes its `tool_output_changed`
+// notices for both foreground and background commands.
 type runCommandTool struct {
-	inst *standardTools
-	jobs jobs.Jobs
+	inst       *standardTools
+	jobs       jobs.Jobs
+	toolOutput *liveToolOutput
 }
 
 func (t runCommandTool) Normalize(_ context.Context, tc ToolContext, call model.ToolCall) (json.RawMessage, error) {
@@ -431,7 +435,7 @@ func (t runCommandTool) Prepare(_ context.Context, tc ToolContext, call model.To
 			if envErr != nil {
 				return commandEnvironmentFailure(call.ID, envErr)
 			}
-			return commandOutcome(ctx, call.ID, command, tc.Workspace, timeoutSec, s, spillDir, env)
+			return t.foregroundOutcome(ctx, call.ID, command, tc, timeoutSec, s, spillDir, env)
 		},
 	}
 }
@@ -466,11 +470,14 @@ func commandEnvironmentFailure(callID string, cause error) harness.ToolOutcome {
 
 // backgroundOutcome starts one background job for the prepared call: it
 // refuses a missing subprocess-environment producer before any reservation,
-// reserves the identity, hands the spawn to the background bridge, resolves
-// the job's exact environment at the admitted Jobs start handoff, aborts the
-// reservation when the bridge or the start rejects, and returns the retained
-// immediate template on success. Every start failure — reserve, handoff, or
-// spawn — renders through the one legacy wrapper.
+// reserves the identity, registers the starting call's live output preview,
+// hands the spawn to the background bridge, resolves the job's exact
+// environment at the admitted Jobs start handoff, aborts the reservation and
+// removes the preview when the bridge or the start rejects, and returns the
+// retained immediate template on success. Its output is the same registry
+// entry and the same `tool_output_changed` notice a foreground command
+// publishes, addressed by the call that started the job. Every start failure —
+// reserve, handoff, or spawn — renders through the one legacy wrapper.
 func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command string, timeoutSec int, tc ToolContext) harness.ToolOutcome {
 	if tc.SubprocessEnv == nil {
 		return commandEnvironmentFailure(callID, errNoSubprocessEnv)
@@ -481,6 +488,9 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 	if err != nil {
 		return backgroundStartOutcome(callID, err)
 	}
+	t.toolOutput.register(sessionID, tc.OperationID, callID, func() string {
+		return jobsInst.Preview(sessionID, jobID)
+	})
 	err = tc.Background.StartJob(jobID, func(ctx context.Context, deliver func(string) error) error {
 		// The environment resolves at the admitted start handoff — never at
 		// Prepare — and the exact slice is the job process's environment; a
@@ -499,11 +509,16 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 			Config:     tc.Invocation.jobsSettings(),
 			OnExit: func(er jobs.ExitResult) {
 				_ = deliver(legacyCompletionText(er)) // terminal for the job's completion; the exit callback has nowhere to propagate
+				t.toolOutput.remove(sessionID, tc.OperationID, callID)
+			},
+			OnChange: func() {
+				t.toolOutput.publishChanged(tc.Workspace, sessionID, tc.OperationID, callID)
 			},
 		})
 	})
 	if err != nil {
 		jobsInst.Abort(jobID) // idempotent: removes the reservation if it still exists
+		t.toolOutput.remove(sessionID, tc.OperationID, callID)
 		return backgroundStartOutcome(callID, err)
 	}
 	return harness.ToolOutcome{Result: model.ToolResult{
@@ -561,6 +576,25 @@ func truncateCompletionText(text string, limit int) string {
 	return text[:max] + marker
 }
 
+// foregroundOutcome constructs and registers the prepared foreground call's
+// output preview for live reads, publishes its throttled change notices on the
+// Operation scope, and removes it after the runner returns.
+func (t runCommandTool) foregroundOutcome(ctx context.Context, callID, command string, tc ToolContext, timeoutSec int, s toolSettings, spillDir string, env []string) harness.ToolOutcome {
+	sessionID := tc.AdmittedEntry.SessionID
+	capture := cmdoutput.NewCapture(cmdoutput.Options{
+		Directory:    spillDir,
+		SpillPrefix:  "cmd_output_",
+		MaxBytes:     s.MaxOutputBytes,
+		MaxLineChars: s.ReadLineMaxChars,
+		OnChange: func() {
+			t.toolOutput.publishChanged(tc.Workspace, sessionID, tc.OperationID, callID)
+		},
+	})
+	t.toolOutput.register(sessionID, tc.OperationID, callID, capture.Preview)
+	defer t.toolOutput.remove(sessionID, tc.OperationID, callID)
+	return commandOutcome(ctx, callID, command, tc.Workspace, timeoutSec, capture, env)
+}
+
 // commandOutcome runs one prepared foreground command through the shared
 // runner over the resolved subprocess environment and maps the retained
 // outcomes onto the model-visible result: a
@@ -571,8 +605,8 @@ func truncateCompletionText(text string, limit int) string {
 // the retained cancellation text. The classification reads the cause the
 // runner flagged on the error, never the context after the runner has settled
 // the real result.
-func commandOutcome(ctx context.Context, callID, command, dir string, timeoutSec int, s toolSettings, spillDir string, env []string) harness.ToolOutcome {
-	result, err := runForegroundCommandFn(ctx, command, dir, timeoutSec, s.MaxOutputBytes, s.ReadLineMaxChars, spillDir, env)
+func commandOutcome(ctx context.Context, callID, command, dir string, timeoutSec int, capture *cmdoutput.Capture, env []string) harness.ToolOutcome {
+	result, err := runForegroundCommandFn(ctx, command, dir, timeoutSec, capture, env)
 	var exitErr *tool.ExitError
 	if errors.As(err, &exitErr) {
 		status := model.ResultError
@@ -734,19 +768,20 @@ func standardToolDeclarations() []standardToolDeclaration {
 }
 
 // newStandardTools constructs the six standard tool values over the owner
-// data root and the jobs service: the file tools share one state that carries
-// no process dependency, run_command carries the jobs service beside that
-// state, process carries only the jobs service, and sleep needs neither; no
+// data root, the jobs service and the owner's live-output registry: the file
+// tools share one state that carries no process dependency, run_command
+// carries the jobs service and registry beside that state, process carries
+// only the jobs service, and sleep needs neither; no
 // per-Session state is created here and no environment key set is captured —
 // the command paths resolve the live subprocess environment through the
 // ToolContext's call-time producer.
-func newStandardTools(dataDir string, jobsService jobs.Jobs) map[string]Tool {
+func newStandardTools(dataDir string, jobsService jobs.Jobs, toolOutput *liveToolOutput) map[string]Tool {
 	inst := &standardTools{dataDir: dataDir}
 	return map[string]Tool{
 		"read_file":   readTool{inst},
 		"write_file":  writeTool{inst},
 		"edit_file":   editTool{inst},
-		"run_command": runCommandTool{inst, jobsService},
+		"run_command": runCommandTool{inst, jobsService, toolOutput},
 		"process":     processTool{jobsService},
 		"sleep":       sleepTool{},
 	}

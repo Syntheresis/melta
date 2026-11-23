@@ -683,6 +683,12 @@ func progressEventScope(t *testing.T, event Event) protocol.Scope {
 		body, err := event.AsTextDeltaEvent()
 		testassert.NoError(t, err)
 		return body.Scope
+	case "reasoning_delta":
+		body, _ := event.AsReasoningDeltaEvent()
+		return body.Scope
+	case "response_restarted":
+		body, _ := event.AsResponseRestartedEvent()
+		return body.Scope
 	case "refusal_delta":
 		body, err := event.AsRefusalDeltaEvent()
 		testassert.NoError(t, err)
@@ -812,6 +818,26 @@ func TestObservationRefusalDeltaProgress(t *testing.T) {
 		}
 		testassert.Require(t, slices.Equal(got, want), "progress = %+v, want the exact fragment order and operation identity %+v", got, want)
 	})
+}
+
+// TestObservationProgressFacts proves both progress facts reach the bus.
+func TestObservationProgressFacts(t *testing.T) {
+	r, _ := openProjectionRuntime(t, storage.NewMemory())
+	defer closeProjectionRuntime(r)
+	sessionID := projectionSession(t, r, t.TempDir(), "solo").Identity.SessionID
+	sub, _ := r.Subscribe(4)
+	r.passive.observe(harness.HarnessFact{Kind: harness.FactResponseRestarted, SessionID: sessionID, OperationID: "op-restart"})
+	restart, _ := nextEvent(t, sub)
+	testassert.NoError(t, assertOperationScoped(t, restart, sessionID, "op-restart"))
+	r.passive.observe(harness.HarnessFact{Kind: harness.FactReasoningDelta, SessionID: sessionID, OperationID: "op-reasoning", Content: "considering"})
+	reasoning, _ := nextEvent(t, sub)
+	testassert.NoError(t, assertOperationScoped(t, reasoning, sessionID, "op-reasoning"))
+	body, err := reasoning.AsReasoningDeltaEvent()
+	testassert.Require(t, err == nil && body.Content == "considering", "reasoning content = %q err %v", body.Content, err)
+	for _, event := range []Event{restart, reasoning} {
+		ws, ok := scopeWorkspaceAttribution(t, progressEventScope(t, event))
+		testassert.Require(t, ok && ws != "", "progress Workspace = %q (%v), want the Session's Workspace", ws, ok)
+	}
 }
 
 // TestObservationObserverOverflowDetachesOnlyThatRegistration proves one

@@ -199,8 +199,8 @@ func TestNewTransportDeepCopiesResolvedInput(t *testing.T) { // one mutation pas
 		t.Fatalf("Stream returned error after construction-time ownership was exercised: %v", streamErr) // any failure here means the mutation pass above somehow corrupted retained state — which is exactly what this test forbids... (so fail with that framing, not a generic message).
 	} else if got := gotHeader.Get("X-From"); got != "caller" { // header value must still be the construction-time one on the wire.
 		t.Fatalf("header X-From posted as %q after caller mutated it to \"mutated\" — retained headers are not independent copies", got) // a leak here means NewTransport stored the map reference instead of copying entries into its own... (the fix is mechanical once this row names it).
-	} else if _, err := stream.Recv(); !errors.Is(err, io.EOF) { // 204 carries no body: first receive must be clean EOF — pinning that an empty accepted response does not error the consumer path either.
-		t.Fatalf("Recv on a content-less accepted response = %v, want io.EOF", err) // (this sub-check is included because Close below would otherwise hide any read-side state corruption from view entirely).
+	} else if _, err := stream.Recv(); !errors.Is(err, ErrStreamBroken) || !errors.Is(err, io.ErrUnexpectedEOF) { // 204 carries no body: an accepted response without [DONE] is a broken stream, not a clean end.
+		t.Fatalf("Recv on a content-less accepted response = %v, want ErrStreamBroken wrapping io.ErrUnexpectedEOF", err) // (this sub-check is included because Close below would otherwise hide any read-side state corruption from view entirely).
 	} else if cerr := stream.Close(); cerr != nil {
 		t.Fatalf("Close returned error: %v", cerr) // releasing a fully-consumed empty body must be quiet — no cleanup path may surface transport facts to the consumer here... (any non-nil would mean release logic depends on something this fixture did not provide).
 	}
@@ -342,8 +342,8 @@ func TestStreamPostsEncodedBodyWithBuiltHeaders(t *testing.T) { // request-shape
 					testassert.Require(t, (got != "") == tc.wantAuth && (!tc.wantAuth || got == "Bearer "+tc.apiKey), "Authorization = %q for key state %q; want presence=%v and exact form when present", got, tc.name, tc.wantAuth)
 				}
 
-				if _, rerr := stream.Recv(); !errors.Is(rerr, io.EOF) { // 204 carries no body: first receive must be a clean EOF — pinning that an empty accepted response does not error the consumer path either.
-					t.Fatalf("Recv on content-less accepted response = %v, want io.EOF", rerr) // (included because Close alone would otherwise hide any read-side state corruption from view entirely).
+				if _, rerr := stream.Recv(); !errors.Is(rerr, ErrStreamBroken) || !errors.Is(rerr, io.ErrUnexpectedEOF) { // 204 carries no body: an accepted response without [DONE] is a broken stream, not a clean end.
+					t.Fatalf("Recv on content-less accepted response = %v, want ErrStreamBroken wrapping io.ErrUnexpectedEOF", rerr) // (included because Close alone would otherwise hide any read-side state corruption from view entirely).
 				} else if cerr := stream.Close(); cerr != nil {
 					t.Fatalf("Close returned error: %v", cerr) // releasing a fully-consumed empty body must be quiet — no cleanup path may surface transport facts to the consumer here.
 				}
@@ -669,8 +669,8 @@ func TestStreamMidFlightCancellationUnblocksBodyRead(t *testing.T) { // modeled 
 	case res := <-resultCh: // normal (correct) path: Recv returned promptly after cancel — the "unblocks" contract itself, with whatever terminal shape net/http chose to surface for an aborted body read... (its exact spelling varies by Go version and is not load-bearing downstream since consumers classify cancellation through their own run context rather than this error's chain).
 		if res.err == nil { // a NIL error here would mean the stream silently swallowed cancellation — strictly worse than any wrong-shape regression since consumers cannot even tell anything happened at all.
 			t.Fatalf("Recv after mid-flight cancel returned nil error with delta %#v; want non-nil", res.delta) // naming both return values in output makes this failure self-explanatory without re-running the test to see what came back instead... (cheap specificity costs nothing here).
-		} else if _, again := stream.Recv(); !errors.Is(again, io.EOF) { // post-terminal-read state: further receives see EOF through done flag rather than re-attempting or erroring repeatedly... (completing this row's end-to-end story about what mid-flight cancellation leaves behind).
-			t.Fatalf("second Recv after cancelled read = %v, want io.EOF", again) // included because close-then-receive ordering variations are exactly where subtle state bugs like double-surfacing the same error hide best.
+		} else if _, again := stream.Recv(); !errors.Is(again, res.err) { // post-terminal-read state: further receives return the same failure rather than re-attempting or falling through to io.EOF.
+			t.Fatalf("second Recv after cancelled read = %v, want the first read's failure", again) // included because close-then-receive ordering variations are exactly where subtle state bugs like double-surfacing the same error hide best.
 		} else if cerr := stream.Close(); cerr != nil { // releasing an already-terminated accepted stream must be quiet — no cleanup path may surface transport facts to consumers at this point... (idempotent-friendly behavior pinned here for parity with every other Close assertion across the suite).
 			t.Fatalf("Close after mid-flight cancel returned %v, want nil", cerr) // explicit about which phase produced it so output stays attributable even in dense failure logs later.
 		} else if err2 := stream.Close(); err2 != nil { // second close absorbed: no double-close error may reach the consumer's deferred cleanup path under any circumstances... (this is a contract guarantee worth pinning exactly once rather than assuming from reading code).

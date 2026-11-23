@@ -463,6 +463,18 @@ func refusalDeltaEvent(scope protocol.Scope, content string) Event {
 	return event
 }
 
+// reasoningDeltaEvent builds one transient model-stream reasoning fragment
+// hint; reasoning carries the content without a position.
+func reasoningDeltaEvent(scope protocol.Scope, content string) Event {
+	var event Event
+	_ = event.FromReasoningDeltaEvent(protocol.ReasoningDeltaEvent{ // plain members; the marshal cannot fail
+		Kind:    protocol.ReasoningDelta,
+		Scope:   scope,
+		Content: content,
+	})
+	return event
+}
+
 // toolStartedEvent builds one dispatched tool-call hint.
 func toolStartedEvent(scope protocol.Scope, callID string, ordinal int64, name string) Event {
 	var event Event
@@ -489,6 +501,76 @@ func toolFinishedEvent(scope protocol.Scope, callID string, status model.ToolRes
 		Evidence: &value,
 	})
 	return event
+}
+
+// responseRestartedEvent builds one transient restart hint: the Operation's
+// model response is being retried.
+func responseRestartedEvent(scope protocol.Scope) Event {
+	var event Event
+	_ = event.FromResponseRestartedEvent(protocol.ResponseRestartedEvent{ // plain members; the marshal cannot fail
+		Kind:  protocol.ResponseRestarted,
+		Scope: scope,
+	})
+	return event
+}
+
+// toolOutputChangedEvent builds one transient command output hint: the
+// addressed call's output grew.
+func toolOutputChangedEvent(scope protocol.Scope, callID string) Event {
+	var event Event
+	_ = event.FromToolOutputChangedEvent(protocol.ToolOutputChangedEvent{ // plain members; the marshal cannot fail
+		Kind:   protocol.ToolOutputChanged,
+		Scope:  scope,
+		CallId: callID,
+	})
+	return event
+}
+
+// toolOutputIdentity addresses one call's running output.
+type toolOutputIdentity struct{ sessionID, operationID, callID string }
+
+// liveToolOutput is the owner's per-instance registry of running commands'
+// output previews: a registration's presence is the call's live output, and
+// the registered function supplies only the text.
+type liveToolOutput struct {
+	obs      *observation
+	mu       sync.Mutex
+	previews map[toolOutputIdentity]func() string
+}
+
+func newLiveToolOutput(obs *observation) *liveToolOutput {
+	return &liveToolOutput{obs: obs, previews: make(map[toolOutputIdentity]func() string)}
+}
+
+func (l *liveToolOutput) register(sessionID, operationID, callID string, preview func() string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.previews[toolOutputIdentity{sessionID, operationID, callID}] = preview
+}
+
+func (l *liveToolOutput) remove(sessionID, operationID, callID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.previews, toolOutputIdentity{sessionID, operationID, callID})
+}
+
+// preview reads one registered preview's bounded current output; presence is
+// the map lookup alone.
+func (l *liveToolOutput) preview(sessionID, operationID, callID string) (string, bool) {
+	l.mu.Lock()
+	read, ok := l.previews[toolOutputIdentity{sessionID, operationID, callID}]
+	l.mu.Unlock()
+	if !ok {
+		return "", false
+	}
+	return read(), true
+}
+
+// publishChanged publishes one tool_output_changed notice for the running call.
+func (l *liveToolOutput) publishChanged(workspace, sessionID, operationID, callID string) {
+	l.obs.publish(func() []Event {
+		return []Event{toolOutputChangedEvent(operationEventScope(workspace, sessionID, operationID), callID)}
+	})
 }
 
 // observationAdapter is the Melta's one passive publication adapter: it
@@ -637,12 +719,18 @@ func (a *observationAdapter) observe(fact harness.HarnessFact) {
 		case harness.FactRefusalDelta:
 			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
 			return []Event{refusalDeltaEvent(scope, fact.Content)}
+		case harness.FactReasoningDelta:
+			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
+			return []Event{reasoningDeltaEvent(scope, fact.Content)}
 		case harness.FactToolStarted:
 			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
 			return []Event{toolStartedEvent(scope, fact.CallID, fact.Ordinal, fact.Name)}
 		case harness.FactToolFinished:
 			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
 			return []Event{toolFinishedEvent(scope, fact.CallID, fact.Status, fact.Evidence)}
+		case harness.FactResponseRestarted:
+			scope := operationEventScope(identity.Workspace, fact.SessionID, fact.OperationID)
+			return []Event{responseRestartedEvent(scope)}
 		}
 		return nil
 	})

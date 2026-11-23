@@ -33,23 +33,28 @@ func compactPricing() *ModelPricing {
 func recomputeFixtureUsage(g *testGraph) {
 	sessionCounts := make(map[model.ModelRef]UsageCount)
 	perOperation := make(map[string]map[model.ModelRef]UsageCount)
-	record := func(operationID string, ref model.ModelRef, counts UsageCount) {
+	record := func(operationID string, ref model.ModelRef, counts *UsageCount) {
+		if counts == nil {
+			return
+		}
 		if operationID != "" {
 			opCounts := perOperation[operationID]
 			if opCounts == nil {
 				opCounts = make(map[model.ModelRef]UsageCount)
 				perOperation[operationID] = opCounts
 			}
-			opCounts[ref] = mustAddUsage(opCounts[ref], counts)
+			opCounts[ref] = mustAddUsage(opCounts[ref], *counts)
 		}
-		sessionCounts[ref] = mustAddUsage(sessionCounts[ref], counts)
+		sessionCounts[ref] = mustAddUsage(sessionCounts[ref], *counts)
 	}
 	for _, entry := range g.entries {
-		if entry.assistant != nil && entry.assistant.Usage != nil {
-			record(entry.env.OperationID, entry.assistant.Source, *entry.assistant.Usage)
+		if entry.assistant != nil {
+			record(entry.env.OperationID, entry.assistant.Source, entry.assistant.Usage)
+			record(entry.env.OperationID, entry.assistant.Source, entry.assistant.RetryUsage)
 		}
-		if entry.settlement != nil && entry.settlement.Usage != nil {
-			record(entry.env.OperationID, *entry.settlement.Model, *entry.settlement.Usage)
+		if entry.settlement != nil && entry.settlement.Model != nil {
+			record(entry.env.OperationID, *entry.settlement.Model, entry.settlement.Usage)
+			record(entry.env.OperationID, *entry.settlement.Model, entry.settlement.RetryUsage)
 		}
 		var facts []maintenanceFact
 		if entry.compaction != nil {
@@ -58,9 +63,8 @@ func recomputeFixtureUsage(g *testGraph) {
 			facts = entry.settlement.Facts
 		}
 		for _, fact := range facts {
-			if fact.Usage != nil {
-				record(entry.env.OperationID, fact.Model, *fact.Usage)
-			}
+			record(entry.env.OperationID, fact.Model, fact.Usage)
+			record(entry.env.OperationID, fact.Model, fact.RetryUsage)
 		}
 	}
 	materialize := func(counts map[model.ModelRef]UsageCount) UsageTotals {
@@ -138,19 +142,22 @@ func TestSessionReadViewCostEstimates(t *testing.T) {
 				for _, entry := range g.entries {
 					if entry.assistant != nil && entry.assistant.EntryID == hexID(2) {
 						entry.assistant.Usage = &UsageCount{InputTokens: 10, CachedInputTokens: 10, OutputTokens: 10}
+						entry.assistant.RetryUsage = &UsageCount{InputTokens: 20}
 					}
 				}
 			},
-			// op1: (10+40+20)/1e6 + (3+4+4)/1e6 = 81e-6; op-compact: (1+4+2)/1e6 = 7e-6.
-			wantOp:      map[string]*float64{testOpID: ptrUSD(81e-6), "op-compact": ptrUSD(7e-6)},
-			wantSession: ptrUSD(88e-6),
+			wantOp:      map[string]*float64{testOpID: ptrUSD(101e-6), "op-compact": ptrUSD(7e-6)},
+			wantSession: ptrUSD(108e-6),
 		},
 		{
 			name: "one reportless assistant producer makes its operation and the session unknown",
-			// The fixture's first assistant reports no usage: op1 is unknown
-			// even though its second assistant and the compact fact are known,
-			// and the Session sum is never presented as a partial-known total.
-			mutate:      func(*testGraph) {},
+			// The fixture's first assistant reports no usage and an unknown
+			// retried attempt: op1 is unknown even though its second assistant
+			// and the compact fact are known.
+			mutate: func(g *testGraph) {
+				g.entries[1].assistant.RetryUsage = &UsageCount{InputTokens: 20}
+				g.entries[1].assistant.RetryUsageUnknown = true
+			},
 			wantOp:      map[string]*float64{testOpID: nil, "op-compact": ptrUSD(7e-6)},
 			wantSession: nil,
 		},

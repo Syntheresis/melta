@@ -206,6 +206,9 @@ type Melta struct {
 	// group joining before the store closes and the lock releases.
 	jobs       jobsService
 	closeStore func() error
+	// toolOutput retains the output previews of running foreground and
+	// background command calls for the live read.
+	toolOutput *liveToolOutput
 	// mu guards only the admission transition below; it is never held across
 	// any call, wait, or I/O.
 	mu     sync.Mutex
@@ -368,7 +371,8 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	acquired = append(acquired, closeStorage)
 	jobsService := newJobs(dataDir)
 	acquired = append(acquired, jobsService.Close)
-	c.standardValues = newStandardTools(dataDir, jobsService)
+	toolOutput := newLiveToolOutput(obs)
+	c.standardValues = newStandardTools(dataDir, jobsService, toolOutput)
 	background := &backgroundBridge{}
 	c.hosts.background = background
 	resources := initial.resources
@@ -421,6 +425,7 @@ func open(ctx context.Context, options options) (*Melta, error) {
 		packages:      packages,
 		jobs:          jobsService,
 		closeStore:    closeStorage,
+		toolOutput:    toolOutput,
 		shutdownDone:  make(chan struct{}),
 	}
 	c.hosts.owner = r

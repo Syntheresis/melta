@@ -853,6 +853,26 @@ func TestGraphValidatorAcceptsCoherentSessions(t *testing.T) {
 		}
 	})
 
+	t.Run("retried attempt usage counted in totals", func(t *testing.T) {
+		fixture := benchValidatorFixture(1)
+		ref := testModelRef()
+		usage, retry := UsageCount{InputTokens: 5}, UsageCount{InputTokens: 2}
+		settlement := fixture.entries[3].settlement
+		settlement.Model, settlement.Usage, settlement.RetryUsage = &ref, &usage, &retry
+		totals := UsageTotals{ByModel: []ModelUsage{{Model: ref, Usage: UsageCount{InputTokens: 7}}}}
+		fixture.ops[0].State.Usage, fixture.session.State.Usage = totals, totals
+		{
+			_, err := validateFixture(t, fixture.storage(t), testSessionID)
+			testassert.NoError(t, err)
+		}
+		omitted := UsageTotals{ByModel: []ModelUsage{{Model: ref, Usage: usage}}}
+		fixture.ops[0].State.Usage, fixture.session.State.Usage = omitted, omitted
+		{
+			_, err := validateFixture(t, fixture.storage(t), testSessionID)
+			testassert.Require(t, err != nil, "usage totals omitting the retried attempts must be rejected")
+		}
+	})
+
 	t.Run("fork prefix copies", func(t *testing.T) {
 		fixture := &testGraph{session: validSessionRecord()}
 		fixture.session.Identity.SourceSessionID = otherSession()

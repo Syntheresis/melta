@@ -7,9 +7,68 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 )
+
+// TestCaptureOnChangeThrottles proves OnChange never runs inside Write, fires at most once per 250 ms with a trailing call, and not after Close.
+func TestCaptureOnChangeThrottles(t *testing.T) {
+	called := make(chan time.Time, 2)
+	release := make(chan struct{})
+	var once sync.Once
+	c := NewCapture(Options{Directory: t.TempDir(), OnChange: func() {
+		called <- time.Now()
+		once.Do(func() { <-release })
+	}})
+	_, _ = c.Stdout().Write([]byte("one"))
+	_, _ = c.Stdout().Write([]byte("two"))
+	first := awaitChange(t, called)
+	_, _ = c.Stdout().Write([]byte("three"))
+	close(release)
+	second := awaitChange(t, called)
+	testassert.Require(t, second.Sub(first) >= 240*time.Millisecond, "change calls %s apart, want at most one per 250 ms", second.Sub(first))
+	_, _ = c.Stdout().Write([]byte("four"))
+	c.Close()
+	select {
+	case <-called:
+		t.Fatal("OnChange ran after Close")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestCapturePreview proves Preview is the write-order tail bounded to MaxBytes,
+// rune-aligned, marked when truncated, memory-only, and readable after Close.
+func TestCapturePreview(t *testing.T) {
+	cases := []struct {
+		name     string
+		maxBytes int
+		writes   []string // a 2> prefix targets stderr
+		want     string
+	}{
+		{"disabled bound", 0, []string{"first", "2>second"}, "firstsecond"},
+		{"past bound", 8, []string{"abcdefgh", "ijklmnop", "qrstuvwx"}, "[Output truncated. 24 bytes so far.]\nqrstuvwx"},
+		{"rune cut", 3, []string{"éé"}, "[Output truncated. 4 bytes so far.]\né"},
+		{"leading continuation byte under bound", 8, []string{"\x80abc"}, "abc"},
+		{"write order", 8, []string{"a", "2>b", "c"}, "abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".melta")
+			c := NewCapture(Options{Directory: dir, MaxBytes: tc.maxBytes})
+			for _, write := range tc.writes {
+				target := c.Stdout()
+				if strings.HasPrefix(write, "2>") {
+					target, write = c.Stderr(), write[2:]
+				}
+				_, _ = target.Write([]byte(write))
+			}
+			c.Close()
+			_ = os.RemoveAll(dir)
+			testassert.Require(t, c.Preview() == tc.want && (tc.maxBytes <= 0 || len(c.tail) <= 2*tc.maxBytes), "Preview = %q, want %q", c.Preview(), tc.want)
+		})
+	}
+}
 
 func TestCaptureBelowCapExactOutputNoSpill(t *testing.T) {
 	home := t.TempDir()
@@ -221,6 +280,18 @@ func TestCaptureCloseDeletesUnreturnedVisibleSpillAndKeepsReturned(t *testing.T)
 			testassert.NoError(t, err)
 		}
 	})
+}
+
+// awaitChange reads one change call within the test budget.
+func awaitChange(t *testing.T, called <-chan time.Time) time.Time {
+	t.Helper()
+	select {
+	case at := <-called:
+		return at
+	case <-time.After(5 * time.Second):
+		t.Fatal("no change call arrived within the test budget")
+		return time.Time{}
+	}
 }
 
 func numberedLines(n int) string {

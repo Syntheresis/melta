@@ -27,14 +27,8 @@ func turn(calls ...model.ToolCall) modelAttempt {
 	return modelAttempt{stream: completedTurnStream(calls...)}
 }
 
-// partialTurn scripts one accepted stream assembling to the fixture errored
-// partial: text "partial" with usage, then the read failure.
-func partialTurn() modelAttempt {
-	return modelAttempt{stream: erroredTurnStream()}
-}
-
-// payloadlessTurn scripts one accepted stream whose assembly errors with no
-// retained payload.
+// payloadlessTurn scripts one accepted stream that breaks before its finish
+// reason with no payload.
 func payloadlessTurn() modelAttempt {
 	return modelAttempt{stream: failStream(errors.New("provider failure"))}
 }
@@ -401,11 +395,11 @@ func TestSteeringAdmitsHeadsInFIFOOrder(t *testing.T) {
 }
 
 // TestSteeringContinuationAcrossOutputShapes proves the boundary decision is
-// independent of output shape: a completed output without calls, a completed
-// output with calls, and an errored output retaining a payload all hand the
-// Operation off at its next boundary so the steering arrives through its own
-// successor admission — and an errored output without a payload settles
-// failure while its steering drains through ordinary admission.
+// independent of output shape: a completed output without calls and a completed
+// output with calls each hand the Operation off at its next boundary so the
+// steering arrives through its own successor admission — while an errored
+// output settles failure whatever content it assembled, and its steering drains
+// through ordinary admission.
 func TestSteeringContinuationAcrossOutputShapes(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -414,8 +408,8 @@ func TestSteeringContinuationAcrossOutputShapes(t *testing.T) {
 	}{
 		{"completed output without calls", turn(), OperationSuccess},
 		{"completed output with calls", turn(testToolCall("call-1")), OperationSuccess},
-		{"errored output with payload", partialTurn(), OperationSuccess},
-		{"errored output without payload", payloadlessTurn(), OperationFailure},
+		{"errored output with payload", modelAttempt{stream: streamOf(turnDelta("length", "partial"), usageDelta(model.Usage{InputTokens: 5, OutputTokens: 7}))}, OperationFailure},
+		{"errored output without payload", modelAttempt{stream: streamOf(model.StreamDelta{HasChoice: true, FinishReason: "length"})}, OperationFailure},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

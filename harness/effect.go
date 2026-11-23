@@ -190,9 +190,8 @@ type toolSelection struct {
 
 // modelResult is the settlement content of one logical model effect: the
 // produced assistant entry when the output carried an eligible payload, the
-// fixed continuation signal when the disposition continues, the terminal
-// classification when the effect settles the Operation, the terminal
-// no-output model usage when a reported usage has no assistant entry to ride,
+// terminal classification when the effect settles the Operation, the terminal
+// no-output attempt usage when a reported usage has no assistant entry to ride,
 // and the maintenance facts a maintenance terminal retains. The usage model
 // is the intent's expected identity while an intent is live; without one the
 // result declares its own usage model. The compaction flag carries that
@@ -203,10 +202,9 @@ type toolSelection struct {
 // Effect-origin terminals, compaction commits and recovery leave it nil.
 type modelResult struct {
 	assistant      *assistantEntry   // nil when no eligible assistant payload exists
-	signal         SignalKind        // empty unless the disposition continues
-	terminal       OperationState    // empty for ready/continue; failure or interruption otherwise
-	detail         string            // terminal detail; empty for ready/continue
-	usage          *UsageCount       // terminal no-output usage; nil when the assistant entry carries it or none was reported
+	terminal       OperationState    // empty for ready; failure or interruption otherwise
+	detail         string            // terminal detail; empty for ready
+	usage          attemptUsage      // the effect's accepted-attempt usage, carried by the settlement only when no assistant entry carries it.
 	usageModel     model.ModelRef    // the terminal no-output usage model when no intent is live; zero otherwise
 	compaction     bool              // true when the carried terminal usage is summary usage
 	facts          *maintenanceFacts // retained maintenance input/consumed evidence a maintenance terminal settles
@@ -258,50 +256,52 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 		// between the committed intent and the callback settles the Operation
 		// as terminal interruption without ever starting the callback.
 		if ctx.Err() != nil {
-			return d.interruptModelEffect(intent, nil, nil)
+			return d.interruptModelEffect(intent, attemptUsage{}, nil)
 		}
 		// Result and terminal transactions run without cancellation so an
 		// already-produced result or required terminal settlement publishes.
 		settleCtx := context.WithoutCancel(h.ctx)
+		// The physical attempt receives the producing conversation invocation
+		// and this logical effect's own reserved result identity; retries
+		// share that logical effect.
+		// The one shared attempt loop lives inside the committed intent:
+		// failures are classified by the retry policy, waits run behind the
+		// cancellation checks, and an accepted stream is assembled once.
+		attemptRes := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, func(stream model.Stream) (model.Output, error) {
+			return assemble(intent.expected, h.observeStream(intent.sessionID, d.operationID, stream))
+		}, d.execution.Retry, func() {
+			h.emitFact(HarnessFact{Kind: FactResponseRestarted, SessionID: intent.sessionID, OperationID: d.operationID})
+		})
+		if attemptRes.usageErr != nil { // an inexact retried-usage sum aborts before any result publication
+			return agent.ModelSettlement{}, attemptRes.usageErr
+		}
 		settle := func(cause error) (agent.ModelSettlement, error) {
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
 				terminal: OperationFailure,
 				detail:   failureDetail(cause),
+				usage:    attemptRes.usage,
 			}); err != nil {
 				return agent.ModelSettlement{}, err
 			}
 			return agent.ModelSettlement{}, cause
 		}
-		// The physical attempt receives the producing conversation invocation
-		// and this logical effect's own reserved result identity; retries
-		// share that logical effect.
-		// The one shared attempt loop lives inside the committed intent: every
-		// failed attempt is classified by the retry policy, waits run behind
-		// the cancellation checks, and an accepted stream never re-enters
-		// retry — assembly owns it, including closure.
-		var output model.Output
-		switch res := runModelAttempts(ctx, req, intent.evidence.Parameters, attempt, d.execution.Retry); res.kind {
-		case attemptAccepted:
-			out, attemptErr := assemble(intent.expected, h.observeStream(intent.sessionID, d.operationID, res.stream)) // exactly one assembly after acceptance
-			if attemptErr != nil {
-				return settle(attemptErr)
-			}
-			output = out
+		switch attemptRes.kind {
 		case attemptInterrupted:
-			return d.interruptModelEffect(intent, nil, nil)
+			return d.interruptModelEffect(intent, attemptRes.usage, nil)
 		case attemptInvalid:
-			return settle(res.err)
+			return settle(attemptRes.err)
 		case attemptFailed:
-			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(res.err)}
+			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(attemptRes.err)}
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
 				terminal: OperationFailure,
-				detail:   failureDetail(res.err),
+				detail:   failureDetail(attemptRes.err),
+				usage:    attemptRes.usage,
 			}); err != nil {
 				return agent.ModelSettlement{}, err
 			}
 			return committed, nil
 		}
-		set := derivedSettlement(output)
+		set := derivedSettlement(attemptRes.output)
 		owned, err := agent.ValidateModelSettlement(intent.expected, set)
 		if err != nil {
 			return settle(err)
@@ -317,7 +317,7 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 				}
 			}
 		}
-		assistant, reported, err := newAssistantEntry(intent.sessionID, d.operationID, intent.resultID, owned.Output, intent.requestID, intent.evidence)
+		assistant, err := newAssistantEntry(intent.sessionID, d.operationID, intent.resultID, owned.Output, attemptRes.usage, intent.requestID, intent.evidence)
 		if err != nil {
 			return agent.ModelSettlement{}, err
 		}
@@ -325,12 +325,10 @@ func (d *executionDriver) modelEffect() agent.ModelEffect {
 		switch owned.Disposition {
 		case agent.DispoReady:
 			res = modelResult{assistant: assistant}
-		case agent.DispoContinue:
-			res = modelResult{assistant: assistant, signal: SignalModelFailureContinuation}
 		case agent.DispoFailure:
-			res = modelResult{assistant: assistant, terminal: OperationFailure, detail: owned.Detail, usage: reported}
+			res = modelResult{assistant: assistant, terminal: OperationFailure, detail: owned.Detail, usage: attemptRes.usage}
 		case agent.DispoInterruption:
-			res = modelResult{assistant: assistant, terminal: OperationInterruption, detail: owned.Detail, usage: reported}
+			res = modelResult{assistant: assistant, terminal: OperationInterruption, detail: owned.Detail, usage: attemptRes.usage}
 		}
 		if _, err := d.commitEffectResult(settleCtx, &intent, res); err != nil {
 			return agent.ModelSettlement{}, err
@@ -351,11 +349,9 @@ func contextMeasurement(c *coordinator) *UsageCount {
 }
 
 // interruptModelEffect settles one committed model effect intent as the fixed
-// terminal interruption after observed execution cancellation before stream
-// acceptance: no output, no assembly call, and the committed settlement
-// returned with a nil error. The given usage and maintenance facts ride the
-// settlement entry.
-func (d *executionDriver) interruptModelEffect(intent modelEffectIntent, usage *UsageCount, facts *maintenanceFacts) (agent.ModelSettlement, error) {
+// terminal interruption with no assembled output; the accepted attempts'
+// usage and maintenance facts ride the settlement entry.
+func (d *executionDriver) interruptModelEffect(intent modelEffectIntent, usage attemptUsage, facts *maintenanceFacts) (agent.ModelSettlement, error) {
 	settleCtx := context.WithoutCancel(d.harness.ctx)
 	committed := agent.ModelSettlement{Disposition: agent.DispoInterruption, Detail: executionInterruptedDetail}
 	if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
@@ -371,9 +367,8 @@ func (d *executionDriver) interruptModelEffect(intent modelEffectIntent, usage *
 }
 
 // derivedSettlement maps one assembled output onto the closed disposition
-// table: completed is ready, interrupted interrupts with its own detail, an
-// errored output retaining a partial payload continues, and a payload-less
-// errored output fails with its detail.
+// table: completed is ready, interrupted interrupts with its own detail, and
+// errored fails with its detail and no assistant entry.
 func derivedSettlement(out model.Output) agent.ModelSettlement {
 	switch out.Status {
 	case model.OutputCompleted:
@@ -381,16 +376,14 @@ func derivedSettlement(out model.Output) agent.ModelSettlement {
 	case model.OutputInterrupted:
 		return agent.ModelSettlement{Disposition: agent.DispoInterruption, Output: &out, Detail: out.Detail}
 	default:
-		if model.HasAssistantContent(out.Message) { // the content-only query: an errored output carries no tool calls, so content is its whole retained-payload question.
-			return agent.ModelSettlement{Disposition: agent.DispoContinue, Output: &out}
-		}
 		return agent.ModelSettlement{Disposition: agent.DispoFailure, Output: &out, Detail: out.Detail}
 	}
 }
 
 // standardRetryPolicy is the nil-Retry classifier: HTTP 429 and 5xx failures,
-// errors wrapping net.OpError, and pre-response io.EOF/io.ErrUnexpectedEOF
-// permit retries 1..3 at 2s/4s/8s; every other failure stops.
+// errors wrapping net.OpError or model.ErrStreamBroken, and pre-response io.EOF
+// or io.ErrUnexpectedEOF failures permit retries 1..3 at 2s/4s/8s; every other
+// failure stops.
 func standardRetryPolicy(cause error, failed int) (time.Duration, bool) {
 	if failed > 3 || !retryableTransportFailure(cause) {
 		return 0, false
@@ -409,7 +402,7 @@ func retryableTransportFailure(cause error) bool {
 	if errors.As(cause, &op) {
 		return true
 	}
-	return errors.Is(cause, io.EOF) || errors.Is(cause, io.ErrUnexpectedEOF)
+	return errors.Is(cause, model.ErrStreamBroken) || errors.Is(cause, io.EOF) || errors.Is(cause, io.ErrUnexpectedEOF)
 }
 
 // publishedCallIDs returns the tool call IDs the Operation's committed
@@ -695,11 +688,14 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 		}
 
 		// The transaction's usage contribution rides the produced assistant
-		// entry; the same totals land on the producer entry, the Operation,
-		// and the Session.
-		var contribution UsageTotals
-		if res.assistant != nil && res.assistant.Usage != nil {
-			contribution = UsageTotals{ByModel: []ModelUsage{{Model: res.assistant.Source, Usage: *res.assistant.Usage}}}
+		// entry: the last accepted and retried attempts' usage all land on the
+		// producer entry, the Operation, and the Session.
+		contribution := UsageTotals{}
+		if res.assistant != nil {
+			contribution, err = usageContribution(res.assistant.Source, res.assistant.Usage, res.assistant.retryUsage)
+			if err != nil {
+				return err
+			}
 		}
 		opUsage, err := addUsageTotals(currentOp.State.Usage, contribution)
 		if err != nil {
@@ -736,15 +732,6 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 					ResultEntryID:  call.ResultEntryID,
 				})
 			}
-		}
-
-		// A running continue result appends its fixed continuation signal.
-		if res.signal != "" {
-			entry, err := newSignalEntry(tx, sessionID, operationID, res.signal)
-			if err != nil {
-				return err
-			}
-			newEntries = append(newEntries, *entry)
 		}
 
 		next := currentOp
@@ -838,21 +825,21 @@ func (d *executionDriver) commitEffectResult(ctx context.Context, intent *modelE
 // here, never both. Recovery calls it from its own re-reading transaction
 // with no process-local facts. It performs no precondition check of its own:
 // the caller passes only records whose state it may settle.
-func commitTerminalSettlement(tx Transaction, sessionID, operationID string, currentSession SessionRecord, currentOp OperationRecord, sregRevision, oregRevision int64, terminal OperationState, detail string, assistant *assistantEntry, usageModel model.ModelRef, usage *UsageCount, compactionUsage bool, facts *maintenanceFacts, maintenanceID string) (OperationRecord, SessionRecord, []graphEntry, error) {
+func commitTerminalSettlement(tx Transaction, sessionID, operationID string, currentSession SessionRecord, currentOp OperationRecord, sregRevision, oregRevision int64, terminal OperationState, detail string, assistant *assistantEntry, usageModel model.ModelRef, usage attemptUsage, compactionUsage bool, facts *maintenanceFacts, maintenanceID string) (OperationRecord, SessionRecord, []graphEntry, error) {
 	var newEntries []graphEntry
 
 	// The transaction's usage contribution is additive: the ordinary
-	// assistant-carried or terminal no-output usage and the retained
-	// maintenance facts' own per-producer usage both land when both occur,
-	// and the same totals land on the producer entry, the Operation, and the
-	// Session. A reported zero stays known zero and an absent report
-	// contributes nothing.
-	var contribution UsageTotals
-	switch {
-	case assistant != nil && assistant.Usage != nil:
-		contribution = UsageTotals{ByModel: []ModelUsage{{Model: assistant.Source, Usage: *assistant.Usage}}}
-	case usage != nil:
-		contribution = UsageTotals{ByModel: []ModelUsage{{Model: usageModel, Usage: *usage}}}
+	// assistant-carried or terminal no-output usage, the retried attempts'
+	// usage, and the retained facts' per-producer usage all land when they
+	// occur; the same totals land on the producer entry, the Operation, and
+	// the Session, and an absent report contributes nothing.
+	ref, last, retried := usageModel, usage.last, usage.retryUsage
+	if assistant != nil {
+		ref, last, retried = assistant.Source, assistant.Usage, assistant.retryUsage
+	}
+	contribution, err := usageContribution(ref, last, retried)
+	if err != nil {
+		return OperationRecord{}, SessionRecord{}, nil, err
 	}
 	factUsage, err := factsUsageContribution(factsList(facts))
 	if err != nil {
@@ -1090,10 +1077,11 @@ func commitTerminalSettlement(tx Transaction, sessionID, operationID string, cur
 		settlement.Facts = []maintenanceFact{summaryFact(activeEffect.RequestID, *activeEffect.Model, activeEffect.Evidence)}
 	}
 	if assistant == nil {
-		if usage != nil { // terminal no-output model usage rides the settlement entry
+		if usage.last != nil || usage.retryUsage.present() { // terminal no-output model attempt usage rides the settlement entry
 			modelRef := usageModel
 			settlement.Model = &modelRef
-			settlement.Usage = usage
+			settlement.Usage = usage.last
+			settlement.retryUsage = usage.retryUsage
 		} else if activeEffect != nil && activeEffect.Kind == EffectModel && activeEffect.Purpose == InvocationPurposeConversation {
 			// Summary producers are witnessed by their facts instead.
 			modelRef := *activeEffect.Model
@@ -1231,15 +1219,43 @@ func normalizeCallArguments(ctx context.Context, normalize func(context.Context,
 // class, not a plugin-defined status or a cancellation instruction.
 var errMalformedNormalization = errors.New("malformed normalization")
 
+// usageCount converts one model usage report into its durable count.
+func usageCount(u *model.Usage) *UsageCount {
+	if u == nil {
+		return nil
+	}
+	return &UsageCount{
+		InputTokens:       int64(u.InputTokens),
+		CachedInputTokens: int64(u.CachedInputTokens),
+		OutputTokens:      int64(u.OutputTokens),
+	}
+}
+
+// usageContribution renders one record's last accepted and retried usage under its model.
+func usageContribution(ref model.ModelRef, last *UsageCount, retry retryUsage) (UsageTotals, error) {
+	var contribution UsageTotals
+	for _, counts := range []*UsageCount{last, retry.RetryUsage} {
+		if counts == nil {
+			continue
+		}
+		var err error
+		contribution, err = addUsageTotals(contribution, UsageTotals{ByModel: []ModelUsage{{Model: ref, Usage: *counts}}})
+		if err != nil {
+			return UsageTotals{}, err
+		}
+	}
+	return contribution, nil
+}
+
 // newAssistantEntry builds one assistant entry from one validated model
 // output under the given entry identity, reserving one result identity per
 // completed call and recording the producing request identity and the request
 // evidence the model effect consumed. An output without an eligible model-visible
-// payload writes no assistant entry and returns its usage for the consuming
-// settlement instead. Call arguments remain raw.
-func newAssistantEntry(sessionID, operationID, entryID string, out *model.Output, requestID string, evidence *RequestEvidence) (*assistantEntry, *UsageCount, error) {
+// payload writes no assistant entry and carries the accepted attempts' usage
+// otherwise. Call arguments remain raw.
+func newAssistantEntry(sessionID, operationID, entryID string, out *model.Output, usage attemptUsage, requestID string, evidence *RequestEvidence) (*assistantEntry, error) {
 	if out == nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 	entry := &assistantEntry{
 		SessionID:   sessionID,
@@ -1252,14 +1268,6 @@ func newAssistantEntry(sessionID, operationID, entryID string, out *model.Output
 	if evidence != nil {
 		owned := copyRequestEvidence(*evidence)
 		entry.Evidence = &owned
-	}
-	var usage *UsageCount
-	if out.Usage != nil {
-		usage = &UsageCount{
-			InputTokens:       int64(out.Usage.InputTokens),
-			CachedInputTokens: int64(out.Usage.CachedInputTokens),
-			OutputTokens:      int64(out.Usage.OutputTokens),
-		}
 	}
 	if out.Message != nil {
 		entry.Content = out.Message.Content
@@ -1279,15 +1287,16 @@ func newAssistantEntry(sessionID, operationID, entryID string, out *model.Output
 	for i := range entry.ToolCalls {
 		id, err := newHexID()
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %v", ErrStorage, err)
+			return nil, fmt.Errorf("%w: %v", ErrStorage, err)
 		}
 		entry.ToolCalls[i].ResultEntryID = id
 	}
 	if !assistantPayloadEligible(*entry) {
-		return nil, usage, nil
+		return nil, nil
 	}
-	entry.Usage = usage
-	return entry, nil, nil
+	entry.Usage = usage.last
+	entry.retryUsage = usage.retryUsage
+	return entry, nil
 }
 
 // copyRequestEvidence returns an independent deep-owned copy of one evidence

@@ -108,7 +108,8 @@ func (e *costEstimate) value() *float64 {
 // conversation pricing, terminal no-output model producers (settlement Model
 // with optional Usage) under their corresponding captured pricing, and each
 // maintenance fact on a checkpoint or a settlement under the pricing captured
-// for the fact's own model. Independently copied fork-prefix entries
+// for the fact's own model; an unknown retry usage makes the estimate unknown.
+// Independently copied fork-prefix entries
 // (operationless envelopes) and every informational signal — background
 // completion reports included — contribute nothing, so a copied producer never
 // charges twice and a copied absent usage never turns a zero-cost fork
@@ -134,6 +135,24 @@ func estimateGraphCosts(graph *sessionGraph) (map[string]*costEstimate, *costEst
 		estimate.add(value, ok)
 		session.add(value, ok)
 	}
+	markUnknown := func(operationID string) {
+		estimate, present := byOperation[operationID]
+		if !present {
+			estimate = &costEstimate{}
+			byOperation[operationID] = estimate
+		}
+		estimate.unknown = true
+		session.unknown = true
+	}
+	produceRecord := func(operationID string, pricing *ModelPricing, usage *UsageCount, retry retryUsage) {
+		produce(operationID, pricing, usage)
+		if retry.RetryUsage != nil {
+			produce(operationID, pricing, retry.RetryUsage)
+		}
+		if retry.RetryUsageUnknown {
+			markUnknown(operationID)
+		}
+	}
 	for i := range graph.Entries {
 		entry := &graph.Entries[i]
 		operationID := entry.Envelope.OperationID
@@ -143,17 +162,18 @@ func estimateGraphCosts(graph *sessionGraph) (map[string]*costEstimate, *costEst
 		capture := captures[operationID]
 		switch {
 		case entry.Assistant != nil:
-			produce(operationID, capture.Pricing, entry.Assistant.Usage)
+			produceRecord(operationID, capture.Pricing, entry.Assistant.Usage, entry.Assistant.retryUsage)
 		case entry.Settlement != nil:
 			if entry.Settlement.Model != nil {
-				produce(operationID, capturedPricingFor(capture, *entry.Settlement.Model), entry.Settlement.Usage)
+				pricing := capturedPricingFor(capture, *entry.Settlement.Model)
+				produceRecord(operationID, pricing, entry.Settlement.Usage, entry.Settlement.retryUsage)
 			}
 			for _, fact := range entry.Settlement.Facts {
-				produce(operationID, capturedPricingFor(capture, fact.Model), fact.Usage)
+				produceRecord(operationID, capturedPricingFor(capture, fact.Model), fact.Usage, fact.retryUsage)
 			}
 		case entry.Compaction != nil:
 			for _, fact := range entry.Compaction.Facts {
-				produce(operationID, capturedPricingFor(capture, fact.Model), fact.Usage)
+				produceRecord(operationID, capturedPricingFor(capture, fact.Model), fact.Usage, fact.retryUsage)
 			}
 		}
 	}
@@ -162,13 +182,7 @@ func estimateGraphCosts(graph *sessionGraph) (map[string]*costEstimate, *costEst
 	// across the gap, even when no surviving producer entry names them.
 	for _, op := range graph.Operations {
 		if op.State.UnreportedMaintenance {
-			estimate, present := byOperation[op.Admission.OperationID]
-			if !present {
-				estimate = &costEstimate{}
-				byOperation[op.Admission.OperationID] = estimate
-			}
-			estimate.unknown = true
-			session.unknown = true
+			markUnknown(op.Admission.OperationID)
 		}
 	}
 	return byOperation, session

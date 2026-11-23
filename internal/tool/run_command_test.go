@@ -13,8 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Syntheresis/melta/internal/cmdoutput"
 	"github.com/Syntheresis/melta/internal/testassert"
 )
+
+// testCapture builds the caller-supplied capture over one spill directory.
+func testCapture(spillDir string, maxBytes, maxLineChars int) *cmdoutput.Capture {
+	return cmdoutput.NewCapture(cmdoutput.Options{Directory: spillDir, MaxBytes: maxBytes, MaxLineChars: maxLineChars})
+}
 
 // TestRunForegroundCommandTimeoutSendsTERMBeforeKILL pins the timeout
 // termination order: SIGTERM reaches the process group first, so a TERM
@@ -22,7 +28,7 @@ import (
 func TestRunForegroundCommandTimeoutSendsTERMBeforeKILL(t *testing.T) {
 	dir := t.TempDir()
 
-	output, err := RunForegroundCommand(context.Background(), "trap 'echo got-term; exit 0' TERM; sleep 10", dir, 1, 0, 0, filepath.Join(dir, ".melta"), os.Environ())
+	output, err := RunForegroundCommand(context.Background(), "trap 'echo got-term; exit 0' TERM; sleep 10", dir, 1, testCapture(filepath.Join(dir, ".melta"), 0, 0), os.Environ())
 	var exitErr *ExitError
 	testassert.Require(t, errors.As(err, &exitErr), "error = %T %v, want *ExitError", err, err)
 	testassert.Require(t, strings.Contains(output, "got-term") && strings.Contains(exitErr.Output, "got-term"), "output=%q exitErr.Output=%q, want SIGTERM trap output before timeout error", output, exitErr.Output)
@@ -74,7 +80,7 @@ func TestRunForegroundCommandCancellationWhileRunningIsDeterministic(t *testing.
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := RunForegroundCommand(ctx, "sleep 5", dir, 60, 0, 0, filepath.Join(dir, ".melta"), os.Environ())
+		_, err := RunForegroundCommand(ctx, "sleep 5", dir, 60, testCapture(filepath.Join(dir, ".melta"), 0, 0), os.Environ())
 		errCh <- err
 	}()
 
@@ -107,7 +113,7 @@ func TestRunForegroundCommandCompletedBeatsLateEvents(t *testing.T) {
 		}
 		defer func() { waitCommand = origWait }()
 
-		result, err := RunForegroundCommand(context.Background(), "printf ok", dir, 1, 0, 0, filepath.Join(dir, ".melta"), os.Environ())
+		result, err := RunForegroundCommand(context.Background(), "printf ok", dir, 1, testCapture(filepath.Join(dir, ".melta"), 0, 0), os.Environ())
 		testassert.Require(t, err == nil && result == "ok", "result = (%q, %v), want the already-finished real result", result, err)
 	})
 
@@ -126,7 +132,7 @@ func TestRunForegroundCommandCompletedBeatsLateEvents(t *testing.T) {
 		errCh := make(chan error, 1)
 		resCh := make(chan string, 1)
 		go func() {
-			result, err := RunForegroundCommand(ctx, "printf ok", dir, 0, 0, 0, filepath.Join(dir, ".melta"), os.Environ())
+			result, err := RunForegroundCommand(ctx, "printf ok", dir, 0, testCapture(filepath.Join(dir, ".melta"), 0, 0), os.Environ())
 			resCh <- result
 			errCh <- err
 		}()
@@ -150,7 +156,7 @@ func TestRunForegroundCommandTimeoutOverflowRejectedBeforeLaunch(t *testing.T) {
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "overflow-launched")
 
-	_, err := RunForegroundCommand(context.Background(), "touch "+probe, dir, int(math.MaxInt64/int64(time.Second))+1, 0, 0, filepath.Join(dir, ".melta"), os.Environ())
+	_, err := RunForegroundCommand(context.Background(), "touch "+probe, dir, int(math.MaxInt64/int64(time.Second))+1, testCapture(filepath.Join(dir, ".melta"), 0, 0), os.Environ())
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "overflows the seconds-to-duration conversion"), "err = %v, want the overflow rejection", err)
 	{
 		_, statErr := os.Stat(probe)
@@ -166,7 +172,7 @@ func TestRunForegroundCommandParentDeadlineIsCancellation(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(1*time.Second))
 	defer cancel()
 
-	_, err := RunForegroundCommand(ctx, "sleep 5", dir, 0, 0, 0, filepath.Join(dir, ".melta"), os.Environ())
+	_, err := RunForegroundCommand(ctx, "sleep 5", dir, 0, testCapture(filepath.Join(dir, ".melta"), 0, 0), os.Environ())
 	var exitErr *ExitError
 	testassert.Require(t, errors.As(err, &exitErr) && exitErr.ExitCode == -1 && strings.HasPrefix(exitErr.Output, "command cancelled"), "err = %v, want the cancellation classification for a parent deadline", err)
 }
@@ -179,7 +185,7 @@ func TestRunForegroundCommandNonZeroExitLargeOutputIsBounded(t *testing.T) {
 	home := t.TempDir()
 	spillDir := filepath.Join(home, ".melta")
 
-	output, err := RunForegroundCommand(context.Background(), "printf 'abcdefg\\n1234567\\n' && exit 7", "", 2, 12, 5, spillDir, os.Environ())
+	output, err := RunForegroundCommand(context.Background(), "printf 'abcdefg\\n1234567\\n' && exit 7", "", 2, testCapture(spillDir, 12, 5), os.Environ())
 	var exitErr *ExitError
 	testassert.Require(t, errors.As(err, &exitErr), "error = %T %v, want *ExitError", err, err)
 	testassert.Require(t, output != "abcdefg\n1234567\n", "output = %q, want bounded output", output)
@@ -193,7 +199,7 @@ func TestRunForegroundCommandTimeoutLargeOutputIsBounded(t *testing.T) {
 	home := t.TempDir()
 	spillDir := filepath.Join(home, ".melta")
 
-	output, err := RunForegroundCommand(context.Background(), "printf 'abcdefg\\n1234567\\n'; sleep 5", "", 1, 12, 5, spillDir, os.Environ())
+	output, err := RunForegroundCommand(context.Background(), "printf 'abcdefg\\n1234567\\n'; sleep 5", "", 1, testCapture(spillDir, 12, 5), os.Environ())
 	var exitErr *ExitError
 	testassert.Require(t, errors.As(err, &exitErr), "error = %T %v, want *ExitError", err, err)
 	testassert.Require(t, output != "abcdefg\n1234567\n", "output = %q, want bounded output", output)
@@ -207,7 +213,7 @@ func TestRunForegroundCommandTimeoutKillsNearConfiguredDeadline(t *testing.T) {
 	dir := t.TempDir()
 	start := time.Now()
 
-	_, err := RunForegroundCommand(context.Background(), "sleep 2", dir, 1, 0, 0, filepath.Join(dir, ".melta"), os.Environ())
+	_, err := RunForegroundCommand(context.Background(), "sleep 2", dir, 1, testCapture(filepath.Join(dir, ".melta"), 0, 0), os.Environ())
 	var exitErr *ExitError
 	testassert.Require(t, errors.As(err, &exitErr), "error = %T %v, want *ExitError", err, err)
 	testassert.Require(t, exitErr.ExitCode == -1 && strings.Contains(exitErr.Output, "timeout"), "ExitError = %+v, want timeout with exit code -1", exitErr)
@@ -231,7 +237,7 @@ func TestRunForegroundCommandCancellationOutput(t *testing.T) {
 		outCh := make(chan string, 1)
 		command := "printf 'abcdefg\\n1234567\\n'; touch " + ready + "; sleep 5"
 		go func() {
-			output, err := RunForegroundCommand(ctx, command, "", 5, 12, 5, filepath.Join(home, ".melta"), os.Environ())
+			output, err := RunForegroundCommand(ctx, command, "", 5, testCapture(filepath.Join(home, ".melta"), 12, 5), os.Environ())
 			outCh <- output
 			errCh <- err
 		}()

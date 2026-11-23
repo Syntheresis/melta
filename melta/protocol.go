@@ -32,7 +32,7 @@ func (r *Melta) Health(ctx context.Context, c Caller) (protocol.Health, error) {
 	if err := r.authorize(c, ctx, nil, harnessScope); err != nil {
 		return protocol.Health{}, err
 	}
-	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N19}, nil
+	return protocol.Health{InstanceId: r.instance, ProtocolVersion: protocol.N24}, nil
 }
 
 // ListSessions projects Session headers under one required workspace and
@@ -370,6 +370,9 @@ func projectAssistantItem(id string, fact harness.HistoryFact, results map[strin
 	if entry.Refusal != "" {
 		refusal := entry.Refusal
 		item.Refusal = &refusal
+	}
+	if reasoning := model.ReasoningText(entry.Extra, entry.Content); reasoning != "" {
+		item.Reasoning = &reasoning
 	}
 	return item, nil
 }
@@ -895,6 +898,34 @@ func (r *Melta) GetSessionOperation(ctx context.Context, c Caller, sessionID, op
 		return err
 	}); err != nil {
 		return protocol.SessionOperation{}, err
+	}
+	return out, nil
+}
+
+// GetSessionToolOutput reads one running command's bounded current output
+// under the owning Session's read authority, whether the command runs in the
+// foreground or as a background job. The call identity includes the Operation
+// because call IDs are unique only within one. After authorization it captures
+// the registered preview, then reads the Session header so an unavailable or
+// corrupt Session answers as the other Session reads do. A call without a
+// registration is not found.
+func (r *Melta) GetSessionToolOutput(ctx context.Context, c Caller, sessionID, operationID, callID string) (protocol.CommandOutput, error) {
+	var out protocol.CommandOutput
+	if err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
+		if err := r.authorize(c, ctx, h, CallerScope{Kind: CallerScopeSession, SessionID: sessionID}); err != nil {
+			return err
+		}
+		preview, ok := r.toolOutput.preview(sessionID, operationID, callID)
+		if _, err := h.ReadSessionHeader(ctx, sessionID); err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("tool call %q in operation %q of session %q has no live output: %w", callID, operationID, sessionID, harness.ErrNotFound)
+		}
+		out.Output = preview
+		return nil
+	}); err != nil {
+		return protocol.CommandOutput{}, err
 	}
 	return out, nil
 }

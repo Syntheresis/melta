@@ -78,8 +78,7 @@ const (
 type SignalKind string
 
 const (
-	SignalInterruption             SignalKind = "interruption"
-	SignalModelFailureContinuation SignalKind = "model_failure_continuation"
+	SignalInterruption SignalKind = "interruption"
 
 	// SignalBackgroundCompletion records one background member's completion.
 	// Its content is the producer-bounded completion text, not a fixed
@@ -90,8 +89,7 @@ const (
 // Fixed signal contents, one per signal kind. The model-visible wording of a
 // durable signal is contract, not free producer text.
 const (
-	signalInterruptionContent             = "Operation interrupted."
-	signalModelFailureContinuationContent = "The previous model response failed after partial output. Continue from the retained response."
+	signalInterruptionContent = "Operation interrupted."
 )
 
 // EntryRef addresses one committed entry of one Session.
@@ -154,6 +152,14 @@ type UsageCount struct {
 	CachedInputTokens int64 `json:"cached_input_tokens"`
 	OutputTokens      int64 `json:"output_tokens"`
 }
+
+// retryUsage carries the retried attempts' summed usage.
+type retryUsage struct {
+	RetryUsage        *UsageCount `json:"retry_usage,omitempty"`
+	RetryUsageUnknown bool        `json:"retry_usage_unknown,omitempty"`
+}
+
+func (u retryUsage) present() bool { return u.RetryUsage != nil || u.RetryUsageUnknown }
 
 // ModelUsage pairs one complete model identity with its accumulated usage.
 type ModelUsage struct {
@@ -445,10 +451,11 @@ type toolCallRecord struct {
 	ResultEntryID   string      `json:"result_entry_id"`
 }
 
-// assistantEntry is one finalized model output: status, complete source
-// identity, eligible model-visible payload, reported usage when present, and
-// the producing request identity with its final effective request evidence.
-// The evidence carries the advertisement and is not conversation text.
+// assistantEntry is one finalized model output: completed or interrupted
+// status, complete source identity, eligible model-visible payload, reported
+// usage and retried attempts' usage when present, and the producing request
+// identity with its final effective request evidence. The evidence carries the
+// advertisement and is not conversation text.
 type assistantEntry struct {
 	SessionID   string              `json:"session_id"`
 	EntryID     string              `json:"entry_id"`
@@ -460,6 +467,7 @@ type assistantEntry struct {
 	Extra       model.Extra         `json:"extra,omitempty"`
 	ToolCalls   []toolCallRecord    `json:"tool_calls"`
 	Usage       *UsageCount         `json:"usage,omitempty"`
+	retryUsage                      // the retried attempts' usage
 	RequestID   string              `json:"request_id"`
 	Evidence    *RequestEvidence    `json:"evidence"`
 }
@@ -569,15 +577,16 @@ type maintenanceFact struct {
 	Model      model.ModelRef  `json:"model"`
 	Input      []model.Message `json:"input"`
 	Usage      *UsageCount     `json:"usage,omitempty"`
+	retryUsage                 // the retried attempts' usage
 	Parameters model.Extra
 	HookIDs    []HookIdentity
 }
 
 // operationSettlementEntry publishes one terminal Operation outcome. It is
-// never operationless; the settlement's usage requires its model identity,
-// while the model identity alone additionally marks one no-output terminal
-// model producer whose usage report was absent. CompactionUsage marks one
-// settlement as the
+// never operationless; the settlement's usage and retry members require its
+// model identity, while the model identity alone additionally marks one
+// no-output terminal model producer whose usage report was absent.
+// CompactionUsage marks one settlement as the
 // maintenance procedure's own provenance: it identifies the maintenance
 // family directly and its ordered Facts carry the procedure's per-request
 // usage. RequestID is the
@@ -596,6 +605,7 @@ type operationSettlementEntry struct {
 	Detail          string            `json:"detail,omitempty"`
 	Model           *model.ModelRef   `json:"model,omitempty"`
 	Usage           *UsageCount       `json:"usage,omitempty"`
+	retryUsage                        // the retried attempts' usage
 	CompactionUsage bool              `json:"compaction_usage,omitempty"`
 	RequestID       string            `json:"request_id,omitempty"`
 	Evidence        *RequestEvidence  `json:"evidence,omitempty"`

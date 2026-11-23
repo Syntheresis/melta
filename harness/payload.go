@@ -114,14 +114,10 @@ func decodeEntryEnvelope(env Entry) error {
 // signalContent returns the contract-fixed model-visible content of one
 // signal kind.
 func signalContent(kind SignalKind) string {
-	switch kind {
-	case SignalInterruption:
+	if kind == SignalInterruption {
 		return signalInterruptionContent
-	case SignalModelFailureContinuation:
-		return signalModelFailureContinuationContent
-	default:
-		return ""
 	}
+	return ""
 }
 
 // encodeInputEntry renders one input entry payload.
@@ -361,6 +357,7 @@ func encodeAssistantEntry(v assistantEntry) (json.RawMessage, error) {
 		Extra       json.RawMessage   `json:"extra,omitempty"`
 		ToolCalls   []json.RawMessage `json:"tool_calls"`
 		Usage       *UsageCount       `json:"usage,omitempty"`
+		retryUsage                    // the retried attempts' usage
 		RequestID   string            `json:"request_id"`
 		Evidence    json.RawMessage   `json:"evidence"`
 	}{
@@ -374,6 +371,7 @@ func encodeAssistantEntry(v assistantEntry) (json.RawMessage, error) {
 		Extra:       extra,
 		ToolCalls:   calls,
 		Usage:       v.Usage,
+		retryUsage:  v.retryUsage,
 		RequestID:   v.RequestID,
 		Evidence:    evidence,
 	})
@@ -394,7 +392,7 @@ func decodeAssistantEntry(env Entry) (assistantEntry, error) {
 	if err != nil {
 		return assistantEntry{}, err
 	}
-	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "status", "source", "content", "refusal", "extra", "tool_calls", "usage", "request_id", "evidence"); err != nil {
+	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "status", "source", "content", "refusal", "extra", "tool_calls", "usage", "retry_usage", "retry_usage_unknown", "request_id", "evidence"); err != nil {
 		return assistantEntry{}, err
 	}
 	sessionID, err := stringMember(obj, "session_id", true)
@@ -449,6 +447,10 @@ func decodeAssistantEntry(env Entry) (assistantEntry, error) {
 		}
 		usage = &counts
 	}
+	retried, err := decodeRetryUsage(obj)
+	if err != nil {
+		return assistantEntry{}, err
+	}
 	requestID, err := stringMember(obj, "request_id", true)
 	if err != nil {
 		return assistantEntry{}, err
@@ -475,6 +477,7 @@ func decodeAssistantEntry(env Entry) (assistantEntry, error) {
 		Refusal:     refusal,
 		Extra:       extra,
 		Usage:       usage,
+		retryUsage:  retried,
 		RequestID:   requestID,
 		Evidence:    &evidence,
 	}
@@ -501,10 +504,11 @@ func decodeAssistantEntry(env Entry) (assistantEntry, error) {
 	return v, nil
 }
 
-// validateAssistantEntry enforces the closed assistant-entry shape: closed
-// output status, complete source identity, unique tool calls with zero-based
-// ordinals and unique reserved results, no calls on errored or interrupted
-// output, and an eligible model-visible payload.
+// validateAssistantEntry enforces the closed assistant-entry shape: completed
+// or interrupted status, complete source identity, unique tool calls with
+// zero-based ordinals and unique reserved results, no calls on interrupted
+// output, an interrupted entry with started text or refusal, and an eligible
+// model-visible payload.
 func validateAssistantEntry(v assistantEntry) error {
 	if err := validateHexID(v.SessionID, "session id"); err != nil {
 		return err
@@ -516,11 +520,11 @@ func validateAssistantEntry(v assistantEntry) error {
 		if err := validateOperationIdentity(v.OperationID, "operation id"); err != nil {
 			return err
 		}
-	} else if v.Usage != nil {
+	} else if v.Usage != nil || v.retryUsage.present() {
 		return errors.New("independently copied fork-prefix assistant entry carries no source usage")
 	}
 	if !validOutputStatus(v.Status) {
-		return fmt.Errorf("assistant status %q is not one of completed, errored or interrupted", v.Status)
+		return fmt.Errorf("assistant status %q is not one of completed or interrupted", v.Status)
 	}
 	if v.Source.Provider == "" || v.Source.Model == "" {
 		return fmt.Errorf("assistant source %q must be a complete model identity", v.Source.String())
@@ -550,6 +554,9 @@ func validateAssistantEntry(v assistantEntry) error {
 	}
 	if v.Status != model.OutputCompleted && len(v.ToolCalls) > 0 {
 		return fmt.Errorf("%s assistant entry carries no tool calls", v.Status)
+	}
+	if v.Status == model.OutputInterrupted && v.Refusal == "" && (model.Message{Content: v.Content}).TextContent() == "" {
+		return errors.New("interrupted assistant entry requires non-empty text content or a refusal")
 	}
 	if err := validateOperationIdentity(v.RequestID, "assistant request id"); err != nil {
 		return err
@@ -1303,7 +1310,7 @@ func validateSignalEntry(v signalEntry) error {
 		}
 	}
 	switch v.Signal {
-	case SignalInterruption, SignalModelFailureContinuation:
+	case SignalInterruption:
 		if v.RelatedMember != nil {
 			return fmt.Errorf("signal kind %s must not carry related_member", v.Signal)
 		}
@@ -1344,7 +1351,7 @@ func validateSignalEntry(v signalEntry) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("signal kind %q is not one of interruption, model_failure_continuation or background_completion", v.Signal)
+		return fmt.Errorf("signal kind %q is not one of interruption or background_completion", v.Signal)
 	}
 }
 
@@ -1386,6 +1393,7 @@ func encodeOperationSettlementEntry(v operationSettlementEntry) (json.RawMessage
 		Detail          string          `json:"detail,omitempty"`
 		Model           json.RawMessage `json:"model,omitempty"`
 		Usage           *UsageCount     `json:"usage,omitempty"`
+		retryUsage                      // the retried attempts' usage
 		CompactionUsage bool            `json:"compaction_usage,omitempty"`
 		RequestID       string          `json:"request_id,omitempty"`
 		Evidence        json.RawMessage `json:"evidence,omitempty"`
@@ -1398,6 +1406,7 @@ func encodeOperationSettlementEntry(v operationSettlementEntry) (json.RawMessage
 		Detail:          v.Detail,
 		Model:           modelRaw,
 		Usage:           v.Usage,
+		retryUsage:      v.retryUsage,
 		CompactionUsage: v.CompactionUsage,
 		RequestID:       v.RequestID,
 		Evidence:        evidenceRaw,
@@ -1420,7 +1429,7 @@ func decodeOperationSettlementEntry(env Entry) (operationSettlementEntry, error)
 	if err != nil {
 		return operationSettlementEntry{}, err
 	}
-	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "status", "detail", "model", "usage", "compaction_usage", "request_id", "evidence", "facts"); err != nil {
+	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "status", "detail", "model", "usage", "retry_usage", "retry_usage_unknown", "compaction_usage", "request_id", "evidence", "facts"); err != nil {
 		return operationSettlementEntry{}, err
 	}
 	sessionID, err := stringMember(obj, "session_id", true)
@@ -1467,6 +1476,10 @@ func decodeOperationSettlementEntry(env Entry) (operationSettlementEntry, error)
 		}
 		usage = &counts
 	}
+	retried, err := decodeRetryUsage(obj)
+	if err != nil {
+		return operationSettlementEntry{}, err
+	}
 	compactionUsage, err := boolMember(obj, "compaction_usage", false)
 	if err != nil {
 		return operationSettlementEntry{}, err
@@ -1510,6 +1523,7 @@ func decodeOperationSettlementEntry(env Entry) (operationSettlementEntry, error)
 		Detail:          detail,
 		Model:           ref,
 		Usage:           usage,
+		retryUsage:      retried,
 		CompactionUsage: compactionUsage,
 		RequestID:       requestID,
 		Evidence:        evidence,
@@ -1551,7 +1565,7 @@ func validateOperationSettlementEntry(v operationSettlementEntry) error {
 	default:
 		return fmt.Errorf("settlement status %q is not terminal", v.Status)
 	}
-	if v.Model == nil && v.Usage != nil {
+	if v.Model == nil && (v.Usage != nil || v.retryUsage.present()) {
 		return errors.New("settlement usage requires its model identity")
 	}
 	if v.Evidence != nil && v.RequestID == "" {
@@ -1631,6 +1645,12 @@ func encodeMaintenanceFacts(facts []maintenanceFact) (json.RawMessage, error) {
 		if fact.Usage != nil {
 			obj["usage"] = mustMarshal(fact.Usage)
 		}
+		if fact.RetryUsage != nil {
+			obj["retry_usage"] = mustMarshal(fact.RetryUsage)
+		}
+		if fact.RetryUsageUnknown {
+			obj["retry_usage_unknown"] = mustMarshal(true)
+		}
 		if fact.Parameters != nil {
 			if obj["parameters"], err = marshalExtra(fact.Parameters); err != nil {
 				return nil, err
@@ -1676,7 +1696,7 @@ func decodeMaintenanceFact(raw json.RawMessage) (maintenanceFact, error) {
 	if err != nil {
 		return maintenanceFact{}, err
 	}
-	if err := rejectUnknownMembers(obj, "request_id", "model", "input", "usage", "parameters", "hook_ids"); err != nil {
+	if err := rejectUnknownMembers(obj, "request_id", "model", "input", "usage", "retry_usage", "retry_usage_unknown", "parameters", "hook_ids"); err != nil {
 		return maintenanceFact{}, err
 	}
 	requestID, err := stringMember(obj, "request_id", true)
@@ -1711,7 +1731,11 @@ func decodeMaintenanceFact(raw json.RawMessage) (maintenanceFact, error) {
 		}
 		usage = &counts
 	}
-	fact := maintenanceFact{RequestID: requestID, Model: source, Input: input, Usage: usage}
+	retried, err := decodeRetryUsage(obj)
+	if err != nil {
+		return maintenanceFact{}, err
+	}
+	fact := maintenanceFact{RequestID: requestID, Model: source, Input: input, Usage: usage, retryUsage: retried}
 	fact.Parameters, err = extraMember(obj, "parameters", false)
 	if err != nil {
 		return maintenanceFact{}, err
@@ -1876,7 +1900,7 @@ func validateContextCheckpointEntry(v contextCheckpointEntry) error {
 		}
 	} else {
 		for _, fact := range v.Facts {
-			if fact.Usage != nil {
+			if fact.Usage != nil || fact.retryUsage.present() {
 				return errors.New("independently copied fork-prefix context checkpoint entry carries no source usage")
 			}
 		}
@@ -1944,6 +1968,28 @@ func decodeUsageCount(obj map[string]json.RawMessage) (UsageCount, error) {
 		return UsageCount{}, err
 	}
 	return UsageCount{InputTokens: input, CachedInputTokens: cached, OutputTokens: output}, nil
+}
+
+// decodeRetryUsage reads the optional retried-usage members.
+func decodeRetryUsage(obj map[string]json.RawMessage) (retryUsage, error) {
+	var retried retryUsage
+	if _, present := obj["retry_usage"]; present {
+		usageObj, err := objectMember(obj, "retry_usage", true)
+		if err != nil {
+			return retryUsage{}, err
+		}
+		counts, err := decodeUsageCount(usageObj)
+		if err != nil {
+			return retryUsage{}, fmt.Errorf("member %q: %w", "retry_usage", err)
+		}
+		retried.RetryUsage = &counts
+	}
+	unknown, err := boolMember(obj, "retry_usage_unknown", false)
+	if err != nil {
+		return retryUsage{}, err
+	}
+	retried.RetryUsageUnknown = unknown
+	return retried, nil
 }
 
 // encodeUsageTotalsWire renders one canonical totals value: a non-null array

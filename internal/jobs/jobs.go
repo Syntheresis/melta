@@ -59,17 +59,18 @@ type ExitResult struct {
 
 // StartRequest is one reserved job's launch input. Config is the opaque
 // top-level jobs section the caller forwards; Env is the exact child
-// environment; TimeoutSec 0 means no timeout.
+// environment; TimeoutSec 0 means no timeout; OnChange is the capture callback.
 type StartRequest struct {
 	JobID, SessionID, Workspace, Command string
 	TimeoutSec                           int
 	Env                                  []string
 	Config                               json.RawMessage
 	OnExit                               func(ExitResult)
+	OnChange                             func()
 }
 
 // Jobs is the capability contract: a reservation-native identity mint,
-// per-Session start/read/kill/list/live over background processes, and
+// per-Session start/read/preview/kill/list/live over background processes, and
 // Abort's reservation release. The concrete Manager's StopJob is the Harness
 // job-stop seam.
 type Jobs interface {
@@ -77,6 +78,7 @@ type Jobs interface {
 	Abort(jobID string)           // resolve a reservation that will not start; idempotent
 	Start(req StartRequest) error // start the reserved job; only its timeout or an explicit stop ends the process
 	Read(sessionID, jobID string) (string, error)
+	Preview(sessionID, jobID string) string // owned record's capture tail; empty for every identity Read rejects
 	Kill(sessionID, jobID string) error
 	List(sessionID string) string
 	Live(sessionID string) []string // the session's running job IDs, sorted
@@ -282,6 +284,7 @@ func (j *Manager) Start(req StartRequest) error {
 		SpillPrefix:  "proc_output_",
 		MaxBytes:     s.MaxOutputBytes,
 		MaxLineChars: s.ReadLineMaxChars,
+		OnChange:     req.OnChange,
 	})
 	cmd.Stdout = capture.Stdout()
 	cmd.Stderr = capture.Stderr()
@@ -396,27 +399,44 @@ func (j *Manager) timeoutLoop(rec *jobRecord, cmd *exec.Cmd, timeoutSec int) {
 	}
 }
 
-// Read returns the retained output text for one owned record: unknown-ID for
-// absent or foreign identities (reservations are invisible), the retained
-// empty placeholder for a silent capture, and the bounded format otherwise.
-func (j *Manager) Read(sessionID, jobID string) (string, error) {
+// ownedCapture returns the owned running-or-exited record's capture; every
+// absent, reserved, or foreign identity is the one unknown-ID error.
+func (j *Manager) ownedCapture(sessionID, jobID string) (*cmdoutput.Capture, error) {
 	j.mu.Lock()
 	rec, ok := j.jobs[jobID]
 	j.mu.Unlock()
 	if !ok {
-		return "", fmt.Errorf("process: no process with ID %q", jobID)
+		return nil, fmt.Errorf("process: no process with ID %q", jobID)
 	}
 	rec.mu.Lock()
+	defer rec.mu.Unlock()
 	if rec.state == stateReserved || rec.sessionID != sessionID {
-		rec.mu.Unlock()
-		return "", fmt.Errorf("process: no process with ID %q", jobID)
+		return nil, fmt.Errorf("process: no process with ID %q", jobID)
 	}
-	capture := rec.capture
-	rec.mu.Unlock()
+	return rec.capture, nil
+}
+
+// Read returns the owned record's retained output text: a silent capture's
+// placeholder or its bounded format.
+func (j *Manager) Read(sessionID, jobID string) (string, error) {
+	capture, err := j.ownedCapture(sessionID, jobID)
+	if err != nil {
+		return "", err
+	}
 	if capture.Len() == 0 {
 		return "(No output yet)", nil
 	}
 	return capture.Format(), nil
+}
+
+// Preview returns the owned record's capture tail, never the read placeholder,
+// and empty for every identity Read rejects.
+func (j *Manager) Preview(sessionID, jobID string) string {
+	capture, err := j.ownedCapture(sessionID, jobID)
+	if err != nil {
+		return ""
+	}
+	return capture.Preview()
 }
 
 // Kill is the user-facing termination: absent, foreign, or still-reserved

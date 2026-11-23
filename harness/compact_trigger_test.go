@@ -1021,11 +1021,12 @@ func TestModelEffectCompactBoundaryExcludesPostFreezeAppends(t *testing.T) {
 }
 
 // TestModelEffectCompactTriggerFullInputCommitAttributesUsage is the
-// full-input commit observation the deleted rolling rows carried. A real
-// conversation produces the failed partial with its continuation signal, the
-// rich tool call and complete result, and the refusal turn. The ordinary manual
-// compact then receives the complete ordered frozen input exactly once; the
-// expected serialized lines are independently authored (not recomputed by the
+// full-input commit observation the deleted rolling rows carried. One prior
+// Operation of the session settles as interruption before any model attempt,
+// committing its input and interruption signal; the rich tool call and
+// complete result follow, then the refusal turn. The ordinary manual compact
+// then receives the complete ordered frozen input exactly once; the expected
+// serialized lines are independently authored (not recomputed by the
 // serializer the producer uses), including the raw tool-call argument bytes,
 // and the one response's reported usage lands on the Operation-owned
 // compaction entry and both registers.
@@ -1047,10 +1048,7 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 		return InvocationExecution{
 			Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				rounds++
-				switch rounds {
-				case 1:
-					return failStream(errors.New("provider failure"), turnDelta("", "partial answer"), usageDelta(model.Usage{InputTokens: 1, OutputTokens: 1})), nil
-				case 2:
+				if rounds == 1 {
 					return rich, nil
 				}
 				refusal := turnDelta("stop", "")
@@ -1076,7 +1074,7 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 		return conversation, nil
 	}}
 	preparedCompact := compactPrepared(testCapture(), compact)
-	queue := []PreparedExecution{preparedTurn, preparedCompact}
+	queue := []PreparedExecution{preparedTurn, preparedTurn, preparedCompact}
 	h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
 		next := queue[0]
 		queue = queue[1:]
@@ -1086,6 +1084,10 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 	testassert.NoError(t, err)
 	sessionID := session.Identity.SessionID
 	c := leaseCoordinator(t, h, sessionID)
+	const interruptedOp = "op-interrupted"
+	mustAdmitWithoutExecution(t, h, sessionID, interruptedOp, admissionContent("interrupted question"))
+	testassert.NoError(t, h.Interrupt(context.Background(), sessionID))
+	testassert.NoError(t, executeDirect(h, c, context.Background(), interruptedOp, preparedTurn))
 	mustAdmitWithoutExecution(t, h, sessionID, testOpID, admissionContent("question one"))
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedTurn))
 
@@ -1101,7 +1103,7 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 			signals++
 		}
 	}
-	testassert.Require(t, assistants == 3 && signals == 1, "produced rich history = %d assistants, %d signals, want partial, rich and refusal beside one continuation signal", assistants, signals)
+	testassert.Require(t, assistants == 2 && signals == 1, "produced rich history = %d assistants, %d signals, want the rich and refusal turns beside the interruption signal", assistants, signals)
 
 	testassert.NoError(t, runManualCompact(t, h, c, sessionID, "compact-1"))
 	testassert.Equal(t, len(requests), 1)
@@ -1175,9 +1177,9 @@ type compactPieceWirePart struct {
 // wantRichPieceLines is the expected wire shape of the rich prefix's six
 // serialized lines, in conversation order.
 var wantRichPieceLines = []compactPieceWireLine{
+	{Role: "user", Content: []compactPieceWirePart{{Kind: "text", Text: "interrupted question"}}},
+	{Role: "user", Content: []compactPieceWirePart{{Kind: "text", Text: "<system-signal>Operation interrupted.</system-signal>"}}},
 	{Role: "user", Content: []compactPieceWirePart{{Kind: "text", Text: "question one"}}},
-	{Role: "assistant", Content: []compactPieceWirePart{{Kind: "text", Text: "partial answer"}}},
-	{Role: "user", Content: []compactPieceWirePart{{Kind: "text", Text: "<system-signal>The previous model response failed after partial output. Continue from the retained response.</system-signal>"}}},
 	{Role: "assistant", Content: []compactPieceWirePart{
 		{Kind: "text", Text: "working"},
 		{Kind: "opaque", OpaqueWireType: "thinking"},

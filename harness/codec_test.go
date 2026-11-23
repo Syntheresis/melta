@@ -376,6 +376,25 @@ func TestEntryPayloadRoundTrip(t *testing.T) {
 			encode: func() (json.RawMessage, error) {
 				v := validAssistantEntry(testOpID)
 				v.Usage = testUsage(3)
+				v.RetryUsage = testUsage(2)
+				v.RetryUsageUnknown = true
+				return encodeAssistantEntry(v)
+			},
+			decode: func(env Entry) error {
+				v, err := decodeAssistantEntry(env)
+				if err != nil {
+					return err
+				}
+				return checkRetry(v.RetryUsage, v.RetryUsageUnknown)
+			},
+		},
+		{
+			name: "interrupted assistant",
+			env:  Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryAssistant, Sequence: 1, CommittedAt: testTime},
+			encode: func() (json.RawMessage, error) {
+				v := validAssistantEntry(testOpID)
+				v.Status = model.OutputInterrupted
+				v.Content = []model.ContentPart{{Kind: model.PartText, Text: "partial"}}
 				return encodeAssistantEntry(v)
 			},
 			decode: func(env Entry) error { _, err := decodeAssistantEntry(env); return err },
@@ -424,9 +443,21 @@ func TestEntryPayloadRoundTrip(t *testing.T) {
 			name: "operation_settlement",
 			env:  Entry{SessionID: testSessionID, ID: testEntryID, OperationID: testOpID, Kind: EntryOperationSettlement, Sequence: 1, CommittedAt: testTime},
 			encode: func() (json.RawMessage, error) {
-				return encodeOperationSettlementEntry(validSettlementEntry())
+				v := validSettlementEntry()
+				ref := testModelRef()
+				v.Model = &ref
+				v.Usage = testUsage(1)
+				v.RetryUsage = testUsage(2)
+				v.RetryUsageUnknown = true
+				return encodeOperationSettlementEntry(v)
 			},
-			decode: func(env Entry) error { _, err := decodeOperationSettlementEntry(env); return err },
+			decode: func(env Entry) error {
+				v, err := decodeOperationSettlementEntry(env)
+				if err != nil {
+					return err
+				}
+				return checkRetry(v.RetryUsage, v.RetryUsageUnknown)
+			},
 		},
 		{
 			name: "compaction",
@@ -434,9 +465,17 @@ func TestEntryPayloadRoundTrip(t *testing.T) {
 			encode: func() (json.RawMessage, error) {
 				v := validCompactionEntry(testOpID)
 				v.Facts[0].Usage = testUsage(3)
+				v.Facts[0].RetryUsage = testUsage(2)
+				v.Facts[0].RetryUsageUnknown = true
 				return encodeContextCheckpointEntry(v)
 			},
-			decode: func(env Entry) error { _, err := decodeContextCheckpointEntry(env); return err },
+			decode: func(env Entry) error {
+				v, err := decodeContextCheckpointEntry(env)
+				if err != nil {
+					return err
+				}
+				return checkRetry(v.Facts[0].RetryUsage, v.Facts[0].RetryUsageUnknown)
+			},
 		},
 		{
 			name: "compaction operationless fork copy",
@@ -604,6 +643,30 @@ func TestEntryPayloadOperationlessRules(t *testing.T) {
 	{
 		_, err := decodeAssistantEntry(env)
 		testassert.Require(t, err != nil, "operationless assistant with stored usage must be rejected")
+	}
+
+	operationlessAssistant := validAssistantEntry("")
+	operationlessAssistant.RetryUsage = testUsage(2)
+	_, err = encodeAssistantEntry(operationlessAssistant)
+	testassert.Require(t, errors.Is(err, ErrInvalid), "encode of operationless assistant with retry_usage = %v, want the invalid-input class", err)
+	operationlessFact := validCompactionEntry("")
+	operationlessFact.Facts[0].RetryUsageUnknown = true
+	_, err = encodeContextCheckpointEntry(operationlessFact)
+	testassert.Require(t, errors.Is(err, ErrInvalid), "encode of operationless checkpoint with retry_usage_unknown = %v, want the invalid-input class", err)
+}
+
+func checkRetry(usage *UsageCount, unknown bool) error {
+	if !sameUsage(usage, testUsage(2)) || !unknown {
+		return errors.New("retry members did not round-trip")
+	}
+	return nil
+}
+
+// TestRetryUsageUnknownMustBeBoolean proves a present retry_usage_unknown must be a JSON boolean.
+func TestRetryUsageUnknownMustBeBoolean(t *testing.T) {
+	for _, value := range []string{"null", "1", `"true"`} {
+		_, err := decodeRetryUsage(map[string]json.RawMessage{"retry_usage_unknown": json.RawMessage(value)})
+		testassert.Require(t, err != nil, "retry_usage_unknown %s decoded, want a boolean-only member", value)
 	}
 }
 
@@ -1458,17 +1521,23 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			_, err := encodeInputEntry(v)
 			return err
 		}},
-		{"assistant empty partial", func() error {
+		{"assistant errored with text", func() error {
 			v := validAssistantEntry(testOpID)
 			v.Status = model.OutputErrored
-			v.Content = []model.ContentPart{}
 			_, err := encodeAssistantEntry(v)
 			return err
 		}},
-		{"assistant errored with calls", func() error {
+		{"interrupted assistant without started text or refusal", func() error {
 			v := validAssistantEntry(testOpID)
-			v.Status = model.OutputErrored
-			v.Refusal = "no"
+			v.Status = model.OutputInterrupted
+			v.Content = nil
+			v.Extra = model.Extra{"reasoning": json.RawMessage(`"thought"`)}
+			_, err := encodeAssistantEntry(v)
+			return err
+		}},
+		{"interrupted assistant with calls", func() error {
+			v := validAssistantEntry(testOpID)
+			v.Status = model.OutputInterrupted
 			v.ToolCalls = []toolCallRecord{validToolCallRecord()}
 			_, err := encodeAssistantEntry(v)
 			return err
@@ -1501,9 +1570,15 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			_, err := encodeToolResultEntry(v)
 			return err
 		}},
+		{"removed continuation signal", func() error {
+			v := validSignalEntry(testOpID)
+			v.Signal = SignalKind("model_failure_continuation")
+			_, err := encodeSignalEntry(v)
+			return err
+		}},
 		{"signal wrong content", func() error {
 			v := validSignalEntry(testOpID)
-			v.Signal = SignalModelFailureContinuation
+			v.Content = "A different model-visible message."
 			_, err := encodeSignalEntry(v)
 			return err
 		}},
@@ -1518,6 +1593,15 @@ func TestCodecRejectsInvalidValues(t *testing.T) {
 			v.Status = OperationFailure
 			v.Detail = "d"
 			v.Usage = testUsage(1)
+			_, err := encodeOperationSettlementEntry(v)
+			return err
+		}},
+		{"settlement retry members without model", func() error {
+			v := validSettlementEntry()
+			v.Status = OperationFailure
+			v.Detail = "d"
+			v.RetryUsage = testUsage(1)
+			v.RetryUsageUnknown = true
 			_, err := encodeOperationSettlementEntry(v)
 			return err
 		}},

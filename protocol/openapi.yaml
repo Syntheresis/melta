@@ -7,7 +7,7 @@
 openapi: "3.0.3"
 info:
   title: melta-protocol
-  version: "19"
+  version: "24"
 servers:
   - url: "http://127.0.0.1"
 # Every path requires the bearer credential; it is declared once here and
@@ -284,6 +284,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionOperation"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/sessions/{id}/operations/{operation_id}/output:
+    get:
+      operationId: GetSessionToolOutput
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+        - $ref: "#/components/parameters/OperationID"
+        - name: call_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: One running command's bounded current output.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandOutput"
         default:
           $ref: "#/components/responses/Error"
   /v1/sessions/{id}/code-snapshots:
@@ -1190,7 +1211,7 @@ components:
         protocol_version:
           type: string
           enum:
-            - "19"
+            - "24"
     Scope:
       description: >
         One SSE event's applicable scope, discriminated by kind. Every
@@ -1583,6 +1604,14 @@ components:
           $ref: "#/components/schemas/Operation"
         inputs:
           $ref: "#/components/schemas/OperationInputs"
+    CommandOutput:
+      type: object
+      additionalProperties: false
+      required:
+        - output
+      properties:
+        output:
+          type: string
     OperationInputs:
       type: object
       additionalProperties: false
@@ -1772,7 +1801,6 @@ components:
           type: string
           enum:
             - completed
-            - errored
             - interrupted
         source:
           $ref: "#/components/schemas/ModelRef"
@@ -1782,6 +1810,9 @@ components:
             $ref: "#/components/schemas/ContentPart"
         refusal:
           type: string
+        reasoning:
+          type: string
+          minLength: 1
         tool_calls:
           type: array
           items:
@@ -1813,7 +1844,6 @@ components:
           type: string
           enum:
             - interruption
-            - model_failure_continuation
             - background_completion
         content:
           type: string
@@ -2915,6 +2945,23 @@ components:
         content:
           type: string
           minLength: 1
+    ReasoningDeltaEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - scope
+        - content
+      properties:
+        kind:
+          type: string
+          enum:
+            - reasoning_delta
+        scope:
+          $ref: "#/components/schemas/Scope"
+        content:
+          type: string
+          minLength: 1
     ToolStartedEvent:
       type: object
       additionalProperties: false
@@ -2959,6 +3006,36 @@ components:
           $ref: "#/components/schemas/ToolCallStatus"
         evidence:
           $ref: "#/components/schemas/ExecutionEvidence"
+    ResponseRestartedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - scope
+      properties:
+        kind:
+          type: string
+          enum:
+            - response_restarted
+        scope:
+          $ref: "#/components/schemas/Scope"
+    ToolOutputChangedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - scope
+        - call_id
+      properties:
+        kind:
+          type: string
+          enum:
+            - tool_output_changed
+        scope:
+          $ref: "#/components/schemas/Scope"
+        call_id:
+          type: string
+          minLength: 1
     Event:
       oneOf:
         - $ref: "#/components/schemas/ConfigurationChangedEvent"
@@ -2967,8 +3044,11 @@ components:
         - $ref: "#/components/schemas/WarningChangedEvent"
         - $ref: "#/components/schemas/TextDeltaEvent"
         - $ref: "#/components/schemas/RefusalDeltaEvent"
+        - $ref: "#/components/schemas/ReasoningDeltaEvent"
         - $ref: "#/components/schemas/ToolStartedEvent"
         - $ref: "#/components/schemas/ToolFinishedEvent"
+        - $ref: "#/components/schemas/ResponseRestartedEvent"
+        - $ref: "#/components/schemas/ToolOutputChangedEvent"
       discriminator:
         propertyName: kind
         mapping:
@@ -2979,5 +3059,8 @@ components:
           warning_changed: "#/components/schemas/WarningChangedEvent"
           text_delta: "#/components/schemas/TextDeltaEvent"
           refusal_delta: "#/components/schemas/RefusalDeltaEvent"
+          reasoning_delta: "#/components/schemas/ReasoningDeltaEvent"
           tool_started: "#/components/schemas/ToolStartedEvent"
           tool_finished: "#/components/schemas/ToolFinishedEvent"
+          response_restarted: "#/components/schemas/ResponseRestartedEvent"
+          tool_output_changed: "#/components/schemas/ToolOutputChangedEvent"

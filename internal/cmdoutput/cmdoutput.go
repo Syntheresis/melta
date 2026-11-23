@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type Options struct {
@@ -22,7 +23,15 @@ type Options struct {
 	SpillPrefix  string
 	MaxBytes     int
 	MaxLineChars int
+	// OnChange, when non-nil, runs on its own goroutine after a write, at most
+	// once per 250 ms with a trailing call, and never inside Write. A firing
+	// that observes the capture closed calls nothing; a call already started
+	// may finish after Close.
+	OnChange func()
 }
+
+// changeInterval is the minimum spacing between one capture's OnChange calls.
+const changeInterval = 250 * time.Millisecond
 
 type Capture struct {
 	opts Options
@@ -35,11 +44,16 @@ type Capture struct {
 	totalBytes int64
 	firstErr   error
 	closed     bool
+	// tail is the last MaxBytes bytes written to either stream in write
+	// order, or every byte written when MaxBytes <= 0.
+	tail []byte
 
 	visiblePath      string
 	visibleReturned  bool
 	lastFormattedLen int64
 	cachedResult     string
+
+	changeTimer *time.Timer
 }
 
 type streamState struct {
@@ -121,6 +135,27 @@ func (c *Capture) Format() string {
 	return preview
 }
 
+// Preview returns the last MaxBytes bytes written to either stream in write
+// order, starting at its first complete UTF-8 rune and prefixed with the
+// truncation marker when bytes were dropped; it reads no file and survives Close.
+func (c *Capture) Preview() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	tail := c.tail
+	if maxBytes := c.opts.MaxBytes; maxBytes > 0 && len(tail) > maxBytes {
+		tail = tail[len(tail)-maxBytes:]
+	}
+	start := 0
+	for start < len(tail) && !utf8.RuneStart(tail[start]) {
+		start++
+	}
+	text := string(tail[start:])
+	if int64(len(tail)) < c.totalBytes {
+		text = fmt.Sprintf("[Output truncated. %d bytes so far.]\n%s", c.totalBytes, text)
+	}
+	return text
+}
+
 func (c *Capture) Close() {
 	c.fmtMu.Lock()
 	defer c.fmtMu.Unlock()
@@ -135,6 +170,10 @@ func (c *Capture) Close() {
 	removeVisible := visiblePath != "" && !c.visibleReturned
 	c.stdout.spillFile = nil
 	c.stderr.spillFile = nil
+	if c.changeTimer != nil {
+		c.changeTimer.Stop()
+		c.changeTimer = nil
+	}
 	c.mu.Unlock()
 
 	if stdoutFile != nil {
@@ -168,27 +207,50 @@ func (c *Capture) write(s *streamState, p []byte) {
 	if len(p) == 0 {
 		return
 	}
-
 	maxBytes := c.opts.MaxBytes
-	if maxBytes <= 0 {
-		_, _ = s.buf.Write(p)
-		c.totalBytes += int64(len(p))
-		return
+	c.tail = append(c.tail, p...)
+	if maxBytes > 0 && len(c.tail) > 2*maxBytes {
+		c.tail = append(c.tail[:0], c.tail[len(c.tail)-maxBytes:]...)
 	}
 
 	remaining := int64(maxBytes) - c.totalBytes
 	c.totalBytes += int64(len(p))
-	if remaining > 0 {
-		keep := int(remaining)
-		if keep > len(p) {
-			keep = len(p)
+	if maxBytes <= 0 {
+		_, _ = s.buf.Write(p)
+	} else {
+		if remaining > 0 {
+			keep := int(remaining)
+			if keep > len(p) {
+				keep = len(p)
+			}
+			_, _ = s.buf.Write(p[:keep])
+			p = p[keep:]
 		}
-		_, _ = s.buf.Write(p[:keep])
-		p = p[keep:]
+		if len(p) > 0 {
+			c.writeSpill(s, p)
+		}
 	}
-	if len(p) > 0 {
-		c.writeSpill(s, p)
+	c.armChange()
+}
+
+// armChange arms the one change timer after a write; a write during the call
+// arms the next interval.
+func (c *Capture) armChange() {
+	if c.opts.OnChange != nil && c.changeTimer == nil {
+		c.changeTimer = time.AfterFunc(changeInterval, c.fireChange)
 	}
+}
+
+// fireChange clears the timer and calls OnChange unless the capture is closed.
+func (c *Capture) fireChange() {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.changeTimer = nil
+	c.mu.Unlock()
+	c.opts.OnChange()
 }
 
 func (c *Capture) writeSpill(s *streamState, p []byte) {
