@@ -1238,14 +1238,18 @@ func TestBackgroundStartFailuresRenderOneWrapperAndAbortReservation(t *testing.T
 
 	t.Run("spawn failure renders through the wrapper and aborts the reservation", func(t *testing.T) {
 		fake := &fakeJobs{startErr: errors.New("spawn boom")}
-		byID, _ := openToolsComposed(t, t.TempDir(), fake, nil)
+		toolOutput := newLiveToolOutput(newObservation())
+		byID := newStandardTools(t.TempDir(), fake, toolOutput)
 		tc := callToolContext(ws)
 		tc.SubprocessEnv = testSubprocessEnv(stubManagedEnv(t))
 		tc.Background = &scriptBackground{}
-		plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"true","background":true}`)
+		call := makeCall(t, "run_command", `{"command":"true","background":true}`)
+		plan := byID["run_command"].Prepare(context.Background(), tc, call)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == "run_command: background start: spawn boom", "result = %+v, want the one wrapper over the spawn failure", outcome.Result)
 		testassert.Require(t, len(fake.aborted) == 1 && fake.aborted[0] == "b0b0b0b0" && len(fake.started) == 1, "aborted = %v, want the reservation aborted once; got %v, want %v", fake.aborted, len(fake.started), 1)
+		_, live := toolOutput.preview(tc.AdmittedEntry.SessionID, tc.OperationID, call.ID)
+		testassert.Require(t, !live, "failed background call still has a registered output preview")
 	})
 
 	t.Run("reserve failure renders through the wrapper without an abort", func(t *testing.T) {

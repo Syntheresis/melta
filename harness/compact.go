@@ -443,12 +443,11 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 		if attemptRes.usageErr != nil { // an inexact retried-usage sum aborts before any fact or settlement publication
 			return agent.ModelSettlement{}, attemptRes.usageErr
 		}
+		facts.retainUsage(attemptRes.usage)
 		switch attemptRes.kind {
 		case attemptInterrupted:
-			facts.retainUsage(attemptRes.usage)
 			return d.interruptModelEffect(intent, attemptUsage{}, facts)
 		case attemptInvalid:
-			facts.retainUsage(attemptRes.usage)
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
 				terminal:      OperationFailure,
 				detail:        failureDetail(attemptRes.err),
@@ -460,8 +459,6 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 			}
 			return agent.ModelSettlement{}, attemptRes.err
 		case attemptFailed:
-			// The attempts' usage lands on the request's fact first.
-			facts.retainUsage(attemptRes.usage)
 			committed := agent.ModelSettlement{Disposition: agent.DispoFailure, Detail: failureDetail(attemptRes.err)}
 			if _, err := d.commitEffectResult(settleCtx, &intent, modelResult{
 				terminal:      OperationFailure,
@@ -474,9 +471,6 @@ func (d *executionDriver) compactModelEffect(inv *openedInvocation, facts *maint
 			}
 			return committed, nil
 		}
-		// The accepted attempts' usage lands on the carrier's newest fact
-		// before the output settles.
-		facts.retainUsage(attemptRes.usage)
 		output := attemptRes.output
 		if output.Status == model.OutputCompleted {
 			// The empty running result inserts no entry, clears the active

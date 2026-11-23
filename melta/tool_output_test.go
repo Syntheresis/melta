@@ -74,17 +74,21 @@ func TestToolOutputLiveRead(t *testing.T) {
 		}
 	}
 
+	other := projectionSession(t, r, t.TempDir(), "solo").Identity.SessionID
+	denied, err := r.Caller(CallerContext{Origin: harness.InputOriginUser, Scope: CallerScope{Kind: CallerScopeSession, SessionID: other}})
+	testassert.NoError(t, err)
+
 	submitThroughRuntime(t, r, sessionID, "op-live", "foreground")
 	first := await("op-live", "call-live")
 	readLive("op-live", "call-live", "a")
+	_, err = r.GetSessionToolOutput(ctx, denied, sessionID, "op-live", "call-live")
+	testassert.Require(t, errors.Is(err, ErrDenied), "ungranted caller = %v, want denied", err)
+
 	second := await("op-live", "call-live")
 	readLive("op-live", "call-live", "ab")
 	testassert.Require(t, second.Sub(first) >= 240*time.Millisecond, "notices %s apart, want at most one per 250 ms", second.Sub(first))
 	awaitOperation(t, r, sessionID, "op-live", harness.OperationSuccess)
 
-	other := projectionSession(t, r, t.TempDir(), "solo").Identity.SessionID
-	denied, err := r.Caller(CallerContext{Origin: harness.InputOriginUser, Scope: CallerScope{Kind: CallerScopeSession, SessionID: other}})
-	testassert.NoError(t, err)
 	for _, row := range [][3]string{
 		{sessionID, "op-live", "call-live"}, {sessionID, "op-other", "call-live"}, {other, "op-live", "call-live"},
 		{sessionID, "op-live", "not a call"}, {sessionID, "", "call-live"},
@@ -92,8 +96,6 @@ func TestToolOutputLiveRead(t *testing.T) {
 		_, err := r.GetSessionToolOutput(ctx, caller, row[0], row[1], row[2])
 		testassert.Require(t, errors.Is(err, harness.ErrNotFound), "GetSessionToolOutput(%q, %q) = %v, want not_found", row[1], row[2], err)
 	}
-	_, err = r.GetSessionToolOutput(ctx, denied, sessionID, "op-live", "call-live")
-	testassert.Require(t, errors.Is(err, ErrDenied), "ungranted caller = %v, want denied", err)
 
 	submitThroughRuntime(t, r, sessionID, "op-job", "job")
 	await("op-job", "call-job")

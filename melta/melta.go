@@ -206,8 +206,8 @@ type Melta struct {
 	// group joining before the store closes and the lock releases.
 	jobs       jobsService
 	closeStore func() error
-	// toolOutput retains running foreground commands' output captures for
-	// the live output read.
+	// toolOutput retains the output previews of running foreground and
+	// background command calls for the live read.
 	toolOutput *liveToolOutput
 	// mu guards only the admission transition below; it is never held across
 	// any call, wait, or I/O.

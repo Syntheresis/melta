@@ -24,8 +24,9 @@ type Options struct {
 	MaxBytes     int
 	MaxLineChars int
 	// OnChange, when non-nil, runs on its own goroutine after a write, at most
-	// once per 250 ms with a trailing call, never inside Write, and not after
-	// Close.
+	// once per 250 ms with a trailing call, and never inside Write. A firing
+	// that observes the capture closed calls nothing; a call already started
+	// may finish after Close.
 	OnChange func()
 }
 

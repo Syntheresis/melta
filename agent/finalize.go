@@ -137,7 +137,7 @@ func (st *assemblyState) interruptedOutput(ctx context.Context) model.Output {
 	msg := st.assembleMessage(false)
 	var msgPtr *model.Message
 	if msg.TextContent() != "" || msg.Refusal != "" { // reasoning, extras or opaque parts alone are not a kept partial.
-		m := msg
+		m := model.RetainInterruptedContent(msg)
 		msgPtr = &m
 	}
 

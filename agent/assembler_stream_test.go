@@ -36,15 +36,17 @@ func TestAssembleReadErrorRoleConflictLiveContext(t *testing.T) {
 // TestAssembleReadErrorCancelledContext pins the same read failure before any finish reason under a done context: interrupted with a message only when text or refusal started — reasoning, extras and opaque parts alone retain nothing.
 func TestAssembleReadErrorCancelledContext(t *testing.T) {
 	cases := []struct {
-		name      string
-		steps     []func() (model.StreamDelta, error)
-		text      string
-		reasoning bool
+		name     string
+		steps    []func() (model.StreamDelta, error)
+		text     string
+		extra    model.Extra // the message extras the interrupted message keeps
+		thinking bool        // whether the thinking opaque part is kept after the text part
 	}{
-		{"no-payload", []func() (model.StreamDelta, error){errStep(errors.New("boom"))}, "", false},
-		{"with-payload", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), errStep(errors.New("boom"))}, "x", false},
-		{"text-with-reasoning", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`)}}), errStep(errors.New("boom"))}, "x", true},
-		{"non-text-payload", []func() (model.StreamDelta, error){deltaStep(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`), "raw": json.RawMessage(`"keep"`)}}), deltaStep(choiceDelta(model.ContentFragment{Position: 0, Kind: model.PartOpaque, OpaqueWireType: "thinking"})), errStep(errors.New("boom"))}, "", false},
+		{"no-payload", []func() (model.StreamDelta, error){errStep(errors.New("boom"))}, "", nil, false},
+		{"with-payload", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), errStep(errors.New("boom"))}, "x", nil, false},
+		{"text-with-reasoning", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`), "annotations": json.RawMessage(`"drop"`)}}), deltaStep(choiceDelta(model.ContentFragment{Position: 1, Kind: model.PartOpaque, OpaqueWireType: "server_tool_use"})), errStep(errors.New("boom"))}, "x", model.Extra{"reasoning_content": json.RawMessage(`"thinking"`)}, false},
+		{"text-with-all-reasoning", []func() (model.StreamDelta, error){deltaStep(choiceDelta(txtPos(0, "x"))), deltaStep(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"content"`), "reasoning": json.RawMessage(`"reason"`), "reasoning_details": json.RawMessage(`[{"text":"details"}]`)}}), deltaStep(choiceDelta(model.ContentFragment{Position: 1, Kind: model.PartOpaque, OpaqueWireType: "thinking"}, model.ContentFragment{Position: 2, Kind: model.PartOpaque, OpaqueWireType: "redacted_thinking"})), errStep(errors.New("boom"))}, "x", model.Extra{"reasoning_content": json.RawMessage(`"content"`), "reasoning": json.RawMessage(`"reason"`), "reasoning_details": json.RawMessage(`[{"text":"details"}]`)}, true},
+		{"non-text-payload", []func() (model.StreamDelta, error){deltaStep(model.StreamDelta{HasChoice: true, MessageExtra: model.Extra{"reasoning_content": json.RawMessage(`"thinking"`), "raw": json.RawMessage(`"keep"`)}}), deltaStep(choiceDelta(model.ContentFragment{Position: 0, Kind: model.PartOpaque, OpaqueWireType: "thinking"})), errStep(errors.New("boom"))}, "", nil, false},
 	}
 
 	for _, tc := range cases {
@@ -60,12 +62,22 @@ func TestAssembleReadErrorCancelledContext(t *testing.T) {
 				testassert.Require(t, out.Message == nil, "payload-less interrupted output unexpectedly carried a message: %#v", out.Message)
 			} else {
 				parts := msgContent(out)
-				// Interrupted classification must not discard the pre-failure payload.
-				testassert.Require(t, len(parts) == 1 && parts[0].Text == tc.text, "interrupted output retained parts = %#v, want one text part %q", out.Message, tc.text)
-				if tc.reasoning {
-					testassert.Require(t, string(out.Message.Extra["reasoning_content"]) == `"thinking"`, "interrupted message extras = %#v, want the reasoning_content extra", out.Message.Extra)
-					testassert.Require(t, len(msgCalls(out)) == 0, "interrupted output retained tool calls: %#v", msgCalls(out))
+				wantParts := 1
+				if tc.thinking {
+					wantParts = 2
 				}
+				// Interrupted classification must not discard the pre-failure payload.
+				testassert.Require(t, len(parts) == wantParts && parts[0].Kind == model.PartText && parts[0].Text == tc.text, "interrupted output retained parts = %#v, want %d starting with text part %q", out.Message, wantParts, tc.text)
+				if tc.thinking {
+					testassert.Require(t, parts[1].Kind == model.PartOpaque && parts[1].OpaqueWireType == "thinking", "interrupted output retained part = %#v, want the thinking part", parts[1])
+				}
+				if tc.extra != nil {
+					testassert.Require(t, len(out.Message.Extra) == len(tc.extra), "interrupted message extras = %#v, want %#v", out.Message.Extra, tc.extra)
+					for key, want := range tc.extra {
+						testassert.Require(t, string(out.Message.Extra[key]) == string(want), "interrupted message extra %q = %s, want %s", key, out.Message.Extra[key], want)
+					}
+				}
+				testassert.Require(t, len(msgCalls(out)) == 0, "interrupted output retained tool calls: %#v", msgCalls(out))
 			}
 		})
 	}
