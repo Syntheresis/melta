@@ -1,13 +1,12 @@
 package melta
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"sync/atomic"
+	"sync"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
@@ -16,269 +15,363 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
-func TestSettingsUpdateRegisteredTransformConcurrentWriter(t *testing.T) {
+// TestSettingsReplace covers the own-settings replace through the native API:
+// a harness-target client operation replaces its own section, every section
+// change while the handler is parked conflicts, a retired activation whose
+// section is unchanged still replaces, and the authority and schema refusals
+// keep their classes.
+func TestSettingsReplace(t *testing.T) {
 	h := newServiceHarness(t)
-	initial := `{"enabled":true,"key":"KEY","grant":"old","value":0}`
+	t.Setenv("SETTINGS_KEY", "first")
+	const initial = `{"enabled":true,"key":"SETTINGS_KEY","grant":"old","value":0}`
 	writeServiceFile(t, h.configPath, `{"providers":{},"extensions":{"setting":`+initial+`}}`)
+	manifest := registrarManifest("setting")
+	manifest.SettingsSchema = []byte(`{"type":"object","required":["enabled","key"],"properties":{"enabled":{"type":"boolean"},"key":{"type":"string"},"value":{"type":"integer"},"large":{"type":"integer"}}}`)
+	manifest.Services = []string{extension.ContractSettings}
+	manifest.Secrets = []extension.SecretRef{{Field: "/key", Lifetime: extension.SecretActivation}}
+	var beforeMu sync.Mutex
+	var beforeReplace func()
+	takeBefore := func() func() {
+		beforeMu.Lock()
+		defer beforeMu.Unlock()
+		return beforeReplace
+	}
+	setBefore := func(hook func()) {
+		beforeMu.Lock()
+		defer beforeMu.Unlock()
+		beforeReplace = hook
+	}
+	operation := func(name string, target extension.ExposedTargetKind) extension.Operation {
+		return extension.Operation{
+			Target: target,
+			Method: extension.Method{Name: name, Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+				if hook := takeBefore(); hook != nil {
+					hook()
+				}
+				payload, err := marshalRawObject(map[string]json.RawMessage{"section": args}, true)
+				if err != nil {
+					return extension.Result{}, err
+				}
+				return call.Call(ctx, extension.ContractSettings, "replace", payload)
+			},
+		}
+	}
+	e := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		for _, op := range []extension.Operation{
+			operation("replace", extension.ExposedTargetHarness),
+			operation("replace-workspace", extension.ExposedTargetWorkspace),
+			operation("replace-session", extension.ExposedTargetSession),
+		} {
+			if _, err := api.RegisterOperation(op, nil); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}}
 	svc := h.preparedService(context.Background())
+	svc.authors = append(svc.authors, nativeActivationSpec{extension: e, section: []byte(initial)})
 	if _, err := svc.publish(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	manifest := registrarManifest("setting")
-	manifest.SettingsSchema = []byte(`{"type":"object","required":["enabled","key"],"properties":{"enabled":{"type":"boolean"},"key":{"type":"string"},"value":{"type":"integer"}}}`)
-	manifest.Services = []string{"melta.settings"}
-	manifest.Secrets = []extension.SecretRef{{Field: "/key", Lifetime: extension.SecretActivation}}
-	var calls atomic.Int32
-	var seen json.RawMessage
-	var beforeUpdate func()
-	e := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterService(extension.Service{Name: "own/opaque", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "change/opaque", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
-			Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
-				calls.Add(1)
-				var input struct {
-					Section   json.RawMessage `json:"section"`
-					Arguments json.RawMessage `json:"arguments"`
-				}
-				if err := json.Unmarshal(args, &input); err != nil {
-					return extension.Result{}, err
-				}
-				seen = append([]byte(nil), input.Arguments...)
-				section, err := decodeRoot(input.Section)
-				if err != nil {
-					return extension.Result{}, err
-				}
-				var edit map[string]json.RawMessage
-				if err := json.Unmarshal(input.Arguments, &edit); err != nil {
-					return extension.Result{}, err
-				}
-				for key, value := range edit {
-					section[key] = value
-				}
-				result, err := marshalRawObject(section, true)
-				return extension.Result{Value: result}, err
-			},
-		}}}, nil)
-		if err == nil {
-			for _, op := range []struct {
-				name   string
-				target extension.ExposedTargetKind
-			}{{"update", extension.ExposedTargetHarness}, {"update-workspace", extension.ExposedTargetWorkspace}, {"update-session", extension.ExposedTargetSession}} {
-				_, err = api.RegisterOperation(extension.Operation{Target: op.target, Method: extension.Method{Name: op.name, Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
-					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
-						if beforeUpdate != nil {
-							beforeUpdate()
-						}
-						return call.Call(ctx, "melta.settings", "update", args)
-					}}, nil)
-				if err != nil {
-					break
-				}
-			}
-		}
-		return nil, err
-	}}
-	svc.authors = append(svc.authors, nativeActivationSpec{extension: e, section: []byte(initial)})
-	candidate, err := svc.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(initial)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer candidate.release()
-	if err := candidate.publishForTest(); err != nil {
-		t.Fatal(err)
-	}
-	r, env := openProjectionRuntime(t, storage.NewMemory())
+	r, _ := openProjectionRuntime(t, storage.NewMemory())
 	defer closeProjectionRuntime(r)
-	workspace := filepath.Join(env.home, "settings-scope")
-	session := projectionSession(t, r, workspace, "solo").Identity.SessionID
 	original := r.config
 	r.config = svc
 	defer func() { r.config = original }()
-	target := protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}
-	invoke := func(args json.RawMessage) error {
-		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "setting", "update", target, args, "")
+	invoke := func(section string) error {
+		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "setting", "replace", harnessTarget(), json.RawMessage(section), "")
 		return err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel}, candidate: candidate, activation: candidate.activations[0]}
-	defer scope.end()
-	for _, forbidden := range []CallerScope{{}, {Kind: CallerScopeWorkspace, Workspace: "/tmp"}, {Kind: CallerScopeSession, SessionID: "session"}} {
-		scope.commandScope = forbidden
-		_, err := scope.call(ctx, "melta.settings", "update", []byte(`{"service":"own/opaque","method":"change/opaque","arguments":{}}`))
-		if !errors.Is(err, ErrDenied) || calls.Load() != 0 || svc.current().generation != 1 {
-			t.Fatalf("forbidden settings scope %+v: %v calls=%d", forbidden, err, calls.Load())
+	reset := func(t *testing.T) {
+		t.Helper()
+		writeServiceFile(t, h.configPath, `{"providers":{},"extensions":{"setting":`+initial+`}}`)
+		if _, err := svc.publish(context.Background()); err != nil {
+			t.Fatal(err)
 		}
 	}
-	scope.commandScope = harnessScope
-	for _, row := range []struct {
-		name   string
-		target protocol.ExtensionInvocationTarget
-	}{{"update-workspace", workspaceTarget(workspace)}, {"update-session", sessionTarget(session)}} {
-		_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "setting", row.name, row.target, []byte(`{"service":"own/opaque","method":"change/opaque","arguments":{}}`), "")
-		if !errors.Is(err, ErrDenied) || calls.Load() != 0 || svc.current().generation != 1 {
-			t.Fatalf("forbidden registered operation %s: %v", row.name, err)
+	sectionBytes := func() json.RawMessage { return rawSection(t, h.configPath, "setting") }
+	scopeFor := func(t *testing.T) *nativeCallScope {
+		t.Helper()
+		candidate := svc.current().native
+		if candidate == nil {
+			t.Fatal("no published native candidate")
 		}
-	}
-	entered, resume := make(chan struct{}), make(chan struct{})
-	firstDone := make(chan error, 1)
-	go func() {
-		_, err := svc.mutate(context.Background(), configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
-			close(entered)
-			<-resume
-			sections, err := decodeRoot(roots.config["extensions"])
-			if err != nil {
-				return 0, err
+		capture := candidate.capture()
+		if capture == nil {
+			t.Fatal("no admission capture")
+		}
+		var activation *nativeActivation
+		for _, entry := range capture.activations {
+			if entry.id == "setting" {
+				activation = entry
+				break
 			}
-			section, err := decodeRoot(sections["setting"])
-			if err != nil {
-				return 0, err
+		}
+		if activation == nil {
+			capture.release()
+			t.Fatal("no published setting activation")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel}, candidate: candidate, activation: activation, commandScope: harnessScope}
+		t.Cleanup(func() {
+			scope.end()
+			capture.release()
+		})
+		return scope
+	}
+	replaceThrough := func(t *testing.T, scope *nativeCallScope, section string) error {
+		t.Helper()
+		payload, err := marshalRawObject(map[string]json.RawMessage{"section": json.RawMessage(section)}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = scope.call(scope.ctx, extension.ContractSettings, "replace", payload)
+		return err
+	}
+
+	t.Run("replaces the section and the next admission uses it", func(t *testing.T) {
+		reset(t)
+		proposed := `{"enabled":true,"key":"SETTINGS_KEY","grant":"new","large":9007199254740993,"value":0}`
+		if err := invoke(proposed); err != nil {
+			t.Fatalf("replace: %v", err)
+		}
+		if got := string(sectionBytes()); got != proposed {
+			t.Fatalf("section = %s, want the proposed bytes %s", got, proposed)
+		}
+		var members map[string]json.RawMessage
+		if err := json.Unmarshal(sectionBytes(), &members); err != nil || string(members["large"]) != "9007199254740993" {
+			t.Fatalf("number lexeme = %s, %v", members["large"], err)
+		}
+		capture := svc.current().native.capture()
+		if capture == nil {
+			t.Fatal("no admission capture")
+		}
+		defer capture.release()
+		var admitted *nativeActivation
+		for _, entry := range capture.activations {
+			if entry.id == "setting" {
+				admitted = entry
+				break
 			}
-			section["value"] = json.RawMessage(`42`)
-			sections["setting"], err = marshalRawObject(section, true)
-			if err == nil {
-				roots.config["extensions"], err = marshalRawObject(sections, true)
+		}
+		if admitted == nil {
+			t.Fatal("next admission does not use the setting activation")
+		}
+		if !bytes.Equal(admitted.section, []byte(proposed)) {
+			t.Fatalf("next admission section = %s, want the proposed bytes", admitted.section)
+		}
+	})
+
+	t.Run("section changes while the call is parked conflict without a write", func(t *testing.T) {
+		rows := []struct {
+			name string
+			edit func(*testing.T)
+		}{
+			{"section edited", func(t *testing.T) {
+				_, err := svc.mutate(context.Background(), configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
+					sections, err := extensionSections(roots, "setting")
+					if err != nil {
+						return 0, err
+					}
+					section, err := decodeRoot(sections["setting"])
+					if err != nil {
+						return 0, err
+					}
+					section["value"] = json.RawMessage(`42`)
+					raw, err := marshalRawObject(section, true)
+					if err != nil {
+						return 0, err
+					}
+					return writeExtensionSection(roots, sections, "setting", raw)
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}},
+			{"section removed", func(t *testing.T) {
+				_, err := svc.mutate(context.Background(), configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
+					sections, err := extensionSections(roots, "setting")
+					if err != nil {
+						return 0, err
+					}
+					delete(sections, "setting")
+					raw, err := marshalRawObject(sections, true)
+					if err != nil {
+						return 0, err
+					}
+					roots.config["extensions"] = raw
+					return editMainConfig, nil
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}},
+			{"extensions member removed", func(t *testing.T) {
+				_, err := svc.mutate(context.Background(), configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
+					delete(roots.config, "extensions")
+					return editMainConfig, nil
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}},
+		}
+		for _, row := range rows {
+			t.Run(row.name, func(t *testing.T) {
+				reset(t)
+				entered, release := make(chan struct{}), make(chan struct{})
+				setBefore(func() { close(entered); <-release })
+				done := make(chan error, 1)
+				go func() { done <- invoke(`{"enabled":true,"key":"SETTINGS_KEY","grant":"changed"}`) }()
+				<-entered
+				row.edit(t)
+				before := string(mustRead(t, h.configPath))
+				close(release)
+				err := <-done
+				setBefore(nil)
+				if !errors.Is(err, harness.ErrConflict) || ErrorCode(err) != protocol.ErrorCodeConflict {
+					t.Fatalf("replace over a changed section = %v, want conflict", err)
+				}
+				if after := string(mustRead(t, h.configPath)); after != before {
+					t.Fatalf("conflict changed the file: %s", after)
+				}
+			})
+		}
+	})
+
+	t.Run("a second replace from the same activation", func(t *testing.T) {
+		const changed = `{"enabled":true,"key":"SETTINGS_KEY","grant":"second"}`
+		t.Run("after the first changed the section conflicts", func(t *testing.T) {
+			reset(t)
+			scope := scopeFor(t)
+			if err := replaceThrough(t, scope, `{"enabled":true,"key":"SETTINGS_KEY","grant":"first"}`); err != nil {
+				t.Fatalf("first replace: %v", err)
 			}
-			return editMainConfig, err
-		}})
-		firstDone <- err
-	}()
-	<-entered
-	secondDone := make(chan error, 1)
-	secondEntered := make(chan struct{})
-	beforeUpdate = func() { close(secondEntered) }
-	go func() {
-		err := invoke(json.RawMessage(`{"service":"own/opaque","method":"change/opaque","arguments":{"grant" : "new","large":9007199254740993}}`))
-		secondDone <- err
-	}()
-	<-secondEntered
-	close(resume)
-	if err := <-firstDone; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-secondDone; err != nil {
-		t.Fatal(err)
-	}
-	beforeUpdate = nil
-	if calls.Load() != 1 || string(seen) != `{"grant" : "new","large":9007199254740993}` {
-		t.Fatalf("transform calls=%d args=%s", calls.Load(), seen)
-	}
-	raw, err := os.ReadFile(h.configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var doc struct {
-		Extensions map[string]struct {
-			Value int    `json:"value"`
-			Grant string `json:"grant"`
-			Key   string `json:"key"`
-		} `json:"extensions"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatal(err)
-	}
-	if got := doc.Extensions["setting"]; got.Value != 42 || got.Grant != "new" || got.Key != "KEY" {
-		t.Fatalf("combined settings: %+v", got)
-	}
-	before := string(raw)
-	err = invoke(json.RawMessage(`{"service":"own/opaque","method":"change/opaque","arguments":{"key":"OTHER"}}`))
-	if !errors.Is(err, ErrDenied) {
-		t.Fatalf("authority-changing transform: %v", err)
-	}
-	raw, err = os.ReadFile(h.configPath)
-	if err != nil || string(raw) != before {
-		t.Fatalf("authority-changing transform wrote config: %v", err)
-	}
-	generation := svc.current().generation
-	for _, arguments := range []string{`{"enabled":false}`, `{"value":"invalid"}`} {
-		request := `{"service":"own/opaque","method":"change/opaque","arguments":` + arguments + `}`
-		if err := invoke([]byte(request)); err == nil {
-			t.Fatalf("invalid transform accepted: %s", arguments)
+			if err := replaceThrough(t, scope, changed); !errors.Is(err, harness.ErrConflict) || ErrorCode(err) != protocol.ErrorCodeConflict {
+				t.Fatalf("second replace = %v, want conflict", err)
+			}
+		})
+		t.Run("after a first that left the bytes unchanged succeeds", func(t *testing.T) {
+			reset(t)
+			scope := scopeFor(t)
+			if err := replaceThrough(t, scope, initial); err != nil {
+				t.Fatalf("unchanged first replace: %v", err)
+			}
+			if err := replaceThrough(t, scope, changed); err != nil {
+				t.Fatalf("second replace: %v", err)
+			}
+			if got := string(sectionBytes()); got != changed {
+				t.Fatalf("section = %s, want %s", got, changed)
+			}
+		})
+	})
+
+	t.Run("proposals that change authority are denied", func(t *testing.T) {
+		reset(t)
+		for _, section := range []string{
+			`{"enabled":false,"key":"SETTINGS_KEY"}`,
+			`{"enabled":true,"key":"OTHER"}`,
+		} {
+			before := string(mustRead(t, h.configPath))
+			if err := invoke(section); !errors.Is(err, ErrDenied) {
+				t.Fatalf("replace %s = %v, want denied", section, err)
+			}
+			if after := string(mustRead(t, h.configPath)); after != before {
+				t.Fatalf("denied replace %s changed the file", section)
+			}
 		}
-		raw, err := os.ReadFile(h.configPath)
-		if err != nil || string(raw) != before || svc.current().generation != generation {
-			t.Fatalf("invalid transform published: %s %v", arguments, err)
+	})
+
+	t.Run("a proposal failing the settings schema is invalid", func(t *testing.T) {
+		reset(t)
+		before := string(mustRead(t, h.configPath))
+		err := invoke(`{"enabled":true,"key":"SETTINGS_KEY","value":"not-an-integer"}`)
+		if ErrorCode(err) != protocol.ErrorCodeInvalid {
+			t.Fatalf("schema-failing replace = %v, want the invalid class", err)
 		}
-	}
-	// An invalid ordinary field leaves the extension inactive while the rest
-	// of the candidate publishes, so its own transform is unavailable until a
-	// later valid write repairs the section.
-	_, err = svc.mutate(context.Background(), configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
-		sections, err := extensionSections(roots, "setting")
+		if after := string(mustRead(t, h.configPath)); after != before {
+			t.Fatal("invalid replace changed the file")
+		}
+	})
+
+	t.Run("only a harness-target operation may replace", func(t *testing.T) {
+		reset(t)
+		workspace := t.TempDir()
+		session := projectionSession(t, r, workspace, "solo").Identity.SessionID
+		scope := scopeFor(t)
+		for _, row := range []struct {
+			name  string
+			scope CallerScope
+		}{
+			{"hook or tool", CallerScope{}},
+			{"workspace scope", CallerScope{Kind: CallerScopeWorkspace, Workspace: "/tmp"}},
+			{"session scope", CallerScope{Kind: CallerScopeSession, SessionID: "session"}},
+		} {
+			scope.commandScope = row.scope
+			if err := replaceThrough(t, scope, `{"enabled":true,"key":"SETTINGS_KEY"}`); !errors.Is(err, ErrDenied) {
+				t.Fatalf("%s replace = %v, want denied", row.name, err)
+			}
+		}
+		for _, row := range []struct {
+			name      string
+			operation string
+			target    protocol.ExtensionInvocationTarget
+		}{
+			{"workspace operation", "replace-workspace", workspaceTarget(workspace)},
+			{"session operation", "replace-session", sessionTarget(session)},
+		} {
+			_, err := r.invokeRegisteredOperation(context.Background(), testCaller(r), "setting", row.operation, row.target, []byte(`{"enabled":true,"key":"SETTINGS_KEY"}`), "")
+			if !errors.Is(err, ErrDenied) {
+				t.Fatalf("%s replace = %v, want denied", row.name, err)
+			}
+		}
+	})
+
+	t.Run("no settings grant is denied", func(t *testing.T) {
+		reset(t)
+		denied, err := svc.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(initial), approvedServices: []string{}}})
 		if err != nil {
-			return 0, err
+			t.Fatal(err)
 		}
-		section, err := decodeRoot(sections["setting"])
-		if err != nil {
-			return 0, err
+		defer denied.release()
+		ctx, cancel := context.WithCancel(context.Background())
+		scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel}, candidate: denied, activation: denied.activations[0], commandScope: harnessScope}
+		defer scope.end()
+		before := string(mustRead(t, h.configPath))
+		if err := replaceThrough(t, scope, `{"enabled":true,"key":"SETTINGS_KEY"}`); !errors.Is(err, ErrDenied) {
+			t.Fatalf("replace without the grant = %v, want denied", err)
 		}
-		section["value"] = json.RawMessage(`"repair-me"`)
-		raw, err := marshalRawObject(section, true)
-		if err != nil {
-			return 0, err
+		if after := string(mustRead(t, h.configPath)); after != before {
+			t.Fatal("a call without the grant changed the file")
 		}
-		return writeExtensionSection(roots, sections, "setting", raw)
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := invoke([]byte(`{"service":"own/opaque","method":"change/opaque","arguments":{"value":9}}`)); !errors.Is(err, harness.ErrNotFound) {
-		t.Fatalf("transform over an inactive section = %v, want not-found", err)
-	}
-	_, err = svc.mutate(context.Background(), configurationEdit{apply: func(roots rawRoots, _ configurationCapture) (editedFile, error) {
-		sections, err := extensionSections(roots, "setting")
-		if err != nil {
-			return 0, err
+	})
+
+	t.Run("a retired activation whose section is unchanged still replaces", func(t *testing.T) {
+		reset(t)
+		retired := svc.current().native.activations[0]
+		entered, release := make(chan struct{}), make(chan struct{})
+		setBefore(func() { close(entered); <-release })
+		proposed := `{"enabled":true,"key":"SETTINGS_KEY","grant":"rotated"}`
+		done := make(chan error, 1)
+		go func() { done <- invoke(proposed) }()
+		<-entered
+		t.Setenv("SETTINGS_KEY", "second")
+		if _, err := svc.publish(context.Background()); err != nil {
+			t.Fatal(err)
 		}
-		section, err := decodeRoot(sections["setting"])
-		if err != nil {
-			return 0, err
+		if svc.current().native.activations[0] == retired {
+			t.Fatal("credential rotation reused the activation")
 		}
-		section["value"] = json.RawMessage(`7`)
-		raw, err := marshalRawObject(section, true)
-		if err != nil {
-			return 0, err
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("retired activation replace: %v", err)
 		}
-		return writeExtensionSection(roots, sections, "setting", raw)
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := invoke([]byte(`{"service":"own/opaque","method":"change/opaque","arguments":{"value":9}}`)); err != nil {
-		t.Fatalf("repaired ordinary field: %v", err)
-	}
-	parked, continueOld := make(chan struct{}), make(chan struct{})
-	beforeUpdate = func() { close(parked); <-continueOld }
-	retainedDone := make(chan error, 1)
-	go func() {
-		retainedDone <- invoke([]byte(`{"service":"own/opaque","method":"change/opaque","arguments":{"value":10}}`))
-	}()
-	<-parked
-	sameAuthority, err := svc.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: rawSection(t, h.configPath, "setting")}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sameAuthority.release()
-	if err := sameAuthority.publishForTest(); err != nil {
-		t.Fatal(err)
-	}
-	close(continueOld)
-	if err := <-retainedDone; err != nil {
-		t.Fatalf("retained same-authority transform: %v", err)
-	}
-	beforeUpdate = nil
-	generation = svc.current().generation
-	next, err := svc.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: rawSection(t, h.configPath, "setting"), approvedServices: []string{}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer next.release()
-	if err := next.publishForTest(); err != nil {
-		t.Fatal(err)
-	}
-	_, err = scope.call(context.Background(), "melta.settings", "update", json.RawMessage(`{"service":"own/opaque","method":"change/opaque","arguments":{"grant":"other"}}`))
-	if !errors.Is(err, ErrDenied) || svc.current().generation != generation {
-		t.Fatalf("stale grant after narrowing: %v", err)
-	}
+		setBefore(nil)
+		if got := string(sectionBytes()); got != proposed {
+			t.Fatalf("section = %s, want %s", got, proposed)
+		}
+	})
 }
 
 func rawSection(t *testing.T, path, id string) json.RawMessage {
@@ -296,13 +389,11 @@ func rawSection(t *testing.T, path, id string) json.RawMessage {
 	return root.Extensions[id]
 }
 
-func TestSettingsUpdateRegisteredWorkerTransform(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "settings-worker")
-	cmd := exec.Command("go", "build", "-o", binary, "./testdata/author")
-	cmd.Dir = filepath.Join("..", "extension", "worker")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build worker: %v: %s", err, output)
-	}
+// TestSettingsReplaceThroughWorker covers the own-settings replace through the
+// worker protocol: the in-test executable extension warns from its entry and a
+// callback, replaces its own section through a harness-target operation, and is
+// inactive without the warning grant it requests.
+func TestSettingsReplaceThroughWorker(t *testing.T) {
 	h := newServiceHarness(t)
 	section := []byte(`{"enabled":true,"value":1}`)
 	writeServiceFile(t, h.configPath, `{"providers":{},"extensions":{"settings-worker":`+string(section)+`}}`)
@@ -312,13 +403,48 @@ func TestSettingsUpdateRegisteredWorkerTransform(t *testing.T) {
 	}
 	manifest := registrarManifest("settings-worker")
 	manifest.SettingsSchema = []byte(`{"type":"object"}`)
-	manifest.Services = []string{"melta.settings", "melta.warnings"}
+	manifest.Services = []string{extension.ContractSettings, extension.ContractWarnings}
 	svc.attachWarnings(newWarningStore())
 	adapter := newObservationAdapter(svc.obs, svc.warnings)
 	svc.composition.reportWarning = adapter.reportPluginWarning
-	guest := executableAuthorExtension(manifest, binary, func(context.Context, []string) ([]string, error) {
-		return append(os.Environ(), "AUTHOR_FIXTURE_MODE=settings"), nil
-	})
+	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+		return adapterAuthor(manifest, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+			if _, err := api.Call(ctx, extension.ContractWarnings, "report", []byte(`{"kind":"worker-entry","message":"before"}`)); err != nil {
+				return nil, err
+			}
+			_, err := api.RegisterService(extension.Service{Name: "worker/transform", Methods: []extension.RegisteredMethod{{
+				Method: extension.Method{Name: "warn", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+				Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+					return call.Call(ctx, extension.ContractWarnings, "report", args)
+				},
+			}}}, nil)
+			if err == nil {
+				_, err = api.RegisterOperation(extension.Operation{
+					Target: extension.ExposedTargetHarness,
+					Method: extension.Method{Name: "replace", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+						replacement, err := decodeRoot(call.Settings)
+						if err != nil {
+							return extension.Result{}, err
+						}
+						replacement["value"] = args
+						raw, err := marshalRawObject(replacement, true)
+						if err != nil {
+							return extension.Result{}, err
+						}
+						payload, err := marshalRawObject(map[string]json.RawMessage{"section": raw}, true)
+						if err != nil {
+							return extension.Result{}, err
+						}
+						return call.Call(ctx, extension.ContractSettings, "replace", payload)
+					},
+				}, nil)
+			}
+			return nil, err
+		}), nil
+	}}
+	spawner.install()
+	guest := executableAuthorExtension(manifest, "settings-worker", adapterEnvironment)
 	candidate, err := svc.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: guest, section: section, installed: true}})
 	if err != nil {
 		t.Fatal(err)
@@ -347,8 +473,7 @@ func TestSettingsUpdateRegisteredWorkerTransform(t *testing.T) {
 	original := r.config
 	r.config = svc
 	defer func() { r.config = original }()
-	_, err = r.invokeRegisteredOperation(context.Background(), testCaller(r), "settings-worker", "update",
-		protocol.ExtensionInvocationTarget{Kind: protocol.ExtensionInvocationTargetKindHarness}, []byte(`{"service":"worker/transform","method":"change/value","arguments":9007199254740993}`), "")
+	_, err = r.invokeRegisteredOperation(context.Background(), testCaller(r), "settings-worker", "replace", harnessTarget(), []byte(`9007199254740993`), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +483,7 @@ func TestSettingsUpdateRegisteredWorkerTransform(t *testing.T) {
 		t.Fatalf("worker settings = %s, %v", got, err)
 	}
 	denied, err := svc.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{
-		extension: guest, section: section, installed: true, approvedServices: []string{"melta.settings"},
+		extension: guest, section: section, installed: true, approvedServices: []string{extension.ContractSettings},
 	}})
 	if err != nil {
 		t.Fatal(err)

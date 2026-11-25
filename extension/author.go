@@ -11,7 +11,7 @@ import (
 )
 
 // APIVersion is the exact activation authoring contract version.
-const APIVersion = "9"
+const APIVersion = "10"
 
 // Manifest is the metadata available before an extension is activated.
 type Manifest struct {

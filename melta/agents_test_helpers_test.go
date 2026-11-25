@@ -1,9 +1,9 @@
 package melta
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/Syntheresis/melta/extension"
 	agents "github.com/Syntheresis/melta/extensions/agents"
@@ -35,42 +35,50 @@ func (h *serviceHarness) preparedService(owner context.Context, authors ...exten
 	return svc
 }
 
-// editAgentModel drives the supplied Agents registered set_model operation
-// through the production settings-update path against the published
-// candidate, for tests that assert the retained model semantics.
+// editAgentModel drives the supplied Agents published set_model operation
+// through its registered handler for tests that assert the retained model
+// semantics.
 func (s *configurationService) editAgentModel(ctx context.Context, agentType, ref string) (configurationCapture, error) {
 	s.nativeMu.Lock()
 	candidate := s.nativeCurrent
-	var activation *nativeActivation
-	if candidate != nil {
-		for _, a := range candidate.activations {
-			if a != nil && a.id == agents.ExtensionID {
-				activation = a
-				break
-			}
-		}
-	}
 	s.nativeMu.Unlock()
-	if candidate == nil || activation == nil {
-		return configurationCapture{}, fmt.Errorf("agents activation is not published: %w", extension.ErrClosed)
+	if candidate == nil {
+		return configurationCapture{}, extension.ErrClosed
 	}
-	arguments, _ := json.Marshal(struct {
+	stage := candidate.snapshotForTest()
+	if stage == nil {
+		return configurationCapture{}, extension.ErrClosed
+	}
+	defer stage.release()
+	entry := stage.operations[nativeOperationKey{agents.ExtensionID, "set_model"}]
+	if entry == nil {
+		return configurationCapture{}, extension.ErrClosed
+	}
+	operation := entry.value.(struct {
+		target extension.ExposedTargetKind
+		method nativeServiceMethod
+	})
+	arguments, err := json.Marshal(struct {
 		DefinitionID string `json:"definition_id"`
 		Model        string `json:"model"`
 	}{DefinitionID: agentType, Model: ref})
-	callCtx, cancel := context.WithCancel(ctx)
-	scope := &nativeCallScope{
-		nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel},
-		candidate:          candidate, activation: activation,
-		commandScope: harnessScope, receipt: &nativeReceipt{},
+	if err != nil {
+		return configurationCapture{}, err
 	}
-	defer scope.end()
-	settingsArgs, _ := json.Marshal(struct {
-		Service   string          `json:"service"`
-		Method    string          `json:"method"`
-		Arguments json.RawMessage `json:"arguments"`
-	}{agents.ConfigurationCapabilityID, "set_model", arguments})
-	if _, err := scope.call(callCtx, extension.ContractSettings, "update", settingsArgs); err != nil {
+	callCtx, cancel := context.WithCancel(ctx)
+	scope := callbackScope(&nativeCallScope{
+		nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel},
+		candidate:          candidate, activation: entry.activation,
+		commandScope: harnessScope, receipt: &nativeReceipt{},
+	})
+	author := extension.AuthorContext{
+		ExtensionID: entry.activation.id, Settings: bytes.Clone(entry.activation.section), Call: scope.call,
+	}
+	_, err = func() (extension.Result, error) {
+		defer scope.end()
+		return executeNativeProvider(scope.ctx, author, operation.method.contract, operation.method.handler, "operation", "set_model", arguments)
+	}()
+	if err != nil {
 		return configurationCapture{}, err
 	}
 	return configurationCapture{snapshot: s.current()}, nil

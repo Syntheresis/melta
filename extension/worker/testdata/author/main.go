@@ -63,12 +63,8 @@ func (t *fixtureTool) Execute(_ context.Context, _ extension.AuthorContext, plan
 }
 
 func main() {
-	if mode := os.Getenv("AUTHOR_FIXTURE_MODE"); mode == "workspace" || mode == "settings" {
-		e := workspaceFixture()
-		if mode == "settings" {
-			e = settingsFixture()
-		}
-		if err := worker.Serve(context.Background(), e, os.Stdin, os.Stdout); err != nil {
+	if mode := os.Getenv("AUTHOR_FIXTURE_MODE"); mode == "workspace" {
+		if err := worker.Serve(context.Background(), workspaceFixture(), os.Stdin, os.Stdout); err != nil {
 			os.Exit(1)
 		}
 		return

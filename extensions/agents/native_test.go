@@ -49,25 +49,34 @@ func TestAuthorListsRosterInResolverOrder(t *testing.T) {
 	testassert.Require(t, reflect.DeepEqual(names, []string{"primary", "secondary", "explore", "review", "compact", "modelless", "plan"}), "list order = %q", names)
 }
 
-// TestAuthorSetModelTransformsLatestSection proves the pure model edit
-// consumes the latest owning section it is handed, preserves every other
-// member and definition field byte-exactly, and retains the known-definition
-// and model invalid-input failures.
-func TestAuthorSetModelTransformsLatestSection(t *testing.T) {
+// TestAuthorSetModelTransformsSettings proves the model edit consumes the
+// settings section the operation started with, preserves every other member
+// and definition field byte-exactly in the replacement document, and retains
+// the known-definition and model invalid-input failures.
+func TestAuthorSetModelTransformsSettings(t *testing.T) {
 	api := activatedAPI(t, `{"enabled":true}`)
-	testassert.Require(t, api.service.Name == ConfigurationCapabilityID && len(api.service.Methods) == 1 && api.service.Methods[0].Method.Mode == extension.ModePure, "configuration service = %+v, want one pure set_model", api.service)
+	var replaced json.RawMessage
+	call := extension.AuthorContext{Call: func(_ context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
+		if service != "melta.settings" || method != "replace" {
+			t.Fatalf("replace = %s.%s", service, method)
+		}
+		var input struct {
+			Section json.RawMessage `json:"section"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			t.Fatalf("replace args = %s %v", args, err)
+		}
+		replaced = input.Section
+		return extension.Result{Value: json.RawMessage("null")}, nil
+	}}
 	transform := func(section, arguments string) (extension.Result, error) {
-		input, err := json.Marshal(struct {
-			Section   json.RawMessage `json:"section"`
-			Arguments json.RawMessage `json:"arguments"`
-		}{json.RawMessage(section), json.RawMessage(arguments)})
-		testassert.NoError(t, err)
-		return api.service.Methods[0].Handler(context.Background(), extension.AuthorContext{}, input)
+		call.Settings = json.RawMessage(section)
+		return api.operations["set_model"].Handler(context.Background(), call, json.RawMessage(arguments))
 	}
-	result, err := transform(`{"enabled":true,"task":{"max_concurrent":7},"unknown":9007199254740993,"definitions":{"worker":{"system_prompt":"simple","description":"kept","tools":[]},"other":{"model":"p/old"}}}`, `{"definition_id":"worker","model":"prov/m"}`)
+	_, err := transform(`{"enabled":true,"task":{"max_concurrent":7},"unknown":9007199254740993,"definitions":{"worker":{"system_prompt":"simple","description":"kept","tools":[]},"other":{"model":"p/old"}}}`, `{"definition_id":"worker","model":"prov/m"}`)
 	testassert.NoError(t, err)
 	var transformed map[string]json.RawMessage
-	testassert.NoError(t, json.Unmarshal(result.Value, &transformed))
+	testassert.NoError(t, json.Unmarshal(replaced, &transformed))
 	testassert.Equal(t, strings.TrimSpace(string(transformed["task"])), `{"max_concurrent":7}`)
 	testassert.Equal(t, strings.TrimSpace(string(transformed["unknown"])), `9007199254740993`)
 	var definitions map[string]json.RawMessage
@@ -75,9 +84,9 @@ func TestAuthorSetModelTransformsLatestSection(t *testing.T) {
 	testassert.Equal(t, strings.TrimSpace(string(definitions["worker"])), `{"description":"kept","model":"prov/m","system_prompt":"simple","tools":[]}`)
 	testassert.Equal(t, strings.TrimSpace(string(definitions["other"])), `{"model":"p/old"}`)
 
-	cleared, err := transform(string(result.Value), `{"definition_id":"worker","model":""}`)
+	_, err = transform(string(replaced), `{"definition_id":"worker","model":""}`)
 	testassert.NoError(t, err)
-	testassert.NoError(t, json.Unmarshal(cleared.Value, &transformed))
+	testassert.NoError(t, json.Unmarshal(replaced, &transformed))
 	testassert.NoError(t, json.Unmarshal(transformed["definitions"], &definitions))
 	testassert.Equal(t, strings.TrimSpace(string(definitions["worker"])), `{"description":"kept","system_prompt":"simple","tools":[]}`)
 

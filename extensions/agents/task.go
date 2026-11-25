@@ -19,9 +19,6 @@ import (
 const (
 	// ExtensionID is the supplied extension identity.
 	ExtensionID = "agents"
-	// ConfigurationCapabilityID is the supplied pure configuration-edit
-	// service.
-	ConfigurationCapabilityID = "agents.configuration"
 	// TaskCapabilityID is the model-visible child-session tool.
 	TaskCapabilityID = "task"
 )

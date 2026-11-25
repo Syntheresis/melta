@@ -53,24 +53,6 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 		return nil, err
 	}
 	s := authorInstance{definitions: definitions}
-	transform := extension.Service{Name: ConfigurationCapabilityID, Methods: []extension.RegisteredMethod{{
-		Method: extension.PureMethod("set_model", `{"type":"object","required":["section","arguments"],"properties":{"section":{"type":"object"},"arguments":`+setModelInputSchema+`},"additionalProperties":false}`, `{"type":"object"}`),
-		Handler: func(ctx context.Context, _ extension.AuthorContext, raw json.RawMessage) (extension.Result, error) {
-			var input struct {
-				Section   json.RawMessage `json:"section"`
-				Arguments json.RawMessage `json:"arguments"`
-			}
-			if err := json.Unmarshal(raw, &input); err != nil {
-				return extension.Result{}, err
-			}
-			return transformModel(input.Section, input.Arguments, func(data []byte) (*Config, error) {
-				return parse(data)
-			})
-		},
-	}}}
-	if _, err = api.RegisterService(transform, nil); err != nil {
-		return nil, err
-	}
 	operations := []extension.Operation{
 		{Target: extension.ExposedTargetHarness, Method: extension.PureMethod("list", emptyObject, rosterOutput), Handler: s.list},
 		{Target: extension.ExposedTargetSession, Method: extension.PureMethod("current", emptyObject, currentOutput), Handler: s.current},
@@ -191,13 +173,15 @@ func (s authorInstance) create(ctx context.Context, call extension.AuthorContext
 }
 
 func (s authorInstance) setModel(ctx context.Context, call extension.AuthorContext, raw json.RawMessage) (extension.Result, error) {
-	args, err := json.Marshal(struct {
-		Service   string          `json:"service"`
-		Method    string          `json:"method"`
-		Arguments json.RawMessage `json:"arguments"`
-	}{ConfigurationCapabilityID, "set_model", raw})
+	transformed, err := transformModel(call.Settings, raw, parse)
 	if err != nil {
 		return extension.Result{}, err
 	}
-	return call.Call(ctx, "melta.settings", "update", args)
+	args, err := json.Marshal(struct {
+		Section json.RawMessage `json:"section"`
+	}{transformed.Value})
+	if err != nil {
+		return extension.Result{}, err
+	}
+	return call.Call(ctx, "melta.settings", "replace", args)
 }

@@ -294,25 +294,19 @@ func TestAuthorModelUpdateTransform(t *testing.T) {
 	if _, err := Author().Activate(context.Background(), api); err != nil {
 		t.Fatal(err)
 	}
-	call := extension.AuthorContext{Call: func(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
-		if service != "melta.settings" || method != "update" {
-			t.Fatalf("update = %s.%s", service, method)
+	call := extension.AuthorContext{Settings: []byte(`{"enabled":true,"other":42}`), Call: func(_ context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
+		if service != "melta.settings" || method != "replace" {
+			t.Fatalf("replace = %s.%s", service, method)
 		}
 		var request struct {
-			Service   string          `json:"service"`
-			Method    string          `json:"method"`
-			Arguments json.RawMessage `json:"arguments"`
+			Section json.RawMessage `json:"section"`
 		}
-		if err := json.Unmarshal(args, &request); err != nil || request.Service != ConfigurationCapabilityID || request.Method != "set_model" {
-			t.Fatalf("update args = %s %v", args, err)
+		if err := json.Unmarshal(args, &request); err != nil {
+			t.Fatalf("replace args = %s %v", args, err)
 		}
-		transform, _ := json.Marshal(struct {
-			Section   json.RawMessage `json:"section"`
-			Arguments json.RawMessage `json:"arguments"`
-		}{[]byte(`{"enabled":true,"other":42}`), request.Arguments})
-		result, err := api.service.Methods[0].Handler(ctx, extension.AuthorContext{}, transform)
-		if err != nil || !strings.Contains(string(result.Value), `"model":"p/m"`) || !strings.Contains(string(result.Value), `"other":42`) {
-			t.Fatalf("transform = %s %v", result.Value, err)
+		want := `{"definitions":{"primary":{"model":"p/m"}},"enabled":true,"other":42}`
+		if string(request.Section) != want {
+			t.Fatalf("replace section = %s, want %s", request.Section, want)
 		}
 		return extension.Result{Value: []byte("null")}, nil
 	}}

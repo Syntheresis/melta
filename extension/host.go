@@ -135,7 +135,7 @@ func hostWorkspaceMethods() []Method {
 
 func hostSettingsMethods() []Method {
 	return []Method{
-		ServiceIOMethod("update", `{"type":"object","required":["service","method","arguments"],"properties":{"service":{"type":"string","minLength":1},"method":{"type":"string","minLength":1},"arguments":{}},"additionalProperties":false}`, `{"type":"null"}`),
+		ServiceIOMethod("replace", `{"type":"object","required":["section"],"properties":{"section":{"type":"object"}},"additionalProperties":false}`, `{"type":"null"}`),
 	}
 }
 
