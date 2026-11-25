@@ -21,7 +21,7 @@ type authorAPI struct {
 	check      extension.ToolCheckHook
 	settings   json.RawMessage
 	service    extension.Service
-	tool       extension.RegisteredTool
+	tool       extension.ToolFunc
 }
 
 func (a *authorAPI) Settings() json.RawMessage {
@@ -38,7 +38,7 @@ func (a *authorAPI) RegisterService(s extension.Service, _ extension.Registratio
 	a.service = s
 	return nil, nil
 }
-func (a *authorAPI) RegisterTool(_ model.ToolDefinition, tool extension.RegisteredTool, _ extension.Registration) (extension.Registration, error) {
+func (a *authorAPI) RegisterTool(_ model.ToolDefinition, tool extension.ToolFunc, _ extension.Registration) (extension.Registration, error) {
 	a.tool = tool
 	return nil, nil
 }
@@ -115,9 +115,9 @@ func TestAuthorTaskReadvertisement(t *testing.T) {
 	if err != nil || admitted.Candidate == nil || len(admitted.Candidate.Tools) != 0 {
 		t.Fatalf("owned-session admission = %#v, %v, want task removed", admitted, err)
 	}
-	plan := api.tool.Prepare(context.Background(), call, model.ToolCall{ID: "call", Name: TaskCapabilityID, Arguments: []byte(`{"prompt":"work","subagent_type":"secondary"}`)})
-	if plan.Immediate == nil || plan.Immediate.Result.Status != model.ResultError || !strings.Contains(plan.Immediate.Result.Content, "task is unavailable in an owned session") {
-		t.Fatalf("re-advertised task plan = %#v, want the owned-session refusal", plan)
+	_, err = api.tool(context.Background(), extension.ToolCall{AuthorContext: call, ID: "call", Name: TaskCapabilityID, Arguments: []byte(`{"prompt":"work","subagent_type":"secondary"}`)})
+	if err == nil || !strings.Contains(err.Error(), "task is unavailable in an owned session") {
+		t.Fatalf("re-advertised task error = %v, want the owned-session refusal", err)
 	}
 	if api.request != nil {
 		t.Fatal("Agents still rewrites the advertised tool list")
@@ -233,7 +233,7 @@ func TestAuthorPromptModesAndWriteRoot(t *testing.T) {
 		t.Fatalf("already-headed instructions: %#v %v reads=%d", result, err, reads)
 	}
 	call := extension.AuthorContext{State: []byte(`{"agent":"writer"}`), Call: func(_ context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
-		if service != "melta.workspace" || method != "bind" {
+		if service != "melta.workspace" || method != "stat" {
 			t.Fatalf("unexpected binding: %s.%s %s", service, method, args)
 		}
 		var input struct {

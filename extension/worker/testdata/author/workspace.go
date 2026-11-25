@@ -4,92 +4,37 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 )
 
-type workspaceTool struct{}
-
-func (workspaceTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (workspaceTool) Prepare(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	type binding struct {
-		Binding string `json:"binding"`
-		Path    string `json:"canonical_path"`
+func workspaceTool(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+	result, err := call.Call(ctx, "workspace-relay", "read", json.RawMessage(`{"path":"file"}`))
+	if err != nil {
+		return extension.ToolResult{}, fmt.Errorf("relay read: %w", err)
 	}
-	var targets []binding
-	for _, path := range []string{"file", "sibling"} {
-		arg, _ := json.Marshal(map[string]string{"path": path})
-		result, err := call.Call(ctx, "melta.workspace", "bind", arg)
-		if err != nil {
-			return failPlan(err)
-		}
-		var target binding
-		if err := json.Unmarshal(result.Value, &target); err != nil {
-			return failPlan(err)
-		}
-		targets = append(targets, target)
+	if string(result.Value) != `{"bytes":"YmVmb3Jl"}` {
+		return extension.ToolResult{}, errors.New("precondition read failed")
 	}
-	data, _ := json.Marshal(targets)
-	return extension.ToolPlan{Data: data}
-}
-
-func failPlan(err error) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
-}
-
-func (workspaceTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	fail := func(err error) harness.ToolOutcome {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
+	if _, err := call.ReadFile(ctx, "sibling"); err != nil {
+		return extension.ToolResult{}, err
 	}
-	var targets []struct {
-		Binding string `json:"binding"`
+	if err := call.WriteFile(ctx, "sibling", []byte("after")); err != nil {
+		return extension.ToolResult{}, err
 	}
-	if err := json.Unmarshal(plan.Data, &targets); err != nil || len(targets) != 2 {
-		return fail(errors.New("invalid targets"))
+	if err := call.CreateFile(ctx, "file", []byte("after")); err == nil {
+		return extension.ToolResult{}, errors.New("create-only overwrite accepted")
 	}
-	arg := func(binding string) json.RawMessage {
-		raw, _ := json.Marshal(map[string]string{"binding": binding})
-		return raw
-	}
-	result, err := call.Call(ctx, "workspace-relay", "read", arg(targets[0].Binding))
-	if err != nil || string(result.Value) != `{"bytes":"YmVmb3Jl"}` {
-		return fail(errors.New("precondition read failed"))
-	}
-	if _, err := call.Call(ctx, "melta.workspace", "read", arg(targets[1].Binding)); err != nil {
-		return fail(errors.New("sibling read failed"))
-	}
-	if _, err := call.Call(ctx, "melta.workspace", "read", arg("forged")); err == nil {
-		return fail(errors.New("unbound read accepted"))
-	}
-	write := func(createOnly bool) json.RawMessage {
-		raw, _ := json.Marshal(map[string]any{"binding": targets[0].Binding, "bytes": "YWZ0ZXI=", "create_only": createOnly})
-		return raw
-	}
-	unbound, _ := json.Marshal(map[string]any{"binding": "forged", "bytes": "YWZ0ZXI=", "create_only": false})
-	if _, err := call.Call(ctx, "melta.workspace", "write", unbound); err == nil {
-		return fail(errors.New("unbound write accepted"))
-	}
-	sibling, _ := json.Marshal(map[string]any{"binding": targets[1].Binding, "bytes": "YWZ0ZXI=", "create_only": false})
-	if _, err := call.Call(ctx, "melta.workspace", "write", sibling); err != nil {
-		return fail(errors.New("sibling write failed"))
-	}
-	if _, err := call.Call(ctx, "melta.workspace", "write", write(true)); err == nil {
-		return fail(errors.New("create-only overwrite accepted"))
-	}
-	result, err = call.Call(ctx, "melta.workspace", "write", write(false))
-	if err != nil || string(result.Value) != `{"outcome":"completed"}` {
-		return fail(errors.New("write failed"))
+	if err := call.WriteFile(ctx, "file", []byte("after")); err != nil {
+		return extension.ToolResult{}, err
 	}
 	if os.Getenv("AUTHOR_FIXTURE_LOSE_REPLY") == "1" {
 		os.Exit(17)
 	}
-	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess}, Evidence: harness.ExecutionObserved}
+	return extension.ToolResult{}, nil
 }
 
 func workspaceFixture() extension.Extension {
@@ -104,26 +49,13 @@ func workspaceFixture() extension.Extension {
 			}}}, nil); err != nil {
 				return nil, err
 			}
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "workspace-worker", Parameters: json.RawMessage(`{}`)}, workspaceTool{}, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "workspace-worker", Parameters: json.RawMessage(`{}`)}, workspaceTool, nil)
 			if err != nil {
 				return nil, err
 			}
 			_, err = api.AttachToolCheck(func(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) (*string, error) {
-				result, err := call.Call(ctx, "melta.workspace", "bind", []byte(`{"path":"file"}`))
-				if err != nil {
-					return nil, err
-				}
-				var target struct {
-					Binding string `json:"binding"`
-				}
-				if err := json.Unmarshal(result.Value, &target); err != nil {
-					return nil, err
-				}
-				args, _ := json.Marshal(map[string]string{"binding": target.Binding})
-				if _, err := call.Call(ctx, "melta.workspace", "read", args); err == nil {
-					return nil, errors.New("restriction read accepted")
-				}
-				return nil, nil
+				_, err := call.ReadFile(ctx, "file")
+				return nil, err
 			}, nil)
 			return nil, err
 		},

@@ -78,7 +78,7 @@ func settingsPlugins() []extension.Extension {
 // rosterToolPlugin provides one real tool declaration so the composed tool
 // universe admits the fixture's agent tool lists.
 func rosterToolPlugin() extension.Extension {
-	return testToolNative("prod_read", fileReadTool{})
+	return testToolNative("prod_read", fileReadTool)
 }
 
 // openConfigurationRuntime opens one composed Melta over the given store

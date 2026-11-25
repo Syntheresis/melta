@@ -288,14 +288,12 @@ func TestAppearedDestinationWithFailedAbandonReportsRefusalAndCleanupFailure(t *
 	path := filepath.Join(root, "created.txt")
 	groupDir := filepath.Join(t.TempDir(), "group")
 	store := newCodeGroupStore(t, groupDir)
-	binding, _, _, err := BindWorkspace(root, "created.txt")
-	testassert.NoError(t, err)
-	outcome, err := binding.Write(store, []byte("one"), true, nil)
+	outcome, err := WorkspaceWrite(root, "created.txt", store, []byte("one"), true)
 	testassert.Require(t, err == nil && outcome == MutationCompleted, "seed write = (%v, %v), want completed", outcome, err)
 	testassert.NoError(t, os.Remove(path))
 
 	wrapped := &recordingCodeGroupStore{testCodeGroupStore: store, plantBefore: path, failAbandon: true}
-	outcome, err = binding.Write(wrapped, []byte("two"), true, nil)
+	outcome, err = WorkspaceWrite(root, "created.txt", wrapped, []byte("two"), true)
 
 	testassert.Require(t, outcome == MutationUntouched, "outcome = %v, want untouched on the refused write", outcome)
 	testassert.Require(t, err != nil, "Add whose destination appeared with failing abandonment succeeded, want refusal")
@@ -315,14 +313,12 @@ func TestAppearedDestinationWithCompletedAbandonKeepsEntryAndPriorProof(t *testi
 	path := filepath.Join(root, "created.txt")
 	groupDir := filepath.Join(t.TempDir(), "group")
 	store := newCodeGroupStore(t, groupDir)
-	binding, _, _, err := BindWorkspace(root, "created.txt")
-	testassert.NoError(t, err)
-	outcome, err := binding.Write(store, []byte("one"), true, nil)
+	outcome, err := WorkspaceWrite(root, "created.txt", store, []byte("one"), true)
 	testassert.Require(t, err == nil && outcome == MutationCompleted, "seed write = (%v, %v), want completed", outcome, err)
 	testassert.NoError(t, os.Remove(path))
 
 	wrapped := &recordingCodeGroupStore{testCodeGroupStore: store, plantBefore: path}
-	outcome, err = binding.Write(wrapped, []byte("two"), true, nil)
+	outcome, err = WorkspaceWrite(root, "created.txt", wrapped, []byte("two"), true)
 
 	testassert.Require(t, outcome == MutationUntouched, "outcome = %v, want untouched on the refused write", outcome)
 	testassert.Require(t, err != nil && strings.Contains(err.Error(), "appeared during apply"), "err = %v, want the destination-appeared refusal", err)

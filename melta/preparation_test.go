@@ -241,43 +241,28 @@ func (h *recordArgumentHook) received() ([]string, []string) {
 // ordinary success result, true settles the executed call with a real error
 // result.
 type prepTool struct {
-	mu         sync.Mutex
-	normalized int
-	executed   int
-	input      []string
-	fail       bool
+	mu       sync.Mutex
+	executed int
+	input    []string
+	fail     bool
 }
 
-func (t *prepTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	t.mu.Lock()
-	t.normalized++
-	t.mu.Unlock()
-	return runtimeNormalize(call)
-}
-
-func (t *prepTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+func (t *prepTool) run(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	t.mu.Lock()
 	t.input = append(t.input, string(call.Arguments))
-	t.mu.Unlock()
-	return extension.ToolPlan{Data: []byte(call.ID)}
-}
-
-func (t *prepTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	t.mu.Lock()
 	t.executed++
 	fail := t.fail
 	t.mu.Unlock()
-	callID := string(plan.Data)
 	if fail {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: "echo failed"}}
+		return extension.ToolResult{}, errors.New("echo failed")
 	}
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: "ran"}}
+	return extension.ToolResult{Content: "ran"}, nil
 }
 
-func (t *prepTool) counters() (int, int, []string) {
+func (t *prepTool) counters() (int, []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.normalized, t.executed, append([]string(nil), t.input...)
+	return t.executed, append([]string(nil), t.input...)
 }
 
 // textTurnEvents returns the SSE events of one completed text turn.
@@ -365,10 +350,10 @@ func (e *prepEnv) plugins() []extension.Extension {
 		if _, err := api.AttachArguments(e.argHooks[1].AdmitArgs, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.RegisterTool(testDescribeTool("echo"), e.echo, nil); err != nil {
+		if _, err := api.RegisterTool(testDescribeTool("echo"), e.echo.run, nil); err != nil {
 			return nil, err
 		}
-		_, err := api.RegisterTool(testDescribeTool("read"), noopNativeTool{}, nil)
+		_, err := api.RegisterTool(testDescribeTool("read"), noopNativeTool, nil)
 		return nil, err
 	})
 	hooks.Manifest.SettingsSchema = json.RawMessage(`{"type":"object","required":["enabled","tag"],"properties":{"enabled":{"type":"boolean"},"tag":{"type":"string","minLength":1}},"additionalProperties":true}`)
@@ -1291,8 +1276,7 @@ func TestPreparationForwardsToolArgumentHooks(t *testing.T) {
 			testassert.Require(t, rec.State.Status == harness.OperationSuccess, "operation = %+v, want terminal success after the hook chain", rec.State)
 		}
 
-		normalized, executed, toolInput := e.echo.counters()
-		testassert.Require(t, normalized == 1, "bound normalization ran %d times, want once at dispatch", normalized)
+		executed, toolInput := e.echo.counters()
 		testassert.Require(t, executed == 1 && len(toolInput) == 1 && toolInput[0] == `{"repaired":"arg.agent"}`, "concrete tool ran %d times on %q, want once with the final committed replacement", executed, toolInput)
 
 		// The committed tool result records the minted implementation and
@@ -1355,15 +1339,9 @@ func TestPreparationForwardsToolArgumentHooks(t *testing.T) {
 
 type visibilityTool struct{ executes *atomic.Int64 }
 
-func (t visibilityTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (t visibilityTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Data: []byte(call.ID)}
-}
-func (t visibilityTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t visibilityTool) run(_ context.Context, _ extension.ToolCall) (extension.ToolResult, error) {
 	t.executes.Add(1)
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: "hidden-ok"}}
+	return extension.ToolResult{Content: "hidden-ok"}, nil
 }
 
 type visibilityRequestTool struct {
@@ -1420,7 +1398,7 @@ func TestPreparationVisibilityRestoresThroughRequestHooks(t *testing.T) {
 		var executes atomic.Int64
 		gate := testNative("gate", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			for _, id := range []string{"hidden", "visible"} {
-				if _, err := api.RegisterTool(testDescribeTool(id), visibilityTool{executes: &executes}, nil); err != nil {
+				if _, err := api.RegisterTool(testDescribeTool(id), (visibilityTool{executes: &executes}).run, nil); err != nil {
 					return nil, err
 				}
 			}

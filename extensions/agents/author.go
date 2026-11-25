@@ -40,11 +40,7 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 		return nil, err
 	}
 	for _, warning := range definitions.Warnings() {
-		args, _ := json.Marshal(struct {
-			Kind    string `json:"kind"`
-			Message string `json:"message"`
-		}{warning.Kind, warning.Error()})
-		if _, err := api.Call(ctx, "melta.warnings", "report", args); err != nil {
+		if err := extension.Activation(api).ReportWarning(ctx, warning.Kind, warning.Error()); err != nil {
 			return nil, err
 		}
 	}
@@ -65,7 +61,7 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 			return nil, err
 		}
 	}
-	if _, err := api.RegisterTool(model.ToolDefinition{Name: TaskCapabilityID, Description: taskDescription(definitions), Parameters: []byte(taskParameters)}, authorTask{definitions: definitions, settings: settings}, nil); err != nil {
+	if _, err := api.RegisterTool(model.ToolDefinition{Name: TaskCapabilityID, Description: taskDescription(definitions), Parameters: []byte(taskParameters)}, (authorTask{definitions: definitions, settings: settings}).run, nil); err != nil {
 		return nil, err
 	}
 	if _, err := api.AttachAdmission(s.admit, nil); err != nil {

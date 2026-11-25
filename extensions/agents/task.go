@@ -9,11 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-
-	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/model"
 )
 
 const (
@@ -75,65 +70,4 @@ func decodeSettings(raw json.RawMessage) (settings, error) {
 		return settings{}, errors.New("tasks: max_output_bytes must be between 1024 and 1048576")
 	}
 	return s, nil
-}
-
-// launchOutcome renders one launch failure through the uniform tool-error
-// path: the harness's rejection details are model-facing and arrive unwrapped.
-func launchOutcome(callID string, err error) harness.ToolOutcome {
-	return launchOutcomeWithKey(callID, err, "child_session_id")
-}
-
-func launchOutcomeWithKey(callID string, err error, key string) harness.ToolOutcome {
-	content := err.Error()
-	var callErr *extension.CallError
-	if errors.As(err, &callErr) && len(callErr.Partial) != 0 {
-		var partial map[string]json.RawMessage
-		var id string
-		if json.Unmarshal(callErr.Partial, &partial) == nil && json.Unmarshal(partial[key], &id) == nil && id != "" {
-			content += "\nSession ID: " + id
-		}
-	}
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: content}}
-}
-
-// immediateError is the normalization-class immediate outcome: status error
-// carrying the validation diagnostic, per the tool-boundary validation
-// contract.
-func immediateError(callID string, cause error) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{
-		Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: cause.Error()},
-	}}
-}
-
-// normalizeTaskArgs is the task tool's member validator: private
-// `_melta_` fields are stripped, a present prompt or subagent_type must
-// be a string, and every other member is preserved; Prepare owns the
-// semantics.
-func normalizeTaskArgs(args map[string]any) (map[string]any, error) {
-	clean := make(map[string]any, len(args))
-	for key, value := range args {
-		if strings.HasPrefix(key, "_melta_") {
-			continue
-		}
-		if key == "prompt" || key == "subagent_type" {
-			if _, ok := value.(string); !ok {
-				return nil, fmt.Errorf("task: %s must be a string", key)
-			}
-		}
-		clean[key] = value
-	}
-	return clean, nil
-}
-
-// normalizeCallArguments is the one shared Normalize body.
-func normalizeCallArguments(call model.ToolCall, normalize func(map[string]any) (map[string]any, error)) (json.RawMessage, error) {
-	args, err := decodeArguments(call.Arguments)
-	if err != nil {
-		return nil, err
-	}
-	normalized, err := normalize(args)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(normalized)
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 )
 
@@ -37,7 +36,7 @@ func testServiceHandler() extension.AuthorHandler {
 
 // testToolNative registers one tool named id backed by the given registered
 // implementation, advertised with the shared testDescribeTool definition.
-func testToolNative(id string, tool extension.RegisteredTool) extension.Extension {
+func testToolNative(id string, tool extension.ToolFunc) extension.Extension {
 	return testNative(id, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterTool(testDescribeTool(id), tool, nil)
 		return nil, err
@@ -49,19 +48,6 @@ func testDescribeTool(id string) model.ToolDefinition {
 	return model.ToolDefinition{Name: id, Description: id, Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-// testRegisteredTool is the shared fixture RegisteredTool: it normalizes
-// arguments unchanged, prepares an immediate success outcome, and executes an
-// empty outcome.
-type testRegisteredTool struct{ Name string }
-
-func (t testRegisteredTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t testRegisteredTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
-}
-
-func (t testRegisteredTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "ok"}}
+func testRegisteredTool(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+	return extension.ToolResult{Content: "ok"}, nil
 }

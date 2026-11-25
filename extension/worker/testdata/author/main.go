@@ -28,38 +28,28 @@ func (fixtureStrategy) Consume(harness.ConsumeInput) (harness.PlanOutput, error)
 	return harness.PlanOutput{Kind: harness.PlanNone}, nil
 }
 
-func (t *fixtureTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *fixtureTool) Prepare(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
+func (t *fixtureTool) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	if !t.fresh {
 		if _, err := call.Call(ctx, "gate", "park", json.RawMessage(`{}`)); err != nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+			return extension.ToolResult{}, err
 		}
 		if t.remove {
 			if err := t.api.Remove(*t.handle); err != nil {
-				return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+				return extension.ToolResult{}, err
 			}
-			return extension.ToolPlan{Data: []byte("old-plan"), Start: &extension.SessionStart{Target: "raw/name", InitialState: []byte(`{"large":9007199254740993}`), Report: true}}
+			return extension.ToolResult{Content: "old handler"}, nil
 		}
-		if _, err := t.api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, &fixtureTool{fresh: true}, *t.handle); err == nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "reserved replacement accepted"}}}
+		if _, err := t.api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, (&fixtureTool{fresh: true}).run, *t.handle); err == nil {
+			return extension.ToolResult{}, errors.New("reserved replacement accepted")
 		}
-		replacement, err := t.api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, &fixtureTool{fresh: true}, *t.handle)
+		replacement, err := t.api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, (&fixtureTool{fresh: true}).run, *t.handle)
 		if err != nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+			return extension.ToolResult{}, err
 		}
 		*t.handle = replacement
+		return extension.ToolResult{Content: "old handler"}, nil
 	}
-	return extension.ToolPlan{Data: []byte("old-plan"), Start: &extension.SessionStart{Target: "raw/name", InitialState: []byte(`{"large":9007199254740993}`), Report: true}}
-}
-
-func (t *fixtureTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	if t.fresh || string(plan.Data) != "old-plan" || plan.Start == nil || plan.Start.Target != "raw/name" || string(plan.Start.InitialState) != `{"large":9007199254740993}` || !plan.Start.Report {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "incorrect handler or plan"}}
-	}
-	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "old handler"}, Evidence: harness.ExecutionObserved}
+	return extension.ToolResult{}, errors.New("incorrect handler")
 }
 
 func main() {
@@ -110,13 +100,13 @@ func main() {
 			}
 			var handle extension.Registration
 			tool := &fixtureTool{api: api, handle: &handle}
-			handle, err = api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, tool, nil)
+			handle, err = api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, tool.run, nil)
 			if err != nil {
 				return nil, err
 			}
 			var removable extension.Registration
 			remover := &fixtureTool{api: api, handle: &removable, remove: true}
-			removable, err = api.RegisterTool(model.ToolDefinition{Name: "removable-tool", Parameters: json.RawMessage(`{}`)}, remover, nil)
+			removable, err = api.RegisterTool(model.ToolDefinition{Name: "removable-tool", Parameters: json.RawMessage(`{}`)}, remover.run, nil)
 			if err != nil {
 				return nil, err
 			}

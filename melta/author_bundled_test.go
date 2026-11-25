@@ -27,7 +27,7 @@ func TestBuiltinPrimaryKeepsRegisteredTools(t *testing.T) {
 	e.fixtureStore(storage.NewMemory())
 	e.server.setScript(func(_ context.Context, _ string) []string { return textTurnEvents("done") })
 	probe := extension.Extension{Manifest: registrarManifest("third-party"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(testDescribeTool("third_party_tool"), testRegisteredTool{}, nil)
+		_, err := api.RegisterTool(testDescribeTool("third_party_tool"), testRegisteredTool, nil)
 		return nil, err
 	}}
 	enableFixturePlugin(t, e.configPath, "third-party")
@@ -187,36 +187,41 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 					t.Fatal("task roster omitted guard")
 				}
 				impl := task.entry.value.(nativeTool).tool
+				var start extension.SessionStart
 				call.Call = func(_ context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
-					if service != "melta.session" || string(args) != "{}" {
+					if service != "melta.session" {
 						t.Fatalf("task host call: %s.%s %s", service, method, args)
 					}
 					switch method {
 					case "members":
 						return extension.Result{Value: []byte(`[]`)}, nil
 					case "start":
+						var err error
+						start, err = extension.DecodeSessionStart(args)
+						if err != nil {
+							t.Fatal(err)
+						}
 						return extension.Result{Value: []byte(`{"session_id":"child"}`)}, nil
 					default:
 						t.Fatalf("unexpected task method: %s", method)
 						return extension.Result{}, nil
 					}
 				}
-				plan := impl.Prepare(context.Background(), call, model.ToolCall{ID: "task-call", Name: "task", Arguments: []byte(`{"subagent_type":"explore","prompt":"work"}`)})
-				if plan.Immediate != nil || plan.Start == nil || plan.Start.Target != "explore" || string(plan.Start.InitialState) != `{"agent":"explore"}` {
-					t.Fatalf("task plan: %#v", plan)
+				outcome := impl(context.Background(), call, model.ToolCall{ID: "task-call", Name: "task", Arguments: []byte(`{"subagent_type":"explore","prompt":"work"}`)})
+				if outcome.Result.Status != model.ResultSuccess || string(start.InitialState) != `{"agent":"explore"}` {
+					t.Fatalf("task start: %#v, outcome %#v", start, outcome)
 				}
-				guardPlan := impl.Prepare(context.Background(), call, model.ToolCall{ID: "guard-call", Name: "task", Arguments: []byte(`{"subagent_type":"guard","prompt":"work"}`)})
-				if guardPlan.Immediate != nil || guardPlan.Start == nil || guardPlan.Start.Target != "guard" {
-					t.Fatalf("task roster disagreement: %#v", guardPlan)
+				outcome = impl(context.Background(), call, model.ToolCall{ID: "guard-call", Name: "task", Arguments: []byte(`{"subagent_type":"guard","prompt":"work"}`)})
+				if outcome.Result.Status != model.ResultSuccess || string(start.InitialState) != `{"agent":"guard"}` {
+					t.Fatalf("task roster disagreement: %#v", outcome)
 				}
-				outcome := impl.Execute(context.Background(), call, plan)
-				if outcome.Result.Status != model.ResultSuccess {
-					t.Fatalf("task outcome: %#v", outcome)
-				}
-				call.Call = func(_ context.Context, _, _ string, _ json.RawMessage) (extension.Result, error) {
+				call.Call = func(_ context.Context, _, method string, _ json.RawMessage) (extension.Result, error) {
+					if method == "members" {
+						return extension.Result{Value: []byte(`[]`)}, nil
+					}
 					return extension.Result{}, &extension.CallError{Err: errors.New("failed after start"), Partial: []byte(`{"session_id":"child"}`)}
 				}
-				outcome = impl.Execute(context.Background(), call, plan)
+				outcome = impl(context.Background(), call, model.ToolCall{ID: "task-call", Name: "task", Arguments: []byte(`{"subagent_type":"explore","prompt":"work"}`)})
 				if outcome.Result.Status != model.ResultError || !strings.Contains(outcome.Result.Content, "child") {
 					t.Fatalf("task partial: %#v", outcome)
 				}

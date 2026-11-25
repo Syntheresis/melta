@@ -104,7 +104,7 @@ func compactPrepWith(t *testing.T, agentsDoc, configDoc, endpoint string) (confi
 func compactToolsPlugin() extension.Extension {
 	return testNative("compacttools", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		for _, id := range []string{"echo", "read"} {
-			if _, err := api.RegisterTool(testDescribeTool(id), testRegisteredTool{}, nil); err != nil {
+			if _, err := api.RegisterTool(testDescribeTool(id), testRegisteredTool, nil); err != nil {
 				return nil, err
 			}
 		}

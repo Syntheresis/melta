@@ -168,10 +168,10 @@ func openTools(t *testing.T, dataDir string) map[string]Tool {
 func TestStandardToolsReservedAgainstShadowing(t *testing.T) {
 	owner := &configurationService{}
 	e := testNative("shadow", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, testRegisteredTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, testRegisteredTool, nil); err == nil {
 			return nil, errors.New("standard tool shadow accepted")
 		}
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "custom_tool", Parameters: json.RawMessage(`{}`)}, testRegisteredTool{}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "custom_tool", Parameters: json.RawMessage(`{}`)}, testRegisteredTool, nil)
 		return nil, err
 	})
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})

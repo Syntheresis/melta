@@ -97,19 +97,11 @@ func serviceNative(id, name string, method extension.Method, handler extension.A
 	})
 }
 
-type noopNativeTool struct{}
-
-func (noopNativeTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (noopNativeTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: "call", Status: model.ResultSuccess, Content: "ok"}}}
-}
-func (noopNativeTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: "call", Status: model.ResultSuccess, Content: "ok"}}
+func noopNativeTool(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+	return extension.ToolResult{Content: "ok"}, nil
 }
 
-func TestNativeToolPlanOwnershipAndDeclaredFailureDispatch(t *testing.T) {
+func TestNativeToolDeclaredFailureDispatch(t *testing.T) {
 	provider := serviceNative("provider", "provider", extension.ServiceMethod("call", `{}`, `{"type":"object"}`,
 		`{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]}`, `{"type":"string"}`),
 		func(_ context.Context, _ extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
@@ -119,45 +111,32 @@ func TestNativeToolPlanOwnershipAndDeclaredFailureDispatch(t *testing.T) {
 			return extension.Result{Value: json.RawMessage(`{"ok":true}`)}, nil
 		})
 	tool := &planTool{}
-	adapter := nativeToolAdapter(t, "tool", provider, testToolNative("tool", tool))
+	adapter := nativeToolAdapter(t, "tool", provider, testToolNative("tool", tool.run))
 	tc := ToolContext{Session: harness.SessionIdentity{SessionID: testSessionID}}
 	call := model.ToolCall{ID: "call-1", Name: "tool", Arguments: json.RawMessage(`{"fail":true}`)}
-	prepared := adapter.Prepare(context.Background(), tc, call)
-	testassert.Require(t, prepared.Execute != nil, "plan = %+v, want the executable plan", prepared)
-	outcome := prepared.Execute(context.Background())
+	outcome := adapter.Run(context.Background(), tc, call)
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "declared:provider refused", "outcome = %+v, want the declared failure mapped through dispatch", outcome.Result)
 	testassert.Require(t, tool.failure != nil && string(tool.failure.Data) == `{"reason":"because"}` && string(tool.failure.Partial) == `"partial"`, "dispatch lost the declared failure payload: %+v", tool.failure)
 }
 
-// planTool prepares one plan carrying opaque Data and, at Execute, calls its
-// declared service with that Data.
+// planTool calls a declared service and retains its failure data.
 type planTool struct {
-	callID  string
 	failure *extension.Failure
 }
 
-func (t *planTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *planTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	t.callID = call.ID
-	return extension.ToolPlan{Data: append([]byte("opaque:"), call.Arguments...)}
-}
-
-func (t *planTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	if string(plan.Data) != `opaque:{"fail":true}` {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: t.callID, Status: model.ResultError, Content: "plan data changed"}}
+func (t *planTool) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+	if string(call.Arguments) != `{"fail":true}` {
+		return extension.ToolResult{}, errors.New("arguments changed")
 	}
 	result, err := call.Call(ctx, "provider", "call", json.RawMessage(`{"fail":true}`))
 	if err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: t.callID, Status: model.ResultError, Content: err.Error()}}
+		return extension.ToolResult{}, err
 	}
 	if result.Failure == nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: t.callID, Status: model.ResultError, Content: "no failure"}}
+		return extension.ToolResult{}, errors.New("no failure")
 	}
 	t.failure = result.Failure
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: t.callID, Status: model.ResultSuccess, Content: result.Failure.Code + ":" + result.Failure.Message}}
+	return extension.ToolResult{Content: result.Failure.Code + ":" + result.Failure.Message}, nil
 }
 
 func TestNativeCallOwnsOriginAndJoinsBeforeReturn(t *testing.T) {
@@ -170,10 +149,8 @@ func TestNativeCallOwnsOriginAndJoinsBeforeReturn(t *testing.T) {
 			close(finished)
 			return extension.Result{}, ctx.Err()
 		})
-	adapter := nativeToolAdapter(t, "caller", provider, testToolNative("caller", &originTool{started: started}))
-	prepared := adapter.Prepare(context.Background(), ToolContext{}, model.ToolCall{ID: "call", Name: "caller", Arguments: json.RawMessage(`{}`)})
-	testassert.Require(t, prepared.Execute != nil, "plan = %+v, want execution", prepared)
-	outcome := prepared.Execute(context.Background())
+	adapter := nativeToolAdapter(t, "caller", provider, testToolNative("caller", (&originTool{started: started}).run))
+	outcome := adapter.Run(context.Background(), ToolContext{}, model.ToolCall{ID: "call", Name: "caller", Arguments: json.RawMessage(`{}`)})
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "outcome = %+v", outcome.Result)
 	select {
 	case <-finished:
@@ -184,22 +161,14 @@ func TestNativeCallOwnsOriginAndJoinsBeforeReturn(t *testing.T) {
 
 type originTool struct {
 	started chan struct{}
-	callID  string
 }
 
-func (t *originTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (t *originTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	t.callID = call.ID
-	return extension.ToolPlan{}
-}
-func (t *originTool) Execute(_ context.Context, call extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (t *originTool) run(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	go func() {
 		_, _ = call.Call(context.Background(), "authprovider", "call", json.RawMessage(`{}`))
 	}()
 	<-t.started
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: t.callID, Status: model.ResultSuccess, Content: "ok"}}
+	return extension.ToolResult{Content: "ok"}, nil
 }
 
 func TestNativeCallbackViewCancelsAndJoinsThroughHarness(t *testing.T) {
@@ -222,7 +191,7 @@ func TestNativeCallbackViewCancelsAndJoinsThroughHarness(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		_, err = api.RegisterTool(testDescribeTool("origin_tool"), &harnessOriginTool{started: started}, nil)
+		_, err = api.RegisterTool(testDescribeTool("origin_tool"), (&harnessOriginTool{started: started}).run, nil)
 		return nil, err
 	})
 	e.server.setScript(func(_ context.Context, body string) []string {
@@ -248,46 +217,30 @@ func TestNativeCallbackViewCancelsAndJoinsThroughHarness(t *testing.T) {
 
 type harnessOriginTool struct {
 	started chan struct{}
-	callID  string
 }
 
-func (t *harnessOriginTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (t *harnessOriginTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	t.callID = call.ID
-	return extension.ToolPlan{}
-}
-func (t *harnessOriginTool) Execute(_ context.Context, call extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (t *harnessOriginTool) run(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	go func() {
 		_, _ = call.Call(context.Background(), "origin.provider", "call", json.RawMessage(`{}`))
 	}()
 	<-t.started
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: t.callID, Status: model.ResultSuccess, Content: "ok"}}
+	return extension.ToolResult{Content: "ok"}, nil
 }
 
 type ownershipProbe struct {
 	inputAfter  string
 	resultValue string
-	callID      string
 }
 
-func (p *ownershipProbe) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (p *ownershipProbe) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	p.callID = call.ID
-	return extension.ToolPlan{}
-}
-func (p *ownershipProbe) Execute(ctx context.Context, call extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (p *ownershipProbe) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	arguments := []byte(`{}`)
 	result, err := call.Call(ctx, "own.provider", "call", arguments)
 	if err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: p.callID, Status: model.ResultError, Content: err.Error()}}
+		return extension.ToolResult{}, err
 	}
 	p.inputAfter = string(arguments)
 	p.resultValue = string(result.Value)
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: p.callID, Status: model.ResultSuccess, Content: "ok"}}
+	return extension.ToolResult{Content: "ok"}, nil
 }
 
 func TestNativeServiceArgumentsAndResultAreOwned(t *testing.T) {
@@ -300,10 +253,8 @@ func TestNativeServiceArgumentsAndResultAreOwned(t *testing.T) {
 			return extension.Result{Value: kept}, nil
 		})
 	probe := &ownershipProbe{}
-	adapter := nativeToolAdapter(t, "caller", provider, testToolNative("caller", probe))
-	prepared := adapter.Prepare(context.Background(), ToolContext{}, model.ToolCall{ID: "call", Name: "caller", Arguments: json.RawMessage(`{}`)})
-	testassert.Require(t, prepared.Execute != nil, "plan = %+v, want execution", prepared)
-	prepared.Execute(context.Background())
+	adapter := nativeToolAdapter(t, "caller", provider, testToolNative("caller", probe.run))
+	adapter.Run(context.Background(), ToolContext{}, model.ToolCall{ID: "call", Name: "caller", Arguments: json.RawMessage(`{}`)})
 	// The provider's result bytes were mutated after return; the accepted value
 	// must remain the original owned bytes.
 	kept[1] = '!'
@@ -414,27 +365,7 @@ func TestNativeSuppliedCancellationPropagatesTransitively(t *testing.T) {
 	}
 }
 
-// normalizeWaitTool normalizes by calling its declared pure provider with a
-// detached author context: only the invocation view origin can cancel it.
-type normalizeWaitTool struct{}
-
-func (normalizeWaitTool) Normalize(tc extension.AuthorContext, _ model.ToolCall) (json.RawMessage, error) {
-	_, err := tc.Call(context.Background(), "norm.provider", "wait", json.RawMessage(`{}`))
-	return nil, err
-}
-
-func (normalizeWaitTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-
-func (normalizeWaitTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: "call-norm", Status: model.ResultSuccess, Content: "ok"}}
-}
-
-// TestNativeNormalizeFollowsInvocationCancellation proves Normalize's view
-// origin is the actual invocation context: cancelling the invocation
-// interrupts a waiting pure provider.
-func TestNativeNormalizeFollowsInvocationCancellation(t *testing.T) {
+func TestNativeToolFollowsInvocationCancellation(t *testing.T) {
 	started := make(chan struct{})
 	provider := serviceNative("normprovider", "norm.provider", extension.ServiceMethod("wait", `{}`, `{}`, "", ""),
 		func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
@@ -443,36 +374,38 @@ func TestNativeNormalizeFollowsInvocationCancellation(t *testing.T) {
 			return extension.Result{}, ctx.Err()
 		})
 	tool := testNative("normtool", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(testDescribeTool("norm_tool"), normalizeWaitTool{}, nil)
+		_, err := api.RegisterTool(testDescribeTool("norm_tool"), func(_ context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
+			_, err := tc.Call(context.Background(), "norm.provider", "wait", json.RawMessage(`{}`))
+			return extension.ToolResult{}, err
+		}, nil)
 		return nil, err
 	})
 	adapter := nativeToolAdapter(t, "norm_tool", provider, tool)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
+	done := make(chan harness.ToolOutcome, 1)
 	go func() {
-		_, err := adapter.Normalize(ctx, ToolContext{}, model.ToolCall{ID: "call-norm", Name: "norm_tool", Arguments: json.RawMessage(`{}`)})
-		done <- err
+		done <- adapter.Run(ctx, ToolContext{}, model.ToolCall{ID: "call-norm", Name: "norm_tool", Arguments: json.RawMessage(`{}`)})
 	}()
 	<-started
 	cancel()
 	select {
-	case err := <-done:
-		testassert.Require(t, errors.Is(err, context.Canceled), "Normalize error = %v, want invocation cancellation", err)
+	case outcome := <-done:
+		testassert.Require(t, outcome.Result.Status == model.ResultInterrupted, "outcome = %+v, want invocation cancellation", outcome)
 	case <-time.After(10 * time.Second):
 		t.Fatal("Normalize did not observe invocation cancellation while the pure provider waited")
 	}
 }
 
-// ownedStartProbe prepares one frozen SessionStart and requests it through the
-// host session service at Execute, after mutating the plan it received.
+// ownedStartProbe starts owned Sessions from one tool call.
 type ownedStartProbe struct {
-	target   string
 	content  string
+	starts   int
 	executes atomic.Int64
 
 	mu        sync.Mutex
 	launchErr error
 	childID   string
+	children  []string
 }
 
 // outcome reads the probe's one launch result under its mutex.
@@ -488,49 +421,34 @@ func (p *ownedStartProbe) record(childID string, err error) {
 	p.mu.Unlock()
 }
 
-func (p *ownedStartProbe) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (p *ownedStartProbe) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+func (p *ownedStartProbe) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	modelRef := model.ModelRef{Provider: "prov", Model: "m"}
-	return extension.ToolPlan{
-		Data: []byte(call.ID),
-		Start: &extension.SessionStart{
-			Target:       p.target,
-			Inputs:       harness.SessionInputs{Model: &modelRef},
-			InitialState: harness.SessionStateValue(`{"probe":"frozen"}`),
-			Input:        []model.ContentPart{{Kind: model.PartText, Text: p.content}},
-		},
-	}
-}
-
-func (p *ownedStartProbe) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	callID := string(plan.Data)
 	p.executes.Add(1)
-	plan.Start.Target = "substituted"
-	plan.Start.Input[0].Text = "substituted"
-	plan.Start.InitialState[0] = 'x'
-	plan.Start.Inputs.Model = &model.ModelRef{Provider: "substituted", Model: "substituted"}
-	result, err := call.Call(ctx, "melta.session", "start", json.RawMessage(`{}`))
-	if err != nil {
-		p.record("", err)
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
+	count := p.starts
+	if count == 0 {
+		count = 1
 	}
-	var launched struct {
-		SessionID string `json:"session_id"`
+	var id string
+	for i := 0; i < count; i++ {
+		var err error
+		id, err = call.StartSession(ctx, extension.SessionStart{Inputs: harness.SessionInputs{Model: &modelRef},
+			InitialState: harness.SessionStateValue(`{"probe":"frozen"}`),
+			Input:        []model.ContentPart{{Kind: model.PartText, Text: p.content}}})
+		if err != nil {
+			p.record(id, err)
+			return extension.ToolResult{}, err
+		}
+		p.mu.Lock()
+		p.children = append(p.children, id)
+		p.mu.Unlock()
 	}
-	if err := json.Unmarshal(result.Value, &launched); err != nil {
-		p.record("", err)
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
-	}
-	p.record(launched.SessionID, nil)
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: "launched " + launched.SessionID}}
+	p.record(id, nil)
+	return extension.ToolResult{Content: "launched " + id}, nil
 }
 
 // ownedStartNative registers probe as name under extension id, which requests
-// the host session service its ToolPlan.Start consumes.
-func ownedStartNative(id, name string, probe extension.RegisteredTool) extension.Extension {
+// the host session service it calls.
+func ownedStartNative(id, name string, probe extension.ToolFunc) extension.Extension {
 	manifest := extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{}`), Services: []string{"melta.session"}}
 	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterTool(testDescribeTool(name), probe, nil)
@@ -554,17 +472,15 @@ func awaitBody(t *testing.T, e *ownerEnv, match func(string) bool) string {
 	}
 }
 
-// TestNativeOwnedStartIgnoresPlanMutation proves the real Harness path: the
-// prepared start is frozen, the executor's mutation of the plan it received
-// cannot substitute the target, inputs or initial state, and the committed
-// child Session exists exactly once with the frozen content.
-func TestNativeOwnedStartIgnoresPlanMutation(t *testing.T) {
+// TestNativeToolStartsTwoSessions proves one tool call commits two distinct
+// children with the parent Session's lineage.
+func TestNativeToolStartsTwoSessions(t *testing.T) {
 	e := newOwnerEnv(t)
 	enableFixturePlugin(t, e.configPath, "grant")
 	writeAgentDefinitions(t, e.configPath, `{"grant_agent":{"model":"prov/m","system_prompt":"simple","tools":["start_tool"]}}`)
 	store := storage.NewMemory()
 	e.fixtureStore(store)
-	probe := &ownedStartProbe{target: "secondary", content: "child work"}
+	probe := &ownedStartProbe{content: "child work", starts: 2}
 	e.server.setScript(func(_ context.Context, body string) []string {
 		if lastUserText(body) == "child work" {
 			return textTurnEvents("child done")
@@ -575,27 +491,31 @@ func TestNativeOwnedStartIgnoresPlanMutation(t *testing.T) {
 		return toolCallTurnEvents("call-start", "start_tool", `{}`)
 	})
 	ctx := context.Background()
-	r, err := e.open(ctx, ownedStartNative("grant", "start_tool", probe))
+	r, err := e.open(ctx, ownedStartNative("grant", "start_tool", probe.run))
 	testassert.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(context.Background()) })
 	session, err := r.createSession(ctx, e.dataDir, "grant_agent")
 	testassert.NoError(t, err)
 	submitThroughRuntime(t, r, session.Identity.SessionID, "op-start", "run")
 	awaitOperation(t, r, session.Identity.SessionID, "op-start", harness.OperationSuccess)
-	childID, launchErr := probe.outcome()
+	_, launchErr := probe.outcome()
 	testassert.NoError(t, launchErr)
-	testassert.Require(t, len(childID) == 32 && probe.executes.Load() == 1, "child id = %q (executes %d), want one admitted start", childID, probe.executes.Load())
-	header, err := r.harness.ReadSessionHeader(ctx, childID)
-	testassert.NoError(t, err)
-	testassert.Equal(t, header.Identity.OwnerSessionID, session.Identity.SessionID)
+	probe.mu.Lock()
+	children := append([]string(nil), probe.children...)
+	probe.mu.Unlock()
+	testassert.Require(t, len(children) == 2 && children[0] != children[1] && probe.executes.Load() == 1, "children = %v (executes %d)", children, probe.executes.Load())
+	for _, childID := range children {
+		header, err := r.harness.ReadSessionHeader(ctx, childID)
+		testassert.NoError(t, err)
+		testassert.Equal(t, header.Identity.OwnerSessionID, session.Identity.SessionID)
+		state, err := r.harness.SessionExtensionStates(ctx, childID)
+		testassert.NoError(t, err)
+		testassert.Equal(t, string(state["grant"]), `{"probe":"frozen"}`)
+	}
 	ids, err := store.ListSessionIDs(ctx)
 	testassert.NoError(t, err)
-	testassert.Equal(t, len(ids), 2)
-	// The frozen content reached the child; no plan mutation did.
+	testassert.Equal(t, len(ids), 3)
 	awaitBody(t, e, func(body string) bool { return lastUserText(body) == "child work" })
-	for i := 0; i < e.server.requests(); i++ {
-		testassert.Require(t, !strings.Contains(e.server.bodyAt(i), "substituted"), "model request %d carried a substituted plan value: %s", i, e.server.bodyAt(i))
-	}
 }
 
 // TestNativeOwnedStartAllowsAnotherExtensionToNest proves the owned start is
@@ -608,8 +528,8 @@ func TestNativeOwnedStartAllowsAnotherExtensionToNest(t *testing.T) {
 	writeAgentDefinitions(t, e.configPath, `{"nest_agent":{"model":"prov/m","system_prompt":"simple","tools":["alpha_start","beta_start"]}}`)
 	store := storage.NewMemory()
 	e.fixtureStore(store)
-	alpha := &ownedStartProbe{target: "shared", content: "alpha work"}
-	beta := &ownedStartProbe{target: "shared", content: "beta work"}
+	alpha := &ownedStartProbe{content: "alpha work"}
+	beta := &ownedStartProbe{content: "beta work"}
 	e.server.setScript(func(_ context.Context, body string) []string {
 		switch lastUserText(body) {
 		case "alpha work", "beta work":
@@ -624,7 +544,7 @@ func TestNativeOwnedStartAllowsAnotherExtensionToNest(t *testing.T) {
 		return toolCallTurnEvents("call-alpha", "alpha_start", `{}`)
 	})
 	ctx := context.Background()
-	r, err := e.open(ctx, ownedStartNative("alpha", "alpha_start", alpha), ownedStartNative("beta", "beta_start", beta))
+	r, err := e.open(ctx, ownedStartNative("alpha", "alpha_start", alpha.run), ownedStartNative("beta", "beta_start", beta.run))
 	testassert.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(context.Background()) })
 	session, err := r.createSession(ctx, e.dataDir, "nest_agent")
@@ -649,17 +569,11 @@ func TestNativeOwnedStartAllowsAnotherExtensionToNest(t *testing.T) {
 	testassert.Equal(t, len(ids), 3)
 }
 
-type registrationTool struct{ executes *atomic.Int64 }
-
-func (t registrationTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (registrationTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (t registrationTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	t.executes.Add(1)
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: "call-owned", Status: model.ResultSuccess, Content: "owned"}}
+func registrationTool(executes *atomic.Int64) extension.ToolFunc {
+	return func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+		executes.Add(1)
+		return extension.ToolResult{Content: "owned"}, nil
+	}
 }
 
 // TestNativeToolDefinitionBytesAreOwned proves the accepted registration is
@@ -674,7 +588,7 @@ func TestNativeToolDefinitionBytesAreOwned(t *testing.T) {
 	parameters := []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`)
 	definition := model.ToolDefinition{Name: "owned_tool", Description: "original registration description", Parameters: parameters}
 	native := testNative("owned_tool", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(definition, registrationTool{executes: &executes}, nil)
+		_, err := api.RegisterTool(definition, registrationTool(&executes), nil)
 		return nil, err
 	})
 	e.server.setScript(func(_ context.Context, body string) []string {
@@ -697,76 +611,6 @@ func TestNativeToolDefinitionBytesAreOwned(t *testing.T) {
 	testassert.Require(t, strings.Contains(e.server.bodyAt(0), "original registration description"), "advertised tool = %s, want the owned original description", e.server.bodyAt(0))
 	testassert.Require(t, !strings.Contains(e.server.bodyAt(0), "mutated description") && strings.Contains(e.server.bodyAt(0), `{"type":"object","properties":{"path":{"type":"string"}}}`), "advertised tool = %s, want no caller-mutated registration", e.server.bodyAt(0))
 	testassert.NoError(t, r.Close(ctx))
-}
-
-type invalidImmediateTool struct{}
-
-func (invalidImmediateTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (invalidImmediateTool) Prepare(_ context.Context, _ extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "immediate without identity"}}}
-}
-func (invalidImmediateTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "must not run"}}
-}
-
-type invalidResultTool struct{}
-
-func (invalidResultTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (invalidResultTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (invalidResultTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "result without identity"}}
-}
-
-// TestNativeInvalidPreparedAndReturnedResultsAreSettledByHarness proves the
-// real native producer's malformed outcomes reach the shared Harness
-// settlement: an immediate success without the actual call identity settles
-// as the internal-validation result without execution, and an executor
-// success without identity settles as unknown rather than being stamped.
-func TestNativeInvalidPreparedAndReturnedResultsAreSettledByHarness(t *testing.T) {
-	for _, row := range []struct {
-		name     string
-		tool     extension.RegisteredTool
-		want     string
-		evidence harness.ExecutionEvidence
-	}{
-		{name: "invalid immediate", tool: invalidImmediateTool{}, want: "Tool call failed internal validation.", evidence: harness.ExecutionNotStarted},
-		{name: "invalid executor result", tool: invalidResultTool{}, want: "Execution outcome unknown", evidence: harness.ExecutionUnknown},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			e := newOwnerEnv(t)
-			enableFixturePlugin(t, e.configPath, "invalid_result")
-			writeAgentDefinitions(t, e.configPath, `{"invalid_agent":{"model":"prov/m","system_prompt":"simple","tools":["invalid_tool"]}}`)
-			e.fixtureStore(storage.NewMemory())
-			native := testNative("invalid_result", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-				_, err := api.RegisterTool(testDescribeTool("invalid_tool"), row.tool, nil)
-				return nil, err
-			})
-			e.server.setScript(func(_ context.Context, body string) []string {
-				if lastMessageRole(body) == "tool" {
-					return textTurnEvents("done")
-				}
-				return toolCallTurnEvents("call-invalid", "invalid_tool", `{}`)
-			})
-			ctx := context.Background()
-			r, err := e.open(ctx, native)
-			testassert.NoError(t, err)
-			session, err := r.createSession(ctx, e.dataDir, "invalid_agent")
-			testassert.NoError(t, err)
-			submitThroughRuntime(t, r, session.Identity.SessionID, "op-invalid", "run")
-			awaitOperation(t, r, session.Identity.SessionID, "op-invalid", harness.OperationSuccess)
-			result := toolResultFact(t, r, session.Identity.SessionID, "op-invalid")
-			testassert.Require(t, result.Status == model.ResultError && result.Evidence == row.evidence && strings.Contains(result.Content, row.want), "result = %+v, want %s and %q", result, row.evidence, row.want)
-			testassert.Require(t, e.server.requests() >= 2, "model requests = %d, want the call and follow-up", e.server.requests())
-			testassert.Require(t, strings.Contains(e.server.bodyAt(1), row.want), "follow-up request = %s, want %q", e.server.bodyAt(1), row.want)
-			testassert.NoError(t, r.Close(ctx))
-		})
-	}
 }
 
 // publicationIntentStore injects one failure at the real Harness tool-effect
@@ -796,19 +640,6 @@ func (s *publicationIntentStore) Transact(ctx context.Context, fn func(harness.T
 	})
 }
 
-type intentFailureTool struct{ executes *atomic.Int64 }
-
-func (t intentFailureTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (intentFailureTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (t intentFailureTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	t.executes.Add(1)
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "must not run"}}
-}
-
 // TestNativeToolIntentPublicationFailureRetainsRunningState proves the real
 // native tool reaches the shared Harness publication boundary: a failed tool
 // intent commits no execution, no result, and leaves the running Operation for
@@ -821,7 +652,10 @@ func TestNativeToolIntentPublicationFailureRetainsRunningState(t *testing.T) {
 	e.fixtureStore(store)
 	var executes atomic.Int64
 	native := testNative("intentext", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(testDescribeTool("intent_tool"), intentFailureTool{executes: &executes}, nil)
+		_, err := api.RegisterTool(testDescribeTool("intent_tool"), func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+			executes.Add(1)
+			return extension.ToolResult{Content: "must not run"}, nil
+		}, nil)
 		return nil, err
 	})
 	e.server.setScript(func(_ context.Context, body string) []string {
@@ -863,7 +697,7 @@ func TestNativeImplementationSettingsPreserveRawBytesCold(t *testing.T) {
 	writeServiceFile(t, e.configPath, config)
 	e.fixtureStore(storage.NewMemory())
 	var executes atomic.Int64
-	native := testToolNative("provsettings", registrationTool{executes: &executes})
+	native := testToolNative("provsettings", registrationTool(&executes))
 	e.server.setScript(func(_ context.Context, body string) []string {
 		if lastMessageRole(body) == "tool" {
 			return textTurnEvents("done")
@@ -920,27 +754,19 @@ type normalizeIdentityTool struct {
 	state *normalizeIdentityState
 }
 
-func (t normalizeIdentityTool) Normalize(tc extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
+func (t normalizeIdentityTool) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	t.state.mu.Lock()
-	t.state.native = append(t.state.native, normalizeIdentity{extensionID: tc.ExtensionID, requestID: tc.RequestID, callID: call.ID, sessionID: tc.Session.SessionID, arguments: string(call.Arguments)})
+	t.state.native = append(t.state.native, normalizeIdentity{extensionID: call.ExtensionID, requestID: call.RequestID, callID: call.ID, sessionID: call.Session.SessionID, arguments: string(call.Arguments)})
 	t.state.mu.Unlock()
-	if _, err := tc.Call(context.Background(), "test.ident.provider", "call", json.RawMessage(`{}`)); err != nil {
-		return nil, err
+	if _, err := call.Call(ctx, "test.ident.provider", "call", json.RawMessage(`{}`)); err != nil {
+		return extension.ToolResult{}, err
 	}
-	return call.Arguments, nil
-}
-func (t normalizeIdentityTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (t normalizeIdentityTool) Execute(_ context.Context, _ extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: "call-ident", Status: model.ResultSuccess, Content: "ok"}}
+	return extension.ToolResult{Content: "ok"}, nil
 }
 
-// TestNativeNormalizeUsesCompleteIdentityCarrier proves the native adapter
-// consumes the Harness callback identity for the one final normalized call,
-// reaching the native tool and its declared pure service with the same
-// producing request and Session identities.
-func TestNativeNormalizeUsesCompleteIdentityCarrier(t *testing.T) {
+// TestNativeToolUsesCompleteIdentityCarrier verifies the tool and its nested
+// service receive the same request and Session identities.
+func TestNativeToolUsesCompleteIdentityCarrier(t *testing.T) {
 	e := newOwnerEnv(t)
 	config := strings.TrimSuffix(ownerConfigDocument(e.server.URL), "}") +
 		`,"extensions":{"agents":{"enabled":true,"definitions":{"identity_agent":{"model":"prov/m","system_prompt":"simple","tools":["identity_tool"]}}},"identityext":{"enabled":true},"identprovider":{"enabled":true}}}`
@@ -960,7 +786,7 @@ func TestNativeNormalizeUsesCompleteIdentityCarrier(t *testing.T) {
 		return nil, err
 	})
 	consumer := testNative("identityext", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(testDescribeTool("identity_tool"), normalizeIdentityTool{state: state}, nil); err != nil {
+		if _, err := api.RegisterTool(testDescribeTool("identity_tool"), (normalizeIdentityTool{state: state}).run, nil); err != nil {
 			return nil, err
 		}
 		_, err := api.AttachArguments(func(_ context.Context, _ extension.AuthorContext, _ model.ToolCall) (extension.ArgumentsResult, error) {
@@ -985,7 +811,7 @@ func TestNativeNormalizeUsesCompleteIdentityCarrier(t *testing.T) {
 	nativeIDs := append([]normalizeIdentity(nil), state.native...)
 	providerIDs := append([]normalizeIdentity(nil), state.provider...)
 	state.mu.Unlock()
-	testassert.Require(t, len(nativeIDs) == 1 && len(providerIDs) == 1, "normalize identities = native %v provider %v, want one final normalization", nativeIDs, providerIDs)
+	testassert.Require(t, len(nativeIDs) == 1 && len(providerIDs) == 1, "tool identities = native %v provider %v, want one call", nativeIDs, providerIDs)
 	testassert.Equal(t, nativeIDs[0].callID, "call-ident")
 	testassert.Equal(t, nativeIDs[0].arguments, `{"repaired":true}`)
 	testassert.Equal(t, nativeIDs[0].extensionID, "identityext")

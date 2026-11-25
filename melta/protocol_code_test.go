@@ -1574,31 +1574,16 @@ func TestExecutionOpenerFailureReleasesInterval(t *testing.T) {
 // executor on the release gate: an execution cleanup held open.
 func parkingAgentClosePlugin(started chan struct{}, gate chan struct{}) extension.Extension {
 	return testNative("parking-agent", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "park_tool", Description: "parks", Parameters: json.RawMessage(`{"type":"object"}`)}, parkingTool{started: started, gate: gate}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "park_tool", Description: "parks", Parameters: json.RawMessage(`{"type":"object"}`)}, func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-gate
+			return extension.ToolResult{Content: "parked"}, nil
+		}, nil)
 		return nil, err
 	})
-}
-
-type parkingTool struct {
-	started chan struct{}
-	gate    chan struct{}
-}
-
-func (parkingTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (parkingTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Data: []byte(call.ID)}
-}
-
-func (t parkingTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	select {
-	case t.started <- struct{}{}:
-	default:
-	}
-	<-t.gate
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: "parked"}}
 }
 
 func TestExecutionCleanupReleasesIntervalLast(t *testing.T) {

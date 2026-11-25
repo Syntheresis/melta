@@ -9,7 +9,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/extension/worker"
@@ -218,7 +217,7 @@ type registeredService struct {
 
 type nativeTool struct {
 	definition model.ToolDefinition
-	tool       extension.RegisteredTool
+	tool       func(context.Context, extension.AuthorContext, model.ToolCall) harness.ToolOutcome
 	validate   func(json.RawMessage) error
 }
 
@@ -720,13 +719,19 @@ func compileToolValidator(def model.ToolDefinition) (func(json.RawMessage) error
 	return contract.ValidateArguments, nil
 }
 
-func (api nativeAPI) RegisterTool(def model.ToolDefinition, tool extension.RegisteredTool, replace extension.Registration) (extension.Registration, error) {
+func (api nativeAPI) RegisterTool(def model.ToolDefinition, tool extension.ToolFunc, replace extension.Registration) (extension.Registration, error) {
+	if tool == nil {
+		return nil, errors.New("missing tool implementation")
+	}
+	return api.registerTool(def, func(ctx context.Context, author extension.AuthorContext, call model.ToolCall) harness.ToolOutcome {
+		return extension.RunTool(ctx, tool, extension.ToolCall{AuthorContext: author, ID: call.ID, Name: call.Name, Arguments: call.Arguments})
+	}, replace)
+}
+
+func (api nativeAPI) registerTool(def model.ToolDefinition, tool func(context.Context, extension.AuthorContext, model.ToolCall) harness.ToolOutcome, replace extension.Registration) (extension.Registration, error) {
 	def, err := model.NewToolDefinition(def)
 	if err != nil {
 		return nil, fmt.Errorf("tool definition: %v: %w", err, harness.ErrInvalid)
-	}
-	if tool == nil {
-		return nil, errors.New("missing tool implementation")
 	}
 	validate, err := compileToolValidator(def)
 	if err != nil {
@@ -935,8 +940,8 @@ type nativeCallScope struct {
 	candidate        *nativeCandidate
 	activation       *nativeActivation
 	kind             nativeCallKind
-	workspace        *nativeWorkspace
-	workspaceBind    bool
+	dataDir          string
+	admittedEntry    harness.EntryRef
 	session          harness.SessionIdentity
 	requestID        string
 	states           map[string]harness.SessionStateValue
@@ -944,14 +949,6 @@ type nativeCallScope struct {
 	lease            *artifactCallLease
 	operationSecrets map[string]map[string]string
 	commandScope     CallerScope
-	start            *nativeSessionStart
-}
-
-type nativeSessionStart struct {
-	mu          sync.Mutex
-	consumed    bool
-	extensionID string
-	plan        extension.SessionStart
 }
 
 func (scope *nativeCallScope) call(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
@@ -1022,7 +1019,7 @@ func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method
 		return extension.Result{}, err
 	}
 	childCtx, cancel := context.WithCancel(ctx)
-	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, kind: parent.kind, workspace: parent.workspace, workspaceBind: parent.workspaceBind, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, start: parent.start, requestID: parent.requestID})
+	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, kind: parent.kind, dataDir: parent.dataDir, admittedEntry: parent.admittedEntry, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, requestID: parent.requestID})
 	return executeNativeProvider(scope.ctx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call, RequestID: scope.requestID}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 		defer scope.end()
 		return binding.handler(ctx, call, args)

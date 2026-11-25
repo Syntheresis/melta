@@ -77,21 +77,3 @@ func TestAuthorAdmissionCodecsWireShape(t *testing.T) {
 		t.Fatalf("admission round trip: %+v, %v", decoded, err)
 	}
 }
-
-func TestAuthorPlanCodecsRoundTrip(t *testing.T) {
-	instructions, prompt := "instructions", "prompt"
-	plan := extension.ToolPlan{Data: []byte{0xff, 0}, Start: &extension.SessionStart{
-		Target: "raw/name", Inputs: harness.SessionInputs{
-			Model: &model.ModelRef{Provider: "incomplete"}, Instructions: &instructions, Prompt: &prompt,
-			Tools: []string{"same", "same"}, Strategy: &harness.StrategySelection{Settings: json.RawMessage{0xff, '{'}},
-		}, InitialState: []byte(`{"n":9007199254740993}`),
-	}}
-	raw, err := worker.EncodeAuthorPlan(plan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := worker.DecodeAuthorPlan(raw)
-	if err != nil || !reflect.DeepEqual(got.Start, plan.Start) || !reflect.DeepEqual(got.Data, plan.Data) {
-		t.Fatalf("plan = %+v, %v", got, err)
-	}
-}

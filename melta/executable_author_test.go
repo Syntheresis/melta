@@ -255,14 +255,10 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}
 			oldTool := oldBinding.entry.value.(nativeTool).tool
 			call := model.ToolCall{ID: "call", Name: "worker-tool", Arguments: json.RawMessage(`{"arg":1}`)}
-			normalized, err := oldTool.Normalize(extension.AuthorContext{}, call)
-			if err != nil || string(normalized) != string(call.Arguments) {
-				t.Fatalf("normalize = %s, %v", normalized, err)
-			}
 			parked, proceed := make(chan struct{}), make(chan struct{})
-			prepared := make(chan extension.ToolPlan, 1)
+			finished := make(chan harness.ToolOutcome, 1)
 			go func() {
-				prepared <- oldTool.Prepare(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+				finished <- oldTool(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
 					close(parked)
 					<-proceed
 					return extension.Result{Value: json.RawMessage(`{}`)}, nil
@@ -270,8 +266,8 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}()
 			select {
 			case <-parked:
-			case plan := <-prepared:
-				t.Fatalf("prepare returned before parking: %+v", plan)
+			case outcome := <-finished:
+				t.Fatalf("tool returned before parking: %+v", outcome)
 			case <-time.After(5 * time.Second):
 				t.Fatal("prepare did not park")
 			}
@@ -284,9 +280,9 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}
 			during.release()
 			close(proceed)
-			plan := <-prepared
-			if plan.Immediate != nil {
-				t.Fatalf("prepare: %+v", plan.Immediate)
+			outcome := <-finished
+			if outcome.Result.Status != model.ResultSuccess || outcome.Result.Content != "old handler" {
+				t.Fatalf("old handler: %+v", outcome)
 			}
 			newStage, err := work.stage()
 			if err != nil {
@@ -296,10 +292,6 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 				t.Fatal("replacement did not appear in next stage")
 			}
 			oldStage.release()
-			outcome := oldTool.Execute(context.Background(), extension.AuthorContext{}, plan)
-			if outcome.Result.Status != model.ResultSuccess || outcome.Result.Content != "old handler" {
-				t.Fatalf("prepared old handler: %+v", outcome)
-			}
 			oldBinding.release()
 			newStage.release()
 			removalStage, err := work.stage()
@@ -316,11 +308,11 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			removalBinding.entry.release = func() { releases.Add(1); release() }
 			owner.nativeMu.Unlock()
 			removalTool := removalBinding.entry.value.(nativeTool).tool
-			removalPlan := removalTool.Prepare(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+			removalOutcome := removalTool(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			}}, model.ToolCall{ID: "remove", Name: "removable-tool", Arguments: json.RawMessage(`{}`)})
-			if removalPlan.Immediate != nil || releases.Load() != 0 {
-				t.Fatalf("self-removal released prepared handler: %+v, releases %d", removalPlan, releases.Load())
+			if removalOutcome.Result.Status != model.ResultSuccess || releases.Load() != 0 {
+				t.Fatalf("self-removal released handler: %+v, releases %d", removalOutcome, releases.Load())
 			}
 			afterRemoval, err := work.stage()
 			if err != nil || afterRemoval.tools["removable-tool"] != nil {
@@ -330,9 +322,6 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			removalStage.release()
 			if releases.Load() != 0 {
 				t.Fatal("plan did not retain removed handler")
-			}
-			if got := removalTool.Execute(context.Background(), extension.AuthorContext{}, removalPlan); got.Result.Status != model.ResultSuccess {
-				t.Fatalf("removed handler execution: %+v", got)
 			}
 			removalBinding.release()
 			removalBinding.release()
@@ -596,9 +585,9 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	binding := parkedStage.bindTool("worker-tool")
 	tool := binding.entry.value.(nativeTool).tool
 	parked, proceed := make(chan struct{}), make(chan struct{})
-	prepared := make(chan extension.ToolPlan, 1)
+	finished := make(chan harness.ToolOutcome, 1)
 	go func() {
-		prepared <- tool.Prepare(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+		finished <- tool(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
 			close(parked)
 			<-proceed
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
@@ -606,8 +595,8 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	}()
 	select {
 	case <-parked:
-	case plan := <-prepared:
-		t.Fatalf("callback returned before parking: %+v", plan)
+	case outcome := <-finished:
+		t.Fatalf("callback returned before parking: %+v", outcome)
 	case <-time.After(5 * time.Second):
 		t.Fatal("callback did not park")
 	}
@@ -620,12 +609,8 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 		t.Fatalf("rotation spawned %d workers", spawns)
 	}
 	close(proceed)
-	plan := <-prepared
-	if plan.Immediate != nil {
-		t.Fatalf("parked callback failed after publication: %+v", plan.Immediate)
-	}
-	if outcome := tool.Execute(context.Background(), extension.AuthorContext{}, plan); outcome.Result.Status != model.ResultSuccess {
-		t.Fatalf("old prepared handler failed after publication: %+v", outcome)
+	if outcome := <-finished; outcome.Result.Status != model.ResultSuccess {
+		t.Fatalf("old handler failed after publication: %+v", outcome)
 	}
 	parkedStage.release()
 	binding.release()

@@ -6,19 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"strings"
 
 	"github.com/Syntheresis/melta/extension"
 )
-
-const workspaceService = "melta.workspace"
-
-// callFunc is the extension host-call shape one tool receives in its
-// AuthorContext. The engine reaches files only through the Host's Workspace
-// operations.
-type callFunc func(context.Context, string, string, json.RawMessage) (extension.Result, error)
 
 type outcome uint8
 
@@ -28,161 +20,75 @@ const (
 	outcomeUncertain
 )
 
-// boundTarget is one path bound during preparation: the Host-issued binding
-// handle and its canonical witness.
+// boundTarget holds the path and facts observed before validation.
 type boundTarget struct {
-	Binding   string `json:"binding"`
-	Canonical string `json:"canonical"`
-	Path      string `json:"path"`
+	Canonical string
+	Path      string
+	Exists    bool
 }
 
-// planData is the prepared plan carried from Prepare to Execute: the call
-// identity and the parsed operations with their bound targets.
-type planData struct {
-	CallID string
-	Ops    []fileOp
-}
-
-// wireOp is the plan's JSON shape; fileOp keeps the parser's private fields.
-type wireOp struct {
-	Kind        opKind       `json:"kind"`
-	Path        string       `json:"path"`
-	MovePath    string       `json:"move_path,omitempty"`
-	Hunks       []hunk       `json:"hunks,omitempty"`
-	Source      boundTarget  `json:"source"`
-	Destination *boundTarget `json:"destination,omitempty"`
-}
-
-func (p planData) MarshalJSON() ([]byte, error) {
-	ops := make([]wireOp, 0, len(p.Ops))
-	for _, op := range p.Ops {
-		ops = append(ops, wireOp{Kind: op.kind, Path: op.path, MovePath: op.movePath, Hunks: op.hunks, Source: op.source, Destination: op.destination})
-	}
-	return json.Marshal(struct {
-		CallID string   `json:"call_id"`
-		Ops    []wireOp `json:"ops"`
-	}{p.CallID, ops})
-}
-
-func (p *planData) UnmarshalJSON(data []byte) error {
-	var wire struct {
-		CallID string   `json:"call_id"`
-		Ops    []wireOp `json:"ops"`
-	}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return err
-	}
-	p.CallID = wire.CallID
-	p.Ops = make([]fileOp, 0, len(wire.Ops))
-	for _, op := range wire.Ops {
-		p.Ops = append(p.Ops, fileOp{kind: op.Kind, path: op.Path, movePath: op.MovePath, hunks: op.Hunks, source: op.Source, destination: op.Destination})
-	}
-	return nil
-}
-
-// preparePlan parses the patch, binds every source and destination through
-// the Workspace service and rejects two targets with the same canonical path.
-func preparePlan(ctx context.Context, call callFunc, input string) (planData, error) {
+// parseAndStatTargets parses the patch, stats every target and rejects duplicate paths.
+func parseAndStatTargets(ctx context.Context, call extension.AuthorContext, input string) ([]fileOp, error) {
 	parsed, err := parsePatch(input)
 	if err != nil {
-		return planData{}, err
+		return nil, err
 	}
-	plan := planData{Ops: make([]fileOp, 0, len(parsed.ops))}
+	ops := make([]fileOp, 0, len(parsed.ops))
 	targets := make([]boundTarget, 0, len(parsed.ops)*2)
 	for _, parsedOp := range parsed.ops {
 		op := parsedOp
-		op.source, err = bindTarget(ctx, call, op.path)
+		op.source, err = statTarget(ctx, call, op.path)
 		if err != nil {
-			return planData{}, err
+			return nil, err
 		}
 		targets = append(targets, op.source)
 		if op.movePath != "" {
-			destination, err := bindTarget(ctx, call, op.movePath)
+			destination, err := statTarget(ctx, call, op.movePath)
 			if err != nil {
-				return planData{}, err
+				return nil, err
 			}
 			op.destination = &destination
 			targets = append(targets, destination)
 		}
-		plan.Ops = append(plan.Ops, op)
+		ops = append(ops, op)
 	}
 	seen := make(map[string]bool, len(targets))
 	for _, target := range targets {
 		key := filepath.Clean(target.Canonical)
 		if seen[key] {
-			return planData{}, fmt.Errorf("apply_patch: multiple patch entries resolve to the same file: %s", target.Canonical)
+			return nil, fmt.Errorf("apply_patch: multiple patch entries resolve to the same file: %s", target.Canonical)
 		}
 		seen[key] = true
 	}
-	return plan, nil
+	return ops, nil
 }
 
-func bindTarget(ctx context.Context, call callFunc, path string) (boundTarget, error) {
-	args, err := json.Marshal(map[string]string{"path": path})
+func statTarget(ctx context.Context, call extension.AuthorContext, path string) (boundTarget, error) {
+	result, err := call.StatFile(ctx, path)
 	if err != nil {
 		return boundTarget{}, err
 	}
-	result, err := call(ctx, workspaceService, "bind", args)
-	if err != nil {
-		return boundTarget{}, err
-	}
-	var bound struct {
-		Binding       string `json:"binding"`
-		CanonicalPath string `json:"canonical_path"`
-	}
-	if err := json.Unmarshal(result.Value, &bound); err != nil {
-		return boundTarget{}, fmt.Errorf("apply_patch: bind %s: %w", path, err)
-	}
-	if bound.Binding == "" || bound.CanonicalPath == "" {
-		return boundTarget{}, fmt.Errorf("apply_patch: bind %s: empty binding", path)
-	}
-	return boundTarget{Binding: bound.Binding, Canonical: bound.CanonicalPath, Path: path}, nil
+	return boundTarget{Canonical: result.Path, Path: path, Exists: result.Exists}, nil
 }
 
-func readTarget(ctx context.Context, call callFunc, target boundTarget) ([]byte, error) {
-	args, err := json.Marshal(map[string]string{"binding": target.Binding})
-	if err != nil {
-		return nil, err
+func writeTarget(ctx context.Context, call extension.AuthorContext, target boundTarget, content []byte, createOnly bool) (outcome, error) {
+	var err error
+	if createOnly {
+		err = call.CreateFile(ctx, target.Path, content)
+	} else {
+		err = call.WriteFile(ctx, target.Path, content)
 	}
-	result, err := call(ctx, workspaceService, "read", args)
-	if err != nil {
-		return nil, err
-	}
-	var read struct {
-		Bytes []byte `json:"bytes"`
-	}
-	if err := json.Unmarshal(result.Value, &read); err != nil {
-		return nil, fmt.Errorf("apply_patch: read %s: %w", target.Path, err)
-	}
-	return read.Bytes, nil
+	return mutationOutcome(err)
 }
 
-func writeTarget(ctx context.Context, call callFunc, target boundTarget, content []byte, createOnly bool) (outcome, error) {
-	args, err := json.Marshal(struct {
-		Binding    string `json:"binding"`
-		Bytes      []byte `json:"bytes"`
-		CreateOnly bool   `json:"create_only"`
-	}{target.Binding, content, createOnly})
-	if err != nil {
-		return outcomeUntouched, err
-	}
-	result, err := call(ctx, workspaceService, "write", args)
-	return mutationOutcome(result, err)
-}
-
-func deleteTarget(ctx context.Context, call callFunc, target boundTarget) (outcome, error) {
-	args, err := json.Marshal(map[string]string{"binding": target.Binding})
-	if err != nil {
-		return outcomeUntouched, err
-	}
-	result, err := call(ctx, workspaceService, "delete", args)
-	return mutationOutcome(result, err)
+func deleteTarget(ctx context.Context, call extension.AuthorContext, target boundTarget) (outcome, error) {
+	return mutationOutcome(call.DeleteFile(ctx, target.Path))
 }
 
 // mutationOutcome reads the Host's reported completion independently of its
 // error: an error carrying a partial outcome still reports what the producer
 // knows.
-func mutationOutcome(result extension.Result, err error) (outcome, error) {
+func mutationOutcome(err error) (outcome, error) {
 	if err != nil {
 		var callErr *extension.CallError
 		if errors.As(err, &callErr) {
@@ -190,7 +96,7 @@ func mutationOutcome(result extension.Result, err error) (outcome, error) {
 		}
 		return outcomeUntouched, err
 	}
-	return decodeOutcome(result.Value), nil
+	return outcomeCompleted, nil
 }
 
 func decodeOutcome(value json.RawMessage) outcome {
@@ -224,19 +130,14 @@ type applyPlan struct {
 	hunks      []appliedHunkPreview
 }
 
-// buildApplyPlans establishes every target's current existence through
-// Workspace reads and validates every hunk before the first mutation.
-func buildApplyPlans(ctx context.Context, call callFunc, plan planData) ([]applyPlan, error) {
-	plans := make([]applyPlan, 0, len(plan.Ops))
-	for _, op := range plan.Ops {
+// buildApplyPlans validates existence and every hunk before the first mutation.
+func buildApplyPlans(ctx context.Context, call extension.AuthorContext, ops []fileOp) ([]applyPlan, error) {
+	plans := make([]applyPlan, 0, len(ops))
+	for _, op := range ops {
 		pl := applyPlan{op: op}
 		switch op.kind {
 		case opAdd:
-			absent, err := targetAbsent(ctx, call, op.source)
-			if err != nil {
-				return nil, fmt.Errorf("apply_patch: read %s: %w", op.path, err)
-			}
-			if !absent {
+			if op.source.Exists {
 				return nil, fmt.Errorf("apply_patch: %s already exists (Add File requires the path to not exist)", op.path)
 			}
 			pl.newContent = buildAddContent(op)
@@ -260,11 +161,7 @@ func buildApplyPlans(ctx context.Context, call callFunc, plan planData) ([]apply
 			pl.preLines = splitLinesRaw(data)
 		}
 		if op.movePath != "" {
-			absent, err := targetAbsent(ctx, call, *op.destination)
-			if err != nil {
-				return nil, fmt.Errorf("apply_patch: read %s before apply: %w", op.movePath, err)
-			}
-			if !absent {
+			if op.destination.Exists {
 				return nil, fmt.Errorf("apply_patch: %s (move destination) already exists (Move over an existing file is not allowed)", op.movePath)
 			}
 			if len(op.hunks) == 0 {
@@ -276,26 +173,13 @@ func buildApplyPlans(ctx context.Context, call callFunc, plan planData) ([]apply
 	return plans, nil
 }
 
-// targetAbsent reports whether the bound target's current read reports not
-// found. Any other outcome is an error, including a successful read.
-func targetAbsent(ctx context.Context, call callFunc, target boundTarget) (bool, error) {
-	_, err := readTarget(ctx, call, target)
-	if err == nil {
-		return false, nil
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return true, nil
-	}
-	return false, err
-}
-
 // readExisting reads one source that the patch requires to exist.
-func readExisting(ctx context.Context, call callFunc, target boundTarget, requirement string) ([]byte, error) {
-	data, err := readTarget(ctx, call, target)
+func readExisting(ctx context.Context, call extension.AuthorContext, target boundTarget, requirement string) ([]byte, error) {
+	if !target.Exists {
+		return nil, fmt.Errorf("apply_patch: %s does not exist (%s requires the path to exist)", target.Path, requirement)
+	}
+	data, err := call.ReadFile(ctx, target.Path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("apply_patch: %s does not exist (%s requires the path to exist)", target.Path, requirement)
-		}
 		return nil, fmt.Errorf("apply_patch: read %s: %w", target.Path, err)
 	}
 	return data, nil
@@ -414,7 +298,7 @@ func hunkTransformPreservingMatchedContext(h hunk, matchedLines []string, synthe
 // source before the create-only destination write and once more before
 // deleting the source. The returned summary and previews are built from each
 // target's actual reported outcome.
-func executePlan(ctx context.Context, call callFunc, plan planData) (string, []appliedFilePreview, error) {
+func executePlan(ctx context.Context, call extension.AuthorContext, plan []fileOp) (string, []appliedFilePreview, error) {
 	plans, err := buildApplyPlans(ctx, call, plan)
 	if err != nil {
 		return "", nil, err
@@ -424,6 +308,9 @@ func executePlan(ctx context.Context, call callFunc, plan planData) (string, []a
 	for i := range plans {
 		preview, err := applyOne(ctx, call, &plans[i], &committed)
 		if err != nil {
+			if len(committed) == 0 {
+				return "", nil, err
+			}
 			return buildSuccessSummary(committed), nil, err
 		}
 		previews = append(previews, preview...)
@@ -431,7 +318,7 @@ func executePlan(ctx context.Context, call callFunc, plan planData) (string, []a
 	return buildSuccessSummary(committed), previews, nil
 }
 
-func applyOne(ctx context.Context, call callFunc, pl *applyPlan, committed *[]appliedOp) ([]appliedFilePreview, error) {
+func applyOne(ctx context.Context, call extension.AuthorContext, pl *applyPlan, committed *[]appliedOp) ([]appliedFilePreview, error) {
 	if pl.op.movePath != "" {
 		if err := revalidateSourceContent(ctx, call, pl); err != nil {
 			return nil, err
@@ -459,8 +346,8 @@ func applyOne(ctx context.Context, call callFunc, pl *applyPlan, committed *[]ap
 	return buildOpPreviews(pl), nil
 }
 
-func revalidateSourceContent(ctx context.Context, call callFunc, pl *applyPlan) error {
-	data, err := readTarget(ctx, call, pl.op.source)
+func revalidateSourceContent(ctx context.Context, call extension.AuthorContext, pl *applyPlan) error {
+	data, err := call.ReadFile(ctx, pl.op.source.Path)
 	if err != nil {
 		return fmt.Errorf("apply_patch: read %s before mutation: %w", pl.op.path, err)
 	}
@@ -470,7 +357,7 @@ func revalidateSourceContent(ctx context.Context, call callFunc, pl *applyPlan) 
 	return nil
 }
 
-func applyOriginalMutation(ctx context.Context, call callFunc, pl *applyPlan, committed []appliedOp) ([]appliedOp, error) {
+func applyOriginalMutation(ctx context.Context, call extension.AuthorContext, pl *applyPlan, committed []appliedOp) ([]appliedOp, error) {
 	var result outcome
 	var err error
 	kind := ""

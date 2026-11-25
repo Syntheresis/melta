@@ -227,6 +227,40 @@ the public worker entry both use the author `worker.Serve` protocol at API versi
 the protocol host and first-run initialization; [`protocol/`](protocol/) is the generated contract and
 [`client/`](client/) the handwritten HTTP/SSE client.
 
+An extension can register a tool as one function. This example requests `melta.workspace` in its manifest and
+appends a line with snapshot capture:
+
+```go
+func Activate(ctx context.Context, api extension.API) (func(context.Context) error, error) {
+	_, err := api.RegisterTool(model.ToolDefinition{
+		Name:        "append_note",
+		Description: "Append a line to notes.md in the workspace.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`),
+	}, func(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+		var args struct{ Text string `json:"text"` }
+		if err := call.Decode(&args); err != nil {
+			return extension.ToolResult{}, err
+		}
+		stat, err := call.StatFile(ctx, "notes.md")
+		if err != nil {
+			return extension.ToolResult{}, err
+		}
+		var old []byte
+		if stat.Exists {
+			old, err = call.ReadFile(ctx, "notes.md")
+			if err != nil {
+				return extension.ToolResult{}, err
+			}
+		}
+		if err := call.WriteFile(ctx, "notes.md", append(old, args.Text+"\n"...)); err != nil {
+			return extension.ToolResult{}, err
+		}
+		return extension.ToolResult{Content: "Added."}, nil
+	}, nil)
+	return nil, err
+}
+```
+
 Extensions use the registered activation surface. `ListExtensions` returns every enabled extension with its
 version, optional configuration schema, settings, registered tools, client operations and inactive reason;
 `InvokeExtension` names the extension, operation, harness/workspace/session target, arguments and request ID, so

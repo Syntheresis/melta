@@ -3,8 +3,6 @@ package melta
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
@@ -33,61 +31,24 @@ func (t registeredExtensionTool) check() error {
 	return activation.unavailableLocked()
 }
 
-func (t registeredExtensionTool) authorScope(ctx context.Context, tc ToolContext, workspace *nativeWorkspace, bind bool, kind nativeCallKind) (*nativeCallScope, extension.AuthorContext) {
+func (t registeredExtensionTool) Run(ctx context.Context, tc ToolContext, call model.ToolCall) harness.ToolOutcome {
+	if err := t.check(); err != nil {
+		return harness.ToolOutcome{Result: bindingToolResult(call.ID, err, false), Evidence: harness.ExecutionNotStarted}
+	}
 	child, cancel := context.WithCancel(ctx)
 	activation := t.binding.entry.activation
 	scope := callbackScope(&nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
-		candidate:          t.binding.candidate, activation: activation, kind: kind,
-		workspace: workspace, workspaceBind: bind,
+		candidate:          t.binding.candidate, activation: activation, kind: callKindTool,
+		dataDir: t.dataDir, admittedEntry: tc.AdmittedEntry,
 		session: tc.Session, states: t.states, host: t.host, lease: t.lease, operationSecrets: t.operationSecrets,
 	})
-	return scope, extension.AuthorContext{
+	defer scope.end()
+	author := extension.AuthorContext{
 		ExtensionID: activation.id, Settings: bytes.Clone(activation.section),
 		Session: tc.Session, State: bytes.Clone(t.states[activation.id]), Call: scope.call,
 	}
-}
-
-func (t registeredExtensionTool) Normalize(ctx context.Context, tc ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	if err := t.check(); err != nil {
-		return nil, err
-	}
-	scope, author := t.authorScope(ctx, tc, nil, false, callKindHook)
-	defer scope.end()
-	return t.binding.entry.value.(nativeTool).tool.Normalize(author, call)
-}
-
-func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, call model.ToolCall) toolPlan {
-	if err := t.check(); err != nil {
-		return immediateError(call.ID, err)
-	}
-	workspace := newNativeWorkspace(tc.Workspace, t.dataDir, tc.AdmittedEntry, t.lease)
-	scope, author := t.authorScope(ctx, tc, workspace, true, callKindHook)
-	plan := func() extension.ToolPlan {
-		defer scope.end()
-		return t.binding.entry.value.(nativeTool).tool.Prepare(scope.ctx, author, call).Owned()
-	}()
-	var start *nativeSessionStart
-	if plan.Start != nil {
-		if plan.Start.Target == "" {
-			return immediateError(call.ID, fmt.Errorf("session start target must not be empty: %w", harness.ErrInvalid))
-		}
-		start = &nativeSessionStart{extensionID: t.binding.entry.activation.id, plan: *plan.Owned().Start}
-	}
-	prepared := toolPlan{Immediate: plan.Immediate}
-	if plan.Immediate != nil {
-		return prepared
-	}
-	prepared.Execute = func(ctx context.Context) harness.ToolOutcome {
-		if err := t.check(); err != nil {
-			return harness.ToolOutcome{Result: bindingToolResult(call.ID, err, false), Evidence: harness.ExecutionNotStarted}
-		}
-		scope, author := t.authorScope(ctx, tc, workspace, false, callKindTool)
-		scope.start = start
-		defer scope.end()
-		return t.binding.entry.value.(nativeTool).tool.Execute(scope.ctx, author, plan)
-	}
-	return prepared
+	return t.binding.entry.value.(nativeTool).tool(scope.ctx, author, call)
 }
 
 func (s *nativeSnapshot) checkHooks(tc ToolContext, states map[string]harness.SessionStateValue, host *composition, lease *artifactCallLease, secrets map[string]map[string]string) []harness.ToolCheckHook {
@@ -99,12 +60,11 @@ func (s *nativeSnapshot) checkHooks(tc ToolContext, states map[string]harness.Se
 			if err := activation.unavailable(); err != nil {
 				return nil, err
 			}
-			workspace := newNativeWorkspace(tc.Workspace, "", harness.EntryRef{}, nil)
 			child, cancel := context.WithCancel(ctx)
 			scope := callbackScope(&nativeCallScope{
 				nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
 				candidate:          s.candidate, activation: activation, kind: callKindHook,
-				workspace: workspace, workspaceBind: true, session: tc.Session, states: states, host: host, lease: lease, operationSecrets: secrets,
+				session: tc.Session, states: states, host: host, lease: lease, operationSecrets: secrets,
 			})
 			defer scope.end()
 			call := extension.AuthorContext{ExtensionID: activation.id, Settings: bytes.Clone(activation.section), Session: tc.Session, State: bytes.Clone(states[activation.id]), Call: scope.call}

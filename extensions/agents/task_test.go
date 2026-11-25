@@ -3,7 +3,6 @@ package agents
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
@@ -11,15 +10,6 @@ import (
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
-
-func TestLaunchOutcomePreservesPartialSession(t *testing.T) {
-	outcome := launchOutcome("call", &extension.CallError{
-		Err:     errors.New("storage failure"),
-		Partial: json.RawMessage(`{"child_session_id":"session123"}`),
-	})
-	testassert.Equal(t, outcome.Result.Status, model.ResultError)
-	testassert.Require(t, strings.Contains(outcome.Result.Content, "storage failure") && strings.Contains(outcome.Result.Content, "session123"), "outcome lost failure or Session identity: %q", outcome.Result.Content)
-}
 
 // TestDecodeSettingsRangesAndShapes proves the settings decoder the tool's
 // preparation owns: absent/blank/null input and null members keep the
@@ -86,7 +76,7 @@ func TestDecodeSettingsRangesAndShapes(t *testing.T) {
 // openTool activates the shipped Agents entry with the captured extension
 // section and returns its registered task tool: settings are decoded and
 // retained at activation, never at Prepare.
-func openTool(t *testing.T, section string) (extension.RegisteredTool, error) {
+func openTool(t *testing.T, section string) (extension.ToolFunc, error) {
 	t.Helper()
 	api := &authorAPI{operations: map[string]extension.Operation{}, settings: json.RawMessage(section)}
 	if section == "" {
@@ -122,64 +112,31 @@ func taskCall(t *testing.T, args string) model.ToolCall {
 	return call
 }
 
-// TestNormalizeTaskArguments proves the member validator.
-func TestNormalizeTaskArguments(t *testing.T) {
-	got, err := authorTask{}.Normalize(extension.AuthorContext{}, taskCall(t, `{"prompt":"do it","subagent_type":"secondary","extra":42,"_melta_probe":"secret","_lightcode_probe":"ordinary"}`))
-	testassert.NoError(t, err)
-	var args map[string]any
-	testassert.NoError(t, json.Unmarshal(got, &args))
-	testassert.Equal(t, args["_lightcode_probe"], any("ordinary"))
-	{
-		_, ok := args["_melta_probe"]
-		testassert.Check(t, !ok, "normalized arguments retained the private field: %s", got)
-	}
-	testassert.Check(t, args["prompt"] == "do it" && args["subagent_type"] == "secondary", "normalized arguments = %s, want the members preserved", got)
-	{
-		extra, ok := args["extra"].(float64)
-		testassert.Check(t, ok && extra == 42, "normalized arguments = %s, want the unrelated member preserved", got)
-	}
-	rejected := []struct {
-		args string
-		want string
-	}{
-		{`{"prompt":5,"subagent_type":"secondary"}`, "task: prompt must be a string"},
-		{`{"prompt":"do it","subagent_type":7}`, "task: subagent_type must be a string"},
-		{`{"prompt":null,"subagent_type":"secondary"}`, "task: prompt must be a string"},
-		{`null`, "arguments must be a JSON object"},
-	}
-	for _, tc := range rejected {
-		_, err := authorTask{}.Normalize(extension.AuthorContext{}, taskCall(t, tc.args))
-		testassert.Check(t, err != nil && err.Error() == tc.want, "Normalize(%s) error = %v, want exactly %q", tc.args, err, tc.want)
-	}
-}
-
 // TestPrepareRejectsMissingAndUnknown proves the retained shape errors.
 func TestPrepareRejectsMissingAndUnknown(t *testing.T) {
 	tool, err := openTool(t, "")
 	testassert.NoError(t, err)
 	tc := extension.AuthorContext{Call: members(0)}
-	prepare := func(args string) extension.ToolPlan {
+	prepare := func(args string) string {
 		t.Helper()
-		plan := tool.Prepare(context.Background(), tc, taskCall(t, args))
-		testassert.Require(t, plan.Immediate != nil, "Prepare(%s) = %+v, want an immediate validation error", args, plan)
-		testassert.Check(t, plan.Data == nil && plan.Start == nil, "Prepare(%s) declared execution behind a validation error", args)
-		testassert.Check(t, plan.Immediate.Result.Status == model.ResultError, "Prepare(%s) status = %q, want %q", args, plan.Immediate.Result.Status, model.ResultError)
-		return plan
+		_, err := tool(context.Background(), extension.ToolCall{AuthorContext: tc, Arguments: json.RawMessage(args)})
+		testassert.Require(t, err != nil, "call(%s) succeeded", args)
+		return err.Error()
 	}
 	{
-		got := prepare(`{}`).Immediate.Result.Content
+		got := prepare(`{}`)
 		testassert.Check(t, got == "missing 'prompt' parameter", "missing prompt content = %q, want %q", got, "missing 'prompt' parameter")
 	}
 	{
-		got := prepare(`{"prompt":"do it"}`).Immediate.Result.Content
+		got := prepare(`{"prompt":"do it"}`)
 		testassert.Check(t, got == "missing 'subagent_type' parameter", "missing subagent_type content = %q, want %q", got, "missing 'subagent_type' parameter")
 	}
 	{
-		got := prepare(`{"prompt":"do it","subagent_type":"ghost"}`).Immediate.Result.Content
+		got := prepare(`{"prompt":"do it","subagent_type":"ghost"}`)
 		testassert.Check(t, got == `unknown subagent type "ghost"`, "unknown type content = %q, want the unknown subagent refusal", got)
 	}
 	{
-		got := prepare(`{"prompt":"do it","subagent_type":"primary"}`).Immediate.Result.Content
+		got := prepare(`{"prompt":"do it","subagent_type":"primary"}`)
 		testassert.Check(t, got == `unknown subagent type "primary"`, "non-subagent content = %q, want the unknown subagent refusal", got)
 	}
 }
@@ -189,20 +146,34 @@ func TestPrepareRejectsMissingAndUnknown(t *testing.T) {
 // integer object retains its values, and non-integer lexemes the settings
 // schema admits as integers are rejected before the activation succeeds.
 func TestActivationRetainsTaskSettings(t *testing.T) {
-	limits := func(t *testing.T, tool extension.RegisteredTool) (int, int) {
+	limits := func(t *testing.T, tool extension.ToolFunc) (int, int) {
 		t.Helper()
-		call := taskCall(t, `{"prompt":"do it","subagent_type":"secondary"}`)
-		plan := tool.Prepare(context.Background(), extension.AuthorContext{Call: members(0)}, call)
-		testassert.Require(t, plan.Immediate == nil && plan.Start != nil, "Prepare = %+v, want a prepared start", plan)
+		args := json.RawMessage(`{"prompt":"do it","subagent_type":"secondary"}`)
+		output := 0
+		invoke := func(count int) error {
+			call := extension.AuthorContext{Call: func(ctx context.Context, service, method string, raw json.RawMessage) (extension.Result, error) {
+				if method == "members" {
+					return members(count)(ctx, service, method, raw)
+				}
+				start, err := extension.DecodeSessionStart(raw)
+				if err != nil {
+					return extension.Result{}, err
+				}
+				output = start.OutputLimit
+				return extension.Result{Value: json.RawMessage(`{"session_id":"id"}`)}, nil
+			}}
+			_, err := tool(context.Background(), extension.ToolCall{AuthorContext: call, Arguments: args})
+			return err
+		}
+		testassert.NoError(t, invoke(0))
 		concurrent := 0
 		for concurrent < 21 {
-			refused := tool.Prepare(context.Background(), extension.AuthorContext{Call: members(concurrent + 1)}, call)
-			if refused.Immediate != nil {
+			if invoke(concurrent+1) != nil {
 				break
 			}
 			concurrent++
 		}
-		return concurrent + 1, plan.Start.OutputLimit
+		return concurrent + 1, output
 	}
 	for _, row := range []struct {
 		name    string

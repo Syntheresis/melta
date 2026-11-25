@@ -135,7 +135,10 @@ func newRestrictedWorkerOwner(t *testing.T, executed *atomic.Int64) (*Melta, *ow
 	manifest := extension.Manifest{ID: "peer", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
 	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
 		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			if _, err := api.RegisterTool(model.ToolDefinition{Name: "peer.tool", Description: "restricted", Parameters: json.RawMessage(`{"type":"object"}`)}, restrictedWorkerTool{executed: executed}, nil); err != nil {
+			if _, err := api.RegisterTool(model.ToolDefinition{Name: "peer.tool", Description: "restricted", Parameters: json.RawMessage(`{"type":"object"}`)}, func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+				executed.Add(1)
+				return extension.ToolResult{Content: "executed"}, nil
+			}, nil); err != nil {
 				return nil, err
 			}
 			if _, err := api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, input model.ToolCall) (*string, error) {
@@ -164,20 +167,6 @@ func newRestrictedWorkerOwner(t *testing.T, executed *atomic.Int64) (*Melta, *ow
 	session, err := r.createSession(ctx, e.dataDir, "")
 	testassert.NoError(t, err)
 	return r, e, spawner, session.Identity.SessionID
-}
-
-// restrictedWorkerTool records execution and succeeds when reached.
-type restrictedWorkerTool struct{ executed *atomic.Int64 }
-
-func (restrictedWorkerTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (restrictedWorkerTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (t restrictedWorkerTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	t.executed.Add(1)
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "executed"}}
 }
 
 // toolResultFact returns the committed tool result of one Operation.

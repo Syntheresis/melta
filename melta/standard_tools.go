@@ -121,15 +121,6 @@ func (in *standardTools) openCodeGroup(tc ToolContext) (*snapshot.CodeStore, err
 	return snapshot.OpenCodeStore(directory)
 }
 
-// immediateError is the normalization-class immediate outcome: status error
-// carrying the bounded validation diagnostic, per the tool-boundary
-// validation contract.
-func immediateError(callID string, cause error) toolPlan {
-	return toolPlan{Immediate: &harness.ToolOutcome{
-		Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: boundedDiagnostic(cause)},
-	}}
-}
-
 // boundedDiagnostic renders one tool-produced validation diagnostic within
 // the durable diagnostic bound.
 func boundedDiagnostic(cause error) string {

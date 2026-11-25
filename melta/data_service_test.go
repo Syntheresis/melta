@@ -857,39 +857,31 @@ type operationDataTool struct {
 	sentinel string
 }
 
-func (t *operationDataTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-
-func (t *operationDataTool) Prepare(_ context.Context, tool extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-
-func (t *operationDataTool) Execute(ctx context.Context, tool extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (t *operationDataTool) run(ctx context.Context, tool extension.ToolCall) (extension.ToolResult, error) {
 	claim, err := tool.Call(ctx, extension.ContractData, "claim_external_data", json.RawMessage(`{}`))
 	if err != nil || string(claim.Value) != "null" {
 		t.err <- fmt.Errorf("claim = (%+v, %v)", claim, err)
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "claim failed"}}
+		return extension.ToolResult{}, errors.New("claim failed")
 	}
 	result, err := tool.Call(ctx, extension.ContractData, "session_namespace", json.RawMessage(`{}`))
 	if err != nil {
 		t.err <- err
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "namespace failed"}}
+		return extension.ToolResult{}, errors.New("namespace failed")
 	}
 	var decoded struct {
 		Directory string `json:"directory"`
 	}
 	if err := json.Unmarshal(result.Value, &decoded); err != nil {
 		t.err <- err
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "namespace invalid"}}
+		return extension.ToolResult{}, errors.New("namespace invalid")
 	}
 	if err := os.WriteFile(t.sentinel, []byte("external"), 0o600); err != nil {
 		t.err <- err
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "external data failed"}}
+		return extension.ToolResult{}, errors.New("external data failed")
 	}
 	t.arrived <- decoded.Directory
 	<-t.release
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "wrote"}}
+	return extension.ToolResult{Content: "wrote"}, nil
 }
 
 // TestDataServiceOperationClaimAndCleanup proves an actual admitted Operation
@@ -919,7 +911,7 @@ func TestDataServiceOperationClaimAndCleanup(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				_, err = api.RegisterTool(model.ToolDefinition{Name: "probe_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, tool, nil)
+				_, err = api.RegisterTool(model.ToolDefinition{Name: "probe_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, tool.run, nil)
 				return nil, err
 			}}
 			writeServiceFile(t, e.configPath, strings.TrimSuffix(dataConfig(e.server.URL, "probe_tool"), "}")+`,"sessions":{"auto_archive":true,"archive_after_days":1,"delete_after_archive_days":1}}`)
@@ -1364,16 +1356,8 @@ func (p *hookClaimProbe) native(cleanup func() error) extension.Extension {
 	}}
 }
 
-type immediateErrorTool struct{}
-
-func (immediateErrorTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-func (immediateErrorTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "hooked"}}}
-}
-func (immediateErrorTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "hooked"}}
+func immediateErrorTool(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+	return extension.ToolResult{}, errors.New("hooked")
 }
 
 // TestDataServiceRootHookClaimAcrossLifetimes proves registered effectful
@@ -1394,7 +1378,7 @@ func TestDataServiceRootHookClaimAcrossLifetimes(t *testing.T) {
 				writeAgentDefinitions(t, e.configPath, `{"hook_agent":{"model":"prov/m","system_prompt":"full","tools":["probe_tool"]}}`)
 				e.fixtureStore(store)
 				tool := extension.Extension{Manifest: registrarManifest("probe_tool"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-					_, err := api.RegisterTool(model.ToolDefinition{Name: "probe_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, immediateErrorTool{}, nil)
+					_, err := api.RegisterTool(model.ToolDefinition{Name: "probe_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, immediateErrorTool, nil)
 					return nil, err
 				}}
 				native := probe.native(func() error {
@@ -1490,19 +1474,13 @@ type nestedClaimCaller struct {
 	release chan struct{}
 }
 
-func (t *nestedClaimCaller) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-func (t *nestedClaimCaller) Prepare(_ context.Context, tool extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (t *nestedClaimCaller) Execute(ctx context.Context, tool extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (t *nestedClaimCaller) run(ctx context.Context, tool extension.ToolCall) (extension.ToolResult, error) {
 	result, err := tool.Call(ctx, "nested.provider", "run", json.RawMessage(`{}`))
 	if err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "provider failed"}}
+		return extension.ToolResult{}, errors.New("provider failed")
 	}
 	<-t.release
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: string(result.Value)}}
+	return extension.ToolResult{Content: string(result.Value)}, nil
 }
 
 // TestDataServiceNestedClaimAcrossLifetime proves the execution lease survives
@@ -1556,7 +1534,7 @@ func TestDataServiceNestedClaimAcrossLifetime(t *testing.T) {
 		releaseCaller := sync.OnceFunc(func() { close(callerTool.release) })
 		defer releaseCaller()
 		caller := extension.Extension{Manifest: registrarManifest("nested_caller"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "nested_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, callerTool, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "nested_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, callerTool.run, nil)
 			return nil, err
 		}}
 		writeServiceFile(t, e.configPath, dataConfig(e.server.URL, "nested_provider", "nested_caller"))

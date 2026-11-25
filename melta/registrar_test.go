@@ -17,7 +17,11 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
-type registrarTestTool struct{ name string }
+func registrarTestTool(name string) extension.ToolFunc {
+	return func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+		return extension.ToolResult{Content: name + ":" + name}, nil
+	}
+}
 
 type registrarContext struct {
 	context.Context
@@ -200,9 +204,9 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error
-			old, err = a.RegisterTool(model.ToolDefinition{Name: "old", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+			old, err = a.RegisterTool(model.ToolDefinition{Name: "old", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 			if err == nil {
-				_, err = a.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+				_, err = a.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 			}
 			return nil, err
 		}}
@@ -211,7 +215,7 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.release()
-	if _, err := api.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool{}, old); err == nil {
+	if _, err := api.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool(""), old); err == nil {
 		t.Fatal("conflicting replacement accepted")
 	}
 	current := c.snapshotForTest()
@@ -219,7 +223,7 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 		t.Fatal("failed replacement removed old registration")
 	}
 	current.release()
-	replacement, err := api.RegisterTool(model.ToolDefinition{Name: "new", Parameters: []byte(`{}`)}, registrarTestTool{}, old)
+	replacement, err := api.RegisterTool(model.ToolDefinition{Name: "new", Parameters: []byte(`{}`)}, registrarTestTool(""), old)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +256,7 @@ func TestRegistrarRejectsInvalidToolSchemaWithoutReplacement(t *testing.T) {
 	guest := extension.Extension{Manifest: registrarManifest("schema"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 		api = a
 		var err error
-		original, err = a.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":"object"}`)}, registrarTestTool{}, nil)
+		original, err = a.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":"object"}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: guest, section: []byte(`{}`)}})
@@ -261,7 +265,7 @@ func TestRegistrarRejectsInvalidToolSchemaWithoutReplacement(t *testing.T) {
 	}
 	defer candidate.release()
 	for _, replacement := range []extension.Registration{nil, original} {
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":7}`)}, registrarTestTool{}, replacement)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":7}`)}, registrarTestTool(""), replacement)
 		if !errors.Is(err, harness.ErrInvalid) {
 			t.Fatalf("invalid schema = %v", err)
 		}
@@ -280,7 +284,7 @@ func TestRegistrarRegistrationReleaseAfterStageAndPlan(t *testing.T) {
 	e := extension.Extension{Manifest: registrarManifest("release"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 		api = a
 		var err error
-		original, err = a.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		original, err = a.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})
@@ -292,7 +296,7 @@ func TestRegistrarRegistrationReleaseAfterStageAndPlan(t *testing.T) {
 	original.(*nativeRegistration).release = func() { released++ }
 	stage := candidate.snapshotForTest()
 	binding := stage.bindTool("tool")
-	if _, err := api.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool{}, original); err != nil {
+	if _, err := api.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool(""), original); err != nil {
 		t.Fatal(err)
 	}
 	if released != 0 {
@@ -449,10 +453,6 @@ func TestRegistrarAmbiguousIdentityInactive(t *testing.T) {
 	}
 }
 
-func (t registrarTestTool) Normalize(extension.AuthorContext, model.ToolCall) (json.RawMessage, error) {
-	return json.RawMessage(t.name), nil
-}
-
 func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 	owner := &configurationService{}
 	manifest := registrarManifest
@@ -465,7 +465,7 @@ func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 	}}
 	b := extension.Extension{Manifest: manifest("b"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		starts["b"]++
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	first, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{
@@ -480,7 +480,7 @@ func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 	}
 	a.Activate = func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		starts["a"]++
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}
 	second, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{
@@ -496,7 +496,7 @@ func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 	if !reflect.DeepEqual(starts, map[string]int{"a": 2, "b": 1}) {
 		t.Fatalf("unrelated activation restarted: %v", starts)
 	}
-	if _, err := aAPI.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err == nil {
+	if _, err := aAPI.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool(""), nil); err == nil {
 		t.Fatal("shared configuration collision accepted")
 	}
 }
@@ -545,7 +545,7 @@ func TestRegistrarSharedActivationChecksEveryHeldConfiguration(t *testing.T) {
 		if string(value.Settings()) == `{"v":2}` {
 			name = "new"
 		}
-		_, err := value.RegisterTool(model.ToolDefinition{Name: name, Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		_, err := value.RegisterTool(model.ToolDefinition{Name: name, Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	first, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: a, section: []byte(`{}`)}, {extension: b, section: []byte(`{"v":1}`)}})
@@ -565,7 +565,7 @@ func TestRegistrarSharedActivationChecksEveryHeldConfiguration(t *testing.T) {
 		t.Fatal(second.inactive)
 	}
 	for _, name := range []string{"old", "new"} {
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: name, Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: name, Parameters: []byte(`{}`)}, registrarTestTool(""), nil); err == nil {
 			t.Fatalf("shared activation displaced %q", name)
 		}
 	}
@@ -577,7 +577,7 @@ func TestRegistrarReusedConflictsRemainPrivate(t *testing.T) {
 		return nativeActivationSpec{extension: extension.Extension{
 			Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 			Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-				_, err := api.RegisterTool(model.ToolDefinition{Name: "same", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+				_, err := api.RegisterTool(model.ToolDefinition{Name: "same", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 				return nil, err
 			},
 		}, section: []byte(`{}`)}
@@ -618,7 +618,7 @@ func TestRegistrarSuccessiveActivationsCanShareNames(t *testing.T) {
 		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			starts++
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "shared", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "shared", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 			return nil, err
 		},
 	}
@@ -1025,7 +1025,7 @@ func TestRegistrarCloseMayReenter(t *testing.T) {
 	e := extension.Extension{Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			return func(context.Context) error {
-				_, err := api.RegisterTool(model.ToolDefinition{Name: "late", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+				_, err := api.RegisterTool(model.ToolDefinition{Name: "late", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 				closed <- err
 				return nil
 			}, nil
@@ -1118,13 +1118,6 @@ func TestRegistrarParkedStageReplacementAndRelease(t *testing.T) {
 		t.Fatalf("close order: %v", closed)
 	}
 }
-func (t registrarTestTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Data: []byte(t.name)}
-}
-func (t registrarTestTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{Content: t.name + ":" + string(plan.Data)}}
-}
-
 func TestRegistrationAllContributions(t *testing.T) {
 	owner := &configurationService{}
 	handler := func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
@@ -1134,7 +1127,7 @@ func TestRegistrationAllContributions(t *testing.T) {
 	e := extension.Extension{
 		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			if _, err := api.RegisterTool(model.ToolDefinition{Name: "custom", Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err != nil {
+			if _, err := api.RegisterTool(model.ToolDefinition{Name: "custom", Parameters: []byte(`{}`)}, registrarTestTool(""), nil); err != nil {
 				return nil, err
 			}
 			if _, err := api.RegisterStrategy(*harness.IncludedStrategyBinding(), nil); err != nil {
@@ -1204,23 +1197,23 @@ func TestRegistrationRejectsInvalidAndForeignHandles(t *testing.T) {
 	def := model.ToolDefinition{Name: "custom", Parameters: []byte(`{}`)}
 	a := extension.Extension{Manifest: manifest("a"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		var err error
-		first, err = api.RegisterTool(def, registrarTestTool{}, nil)
+		first, err = api.RegisterTool(def, registrarTestTool(""), nil)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := api.RegisterTool(def, registrarTestTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(def, registrarTestTool(""), nil); err == nil {
 			t.Fatal("duplicate accepted")
 		}
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: []byte(`{}`)}, registrarTestTool(""), nil); err == nil {
 			t.Fatal("standard tool replaced")
 		}
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: "bad", Parameters: []byte(`[]`)}, registrarTestTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "bad", Parameters: []byte(`[]`)}, registrarTestTool(""), nil); err == nil {
 			t.Fatal("invalid tool accepted")
 		}
 		return nil, nil
 	}}
 	b := extension.Extension{Manifest: manifest("b"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(def, registrarTestTool{}, first); err == nil {
+		if _, err := api.RegisterTool(def, registrarTestTool(""), first); err == nil {
 			t.Fatal("foreign replacement accepted")
 		}
 		if err := api.Remove(first); err == nil {
@@ -1254,7 +1247,7 @@ func TestRegistrarPreparedToolRetainsIdentity(t *testing.T) {
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error
-			original, err = a.RegisterTool(definition, registrarTestTool{name: `"old"`}, nil)
+			original, err = a.RegisterTool(definition, registrarTestTool(`"old"`), nil)
 			return func(context.Context) error { closed = true; return nil }, err
 		},
 	}
@@ -1267,8 +1260,7 @@ func TestRegistrarPreparedToolRetainsIdentity(t *testing.T) {
 	if binding == nil {
 		t.Fatal("missing binding")
 	}
-	prepared := binding.entry.value.(nativeTool).tool.Prepare(context.Background(), extension.AuthorContext{}, model.ToolCall{})
-	if _, err := api.RegisterTool(definition, registrarTestTool{name: `"new"`}, original); err != nil {
+	if _, err := api.RegisterTool(definition, registrarTestTool(`"new"`), original); err != nil {
 		t.Fatal(err)
 	}
 	stage.release()
@@ -1280,7 +1272,7 @@ func TestRegistrarPreparedToolRetainsIdentity(t *testing.T) {
 	if closed {
 		t.Fatal("closed while prepared binding held")
 	}
-	result := binding.entry.value.(nativeTool).tool.Execute(context.Background(), extension.AuthorContext{}, prepared)
+	result := binding.entry.value.(nativeTool).tool(context.Background(), extension.AuthorContext{}, model.ToolCall{ID: "call"})
 	if result.Result.Content != `"old":"old"` {
 		t.Fatalf("bound implementation: %s", result.Result.Content)
 	}
@@ -1297,13 +1289,13 @@ func TestRegistrarCandidateIsolation(t *testing.T) {
 	manifest := registrarManifest
 	owner := &configurationService{}
 	first := extension.Extension{Manifest: manifest("first"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(definition, registrarTestTool{}, nil); err != nil {
+		if _, err := api.RegisterTool(definition, registrarTestTool(""), nil); err != nil {
 			return nil, err
 		}
 		return nil, fail
 	}}
 	second := extension.Extension{Manifest: manifest("second"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(definition, registrarTestTool{}, nil)
+		_, err := api.RegisterTool(definition, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{

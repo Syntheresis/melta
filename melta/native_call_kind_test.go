@@ -98,6 +98,16 @@ var kindRows = []kindRow{
 		columns: []string{kindPhaseActivation, kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseCleanup, kindPhaseTool, "operation"}},
 	{name: "members", service: extension.ContractSession, method: "members", args: json.RawMessage(`{}`),
 		columns: []string{kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
+	{name: "stat", service: extension.ContractWorkspace, method: "stat", args: json.RawMessage(`{"path":"kind-read"}`),
+		columns: []string{kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseTool}, needsSess: true},
+	{name: "read", service: extension.ContractWorkspace, method: "read", args: json.RawMessage(`{"path":"kind-read"}`),
+		columns: []string{kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseTool}, needsSess: true},
+	{name: "write", service: extension.ContractWorkspace, method: "write", args: json.RawMessage(`{"path":"kind-write","bytes":"eA==","create_only":false}`),
+		columns: []string{kindPhaseTool}},
+	{name: "delete", service: extension.ContractWorkspace, method: "delete", args: json.RawMessage(`{"path":"kind-delete"}`),
+		columns: []string{kindPhaseTool}},
+	{name: "start", service: extension.ContractSession, method: "start", args: kindStartDocument(),
+		columns: []string{kindPhaseTool}},
 	{name: "state", service: extension.ContractState, method: "set", args: json.RawMessage(`{"value":{"call_kind":true}}`),
 		columns: []string{kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
 	{name: "session-namespace", service: extension.ContractData, method: "session_namespace", args: json.RawMessage(`{}`),
@@ -110,11 +120,19 @@ var kindRows = []kindRow{
 		columns: []string{"operation"}},
 }
 
+func kindStartDocument() json.RawMessage {
+	raw, err := extension.EncodeSessionStart(extension.SessionStart{Input: []model.ContentPart{{Kind: model.PartText, Text: "kind child"}}})
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
 // callKindProbe records every row's outcome for one call column. One extension
 // carries it through every callback the columns cover.
 type callKindProbe struct {
 	mu       sync.Mutex
-	outcomes map[string][]error
+	outcomes map[string][]kindOutcome
 
 	peerMu      sync.Mutex
 	peerCalls   map[string]error
@@ -127,9 +145,14 @@ type callKindProbe struct {
 	requestRelease chan struct{}
 }
 
+type kindOutcome struct {
+	err   error
+	owner string
+}
+
 func newCallKindProbe(harnessWork string) *callKindProbe {
 	return &callKindProbe{
-		outcomes:  make(map[string][]error),
+		outcomes:  make(map[string][]kindOutcome),
 		peerCalls: make(map[string]error), plainCalls: make(map[string]error),
 		harnessWork: harnessWork,
 	}
@@ -137,11 +160,11 @@ func newCallKindProbe(harnessWork string) *callKindProbe {
 
 func kindOutcomeKey(phase, row string) string { return phase + "|" + row }
 
-func (p *callKindProbe) record(phase, row string, err error) {
+func (p *callKindProbe) record(phase, row string, session harness.SessionIdentity, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	key := kindOutcomeKey(phase, row)
-	p.outcomes[key] = append(p.outcomes[key], err)
+	p.outcomes[key] = append(p.outcomes[key], kindOutcome{err: err, owner: session.OwnerSessionID})
 }
 
 func (p *callKindProbe) observe(call extension.AuthorContext, phase, commandMethod string, commandArgs json.RawMessage) {
@@ -151,7 +174,7 @@ func (p *callKindProbe) observe(call extension.AuthorContext, phase, commandMeth
 		case "settings":
 			raw, err := json.Marshal(map[string]json.RawMessage{"section": call.Settings})
 			if err != nil {
-				p.record(phase, row.name, err)
+				p.record(phase, row.name, call.Session, err)
 				continue
 			}
 			args = raw
@@ -159,7 +182,7 @@ func (p *callKindProbe) observe(call extension.AuthorContext, phase, commandMeth
 			method, args = commandMethod, commandArgs
 		}
 		_, err := call.Call(context.Background(), service, method, args)
-		p.record(phase, row.name, err)
+		p.record(phase, row.name, call.Session, err)
 	}
 }
 
@@ -194,20 +217,25 @@ func (p *callKindProbe) callSecondExtensions(ctx context.Context, call extension
 	p.recordPeer(phase, "kind.plain", err)
 }
 
-func (p *callKindProbe) verify(t *testing.T) {
+func (p *callKindProbe) verify(t *testing.T, parent string) {
 	t.Helper()
 	for phase, info := range kindPhases {
 		for _, row := range kindRows {
 			key := kindOutcomeKey(phase, row.name)
 			p.mu.Lock()
-			outcomes := append([]error(nil), p.outcomes[key]...)
+			outcomes := append([]kindOutcome(nil), p.outcomes[key]...)
 			p.mu.Unlock()
 			if len(outcomes) == 0 {
 				t.Errorf("%s/%s: no call was attempted", phase, row.name)
 				continue
 			}
 			allowed := row.allows(info)
-			for index, err := range outcomes {
+			for index, outcome := range outcomes {
+				err := outcome.err
+				// An owned Session is not yet persisted when its admission hook runs.
+				if allowed && phase == kindPhaseAdmission && row.name == "members" && outcome.owner == parent && errors.Is(err, harness.ErrNotFound) {
+					continue
+				}
 				if allowed && err != nil {
 					t.Errorf("%s/%s outcome %d = %v, want the handler reached", phase, row.name, index, err)
 				}
@@ -228,6 +256,15 @@ func (p *callKindProbe) verify(t *testing.T) {
 	if !errors.Is(p.plainCalls[kindPhaseRequest], ErrDenied) {
 		t.Errorf("ungranted server state change = %v, want denied although its caller has the grant", p.plainCalls[kindPhaseRequest])
 	}
+	if !errors.Is(p.peerCalls[kindPhaseRequest+"-write"], ErrDenied) {
+		t.Errorf("hook served write = %v, want denied", p.peerCalls[kindPhaseRequest+"-write"])
+	}
+	if p.peerCalls[kindPhaseTool+"-write"] != nil {
+		t.Errorf("tool served write = %v, want success", p.peerCalls[kindPhaseTool+"-write"])
+	}
+	if !errors.Is(p.plainCalls[kindPhaseTool+"-write"], ErrDenied) {
+		t.Errorf("ungranted server write = %v, want denied although its caller has the grant", p.plainCalls[kindPhaseTool+"-write"])
+	}
 }
 
 func (p *callKindProbe) extension() extension.Extension {
@@ -235,7 +272,7 @@ func (p *callKindProbe) extension() extension.Extension {
 	manifest.Services = []string{
 		extension.ContractCredentials, extension.ContractData, extension.ContractState,
 		extension.ContractSession, extension.ContractWarnings, extension.ContractSettings,
-		extension.ContractCommands,
+		extension.ContractCommands, extension.ContractWorkspace,
 	}
 	manifest.Secrets = []extension.SecretRef{{Field: "/key", Lifetime: extension.SecretActivation}}
 	// One command method that succeeds on each operation target without
@@ -252,7 +289,14 @@ func (p *callKindProbe) extension() extension.Extension {
 		// arguments.
 		_, p.precedence[1] = api.Call(ctx, extension.ContractWarnings, "missing", json.RawMessage(`{"kind":7}`))
 
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: "kind_probe", Description: "call-kind probe", Parameters: json.RawMessage(`{"type":"object"}`)}, kindProbeTool{p}, nil); err != nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "kind_probe", Description: "call-kind probe", Parameters: json.RawMessage(`{"type":"object"}`)}, func(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+			p.observe(call.AuthorContext, kindPhaseTool, "interrupt", json.RawMessage(`{}`))
+			_, err := call.Call(ctx, "kind.peer", "write", json.RawMessage(`{}`))
+			p.recordPeer(kindPhaseTool+"-write", "kind.peer", err)
+			_, err = call.Call(ctx, "kind.plain", "write", json.RawMessage(`{}`))
+			p.recordPeer(kindPhaseTool+"-write", "kind.plain", err)
+			return extension.ToolResult{Content: "ok"}, nil
+		}, nil); err != nil {
 			return nil, err
 		}
 		if _, err := api.AttachAdmission(func(ctx context.Context, call extension.AuthorContext, _ extension.AdmissionInput) (extension.AdmissionResult, error) {
@@ -269,6 +313,8 @@ func (p *callKindProbe) extension() extension.Extension {
 			p.waitBeforeRequest()
 			p.observe(call, kindPhaseRequest, "interrupt", json.RawMessage(`{}`))
 			p.callSecondExtensions(ctx, call, kindPhaseRequest)
+			_, err := call.Call(ctx, "kind.peer", "write", json.RawMessage(`{}`))
+			p.recordPeer(kindPhaseRequest+"-write", "kind.peer", err)
 			return harness.RequestConsequence{}, nil
 		}, nil); err != nil {
 			return nil, err
@@ -324,34 +370,27 @@ func (p *callKindProbe) extension() extension.Extension {
 	}}
 }
 
-type kindProbeTool struct{ probe *callKindProbe }
-
-func (t kindProbeTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t kindProbeTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-
-func (t kindProbeTool) Execute(ctx context.Context, call extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
-	t.probe.observe(call, kindPhaseTool, "interrupt", json.RawMessage(`{}`))
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: "kind-call", Status: model.ResultSuccess, Content: "ok"}, Evidence: harness.ExecutionObserved}
-}
-
 // kindPeerService is a second extension's service whose handler acts on its
 // own Session state through the nested call scope it receives. granted says
 // whether it requests the state service.
 func kindPeerService(id, service string, granted bool) extension.Extension {
 	manifest := registrarManifest(id)
 	if granted {
-		manifest.Services = []string{extension.ContractState}
+		manifest.Services = []string{extension.ContractState, extension.ContractWorkspace}
 	}
 	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: service, Methods: []extension.RegisteredMethod{{
 			Method: extension.ServiceMethod("set", `{}`, `{}`, "", ""),
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return call.Call(ctx, extension.ContractState, "set", json.RawMessage(`{"value":{"peer":true}}`))
+			},
+		}, {
+			Method: extension.ServiceMethod("write", `{}`, `{}`, "", ""),
+			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
+				if err := call.WriteFile(ctx, "kind-peer", []byte("peer")); err != nil {
+					return extension.Result{}, err
+				}
+				return extension.Result{Value: json.RawMessage(`null`)}, nil
 			},
 		}}}, nil)
 		return nil, err
@@ -381,6 +420,8 @@ func runCallKindLimits(t *testing.T, workerHost bool) {
 	e := newOwnerEnv(t)
 	workspace := filepath.Join(e.dataDir, "kind-workspace")
 	testassert.NoError(t, os.MkdirAll(workspace, 0o700))
+	testassert.NoError(t, os.WriteFile(filepath.Join(workspace, "kind-read"), []byte("read"), 0o600))
+	testassert.NoError(t, os.WriteFile(filepath.Join(workspace, "kind-delete"), []byte("delete"), 0o600))
 	writeServiceFile(t, e.configPath, strings.TrimSuffix(ownerConfigDocument(e.server.URL), "}")+
 		`,"extensions":{"agents":{"enabled":true},"kindprobe":{"enabled":true,"key":"KIND_PROBE_KEY"},"kindpeer":{"enabled":true},"kindplain":{"enabled":true},"kindnogrant":{"enabled":true}}}`)
 	writeAgentDefinitions(t, e.configPath, projectionAgentsDocument)
@@ -411,6 +452,9 @@ func runCallKindLimits(t *testing.T, workerHost bool) {
 
 	session := projectionSession(t, r, workspace, "solo").Identity.SessionID
 	e.server.setScript(func(_ context.Context, body string) []string {
+		if lastUserText(body) == "kind child" {
+			return textTurnEvents("done")
+		}
 		if lastMessageRole(body) == "tool" {
 			return textTurnEvents("done")
 		}
@@ -436,6 +480,9 @@ func runCallKindLimits(t *testing.T, workerHost bool) {
 	}
 	if owners := sessionOwners(t, store, session); len(owners) != 0 {
 		t.Errorf("denied admission call recorded an external-data claim: %v", owners)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "kind-write")); !os.IsNotExist(err) {
+		t.Errorf("denied admission wrote the file: %v", err)
 	}
 	close(probe.requestRelease)
 	awaitOperation(t, r, session, "kind-op", harness.OperationSuccess)
@@ -464,6 +511,18 @@ func runCallKindLimits(t *testing.T, workerHost bool) {
 	if _, ok := states["kindplain"]; ok {
 		t.Errorf("ungranted serving extension wrote state: %s", states["kindplain"])
 	}
+	assertFileContent(t, filepath.Join(workspace, "kind-peer"), "peer")
+	ids, err := store.ListSessionIDs(ctx)
+	testassert.NoError(t, err)
+	children := 0
+	for _, id := range ids {
+		header, err := r.harness.ReadSessionHeader(ctx, id)
+		testassert.NoError(t, err)
+		if header.Identity.OwnerSessionID == session {
+			children++
+		}
+	}
+	testassert.Equal(t, children, 1)
 
 	// The cleanup hook runs through real Session deletion; the claims the
 	// permitted columns recorded make this extension one of its owners.
@@ -473,7 +532,7 @@ func runCallKindLimits(t *testing.T, workerHost bool) {
 		t.Fatal(err)
 	}
 
-	probe.verify(t)
+	probe.verify(t, session)
 	testassert.Require(t, errors.Is(probe.precedence[0], ErrDenied), "no grant and an unknown method = %v, want denied first", probe.precedence[0])
 	testassert.Require(t, errors.Is(probe.precedence[1], harness.ErrNotFound), "an unknown method and invalid arguments = %v, want not-found first", probe.precedence[1])
 	testassert.Require(t, errors.Is(probe.precedence[2], ErrDenied), "a refused kind and invalid arguments = %v, want denied first", probe.precedence[2])

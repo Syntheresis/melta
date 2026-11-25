@@ -45,70 +45,6 @@ func DecodeAuthorRequest(raw json.RawMessage) (extension.AuthorRequestInput, err
 	return extension.AuthorRequestInput{RequestHookInput: input, PromptAssembled: wire.PromptAssembled}, err
 }
 
-type authorStartJSON struct {
-	Target       string    `json:"target"`
-	Inputs       JSONBytes `json:"inputs"`
-	InitialState JSONBytes `json:"initial_state"`
-	Input        JSONBytes `json:"input"`
-	Report       bool      `json:"report"`
-	OutputLimit  int       `json:"output_limit"`
-}
-
-type authorInputsJSON struct {
-	Model *struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
-	} `json:"model,omitempty"`
-	Instructions *string   `json:"instructions,omitempty"`
-	Prompt       *string   `json:"prompt,omitempty"`
-	Tools        *[]string `json:"tools,omitempty"`
-	Strategy     *struct {
-		ID       string     `json:"id"`
-		Settings *JSONBytes `json:"settings,omitempty"`
-	} `json:"strategy,omitempty"`
-}
-
-func authorInputsFrom(inputs harness.SessionInputs) authorInputsJSON {
-	wire := authorInputsJSON{Instructions: inputs.Instructions, Prompt: inputs.Prompt}
-	if inputs.Tools != nil {
-		wire.Tools = &inputs.Tools
-	}
-	if inputs.Model != nil {
-		wire.Model = &struct {
-			Provider string `json:"provider"`
-			Model    string `json:"model"`
-		}{inputs.Model.Provider, inputs.Model.Model}
-	}
-	if inputs.Strategy != nil {
-		wire.Strategy = &struct {
-			ID       string     `json:"id"`
-			Settings *JSONBytes `json:"settings,omitempty"`
-		}{ID: inputs.Strategy.ID}
-		if inputs.Strategy.Settings != nil {
-			settings := JSONBytes(inputs.Strategy.Settings)
-			wire.Strategy.Settings = &settings
-		}
-	}
-	return wire
-}
-
-func authorInputsValue(wire authorInputsJSON) harness.SessionInputs {
-	inputs := harness.SessionInputs{Instructions: wire.Instructions, Prompt: wire.Prompt}
-	if wire.Tools != nil {
-		inputs.Tools = *wire.Tools
-	}
-	if wire.Model != nil {
-		inputs.Model = &model.ModelRef{Provider: wire.Model.Provider, Model: wire.Model.Model}
-	}
-	if wire.Strategy != nil {
-		inputs.Strategy = &harness.StrategySelection{ID: wire.Strategy.ID}
-		if wire.Strategy.Settings != nil {
-			inputs.Strategy.Settings = append(json.RawMessage{}, (*wire.Strategy.Settings)...)
-		}
-	}
-	return inputs
-}
-
 type authorCandidateJSON struct {
 	Model        modelRefJSON          `json:"model"`
 	Prompt       *string               `json:"prompt,omitempty"`
@@ -222,11 +158,6 @@ func DecodeAuthorAdmissionResult(raw json.RawMessage) (extension.AdmissionResult
 	return result, nil
 }
 
-type authorPlanJSON struct {
-	Plan  JSONBytes        `json:"plan"`
-	Start *authorStartJSON `json:"start,omitempty"`
-}
-
 type authorArgumentsResultJSON struct {
 	Arguments *JSONBytes `json:"arguments,omitempty"`
 	Refusal   *string    `json:"refusal,omitempty"`
@@ -265,61 +196,4 @@ func DecodeAuthorArgumentsResult(raw json.RawMessage) (extension.ArgumentsResult
 		result.Arguments = append(json.RawMessage{}, (*wire.Arguments)...)
 	}
 	return result, nil
-}
-
-// EncodeAuthorPlan preserves the complete author plan as opaque payloads.
-func EncodeAuthorPlan(plan extension.ToolPlan) (json.RawMessage, error) {
-	base, err := EncodePrepareResult(plan)
-	if err != nil {
-		return nil, err
-	}
-	wire := authorPlanJSON{Plan: JSONBytes(base)}
-	if plan.Start != nil {
-		inputs, err := json.Marshal(authorInputsFrom(plan.Start.Inputs))
-		if err != nil {
-			return nil, err
-		}
-		var parts []contentPartJSON
-		if plan.Start.Input != nil {
-			parts = contentFrom(plan.Start.Input)
-		}
-		input, err := json.Marshal(parts)
-		if err != nil {
-			return nil, err
-		}
-		wire.Start = &authorStartJSON{
-			Target: plan.Start.Target, Inputs: inputs, InitialState: JSONBytes(plan.Start.InitialState),
-			Input: input, Report: plan.Start.Report, OutputLimit: plan.Start.OutputLimit,
-		}
-	}
-	return json.Marshal(wire)
-}
-
-// DecodeAuthorPlan decodes the complete author plan.
-func DecodeAuthorPlan(raw json.RawMessage) (extension.ToolPlan, error) {
-	var wire authorPlanJSON
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		return extension.ToolPlan{}, err
-	}
-	plan, err := DecodePrepareResult(json.RawMessage(wire.Plan))
-	if err != nil || wire.Start == nil {
-		return plan, err
-	}
-	var inputs authorInputsJSON
-	if err := json.Unmarshal(wire.Start.Inputs, &inputs); err != nil {
-		return extension.ToolPlan{}, err
-	}
-	var input []contentPartJSON
-	if err := json.Unmarshal(wire.Start.Input, &input); err != nil {
-		return extension.ToolPlan{}, err
-	}
-	var parts []model.ContentPart
-	if input != nil {
-		parts = contentValue(input)
-	}
-	plan.Start = &extension.SessionStart{
-		Target: wire.Start.Target, Inputs: authorInputsValue(inputs), InitialState: append(harness.SessionStateValue(nil), wire.Start.InitialState...),
-		Input: parts, Report: wire.Start.Report, OutputLimit: wire.Start.OutputLimit,
-	}
-	return plan, nil
 }

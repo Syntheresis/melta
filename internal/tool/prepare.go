@@ -32,15 +32,9 @@ type boundCall struct {
 	canonical  string
 	displayAbs string
 	leafExists bool
-	recheck    func() error
 }
 
 func (b boundCall) revalidate() error {
-	if b.recheck != nil {
-		if err := b.recheck(); err != nil {
-			return err
-		}
-	}
 	resolved, err := pathutil.ResolveFilePathFrom(b.root, b.path)
 	if err != nil {
 		return err

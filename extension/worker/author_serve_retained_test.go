@@ -168,14 +168,11 @@ func TestAuthorServeToolCheck(t *testing.T) {
 		t.Fatalf("hello = %+v", reply)
 	}
 	registered := p.activate()
-	if len(registered) != 1 || registered[0].Kind != "check" {
+	if len(registered) != 1 || registered[0].Kind != "check" || string(registered[0].Spec) != "{}" {
 		t.Fatalf("registrations = %+v", registered)
 	}
 	input := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{"x":1}`)}
-	raw, err := worker.EncodeBeforeToolHookParams(input)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := json.RawMessage(`{"id":"call-1","name":"echo","arguments":"eyJ4IjoxfQ=="}`)
 	reply := p.call("check", registered[0].Handle, "check", raw, worker.AuthorCallContext{Token: "t"})
 	if reply.Error != nil {
 		t.Fatalf("check = %+v", reply)
@@ -367,7 +364,10 @@ func TestAuthorServeOpaqueArgumentsAndInterruption(t *testing.T) {
 	opaque := []byte{0xff, 0x00, 0x7b}
 	var seen []byte
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: "opaque", Description: "opaque", Parameters: json.RawMessage(`{"type":"object"}`)}, opaqueTool{seen: &seen}, nil); err != nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "opaque", Description: "opaque", Parameters: json.RawMessage(`{"type":"object"}`)}, func(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+			seen = append([]byte(nil), call.Arguments...)
+			return extension.ToolResult{Content: "ok"}, nil
+		}, nil); err != nil {
 			return nil, err
 		}
 		if _, err := api.RegisterOperation(extension.Operation{
@@ -386,23 +386,14 @@ func TestAuthorServeOpaqueArgumentsAndInterruption(t *testing.T) {
 	if len(registered) != 2 {
 		t.Fatalf("registrations = %d, want tool and operation", len(registered))
 	}
-	toolCall, err := json.Marshal(struct {
-		ID        string           `json:"id"`
-		Name      string           `json:"name"`
-		Arguments worker.JSONBytes `json:"arguments"`
-	}{ID: "call", Name: "opaque", Arguments: opaque})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply := p.call("normalize", registered[0].Handle, "normalize", toolCall, worker.AuthorCallContext{Token: "t"})
+	toolCall := json.RawMessage(`{"id":"call","name":"opaque","arguments":"/wB7"}`)
+	reply := p.call("run", registered[0].Handle, "run", toolCall, worker.AuthorCallContext{Token: "t"})
 	if reply.Error != nil || !bytes.Equal(seen, opaque) {
-		t.Fatalf("opaque normalize = %+v, seen %v", reply, seen)
+		t.Fatalf("opaque run = %+v, seen %v", reply, seen)
 	}
-	var normalized struct {
-		Arguments worker.JSONBytes `json:"arguments"`
-	}
-	if err := json.Unmarshal(reply.Result, &normalized); err != nil || !bytes.Equal(normalized.Arguments, opaque) {
-		t.Fatalf("normalized bytes = %s, %v", reply.Result, err)
+	outcome, err := worker.DecodeExecuteResult(reply.Result)
+	if err != nil || outcome.Result.Status != model.ResultSuccess || outcome.Result.Content != "ok" {
+		t.Fatalf("outcome = %s, %v", reply.Result, err)
 	}
 	reply = p.call("effect", registered[1].Handle, "effect", json.RawMessage(`{}`), worker.AuthorCallContext{Token: "t"})
 	if reply.Error == nil || !reply.Error.Interrupted {
@@ -421,17 +412,27 @@ func TestAuthorServeOpaqueArgumentsAndInterruption(t *testing.T) {
 	}
 }
 
-type opaqueTool struct{ seen *[]byte }
-
-func (o opaqueTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	*o.seen = append([]byte(nil), call.Arguments...)
-	return call.Arguments, nil
-}
-func (opaqueTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (opaqueTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{}
+func TestAuthorServeRejectsRetiredToolRoutes(t *testing.T) {
+	for _, method := range []string{"normalize", "prepare", "execute", "authorization"} {
+		t.Run(method, func(t *testing.T) {
+			p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+				if method == "authorization" {
+					_, err := api.AttachToolCheck(func(context.Context, extension.AuthorContext, model.ToolCall) (*string, error) { return nil, nil }, nil)
+					return nil, err
+				}
+				_, err := api.RegisterTool(model.ToolDefinition{Name: "echo", Parameters: json.RawMessage(`{}`)}, func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+					return extension.ToolResult{}, nil
+				}, nil)
+				return nil, err
+			}})
+			p.hello(extension.APIVersion)
+			registered := p.activate()
+			p.send(worker.Frame{Kind: worker.KindRequest, ID: "old", Method: worker.MethodCall, Params: callParams(t, registered[0].Handle, method)})
+			if err := p.wait(); err == nil {
+				t.Fatal("retired method accepted")
+			}
+		})
+	}
 }
 
 // TestAuthorHostcallEmptyArgumentsAndPartial proves an empty hostcall argument

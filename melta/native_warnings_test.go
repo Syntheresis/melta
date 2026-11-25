@@ -61,7 +61,8 @@ func TestScopedServiceWarningsBufferAndPublish(t *testing.T) {
 	if _, err := scope.call(context.Background(), extension.ContractWarnings, "missing", []byte(`{}`)); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("unknown host method: %v", err)
 	}
-	if _, err := scope.call(context.Background(), extension.ContractWorkspace, "write", []byte(`{"binding":"x","bytes":"eA==","create_only":null}`)); !errors.Is(err, harness.ErrInvalid) {
+	scope.kind = callKindTool
+	if _, err := scope.call(context.Background(), extension.ContractWorkspace, "write", []byte(`{"path":"x","bytes":"eA==","create_only":null}`)); !errors.Is(err, harness.ErrInvalid) {
 		t.Fatalf("invalid host document: %v", err)
 	}
 	_, err = r.invokeRegisteredOperation(context.Background(), testCaller(r), "warning-test", "report", target, []byte(`{"kind":"spoof","message":"bad","source":"other"}`), "")

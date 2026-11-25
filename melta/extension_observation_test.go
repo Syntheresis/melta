@@ -23,7 +23,6 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
-	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
 
@@ -197,72 +196,26 @@ func independentSubmitRequest(operationID string) json.RawMessage {
 	return raw
 }
 
-// independentCommandTool issues API.Command during and after its own Prepare
-// and Execute callbacks, reporting the class to the fixture report file.
+// independentCommandTool issues API.Command during and after the tool call.
 type independentCommandTool struct {
 	api     extension.API
 	settled chan string
 }
 
-func (t independentCommandTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func independentToolOutcome(callID, content string) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: content}}
-}
-
-func (t independentCommandTool) Prepare(ctx context.Context, call extension.AuthorContext, input model.ToolCall) extension.ToolPlan {
-	args := independentToolPhase(input.Arguments)
-	phase, operationID := args.Phase, args.OperationID
-	switch phase {
-	case "prepare":
-		result, err := t.api.Command(ctx, nativeSessionTarget(call.Session.SessionID), "submit", independentSubmitRequest(operationID))
-		nativeIndependentReport(t.api, "tool-prepare", result, err)
-		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: input.ID, Status: model.ResultSuccess, Content: "prepared"}}}
-	case "prepare_after":
-		settings := independentSettingsOf(t.api)
-		sessionID := call.Session.SessionID
-		go func() {
-			if !waitSettled(t.settled, args.Parent) {
-				return
-			}
-			result, err := independentCommandAfterSettled(t.api, nativeSessionTarget(sessionID), operationID)
-			appendIndependentReport(settings.Report, "tool-prepare-after", independentNativeClass(err), string(result.Value), "", operationID, "", settings.Version)
-		}()
-		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: input.ID, Status: model.ResultSuccess, Content: "prepared"}}}
-	}
-	payload, _ := json.Marshal(map[string]json.RawMessage{
-		"id":        json.RawMessage(`"` + input.ID + `"`),
-		"arguments": append(json.RawMessage(nil), input.Arguments...),
-	})
-	return extension.ToolPlan{Data: payload}
-}
-
-func (t independentCommandTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	var payload struct {
-		ID        string          `json:"id"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	_ = json.Unmarshal(plan.Data, &payload)
-	args := independentToolPhase(payload.Arguments)
-	phase, operationID := args.Phase, args.OperationID
-	switch phase {
-	case "execute":
-		result, err := t.api.Command(ctx, nativeSessionTarget(call.Session.SessionID), "submit", independentSubmitRequest(operationID))
-		nativeIndependentReport(t.api, "tool-execute", result, err)
-	case "execute_after":
-		settings := independentSettingsOf(t.api)
-		sessionID := call.Session.SessionID
-		go func() {
-			if !waitSettled(t.settled, args.Parent) {
-				return
-			}
-			result, err := independentCommandAfterSettled(t.api, nativeSessionTarget(sessionID), operationID)
-			appendIndependentReport(settings.Report, "tool-execute-after", independentNativeClass(err), string(result.Value), "", operationID, "", settings.Version)
-		}()
-	}
-	return independentToolOutcome(payload.ID, "executed")
+func (t independentCommandTool) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+	args := independentToolPhase(call.Arguments)
+	result, err := t.api.Command(ctx, nativeSessionTarget(call.Session.SessionID), "submit", independentSubmitRequest("op-tool-denied"))
+	nativeIndependentReport(t.api, "tool-command", result, err)
+	settings := independentSettingsOf(t.api)
+	sessionID := call.Session.SessionID
+	go func() {
+		if !waitSettled(t.settled, args.Parent) {
+			return
+		}
+		result, err := independentCommandAfterSettled(t.api, nativeSessionTarget(sessionID), args.OperationID)
+		appendIndependentReport(settings.Report, "tool-after", independentNativeClass(err), string(result.Value), "", args.OperationID, "", settings.Version)
+	}()
+	return extension.ToolResult{Content: "executed"}, nil
 }
 
 func nativeIndependentOperation(name string, handler extension.AuthorHandler) extension.Operation {
@@ -314,7 +267,7 @@ func nativeIndependentFixture() extension.Extension {
 		}), nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.RegisterTool(testDescribeTool("command-tool"), independentCommandTool{api: api, settled: settled}, nil); err != nil {
+		if _, err := api.RegisterTool(testDescribeTool("command-tool"), (independentCommandTool{api: api, settled: settled}).run, nil); err != nil {
 			return nil, err
 		}
 
@@ -783,7 +736,7 @@ func TestCommandSessionReadDoesNotHoldNativeMu(t *testing.T) {
 
 	registrationDone := make(chan error, 1)
 	go func() {
-		_, err := api.RegisterTool(testDescribeTool("held-tool"), testRegisteredTool{}, nil)
+		_, err := api.RegisterTool(testDescribeTool("held-tool"), testRegisteredTool, nil)
 		registrationDone <- err
 	}()
 	select {
@@ -817,20 +770,10 @@ func TestAuthorToolCallbackCommand(t *testing.T) {
 				if lastMessageRole(body) == "tool" {
 					return textTurnEvents("done")
 				}
-				var arguments string
-				switch independentLastUserText(body) {
-				case "prepare":
-					arguments = `{"phase":"prepare","operation_id":"op-tool-prepare","parent":"op-parent-prepare"}`
-				case "prepare_after":
-					arguments = `{"phase":"prepare_after","operation_id":"op-tool-prepare-after","parent":"op-parent-prepare-after"}`
-				case "execute":
-					arguments = `{"phase":"execute","operation_id":"op-tool-execute","parent":"op-parent-execute"}`
-				case "execute_after":
-					arguments = `{"phase":"execute_after","operation_id":"op-tool-execute-after","parent":"op-parent-execute-after"}`
-				default:
+				if independentLastUserText(body) != "probe" {
 					return textTurnEvents("done")
 				}
-				return toolCallTurnEvents("call-1", "command-tool", arguments)
+				return toolCallTurnEvents("call-1", "command-tool", `{"operation_id":"op-tool-after","parent":"op-parent"}`)
 			})
 			caller := testCaller(r)
 			session := projectionSession(t, r, filepath.Join(t.TempDir(), "ws"), "")
@@ -844,25 +787,13 @@ func TestAuthorToolCallbackCommand(t *testing.T) {
 				awaitOperation(t, r, sessionID, operationID, harness.OperationSuccess)
 			}
 
-			submit("op-parent-prepare", "prepare")
-			report := log.awaitKind(t, "tool-prepare")
-			testassert.Require(t, report["class"] == "denied", "Prepare command = %+v, want denied", report)
-			requireNoOperation(t, r, sessionID, "op-tool-prepare")
-
-			submit("op-parent-prepare-after", "prepare_after")
-			report = log.awaitKind(t, "tool-prepare-after")
-			testassert.Require(t, report["class"] == "" && (strings.Contains(report["value"], `"operation_id":"op-tool-prepare-after"`) || strings.Contains(report["value"], `"disposition":"steering"`)), "post-Prepare timer command = %+v, want a successful receipt", report)
-			awaitOperation(t, r, sessionID, "op-tool-prepare-after", harness.OperationSuccess)
-
-			submit("op-parent-execute", "execute")
-			report = log.awaitKind(t, "tool-execute")
-			testassert.Require(t, report["class"] == "denied", "Execute command = %+v, want denied", report)
-			requireNoOperation(t, r, sessionID, "op-tool-execute")
-
-			submit("op-parent-execute-after", "execute_after")
-			report = log.awaitKind(t, "tool-execute-after")
-			testassert.Require(t, report["class"] == "" && (strings.Contains(report["value"], `"operation_id":"op-tool-execute-after"`) || strings.Contains(report["value"], `"disposition":"steering"`)), "post-Execute timer command = %+v, want a successful receipt", report)
-			awaitOperation(t, r, sessionID, "op-tool-execute-after", harness.OperationSuccess)
+			submit("op-parent", "probe")
+			report := log.awaitKind(t, "tool-command")
+			testassert.Require(t, report["class"] == "denied", "tool command = %+v, want denied", report)
+			requireNoOperation(t, r, sessionID, "op-tool-denied")
+			report = log.awaitKind(t, "tool-after")
+			testassert.Require(t, report["class"] == "" && (strings.Contains(report["value"], `"operation_id":"op-tool-after"`) || strings.Contains(report["value"], `"disposition":"steering"`)), "post-tool command = %+v, want a successful receipt", report)
+			awaitOperation(t, r, sessionID, "op-tool-after", harness.OperationSuccess)
 		})
 	}
 }

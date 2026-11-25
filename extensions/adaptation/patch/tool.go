@@ -1,16 +1,11 @@
 package patch
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"strings"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 )
 
@@ -22,92 +17,32 @@ func Definition() model.ToolDefinition {
 	return model.ToolDefinition{Name: ToolName, Description: description, Parameters: json.RawMessage(parameters)}
 }
 
-// Tool implements multi-file V4A patching through the Host's Workspace file
-// operations.
-type Tool struct{}
-
-func (Tool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	args, err := decodeArguments(call.Arguments)
+// Tool applies a multi-file V4A patch through Workspace operations.
+func Tool(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+	var args struct {
+		Input string `json:"input"`
+	}
+	if err := call.Decode(&args); err != nil {
+		return extension.ToolResult{}, err
+	}
+	prepared, err := parseAndStatTargets(ctx, call.AuthorContext, args.Input)
 	if err != nil {
-		return nil, err
+		return extension.ToolResult{}, err
 	}
-	clean := make(map[string]any, len(args))
-	for key, value := range args {
-		if strings.HasPrefix(key, "_melta_") {
-			continue
-		}
-		clean[key] = value
-	}
-	if value, present := clean["input"]; present {
-		if _, ok := value.(string); !ok {
-			return nil, errors.New("apply_patch: input must be a string")
-		}
-	}
-	return json.Marshal(clean)
-}
-
-func (Tool) Prepare(ctx context.Context, author extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	args, err := decodeArguments(call.Arguments)
+	summary, previews, err := executePlan(ctx, call.AuthorContext, prepared)
 	if err != nil {
-		return invalid(call.ID, err)
-	}
-	input, _ := args["input"].(string)
-	plan, err := preparePlan(ctx, author.Call, input)
-	if err != nil {
-		return invalid(call.ID, err)
-	}
-	plan.CallID = call.ID
-	data, err := json.Marshal(plan)
-	if err != nil {
-		return invalid(call.ID, err)
-	}
-	return extension.ToolPlan{Data: data}
-}
-
-func (Tool) Execute(ctx context.Context, author extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	var prepared planData
-	if err := json.Unmarshal(plan.Data, &prepared); err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: prepared.CallID, Status: model.ResultError, Content: err.Error()}}
-	}
-	summary, previews, err := executePlan(ctx, author.Call, prepared)
-	if err != nil {
-		content := err.Error()
 		if summary != "" {
-			content = summary + "\n\n" + content
+			return extension.ToolResult{}, fmt.Errorf("%s\n\n%w", summary, err)
 		}
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: prepared.CallID, Status: model.ResultError, Content: content}}
+		return extension.ToolResult{}, err
 	}
-	outcome := harness.ToolOutcome{Result: model.ToolResult{CallID: prepared.CallID, Status: model.ResultSuccess, Content: summary}}
+	outcome := extension.ToolResult{Content: summary}
 	if metadata := previewMetadata(previews); metadata != nil {
 		if raw, marshalErr := json.Marshal(metadata); marshalErr == nil {
 			outcome.Metadata = raw
 		}
 	}
-	return outcome
-}
-
-// invalid settles an undecodable prepared argument set as an ordinary
-// validation error.
-func invalid(callID string, cause error) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: cause.Error()}}}
-}
-
-// decodeArguments strictly decodes one call's JSON arguments into an owned
-// object, preserving every numeric lexeme.
-func decodeArguments(raw json.RawMessage) (map[string]any, error) {
-	var args map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&args); err != nil {
-		return nil, fmt.Errorf("arguments must be a JSON object: %w", err)
-	}
-	if args == nil {
-		return nil, errors.New("arguments must be a JSON object")
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return nil, errors.New("arguments must be one JSON object")
-	}
-	return args, nil
+	return outcome, nil
 }
 
 const description = `Edits, creates, deletes, or renames files using the apply_patch (V4A) patch format.

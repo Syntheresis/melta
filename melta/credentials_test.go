@@ -329,7 +329,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 		return nil, err
 	})
 	callerAuthor := credentialAuthor(t, "credcaller", []extension.SecretRef{{Field: "/caller", Lifetime: extension.SecretActivation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "cred_caller", Description: "reads its own credential and nests a provider call", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, credentialNestedTool{}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "cred_caller", Description: "reads its own credential and nests a provider call", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, credentialNestedTool, nil)
 		return nil, err
 	})
 	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credprovider":{"enabled":true,"provider":"`+providerName+`"},"credcaller":{"enabled":true,"caller":"`+callerName+`"}}`))
@@ -361,24 +361,16 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 
 // credentialNestedTool is one caller tool whose nested provider call reads
 // the provider's own declared credential field.
-type credentialNestedTool struct{}
-
-func (credentialNestedTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (credentialNestedTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (credentialNestedTool) Execute(ctx context.Context, tc extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func credentialNestedTool(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	own, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/caller"}`))
 	if err != nil {
-		return credentialOutcome("call", "caller error: "+err.Error())
+		return extension.ToolResult{Content: "caller error: " + err.Error()}, nil
 	}
 	nested, err := tc.Call(ctx, "cred_provider", "call", json.RawMessage(`{}`))
 	if err != nil {
-		return credentialOutcome("call", "provider error: "+err.Error())
+		return extension.ToolResult{Content: "provider error: " + err.Error()}, nil
 	}
-	return credentialOutcome("call", "caller="+credentialString(own)+"|provider="+credentialString(nested))
+	return extension.ToolResult{Content: "caller=" + credentialString(own) + "|provider=" + credentialString(nested)}, nil
 }
 
 // TestCredentialHookUsesOperationCapture proves every callback kind
@@ -404,7 +396,7 @@ func TestCredentialHookUsesOperationCapture(t *testing.T) {
 		mu.Unlock()
 	}
 	author := credentialAuthor(t, "credhook", []extension.SecretRef{{Field: "/operation", Lifetime: extension.SecretOperation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(testDescribeTool("cred_tool"), testRegisteredTool{}, nil); err != nil {
+		if _, err := api.RegisterTool(testDescribeTool("cred_tool"), testRegisteredTool, nil); err != nil {
 			return nil, err
 		}
 		if _, err := api.AttachAdmission(func(ctx context.Context, call extension.AuthorContext, _ extension.AdmissionInput) (extension.AdmissionResult, error) {
@@ -720,7 +712,7 @@ func (p *credentialProbe) author(t *testing.T) extension.Extension {
 			if err != nil {
 				p.openUndeclared = err.Error()
 			}
-			_, err = api.RegisterTool(model.ToolDefinition{Name: "cred_probe", Description: "reads declared credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, &credentialTool{probe: p}, nil)
+			_, err = api.RegisterTool(model.ToolDefinition{Name: "cred_probe", Description: "reads declared credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, (&credentialTool{probe: p}).run, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -754,28 +746,20 @@ func (p *credentialProbe) prepare(_ context.Context, _ extension.AuthorContext, 
 
 type credentialTool struct{ probe *credentialProbe }
 
-func (t *credentialTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *credentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Data: []byte(call.ID)}
-}
-
-func (t *credentialTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t *credentialTool) run(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	activation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 	if err != nil {
-		return credentialOutcome(string(plan.Data), "activation error: "+err.Error())
+		return extension.ToolResult{Content: "activation error: " + err.Error()}, nil
 	}
 	operation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
 	if err != nil {
-		return credentialOutcome(string(plan.Data), "operation error: "+err.Error())
+		return extension.ToolResult{Content: "operation error: " + err.Error()}, nil
 	}
 	t.probe.mu.Lock()
 	combined := "activation=" + credentialString(activation) + "|operation=" + credentialString(operation)
 	t.probe.toolValues = append(t.probe.toolValues, combined)
 	t.probe.mu.Unlock()
-	return credentialOutcome(string(plan.Data), combined)
+	return extension.ToolResult{Content: combined}, nil
 }
 
 func credentialString(result extension.Result) string {
@@ -784,10 +768,6 @@ func credentialString(result extension.Result) string {
 	}
 	_ = json.Unmarshal(result.Value, &value)
 	return value.Value
-}
-
-func credentialOutcome(callID, content string) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: content}}
 }
 
 func credentialConfigDocument(endpoint, activation, operation string) string {
@@ -1076,7 +1056,7 @@ func (p *credentialGateProbe) authorFor(t *testing.T, id, toolID string) extensi
 			},
 		},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(model.ToolDefinition{Name: toolID, Description: "reads the captured credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, &credentialGateTool{probe: p}, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: toolID, Description: "reads the captured credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, (&credentialGateTool{probe: p}).run, nil)
 			return nil, err
 		},
 	}
@@ -1084,29 +1064,12 @@ func (p *credentialGateProbe) authorFor(t *testing.T, id, toolID string) extensi
 
 type credentialGateTool struct{ probe *credentialGateProbe }
 
-func (t *credentialGateTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *credentialGateTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	data, _ := json.Marshal(struct {
-		CallID    string          `json:"call_id"`
-		Arguments json.RawMessage `json:"arguments"`
-	}{CallID: call.ID, Arguments: call.Arguments})
-	return extension.ToolPlan{Data: data}
-}
-
-func (t *credentialGateTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	var prepared struct {
-		CallID    string          `json:"call_id"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	_ = json.Unmarshal(plan.Data, &prepared)
+func (t *credentialGateTool) run(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	var request struct {
 		Key  string `json:"key"`
 		Park bool   `json:"park"`
 	}
-	_ = json.Unmarshal(prepared.Arguments, &request)
+	_ = tc.Decode(&request)
 	if request.Park {
 		t.probe.mu.Lock()
 		t.probe.parked = true
@@ -1115,11 +1078,11 @@ func (t *credentialGateTool) Execute(ctx context.Context, tc extension.AuthorCon
 	}
 	activation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 	if err != nil {
-		return credentialOutcome(prepared.CallID, "activation error: "+err.Error())
+		return extension.ToolResult{Content: "activation error: " + err.Error()}, nil
 	}
 	operation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
 	if err != nil {
-		return credentialOutcome(prepared.CallID, "operation error: "+err.Error())
+		return extension.ToolResult{Content: "operation error: " + err.Error()}, nil
 	}
 	t.probe.mu.Lock()
 	if t.probe.values == nil {
@@ -1127,7 +1090,7 @@ func (t *credentialGateTool) Execute(ctx context.Context, tc extension.AuthorCon
 	}
 	t.probe.values[request.Key] = credentialString(activation) + "|" + credentialString(operation)
 	t.probe.mu.Unlock()
-	return credentialOutcome(prepared.CallID, "probed")
+	return extension.ToolResult{Content: "probed"}, nil
 }
 
 // captureValueForTest returns one managed file value.

@@ -3,9 +3,6 @@ package extension
 import (
 	"encoding/json"
 	"errors"
-
-	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/model"
 )
 
 // ErrClosed reports a call whose activation, registration or callback
@@ -15,37 +12,6 @@ var ErrClosed = errors.New("extension: closed")
 // ErrDenied reports a call outside what its kind, its grants or its target
 // allow.
 var ErrDenied = errors.New("extension: denied")
-
-// ToolPlan is one prepared tool call. Data is opaque bytes owned by the tool
-// and returned to Execute unchanged; the host never interprets it.
-type ToolPlan struct {
-	Immediate *harness.ToolOutcome
-	Data      []byte
-	Start     *SessionStart
-}
-
-// Owned returns an independent copy of the plan and its byte fields.
-func (p ToolPlan) Owned() ToolPlan {
-	out := p
-	if p.Immediate != nil {
-		immediate := *p.Immediate
-		immediate.Metadata = append(json.RawMessage(nil), p.Immediate.Metadata...)
-		immediate.Result.Content = p.Immediate.Result.Content
-		out.Immediate = &immediate
-	}
-	out.Data = append([]byte(nil), p.Data...)
-	if p.Start != nil {
-		start := *p.Start
-		start.Inputs = p.Start.Inputs.Owned()
-		start.InitialState = append(harness.SessionStateValue(nil), p.Start.InitialState...)
-		start.Input = append([]model.ContentPart(nil), p.Start.Input...)
-		for i := range start.Input {
-			start.Input[i].Extra = start.Input[i].Extra.Clone()
-		}
-		out.Start = &start
-	}
-	return out
-}
 
 // Result is one method result: exactly a schema-valid success value or one
 // declared failure.

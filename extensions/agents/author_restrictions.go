@@ -15,7 +15,8 @@ func (s authorInstance) arguments(_ context.Context, call extension.AuthorContex
 	if err != nil || !definition.Readonly || input.Name != "run_command" {
 		return extension.ArgumentsResult{}, nil
 	}
-	args, err := decodeArguments(input.Arguments)
+	var args map[string]any
+	err = (extension.ToolCall{Arguments: input.Arguments}).Decode(&args)
 	if err != nil {
 		return extension.ArgumentsResult{}, nil
 	}
@@ -43,7 +44,8 @@ func (s authorInstance) check(ctx context.Context, call extension.AuthorContext,
 	}
 	refuse := func(message string) (*string, error) { return &message, nil }
 	if definition.Readonly && input.Name == "run_command" {
-		args, err := decodeArguments(input.Arguments)
+		var args map[string]any
+		err := (extension.ToolCall{Arguments: input.Arguments}).Decode(&args)
 		if err != nil {
 			return refuse(ReadOnlyRunCommandRejected)
 		}
@@ -65,37 +67,21 @@ func (s authorInstance) check(ctx context.Context, call extension.AuthorContext,
 			}
 			return nil, nil
 		}
-		arguments, err := decodeArguments(input.Arguments)
+		var arguments map[string]any
+		err := (extension.ToolCall{Arguments: input.Arguments}).Decode(&arguments)
 		if err != nil {
 			return nil, err
 		}
 		path, _ := arguments["path"].(string)
-		bind := func(path string) (string, *string, error) {
-			args, _ := json.Marshal(map[string]string{"path": path})
-			result, err := call.Call(ctx, "melta.workspace", "bind", args)
-			if err != nil {
-				return "", nil, err
-			}
-			if result.Failure != nil {
-				return "", &result.Failure.Message, nil
-			}
-			var bound struct {
-				CanonicalPath string `json:"canonical_path"`
-			}
-			if err := json.Unmarshal(result.Value, &bound); err != nil {
-				return "", nil, err
-			}
-			return bound.CanonicalPath, nil, nil
+		file, err := call.StatFile(ctx, path)
+		if err != nil {
+			return nil, err
 		}
-		file, refusal, err := bind(path)
-		if err != nil || refusal != nil {
-			return refusal, err
+		root, err := call.StatFile(ctx, writeDir)
+		if err != nil {
+			return nil, err
 		}
-		root, refusal, err := bind(writeDir)
-		if err != nil || refusal != nil {
-			return refusal, err
-		}
-		relative, err := filepath.Rel(root, file)
+		relative, err := filepath.Rel(root.Path, file.Path)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
 			return refuse("write target is outside the agent write root")
 		}

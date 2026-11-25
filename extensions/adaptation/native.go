@@ -24,7 +24,7 @@ func Author() extension.Extension {
 			if err != nil {
 				return nil, err
 			}
-			if _, err := api.RegisterTool(patch.Definition(), patch.Tool{}, nil); err != nil {
+			if _, err := api.RegisterTool(patch.Definition(), patch.Tool, nil); err != nil {
 				return nil, err
 			}
 			_, err = api.AttachRequest(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {

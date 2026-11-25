@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -494,26 +495,20 @@ func TestConversationProjectionToolCallLifecycle(t *testing.T) {
 		// The declared tools' prepared outcomes: the first result carries its
 		// big-number metadata, the second parks until released, the rest
 		// settle immediately.
-		bg.tools.setPrepare(func(_ context.Context, call model.ToolCall) extension.ToolPlan {
+		bg.tools.setRun(func(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 			switch call.ID {
 			case "call-1":
-				return extension.ToolPlan{Immediate: &harness.ToolOutcome{
-					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "first"},
-					Metadata: json.RawMessage(`{"n":9007199254740993}`),
-				}}
+				return extension.ToolResult{Content: "first", Metadata: json.RawMessage(`{"n":9007199254740993}`)}, nil
 			case "call-2":
-				return extension.ToolPlan{Data: []byte(call.ID)}
+				select {
+				case toolStarted <- struct{}{}:
+				default:
+				}
+				<-releaseTool
+				return extension.ToolResult{Content: "second", Metadata: json.RawMessage(`{"late":true}`)}, nil
 			default:
-				return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: call.ID + " ran"}}}
+				return extension.ToolResult{Content: call.ID + " ran"}, nil
 			}
-		})
-		bg.tools.setExecute(func(_ context.Context, plan extension.ToolPlan) harness.ToolOutcome {
-			select {
-			case toolStarted <- struct{}{}:
-			default:
-			}
-			<-releaseTool
-			return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: "second"}, Metadata: json.RawMessage(`{"late":true}`)}
 		})
 		submitThroughRuntime(t, bg.r, session, "op-1", "work")
 		bg.e.server.awaitRequests(2) // the parked second call's turn arrived
@@ -615,8 +610,8 @@ func TestConversationProjectionSyntheticToolResult(t *testing.T) {
 		})
 		// The declared read tool fails its prepared call immediately: the
 		// synthetic error outcome settles the published call.
-		bg.tools.setPrepare(func(_ context.Context, call model.ToolCall) extension.ToolPlan {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no concrete tools yet"}}}
+		bg.tools.setRun(func(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+			return extension.ToolResult{}, errors.New("no concrete tools yet")
 		})
 		submitThroughRuntime(t, bg.r, session, "op-1", "work")
 		awaitOperation(t, bg.r, session, "op-1", harness.OperationSuccess)
@@ -644,13 +639,10 @@ func twoReadCallTurnEvents() []string {
 // call-1 parks its execution until release or run cancellation, while every
 // other call settles immediately.
 func setParkedReadCall(tools *lifecycleTools, releaseTool <-chan struct{}, toolStarted chan<- struct{}) {
-	tools.setPrepare(func(_ context.Context, call model.ToolCall) extension.ToolPlan {
+	tools.setRun(func(execCtx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 		if call.ID != "call-1" {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: call.ID + " ran"}}}
+			return extension.ToolResult{Content: call.ID + " ran"}, nil
 		}
-		return extension.ToolPlan{Data: []byte(call.ID)}
-	})
-	tools.setExecute(func(execCtx context.Context, plan extension.ToolPlan) harness.ToolOutcome {
 		select {
 		case toolStarted <- struct{}{}:
 		default:
@@ -659,7 +651,7 @@ func setParkedReadCall(tools *lifecycleTools, releaseTool <-chan struct{}, toolS
 		case <-releaseTool:
 		case <-execCtx.Done():
 		}
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: "first ran"}}
+		return extension.ToolResult{Content: "first ran"}, nil
 	})
 }
 
@@ -841,11 +833,8 @@ func TestConversationProjectionForkPrefixIsIndependent(t *testing.T) {
 		})
 		// The declared read tool settles its call with the big-number
 		// metadata the projection keeps.
-		bg.tools.setPrepare(func(_ context.Context, call model.ToolCall) extension.ToolPlan {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{
-				Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "first"},
-				Metadata: json.RawMessage(`{"n":9007199254740993}`),
-			}}
+		bg.tools.setRun(func(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+			return extension.ToolResult{Content: "first", Metadata: json.RawMessage(`{"n":9007199254740993}`)}, nil
 		})
 		submitThroughRuntime(t, bg.r, root, "op-1", "hello fork")
 		awaitOperation(t, bg.r, root, "op-1", harness.OperationSuccess)

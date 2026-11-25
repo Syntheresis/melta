@@ -2,7 +2,6 @@ package melta
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +10,6 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
-	"github.com/Syntheresis/melta/model"
 )
 
 // backgroundProbe records the author call view of every prepared call.
@@ -23,27 +21,12 @@ func (p *backgroundProbe) record(tc extension.AuthorContext) {
 	p.seen = append(p.seen, tc)
 }
 
-type backgroundProbeTool struct {
-	probe *backgroundProbe
-}
-
-func (t backgroundProbeTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-
-func (t backgroundProbeTool) Prepare(_ context.Context, tc extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	t.probe.record(tc)
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "probed"}}}
-}
-
-func (t backgroundProbeTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "probed"}}
-}
-
 func backgroundProbePlugin(probe *backgroundProbe) extension.Extension {
-	tool := backgroundProbeTool{probe: probe}
 	return testNative("bgprobe", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(testDescribeTool("bg_probe"), tool, nil)
+		_, err := api.RegisterTool(testDescribeTool("bg_probe"), func(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+			probe.record(call.AuthorContext)
+			return extension.ToolResult{Content: "probed"}, nil
+		}, nil)
 		return nil, err
 	})
 }

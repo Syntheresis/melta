@@ -873,11 +873,7 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 					Identity: harness.ToolImplementation{ID: binding.entry.id, ExtensionID: binding.entry.activation.id},
 					Validate: binding.entry.value.(nativeTool).validate,
 					Run: func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
-						return runTool(ctx, call,
-							func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-								return tool.Normalize(ctx, tc, call)
-							},
-							func(ctx context.Context, call model.ToolCall) toolPlan { return tool.Prepare(ctx, tc, call) })
+						return tool.Run(ctx, tc, call)
 					},
 					Release: func() { _ = binding.release() },
 				}, true, nil

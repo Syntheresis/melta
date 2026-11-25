@@ -502,9 +502,9 @@ func seedRunningOperation(t *testing.T, store harness.Storage, workspace string)
 					return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 						return harness.InvocationExecution{
 							Model: modelFn,
-							LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) toolPlan {
-								return toolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "seeded"}}}
-							}, runtimeNormalizeContext),
+							LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) harness.ToolOutcome {
+								return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "seeded"}}
+							}),
 						}, nil
 					}}, nil
 				},
@@ -1566,7 +1566,7 @@ func TestRuntimeBaselineServicesAreDirectlyConstructed(t *testing.T) {
 		e := newOwnerEnv(t)
 		enableFixturePlugin(t, e.configPath, "shadow")
 		shadow := extension.Extension{Manifest: registrarManifest("shadow"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "write_file", Parameters: json.RawMessage(`{"type":"object"}`)}, registrarTestTool{}, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "write_file", Parameters: json.RawMessage(`{"type":"object"}`)}, registrarTestTool(""), nil)
 			return nil, err
 		}}
 		r, err := e.open(context.Background(), shadow)

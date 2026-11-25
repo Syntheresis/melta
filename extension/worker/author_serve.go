@@ -312,28 +312,15 @@ func (s *server) admitAuthorRequest(frame Frame, ctx context.Context, cancel con
 				}
 				return EncodePlanResult(result)
 			case "tool":
-				handler := registration.value.(extension.RegisteredTool)
-				switch params.Method {
-				case "normalize", "prepare":
-					input, err := DecodeBeforeToolHookParams(json.RawMessage(params.Arguments))
-					if err != nil {
-						return nil, badRoute("worker: invalid tool input: %v", err)
-					}
-					if params.Method == "normalize" {
-						result, err := handler.Normalize(call, input)
-						if err != nil {
-							return nil, err
-						}
-						return EncodeArguments(result)
-					}
-					return EncodeAuthorPlan(handler.Prepare(ctx, call, input))
-				case "execute":
-					plan, err := DecodeAuthorPlan(json.RawMessage(params.Arguments))
-					if err != nil {
-						return nil, badRoute("worker: invalid tool plan: %v", err)
-					}
-					return EncodeExecuteResult(handler.Execute(ctx, call, plan))
+				if params.Method != "run" {
+					return nil, badRoute("worker: invalid tool method")
 				}
+				input, err := DecodeBeforeToolHookParams(json.RawMessage(params.Arguments))
+				if err != nil {
+					return nil, badRoute("worker: invalid tool input: %v", err)
+				}
+				return EncodeExecuteResult(extension.RunTool(ctx, registration.value.(extension.ToolFunc),
+					extension.ToolCall{AuthorContext: call, ID: input.ID, Name: input.Name, Arguments: input.Arguments}))
 			case "cleanup":
 				handler := registration.value.(extension.CleanupHook)
 				var session harness.SessionIdentity
@@ -502,7 +489,7 @@ func (a *authorAPI) Remove(handle extension.Registration) error {
 		Handle string `json:"handle"`
 	}{r.handle})
 }
-func (a *authorAPI) RegisterTool(def model.ToolDefinition, tool extension.RegisteredTool, replace extension.Registration) (extension.Registration, error) {
+func (a *authorAPI) RegisterTool(def model.ToolDefinition, tool extension.ToolFunc, replace extension.Registration) (extension.Registration, error) {
 	if tool == nil {
 		return nil, errors.New("missing tool implementation")
 	}

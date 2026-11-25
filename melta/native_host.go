@@ -80,12 +80,12 @@ func buildNativeHostMethods() map[string]map[string]*hostMethod {
 	add(extension.ContractData, "claim_external_data", callKinds(callKindHook, callKindTool, callKindOperation), true, false, false, (*nativeCallScope).dataService)
 	add(extension.ContractWarnings, "report", allCallKinds, false, false, false, (*nativeCallScope).warningsService)
 	add(extension.ContractSession, "members", callKinds(callKindAdmission, callKindHook, callKindTool, callKindOperation), true, false, false, (*nativeCallScope).sessionService)
-	add(extension.ContractSession, "start", allCallKinds, true, false, false, (*nativeCallScope).sessionService)
+	add(extension.ContractSession, "start", callKinds(callKindTool), true, false, false, (*nativeCallScope).sessionService)
 	add(extension.ContractState, "set", callKinds(callKindHook, callKindTool, callKindOperation), true, false, false, (*nativeCallScope).stateService)
-	add(extension.ContractWorkspace, "bind", allCallKinds, false, false, false, (*nativeCallScope).workspaceService)
-	add(extension.ContractWorkspace, "read", allCallKinds, false, false, false, (*nativeCallScope).workspaceService)
-	add(extension.ContractWorkspace, "write", allCallKinds, false, false, false, (*nativeCallScope).workspaceService)
-	add(extension.ContractWorkspace, "delete", allCallKinds, false, false, false, (*nativeCallScope).workspaceService)
+	add(extension.ContractWorkspace, "stat", callKinds(callKindAdmission, callKindHook, callKindTool), true, false, false, (*nativeCallScope).workspaceService)
+	add(extension.ContractWorkspace, "read", callKinds(callKindAdmission, callKindHook, callKindTool), true, false, false, (*nativeCallScope).workspaceService)
+	add(extension.ContractWorkspace, "write", callKinds(callKindTool), false, false, false, (*nativeCallScope).workspaceService)
+	add(extension.ContractWorkspace, "delete", callKinds(callKindTool), false, false, false, (*nativeCallScope).workspaceService)
 	add(extension.ContractSettings, "replace", callKinds(callKindOperation), false, true, false, (*nativeCallScope).settingsService)
 	commands, _ := extension.HostService(extension.ContractCommands)
 	for _, method := range commands {
@@ -198,29 +198,22 @@ func (scope *nativeCallScope) sessionService(ctx context.Context, method string,
 		members, err := h.SessionMembers(ctx, scope.session.SessionID)
 		return commandResult(members, err)
 	case "start":
-		if scope.kind != callKindTool || scope.workspaceBind || scope.start == nil {
-			return extension.Result{}, ErrDenied
+		start, err := extension.DecodeSessionStart(args)
+		if err != nil {
+			return extension.Result{}, fmt.Errorf("session start: %v: %w", err, harness.ErrInvalid)
 		}
-		start := scope.start
-		start.mu.Lock()
-		if start.consumed {
-			start.mu.Unlock()
-			return extension.Result{}, fmt.Errorf("session start already consumed: %w", harness.ErrConflict)
-		}
-		start.consumed = true
-		start.mu.Unlock()
 		operationID, err := mintInstance()
 		if err != nil {
 			return extension.Result{}, err
 		}
 		var states map[string]harness.SessionStateValue
-		if start.plan.InitialState != nil {
-			states = map[string]harness.SessionStateValue{start.extensionID: bytes.Clone(start.plan.InitialState)}
+		if start.InitialState != nil {
+			states = map[string]harness.SessionStateValue{scope.activation.id: bytes.Clone(start.InitialState)}
 		}
 		launched, err := h.LaunchChildSession(ctx, harness.LaunchChildRequest{
-			ParentSessionID: scope.session.SessionID, ExtensionID: start.extensionID,
-			OperationID: operationID, Inputs: start.plan.Inputs, ExtensionState: states,
-			Content: start.plan.Input, Report: start.plan.Report, OutputLimit: start.plan.OutputLimit,
+			ParentSessionID: scope.session.SessionID, ExtensionID: scope.activation.id,
+			OperationID: operationID, Inputs: start.Inputs, ExtensionState: states,
+			Content: start.Input, Report: start.Report, OutputLimit: start.OutputLimit,
 		})
 		value, marshalErr := json.Marshal(struct {
 			SessionID string `json:"session_id"`
@@ -257,19 +250,7 @@ func (scope *nativeCallScope) stateService(ctx context.Context, _ string, args j
 }
 
 func (scope *nativeCallScope) workspaceService(ctx context.Context, method string, args json.RawMessage) (extension.Result, error) {
-	if scope.workspace == nil {
-		return extension.Result{}, ErrDenied
-	}
-	if method == "bind" {
-		if !scope.workspaceBind {
-			return extension.Result{}, ErrDenied
-		}
-		return scope.workspace.bind(args)
-	}
-	if scope.kind != callKindTool || scope.workspaceBind {
-		return extension.Result{}, ErrDenied
-	}
-	return scope.workspace.execute(ctx, method, args)
+	return scope.workspaceCall(ctx, method, args)
 }
 
 func (scope *nativeCallScope) settingsService(ctx context.Context, _ string, args json.RawMessage) (extension.Result, error) {

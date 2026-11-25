@@ -96,10 +96,10 @@ func hostWorkspaceMethods() []Method {
 	outcome := `{"type":"object","required":["outcome"],"properties":{"outcome":{"const":"completed"}},"additionalProperties":false}`
 	partial := `{"type":"object","required":["outcome"],"properties":{"outcome":{"enum":["completed","uncertain"]}},"additionalProperties":false}`
 	return []Method{
-		ServiceMethod("bind", `{"type":"object","required":["path"],"properties":{"path":{"type":"string","minLength":1}},"additionalProperties":false}`, `{"type":"object","required":["binding","canonical_path","exists"],"properties":{"binding":{"type":"string"},"canonical_path":{"type":"string"},"exists":{"type":"boolean"}},"additionalProperties":false}`, "", ""),
-		ServiceMethod("read", `{"type":"object","required":["binding"],"properties":{"binding":{"type":"string","minLength":1}},"additionalProperties":false}`, `{"type":"object","required":["bytes"],"properties":{"bytes":{"type":"string"}},"additionalProperties":false}`, "", ""),
-		ServiceMethod("write", `{"type":"object","required":["binding","bytes","create_only"],"properties":{"binding":{"type":"string","minLength":1},"bytes":{"type":"string"},"create_only":{"type":"boolean"}},"additionalProperties":false}`, outcome, "", partial),
-		ServiceMethod("delete", `{"type":"object","required":["binding"],"properties":{"binding":{"type":"string","minLength":1}},"additionalProperties":false}`, outcome, "", partial),
+		ServiceMethod("stat", `{"type":"object","required":["path"],"properties":{"path":{"type":"string","minLength":1}},"additionalProperties":false}`, `{"type":"object","required":["canonical_path","exists"],"properties":{"canonical_path":{"type":"string"},"exists":{"type":"boolean"}},"additionalProperties":false}`, "", ""),
+		ServiceMethod("read", `{"type":"object","required":["path"],"properties":{"path":{"type":"string","minLength":1}},"additionalProperties":false}`, `{"type":"object","required":["bytes"],"properties":{"bytes":{"type":"string"}},"additionalProperties":false}`, "", ""),
+		ServiceMethod("write", `{"type":"object","required":["path","bytes","create_only"],"properties":{"path":{"type":"string","minLength":1},"bytes":{"type":"string"},"create_only":{"type":"boolean"}},"additionalProperties":false}`, outcome, "", partial),
+		ServiceMethod("delete", `{"type":"object","required":["path"],"properties":{"path":{"type":"string","minLength":1}},"additionalProperties":false}`, outcome, "", partial),
 	}
 }
 
@@ -171,13 +171,13 @@ func hostStateMethods() []Method {
 }
 
 // hostSessionMethods expose the calling Session's live ownership group and
-// its one prepared owned-Session start.
+// owned-Session starts.
 func hostSessionMethods() []Method {
 	const empty = `{"type":"object","additionalProperties":false}`
 	const started = `{"type":"object","required":["session_id"],"properties":{"session_id":{"type":"string","minLength":1}},"additionalProperties":false}`
 	members := `{"type":"array","items":{"type":"object","required":["kind","id","starter"],"properties":{"kind":{"enum":["session","job"]},"id":{"type":"string"},"starter":{"type":"string"}},"additionalProperties":false}}`
 	return []Method{
 		ServiceMethod("members", empty, members, "", ""),
-		ServiceMethod("start", empty, started, "", started),
+		ServiceMethod("start", `{"type":"object","required":["inputs","initial_state","input","report","output_limit"],"properties":{"inputs":{"type":"string"},"initial_state":{"type":"string"},"input":{"type":"string"},"report":{"type":"boolean"},"output_limit":{"type":"integer"}},"additionalProperties":false}`, started, "", started),
 	}
 }

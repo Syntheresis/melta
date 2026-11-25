@@ -105,80 +105,43 @@ func parkPlugin(park *parkingHook) extension.Extension {
 	}}
 }
 
-// fileWriteTool is the concrete mutation tool of the production suite.
-type fileWriteTool struct{}
-
-func (t fileWriteTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-
-func (t fileWriteTool) Prepare(_ context.Context, tc extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+func fileWriteTool(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	var args struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
 	}
-	if err := json.Unmarshal(call.Arguments, &args); err != nil || args.Path == "" || args.Content == "" {
-		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "prod_write requires path and content"}}}
-	}
-	data, _ := json.Marshal(args)
-	return extension.ToolPlan{Data: data}
-}
-
-func (t fileWriteTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	var args struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(plan.Data, &args); err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
+	if err := tc.Decode(&args); err != nil || args.Path == "" || args.Content == "" {
+		return extension.ToolResult{}, errors.New("prod_write requires path and content")
 	}
 	target := filepath.Clean(filepath.Join(tc.Session.Workspace, args.Path))
 	if err := ctx.Err(); err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "interrupted"}}
+		return extension.ToolResult{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
+		return extension.ToolResult{}, err
 	}
 	if err := os.WriteFile(target, []byte(args.Content), 0o600); err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
+		return extension.ToolResult{}, err
 	}
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "written"}}
+	return extension.ToolResult{Content: "written"}, nil
 }
 
-// fileReadTool is the concrete read-only sibling.
-type fileReadTool struct{}
-
-func (t fileReadTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-
-func (t fileReadTool) Prepare(_ context.Context, tc extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+func fileReadTool(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	var args struct {
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal(call.Arguments, &args); err != nil || args.Path == "" {
-		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "prod_read requires path"}}}
-	}
-	data, _ := json.Marshal(args)
-	return extension.ToolPlan{Data: data}
-}
-
-func (t fileReadTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	var args struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(plan.Data, &args); err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
+	if err := tc.Decode(&args); err != nil || args.Path == "" {
+		return extension.ToolResult{}, errors.New("prod_read requires path")
 	}
 	target := filepath.Clean(filepath.Join(tc.Session.Workspace, args.Path))
 	if err := ctx.Err(); err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "interrupted"}}
+		return extension.ToolResult{}, err
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
+		return extension.ToolResult{}, err
 	}
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: string(data)}}
+	return extension.ToolResult{Content: string(data)}, nil
 }
 
 // productionToolsPlugin registers the suite's concrete tools.
@@ -187,11 +150,11 @@ func productionToolsPlugin() extension.Extension {
 		Manifest: registrarManifest("prodtools"),
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			write := model.ToolDefinition{Name: "prod_write", Description: "writes one file in the workspace", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)}
-			if _, err := api.RegisterTool(write, fileWriteTool{}, nil); err != nil {
+			if _, err := api.RegisterTool(write, fileWriteTool, nil); err != nil {
 				return nil, err
 			}
 			read := model.ToolDefinition{Name: "prod_read", Description: "reads one file in the workspace", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)}
-			_, err := api.RegisterTool(read, fileReadTool{}, nil)
+			_, err := api.RegisterTool(read, fileReadTool, nil)
 			return nil, err
 		},
 	}

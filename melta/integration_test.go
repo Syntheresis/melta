@@ -3,6 +3,7 @@ package melta
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -104,27 +105,19 @@ type probeTool struct {
 	events *traceLog
 }
 
-func (probeTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-
-func (t probeTool) Prepare(ctx context.Context, tc extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+func (t probeTool) run(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	result, err := tc.Call(ctx, "dep", "call", json.RawMessage(`{}`))
 	if err != nil {
-		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: err.Error()}}}
+		return extension.ToolResult{}, err
 	}
 	var value struct {
 		Result string `json:"result"`
 	}
 	if result.Failure != nil || json.Unmarshal(result.Value, &value) != nil {
-		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "undecodable dependency result"}}}
+		return extension.ToolResult{}, errors.New("undecodable dependency result")
 	}
 	t.events.add("work:" + value.Result)
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "probed"}}}
-}
-
-func (probeTool) Execute(_ context.Context, _ extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "probed"}}
+	return extension.ToolResult{}, errors.New("probed")
 }
 
 // shPureService is one pure "call" service named name, answered by handler.
@@ -191,7 +184,7 @@ func assembledPlugins(e *ownerEnv, store harness.Storage, hook *recordHook, ws *
 		}, err
 	})
 	probe := testNative("probe", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Description: "records one dependency invocation", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, probeTool{events: e.events}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Description: "records one dependency invocation", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, (probeTool{events: e.events}).run, nil)
 		return nil, err
 	})
 	return []extension.Extension{agentsTestNative(), hookPlugin(hook), base, depper, probe}

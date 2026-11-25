@@ -134,7 +134,7 @@ func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extensi
 		}
 	}
 	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(testDescribeTool("fixture.tool"), testRegisteredTool{}, nil); err != nil {
+		if _, err := api.RegisterTool(testDescribeTool("fixture.tool"), testRegisteredTool, nil); err != nil {
 			return nil, err
 		}
 		echoService := func(name string) extension.Service {

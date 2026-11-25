@@ -2,7 +2,6 @@ package melta
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
@@ -73,29 +72,3 @@ type ToolContext struct {
 
 // Tool is one standard tool implementation.
 type Tool func(context.Context, ToolContext, model.ToolCall) harness.ToolOutcome
-
-type toolPlan struct {
-	Immediate *harness.ToolOutcome
-	Execute   func(context.Context) harness.ToolOutcome
-}
-
-func runTool(ctx context.Context, call model.ToolCall, normalize func(context.Context, model.ToolCall) (json.RawMessage, error), prepare func(context.Context, model.ToolCall) toolPlan) harness.ToolOutcome {
-	args, err := normalize(ctx, call)
-	if err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: boundedDiagnostic(err)}, Evidence: harness.ExecutionNotStarted}
-	}
-	call.Arguments = args
-	plan := prepare(ctx, call)
-	if plan.Immediate != nil {
-		outcome := *plan.Immediate
-		if _, err := model.NewToolResult(outcome.Result); err != nil || outcome.Result.CallID != call.ID {
-			return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "Tool call failed internal validation."}, Evidence: harness.ExecutionNotStarted}
-		}
-		outcome.Evidence = harness.ExecutionNotStarted
-		if outcome.Result.Status == model.ResultSuccess {
-			outcome.Evidence = harness.ExecutionObserved
-		}
-		return outcome
-	}
-	return plan.Execute(ctx)
-}

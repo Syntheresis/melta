@@ -88,7 +88,7 @@ type Registration interface{}
 type API interface {
 	Settings() json.RawMessage
 	Remove(Registration) error
-	RegisterTool(model.ToolDefinition, RegisteredTool, Registration) (Registration, error)
+	RegisterTool(model.ToolDefinition, ToolFunc, Registration) (Registration, error)
 	RegisterStrategy(harness.StrategyBinding, Registration) (Registration, error)
 	RegisterService(Service, Registration) (Registration, error)
 	RegisterOperation(Operation, Registration) (Registration, error)
@@ -143,13 +143,6 @@ type AuthorContext struct {
 	Session     harness.SessionIdentity
 	State       harness.SessionStateValue
 	Call        func(context.Context, string, string, json.RawMessage) (Result, error)
-}
-
-// RegisteredTool is the typed implementation paired with a tool definition.
-type RegisteredTool interface {
-	Normalize(AuthorContext, model.ToolCall) (json.RawMessage, error)
-	Prepare(context.Context, AuthorContext, model.ToolCall) ToolPlan
-	Execute(context.Context, AuthorContext, ToolPlan) harness.ToolOutcome
 }
 
 // RegisteredMethod pairs a method definition with its implementation.
@@ -227,9 +220,8 @@ type ToolCheckHook func(context.Context, AuthorContext, model.ToolCall) (*string
 type ResultHook func(context.Context, AuthorContext, harness.ToolOutputInput) (string, error)
 type CleanupHook func(context.Context, AuthorContext, harness.SessionIdentity) error
 
-// SessionStart is data in a tool plan, not authority to start a Session.
+// SessionStart describes a new owned Session.
 type SessionStart struct {
-	Target       string
 	Inputs       harness.SessionInputs
 	InitialState harness.SessionStateValue
 	Input        []model.ContentPart

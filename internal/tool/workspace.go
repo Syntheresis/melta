@@ -8,9 +8,6 @@ import (
 	"github.com/Syntheresis/melta/internal/safefs"
 )
 
-// WorkspaceBinding retains the lexical and canonical witnesses for one target.
-type WorkspaceBinding struct{ bound boundCall }
-
 // MutationOutcome reports what the producer knows independently of its error.
 type MutationOutcome = mutationOutcome
 
@@ -20,34 +17,40 @@ const (
 	MutationUncertain = mutationUncertain
 )
 
-// BindWorkspace resolves a target without accessing its contents.
-func BindWorkspace(root, path string) (WorkspaceBinding, string, bool, error) {
+// WorkspaceStat resolves a target without accessing its contents.
+func WorkspaceStat(root, path string) (string, bool, error) {
 	bound, err := bindCanonicalTarget(root, "workspace", path)
 	if err != nil {
-		return WorkspaceBinding{}, "", false, err
+		return "", false, err
 	}
-	return WorkspaceBinding{bound}, bound.canonical, bound.leafExists, nil
+	return bound.canonical, bound.leafExists, nil
 }
 
-// Read revalidates the witnesses before opening the bound target.
-func (b WorkspaceBinding) Read(recheck func() error) ([]byte, error) {
-	b.bound.recheck = recheck
-	if err := b.bound.revalidate(); err != nil {
+// WorkspaceRead resolves and reads a target.
+func WorkspaceRead(root, path string) ([]byte, error) {
+	bound, err := bindCanonicalTarget(root, "workspace", path)
+	if err != nil {
 		return nil, err
 	}
-	return readFileBytes(b.bound.canonical)
+	return readFileBytes(bound.canonical)
 }
 
-// Write uses the shared snapshot-aware file mutation producer.
-func (b WorkspaceBinding) Write(store SnapshotStore, content []byte, createOnly bool, recheck func() error) (MutationOutcome, error) {
-	b.bound.recheck = recheck
-	return writeBound(b.bound, store, content, createOnly)
+// WorkspaceWrite resolves a target and captures a snapshot before writing.
+func WorkspaceWrite(root, path string, store SnapshotStore, content []byte, createOnly bool) (MutationOutcome, error) {
+	bound, err := bindCanonicalTarget(root, "workspace", path)
+	if err != nil {
+		return MutationUntouched, err
+	}
+	return writeBound(bound, store, content, createOnly)
 }
 
-// Delete uses the shared snapshot-aware file mutation producer.
-func (b WorkspaceBinding) Delete(store SnapshotStore, recheck func() error) (MutationOutcome, error) {
-	b.bound.recheck = recheck
-	return deleteBound(b.bound, store)
+// WorkspaceDelete resolves a target and captures a snapshot before deletion.
+func WorkspaceDelete(root, path string, store SnapshotStore) (MutationOutcome, error) {
+	bound, err := bindCanonicalTarget(root, "workspace", path)
+	if err != nil {
+		return MutationUntouched, err
+	}
+	return deleteBound(bound, store)
 }
 
 func deleteBound(bound boundCall, store SnapshotStore) (mutationOutcome, error) {

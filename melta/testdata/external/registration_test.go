@@ -318,33 +318,21 @@ type capturedCredentialTool struct {
 	values  chan [2]string
 }
 
-func (t *capturedCredentialTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *capturedCredentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Data: []byte(call.ID)}
-}
-
-func (t *capturedCredentialTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t *capturedCredentialTool) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	if t.count.Add(1) == 1 {
 		close(t.entered)
 		<-t.release
 	}
 	var values [2]string
 	for i, field := range []string{"/activation", "/operation"} {
-		result, err := call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"`+field+`"}`))
+		value, err := call.Credential(ctx, field)
 		if err != nil {
-			return harness.ToolOutcome{Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultError, Content: err.Error()}}
+			return extension.ToolResult{}, err
 		}
-		var body struct {
-			Value string `json:"value"`
-		}
-		_ = json.Unmarshal(result.Value, &body)
-		values[i] = body.Value
+		values[i] = value
 	}
 	t.values <- values
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: "done"}}
+	return extension.ToolResult{Content: "done"}, nil
 }
 
 func TestRetainedOperationKeepsCredentialCapture(t *testing.T) {
@@ -378,7 +366,7 @@ func TestRetainedOperationKeepsCredentialCapture(t *testing.T) {
 			},
 		},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "credential_probe", Parameters: json.RawMessage(`{"type":"object"}`)}, probe, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "credential_probe", Parameters: json.RawMessage(`{"type":"object"}`)}, probe.run, nil)
 			return nil, err
 		},
 	}
@@ -434,20 +422,12 @@ type replacementTool struct {
 	output  string
 }
 
-func (t replacementTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
+func (t replacementTool) run(_ context.Context, _ extension.ToolCall) (extension.ToolResult, error) {
 	if t.entered != nil {
 		close(t.entered)
 		<-t.release
 	}
-	return call.Arguments, nil
-}
-
-func (t replacementTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Data: []byte(call.ID)}
-}
-
-func (t replacementTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: t.output}}
+	return extension.ToolResult{Content: t.output}, nil
 }
 
 func TestToolReplacementKeepsPreparedRegistration(t *testing.T) {
@@ -485,7 +465,7 @@ func TestToolReplacementKeepsPreparedRegistration(t *testing.T) {
 		Activate: func(_ context.Context, registered extension.API) (func(context.Context) error, error) {
 			api = registered
 			var err error
-			first, err = api.RegisterTool(definition, replacementTool{entered: entered, release: release, output: "old"}, nil)
+			first, err = api.RegisterTool(definition, (replacementTool{entered: entered, release: release, output: "old"}).run, nil)
 			return nil, err
 		},
 	}
@@ -513,7 +493,7 @@ func TestToolReplacementKeepsPreparedRegistration(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first tool was not bound")
 	}
-	if _, err := api.RegisterTool(replacement, replacementTool{output: "new"}, first); err != nil {
+	if _, err := api.RegisterTool(replacement, (replacementTool{output: "new"}).run, first); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
@@ -652,7 +632,7 @@ func TestAdmissionToolOverrideSurvivesReplacement(t *testing.T) {
 				return nil, err
 			}
 			var err error
-			first, err = api.RegisterTool(definition, replacementTool{entered: entered, release: release, output: "old"}, nil)
+			first, err = api.RegisterTool(definition, (replacementTool{entered: entered, release: release, output: "old"}).run, nil)
 			return nil, err
 		},
 	}
@@ -679,7 +659,7 @@ func TestAdmissionToolOverrideSurvivesReplacement(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("tool was not bound")
 	}
-	if _, err := api.RegisterTool(replacement, replacementTool{output: "new"}, first); err != nil {
+	if _, err := api.RegisterTool(replacement, (replacementTool{output: "new"}).run, first); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
@@ -745,7 +725,7 @@ func TestAdmissionOverrideUsesRegisteredToolSchema(t *testing.T) {
 			}, nil); err != nil {
 				return nil, err
 			}
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: json.RawMessage(`{"type":"object","properties":{"registered":{"type":"string"}},"required":["registered"]}`)}, replacementTool{output: "ran"}, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: json.RawMessage(`{"type":"object","properties":{"registered":{"type":"string"}},"required":["registered"]}`)}, (replacementTool{output: "ran"}).run, nil)
 			return nil, err
 		},
 	}
