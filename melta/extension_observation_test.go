@@ -329,7 +329,7 @@ func nativeIndependentFixture() extension.Extension {
 		}), nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachRequest(extension.HookModePure, func(_ context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		if _, err := api.AttachRequest(func(_ context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			settings := independentSettingsOf(api)
 			if settings.Observe != "request-block" {
 				return harness.RequestConsequence{}, nil

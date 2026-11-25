@@ -16,24 +16,24 @@ import (
 
 func TestRequestHookChainedEdits(t *testing.T) {
 	zero := 0
-	hook := func(id string, mode HookMode, run func(RequestHookInput) RequestConsequence) RequestHook {
-		return RequestHook{ID: id, ExtensionID: "req-ext", Mode: mode, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	hook := func(id string, run func(RequestHookInput) RequestConsequence) RequestHook {
+		return RequestHook{ID: id, ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 			return run(in), nil
 		}}
 	}
 	retain := func(content []model.ContentPart) RequestConsequence {
 		return RequestConsequence{Edits: []RequestMessageEdit{{Position: &zero, Content: content}}}
 	}
-	first := hook("req.rename", HookModePure, func(in RequestHookInput) RequestConsequence {
+	first := hook("req.rename", func(in RequestHookInput) RequestConsequence {
 		testassert.Require(t, *in.MessagePositions[0] == 0, "positions: %v", in.MessagePositions)
 		return retain(admissionContent("edited"))
 	})
-	second := hook("req.retain", HookModeEffectful, func(in RequestHookInput) RequestConsequence {
+	second := hook("req.retain", func(in RequestHookInput) RequestConsequence {
 		testassert.Equal(t, in.Messages[0].TextContent(), "edited")
 		in.Messages[0].Content[0].Text = "mutation"
 		return retain(nil)
 	})
-	third := hook("req.check", HookModePure, func(in RequestHookInput) RequestConsequence {
+	third := hook("req.check", func(in RequestHookInput) RequestConsequence {
 		testassert.Equal(t, in.Messages[0].TextContent(), "edited")
 		return RequestConsequence{}
 	})
@@ -44,18 +44,16 @@ func TestRequestHookChainedEdits(t *testing.T) {
 	sent, err := runRequestHookRound(t, h, c, exec, testCapture())
 	testassert.NoError(t, err)
 	testassert.Equal(t, sent.Messages[1].TextContent(), "edited")
-	committed := hookGraphHookResults(t, store, sessionID)
-	testassert.Require(t, len(committed) == 1 && reflect.DeepEqual(committed[0].Consequence.Edits[0].Content, admissionContent("edited")), "effectful consequence: %+v", committed)
 	cold := compositionAssistant(t, store, sessionID).Evidence
 	testassert.Require(t, len(cold.Edits) == 1 && *cold.Edits[0].Position == 0 && reflect.DeepEqual(cold.Edits[0].Content, admissionContent("edited")), "cold evidence: %+v", cold)
 }
 
 func TestRequestHookReorderAndDefinitionChain(t *testing.T) {
-	first := RequestHook{ID: "req.reorder", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	first := RequestHook{ID: "req.reorder", ExtensionID: "ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		in.Tools[0].Description = "redefined"
 		return RequestConsequence{Edits: []RequestMessageEdit{{Position: new(2)}, {Position: new(0)}}, Tools: in.Tools}, nil
 	}}
-	second := RequestHook{ID: "req.select", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	second := RequestHook{ID: "req.select", ExtensionID: "ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		testassert.Equal(t, len(in.Messages), 2)
 		testassert.Equal(t, *in.MessagePositions[0], 2)
 		testassert.Equal(t, *in.MessagePositions[1], 0)
@@ -121,7 +119,7 @@ func TestRequestHookStageChangesBetweenRequests(t *testing.T) {
 					if tc.models == 0 {
 						stage.InitialToolNames = []string{late.Name}
 					}
-					stage.Hooks = []RequestHook{{ID: "req." + def.Name, ExtensionID: "req-ext", Mode: HookModePure,
+					stage.Hooks = []RequestHook{{ID: "req." + def.Name, ExtensionID: "req-ext",
 						Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 							hooks++
 							testassert.Require(t, len(in.Tools) == 0 && len(in.Catalog) == 1 && in.Catalog[0].Name == def.Name, "catalog/advertisement: %+v / %+v", in.Catalog, in.Tools)
@@ -251,7 +249,7 @@ func TestPartialCutRequestEvidenceIncludesPreCheckpointSignal(t *testing.T) {
 	}, forbiddenMaintenanceModel(t))
 	exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(&noneStrategy{}))
 	exec = requestHookExecution(exec, RequestHook{
-		ID: "req.edit", ExtensionID: "req-ext", Mode: HookModePure,
+		ID: "req.edit", ExtensionID: "req-ext",
 		Run: func(_ context.Context, input RequestHookInput) (RequestConsequence, error) {
 			checkpoint := len(validCompactionEntry(testOpID).Messages)
 			preCheckpoint := checkpoint + 1

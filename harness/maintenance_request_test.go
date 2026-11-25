@@ -117,7 +117,7 @@ func runAuthoredSummaryRound(t *testing.T, authored []model.Message, echo bool, 
 			return completedTurnStream(), nil
 		}
 		inv.RequestStage = fixtureRequestStage([]RequestHook{{
-			ID: "req.inspect", ExtensionID: "req-ext", Mode: HookModePure,
+			ID: "req.inspect", ExtensionID: "req-ext",
 			Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 				if in.Purpose == InvocationPurposeMaintenance {
 					checkHook(t, in)
@@ -203,7 +203,7 @@ func TestSummaryRunningRequestClearedBeforeConsume(t *testing.T) {
 		}
 		if request.Purpose == InvocationPurposeMaintenance {
 			inv.RequestStage = fixtureRequestStage([]RequestHook{{
-				ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful,
+				ID: "req.effectful", ExtensionID: "req-ext",
 				Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 					hookID = in.RequestID
 					return RequestConsequence{}, nil
@@ -214,8 +214,8 @@ func TestSummaryRunningRequestClearedBeforeConsume(t *testing.T) {
 	}
 	testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
 	testassert.Require(t, dispatchedID != "" && hookID == dispatchedID, "summary hook/model identities = %q/%q, want the one issued invocation identity", hookID, dispatchedID)
-	testassert.Require(t, sawModelState.Request != nil && sawModelState.Request.RequestID == dispatchedID && sawModelState.Request.BoundaryEntryID != "" && len(sawModelState.Request.HookResults) == 1,
-		"summary model state = %+v, want the one request occupying the running-request slot with its committed hook result", sawModelState)
+	testassert.Require(t, sawModelState.Request != nil && sawModelState.Request.RequestID == dispatchedID && sawModelState.Request.BoundaryEntryID != "",
+		"summary model state = %+v, want the one request occupying the running-request slot", sawModelState)
 	testassert.Require(t, sawConsumeState.Request == nil && sawConsumeState.ActiveEffect == nil,
 		"summary consume state = %+v, want the request cleared by the model settlement before folding", sawConsumeState)
 	graph, err := validateFixture(t, store, sessionID)
@@ -330,81 +330,6 @@ func (s *countingCheckpointStrategy) Consume(in ConsumeInput) (PlanOutput, error
 // neither replays work, dispatches the conversation, or survives a second
 // recovery with any additional write.
 func TestMaintenanceSummaryLossRecovery(t *testing.T) {
-	t.Run("loss while the summary request hook is active", func(t *testing.T) {
-		seed := UsageCount{InputTokens: 13}
-		h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
-		var summaryID string
-		modelCalls := 0
-		exec := purposeExecution(quietConversation(), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			modelCalls++
-			return summaryStream("summary", model.Usage{InputTokens: 1}), nil
-		})
-		exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: IncludedStrategyID, RequiresContextWindow: true, Strategy: requestShapeStrategy{request: []model.Message{
-			{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "pass"}}},
-		}}})
-		opened := exec.OpenInvocation
-		exec.OpenInvocation = func(ctx context.Context, request InvocationRequest) (InvocationExecution, error) {
-			inv, err := opened(ctx, request)
-			if err != nil {
-				return inv, err
-			}
-			if request.Purpose == InvocationPurposeMaintenance {
-				inv.RequestStage = fixtureRequestStage([]RequestHook{{
-					ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful,
-					Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
-						summaryID = in.RequestID
-						return RequestConsequence{}, nil
-					},
-				}}...)
-			}
-			return inv, nil
-		}
-		failed := false
-		store.entryHook = func(draft EntryDraft) error {
-			if failed || draft.Kind != EntryHookResult {
-				return nil
-			}
-			entry, err := decodeHookResultEntry(Entry{SessionID: draft.SessionID, ID: draft.ID, OperationID: draft.OperationID, Kind: draft.Kind, Payload: draft.Payload})
-			if err == nil && entry.RequestID == summaryID && entry.Status == hookSucceeded {
-				failed = true
-				return fmt.Errorf("%w: injected summary hook result failure", ErrStorage)
-			}
-			return nil
-		}
-		err := runAutomaticMaintenance(t, h, c, exec)
-		testassert.Require(t, errors.Is(err, ErrStorage), "run = %v, want the injected storage failure", err)
-		testassert.Require(t, summaryID != "" && modelCalls == 0, "summary id/model calls = %q/%d, want the hook active before any model", summaryID, modelCalls)
-		rec, rerr := h.ReadOperation(context.Background(), sessionID, testOpID)
-		testassert.NoError(t, rerr)
-		testassert.Require(t, rec.State.Status == OperationRunning && rec.State.ActiveEffect != nil && rec.State.ActiveEffect.Kind == EffectHook &&
-			rec.State.ActiveEffect.RequestID == summaryID && rec.State.Request != nil && rec.State.Request.RequestID == summaryID &&
-			!rec.State.UnreportedMaintenance,
-			"state at the lost summary hook = %+v, want the reserved hook intent and summary request", rec.State)
-		reserved := rec.State.ActiveEffect.ResultEntryID
-		{
-			err := Recover(context.Background(), store)
-			testassert.NoError(t, err)
-		}
-		graph, gerr := validateFixture(t, store, sessionID)
-		testassert.NoError(t, gerr)
-		var settled *hookResultEntry
-		for _, entry := range graph.Entries {
-			if entry.HookResult != nil {
-				settled = entry.HookResult
-			}
-		}
-		testassert.Require(t, settled != nil && settled.EntryID == reserved && settled.Status == hookInterrupted && settled.Evidence == ExecutionUnknown &&
-			settled.RequestID == summaryID && settled.InputEvidence != nil && settled.Consequence == nil,
-			"recovered hook = %+v, want the interrupted summary effect under its reserved identity", settled)
-		settlement := settlementEntryOf(t, graph)
-		testassert.Require(t, settlement.Status == OperationInterruption && settlement.RequestID == summaryID && len(settlement.Facts) == 0 && settlement.Evidence == nil,
-			"settlement = %+v, want the summary producer witnessed with no invented facts or evidence", settlement)
-		state := operationStateOf(t, graph, testOpID)
-		testassert.Require(t, state.Status == OperationInterruption && state.Request == nil && !state.UnreportedMaintenance, "recovered operation = %+v", state)
-		assertMaintenanceRecoverIdempotent(t, store, sessionID, testOpID)
-		testassert.Equal(t, modelCalls, 0) // recovery never replays the summary model
-	})
-
 	t.Run("loss after the summary model ran but before its result committed", func(t *testing.T) {
 		seed := UsageCount{InputTokens: 13}
 		h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
@@ -432,7 +357,7 @@ func TestMaintenanceSummaryLossRecovery(t *testing.T) {
 			}
 			if request.Purpose == InvocationPurposeMaintenance {
 				summaryID = request.ID
-				inv.RequestStage = fixtureRequestStage([]RequestHook{{ID: "req.summary", ExtensionID: "req-ext", Mode: HookModePure,
+				inv.RequestStage = fixtureRequestStage([]RequestHook{{ID: "req.summary", ExtensionID: "req-ext",
 					Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 						return RequestConsequence{Prompt: &in.Prompt, Parameters: model.Extra{"temperature": json.RawMessage(`0.3`)}}, nil
 					}}}...)
@@ -548,7 +473,7 @@ func TestSummaryRequestRejectsToolDefinitions(t *testing.T) {
 		}
 		if request.Purpose == InvocationPurposeMaintenance {
 			inv.RequestStage = fixtureRequestStage([]RequestHook{{
-				ID: "req.tools", ExtensionID: "req-ext", Mode: HookModePure,
+				ID: "req.tools", ExtensionID: "req-ext",
 				Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 					return RequestConsequence{Tools: fixtureDefinitions("echo")}, nil
 				},
@@ -656,7 +581,7 @@ func TestMaintenanceSummaryHookCancellationInterrupts(t *testing.T) {
 	}}})
 	entered := make(chan struct{})
 	var once sync.Once
-	hook := RequestHook{ID: "req.cancel", ExtensionID: "req-ext", Mode: HookModePure, Run: func(ctx context.Context, _ RequestHookInput) (RequestConsequence, error) {
+	hook := RequestHook{ID: "req.cancel", ExtensionID: "req-ext", Run: func(ctx context.Context, _ RequestHookInput) (RequestConsequence, error) {
 		once.Do(func() { close(entered) })
 		<-ctx.Done()
 		return RequestConsequence{}, ctx.Err()
@@ -699,13 +624,11 @@ func TestMaintenanceSummaryHookCancellationInterrupts(t *testing.T) {
 }
 
 // TestEmptyHistorySummarySlotDispatchAndRecovery proves a history-free manual
-// Session still dispatches a strategy-authored summary through an effectful
-// hook and model under a purpose-bound running-request slot with absent
-// canonical references, and that an active hook on that empty base recovers
-// with the same empty evidence instead of fabricating a conversation
-// boundary.
+// Session still dispatches a strategy-authored summary through a request hook
+// and model under a purpose-bound running-request slot with absent canonical
+// references.
 func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
-	t.Run("effectful dispatch and model-free settlement", func(t *testing.T) {
+	t.Run("dispatch and model-free settlement", func(t *testing.T) {
 		store := emptyStore(t)
 		var sawSlot OperationCurrentState
 		var sessionID string
@@ -727,7 +650,7 @@ func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
 			}
 			if request.Purpose == InvocationPurposeMaintenance {
 				inv.RequestStage = fixtureRequestStage([]RequestHook{{
-					ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful,
+					ID: "req.effectful", ExtensionID: "req-ext",
 					Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 						return RequestConsequence{}, nil
 					},
@@ -756,87 +679,8 @@ func TestEmptyHistorySummarySlotDispatchAndRecovery(t *testing.T) {
 		testassert.Require(t, settlement.Status == OperationSuccess && settlement.CompactionUsage && settlement.RequestID != "" &&
 			len(settlement.Facts) == 1 && settlement.Facts[0].RequestID == settlement.RequestID && settlement.Evidence == nil,
 			"settlement = %+v, want the actual summary producer with carried facts and no invented boundary", settlement)
-		var hook *hookResultEntry
-		for _, entry := range graph.Entries {
-			if entry.HookResult != nil {
-				hook = entry.HookResult
-			}
-		}
-		testassert.Require(t, hook != nil && hook.RequestID == settlement.RequestID && hook.Purpose == InvocationPurposeMaintenance && hook.InputEvidence != nil && hook.InputEvidence.BoundaryEntryID == "",
-			"hook result = %+v, want the empty-base consumed evidence", hook)
 	})
 
-	t.Run("active effectful hook on the empty base recovers", func(t *testing.T) {
-		store := emptyStore(t)
-		modelCalls := 0
-		exec := purposeExecution(forbiddenConversationModel(t), func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			modelCalls++
-			return summaryStream("summary", model.Usage{InputTokens: 1}), nil
-		})
-		exec.ResolveStrategy = fixedStrategyResolver(&StrategyBinding{ID: "test.empty/v1", Strategy: requestShapeStrategy{
-			request: []model.Message{{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "pass"}}}},
-			outcome: "none-success",
-		}})
-		capture := captureForHandoff()
-		capture.Strategy = StrategyCapture{ID: "test.empty/v1"}
-		opened := exec.OpenInvocation
-		var requestID string
-		exec.OpenInvocation = func(ctx context.Context, request InvocationRequest) (InvocationExecution, error) {
-			inv, err := opened(ctx, request)
-			if err != nil {
-				return inv, err
-			}
-			if request.Purpose == InvocationPurposeMaintenance {
-				requestID = request.ID
-				inv.RequestStage = fixtureRequestStage([]RequestHook{{
-					ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful,
-					Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-						return RequestConsequence{}, nil
-					},
-				}}...)
-			}
-			return inv, nil
-		}
-		prepared := compactPrepared(capture, exec)
-		h := newCompactHarness(t, store, prepared)
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
-		testassert.NoError(t, err)
-		c := leaseCoordinator(t, h, session.Identity.SessionID)
-		failed := false
-		store.entryHook = func(draft EntryDraft) error {
-			if failed || draft.Kind != EntryHookResult {
-				return nil
-			}
-			entry, derr := decodeHookResultEntry(Entry{SessionID: draft.SessionID, ID: draft.ID, OperationID: draft.OperationID, Kind: draft.Kind, Payload: draft.Payload})
-			if derr == nil && entry.RequestID == requestID && entry.Status == hookSucceeded {
-				failed = true
-				return fmt.Errorf("%w: injected empty-base hook result failure", ErrStorage)
-			}
-			return nil
-		}
-		err = runManualCompact(t, h, c, session.Identity.SessionID, "compact-1")
-		testassert.Require(t, errors.Is(err, ErrStorage), "run = %v, want the injected hook publication failure", err)
-		rec, rerr := h.ReadOperation(context.Background(), session.Identity.SessionID, "compact-1")
-		testassert.NoError(t, rerr)
-		testassert.Require(t, rec.State.ActiveEffect != nil && rec.State.ActiveEffect.Kind == EffectHook && rec.State.ActiveEffect.Purpose == InvocationPurposeMaintenance &&
-			rec.State.Request != nil && rec.State.Request.Purpose == InvocationPurposeMaintenance && rec.State.Request.BoundaryEntryID == "",
-			"state at the active empty-base hook = %+v", rec.State)
-		testassert.NoError(t, Recover(context.Background(), store))
-		graph, gerr := validateFixture(t, store, session.Identity.SessionID)
-		testassert.NoError(t, gerr)
-		settlement := settlementEntryOf(t, graph)
-		testassert.Require(t, settlement.RequestID == requestID && settlement.Status == OperationInterruption && modelCalls == 0,
-			"settlement = %+v, want the interrupted empty-base request identity and no model dispatch", settlement)
-		testassert.Require(t, len(settlement.Facts) == 0, "recovery invented empty-base facts")
-		var hook *hookResultEntry
-		for _, entry := range graph.Entries {
-			if entry.HookResult != nil {
-				hook = entry.HookResult
-			}
-		}
-		testassert.Require(t, hook != nil && hook.Status == hookInterrupted && hook.Purpose == InvocationPurposeMaintenance && hook.InputEvidence != nil && hook.InputEvidence.BoundaryEntryID == "",
-			"recovered hook = %+v, want the interrupted empty-base consumed evidence", hook)
-	})
 }
 
 // planErrorStrategy fails its first Plan before any model request opens.

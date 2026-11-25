@@ -452,7 +452,7 @@ func TestManualMaintenanceDisposalFollowsCompletionPublication(t *testing.T) {
 func TestQuietCompletionSettlesUnmarkedStorageCallbackError(t *testing.T) {
 	t.Run("ordinary request-hook storage cause settles failure and drains", func(t *testing.T) {
 		hookErr := fmt.Errorf("hook transport: %w", ErrStorage)
-		hook := RequestHook{ID: "req.storage", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		hook := RequestHook{ID: "req.storage", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{}, hookErr
 		}}
 		exec := requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {

@@ -37,11 +37,11 @@ func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 		if reqRuns != 1 { // the first accepted hook of the first round tampers every family
 			return
 		}
-		sharedRequest[1] = RequestHook{ID: "tampered.req", ExtensionID: "tamper-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		sharedRequest[1] = RequestHook{ID: "tampered.req", ExtensionID: "tamper-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			ran("tampered.req")
 			return RequestConsequence{}, nil
 		}}
-		sharedArgs[0] = ToolArgumentsHook{ID: "tampered.arg", ExtensionID: "tamper-ext", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+		sharedArgs[0] = ToolArgumentsHook{ID: "tampered.arg", ExtensionID: "tamper-ext", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 			ran("tampered.arg")
 			return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 		}}
@@ -52,21 +52,21 @@ func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 		}}
 	}
 
-	reqPure := RequestHook{ID: "own.req.pure", ExtensionID: "own-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	reqPure := RequestHook{ID: "own.req.pure", ExtensionID: "own-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		reqRuns++
 		ran("own.req.pure")
 		tamperOnce()
 		return RequestConsequence{}, nil
 	}}
-	reqEffectful := RequestHook{ID: "own.req.effectful", ExtensionID: "own-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+	reqEffectful := RequestHook{ID: "own.req.effectful", ExtensionID: "own-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 		ran("own.req.effectful")
 		return RequestConsequence{}, nil
 	}}
-	argPure := ToolArgumentsHook{ID: "own.arg.pure", ExtensionID: "own-ext", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+	argPure := ToolArgumentsHook{ID: "own.arg.pure", ExtensionID: "own-ext", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		ran("own.arg.pure")
 		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
-	argEffectful := ToolArgumentsHook{ID: "own.arg.effectful", ExtensionID: "own-ext", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+	argEffectful := ToolArgumentsHook{ID: "own.arg.effectful", ExtensionID: "own-ext", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		ran("own.arg.effectful")
 		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
@@ -126,12 +126,6 @@ func TestConversationOpenedInvocationDeclarationsAreOwned(t *testing.T) {
 	}
 
 	// The durable evidence carries only identities accepted at their own stages.
-	committed := hookGraphHookResults(t, store, sessionID)
-	testassert.Equal(t, len(committed), 3) // the effectful request hook once per round plus the effectful argument hook once
-	for _, entry := range committed {
-		testassert.Require(t, ((entry.HookID == "own.req.effectful" || entry.HookID == "own.arg.effectful") && entry.ExtensionID == "own-ext" || entry.HookID == "tampered.req" && entry.ExtensionID == "tamper-ext") && entry.Status == hookSucceeded,
-			"committed hook result = %+v, want an accepted effectful hook settling succeeded", entry)
-	}
 	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
 	testassert.NoError(t, err)
 	testassert.Require(t, rec.State.Status == OperationSuccess && len(rec.State.PendingToolCalls) == 0, "operation state = %+v, want the turn settled from the accepted families", rec.State)
@@ -161,7 +155,7 @@ func TestMaintenanceOpenedInvocationDeclarationsArePreserved(t *testing.T) {
 	// acceptance boundary copied them.
 	compactFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		passes++
-		sharedRequest[0] = RequestHook{ID: "tampered.req", ExtensionID: "tamper-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		sharedRequest[0] = RequestHook{ID: "tampered.req", ExtensionID: "tamper-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			t.Errorf("a tampered maintenance request hook ran")
 			return RequestConsequence{}, nil
 		}}
@@ -176,11 +170,11 @@ func TestMaintenanceOpenedInvocationDeclarationsArePreserved(t *testing.T) {
 			if request.Purpose == InvocationPurposeConversation {
 				return invocationExecution(quietConversation(), noopTool), nil
 			}
-			sharedRequest = []RequestHook{{ID: "own.req", ExtensionID: "own-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+			sharedRequest = []RequestHook{{ID: "own.req", ExtensionID: "own-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 				requestHooks++
 				return RequestConsequence{}, nil
 			}}}
-			sharedArgs = []ToolArgumentsHook{{ID: "own.arg", ExtensionID: "own-ext", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+			sharedArgs = []ToolArgumentsHook{{ID: "own.arg", ExtensionID: "own-ext", Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
 				t.Errorf("a maintenance invocation argument hook ran")
 				return ToolArgumentsResult{}, nil
 			}}}

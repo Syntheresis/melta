@@ -326,7 +326,7 @@ func compactRawRunningModelState(now, reserved, boundary string) string {
 	return fmt.Sprintf(
 		`{"status":"running","started_at":%q,`+
 			`"active_effect":{"kind":"model","result_entry_id":%q,"request_id":"request-live-%s","model":{"provider":"prov","model":"m"},"purpose":"conversation","evidence":{"boundary_entry_id":%q,"prompt":"compact-sys","tools":[]}},`+
-			`"running_request":{"request_id":"request-live-%s","purpose":"conversation","boundary_entry_id":%q,"hook_results":[]},`+
+			`"running_request":{"request_id":"request-live-%s","purpose":"conversation","boundary_entry_id":%q},`+
 			`"pending_tool_calls":[],"usage":{"by_model":[]}}`,
 		now, reserved, reserved, boundary, reserved, boundary)
 }

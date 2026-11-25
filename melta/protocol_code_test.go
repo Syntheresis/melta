@@ -1526,7 +1526,7 @@ func TestBackgroundWakeOpenerWaitsForRestoreInterval(t *testing.T) {
 // fails while armed: a concrete execution failure.
 func failingAgentFactoryPlugin(fail *atomic.Bool) extension.Extension {
 	return testNative("failing-agent", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		_, err := api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			if fail.Load() {
 				return harness.RequestConsequence{}, errors.New("boom")
 			}

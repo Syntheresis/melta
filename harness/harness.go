@@ -93,21 +93,6 @@ type PreparedExecution struct {
 	Release func() error
 }
 
-// HookMode declares one hook's participation contract at its boundary. A pure
-// hook validates and coalesces its changed value in memory with no effect
-// transaction; an effectful hook's execution is its own Harness-settled
-// Operation effect with durable hook_result evidence.
-type HookMode string
-
-const (
-	HookModePure      HookMode = "pure"
-	HookModeEffectful HookMode = "effectful"
-)
-
-func validHookMode(mode HookMode) bool {
-	return mode == HookModePure || mode == HookModeEffectful
-}
-
 // ExecutionEvidence describes one effect execution's knowledge independently
 // of its status: not_started is proven unstarted work, observed is a valid
 // terminal execution response (including cooperative interruption), and
@@ -129,10 +114,8 @@ func validExecutionEvidence(evidence ExecutionEvidence) bool {
 }
 
 // EffectError declares callback interruption independently of its cause.
-// Effectful hooks also declare execution knowledge, validated at publication;
-// pure callbacks use only Interrupted and Err. Unwrap exposes the cause.
+// Unwrap exposes the cause.
 type EffectError struct {
-	Evidence    ExecutionEvidence
 	Err         error
 	Interrupted bool
 }
@@ -154,12 +137,10 @@ type ToolArgumentsResult struct {
 // with a reason. Its successful unchanged output passes through verbatim; a
 // changed output must be one JSON object. The bound tool normalizes after the
 // hook chain. Hooks cannot replace the call identity, tool name, or another
-// call's arguments. An effectful hook is a Harness-settled Operation effect; a
-// pure hook runs in memory. Run receives owned call data.
+// call's arguments. Run receives owned call data.
 type ToolArgumentsHook struct {
 	ID          string
 	ExtensionID string
-	Mode        HookMode
 	Run         func(context.Context, model.ToolCall) (ToolArgumentsResult, error)
 }
 
@@ -246,7 +227,6 @@ type ResultStage struct {
 type RequestHook struct {
 	ID          string
 	ExtensionID string
-	Mode        HookMode
 	Run         func(context.Context, RequestHookInput) (RequestConsequence, error)
 }
 
@@ -2451,9 +2431,6 @@ func ownOperationRecord(rec OperationRecord) OperationRecord {
 	}
 	if rec.State.Request != nil {
 		request := *rec.State.Request
-		if rec.State.Request.HookResults != nil {
-			request.HookResults = append([]EntryRef(nil), rec.State.Request.HookResults...)
-		}
 		out.State.Request = &request
 	}
 	if rec.State.SettledAt != nil {

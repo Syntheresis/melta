@@ -233,10 +233,10 @@ func (v *requestView) applyConsequence(con RequestConsequence) {
 }
 
 // recordAccepted applies one accepted consequence and records its identity.
-// Every successfully accepted hook identity — pure or effectful, no-op,
-// changed or restored alike — enters the contributors once, in configured
-// order; a rejected or failed consequence never does. Validation, effect
-// timing and codec adoption stay with the caller.
+// Every successfully accepted hook identity — no-op, changed or restored
+// alike — enters the contributors once, in configured order; a rejected or
+// failed consequence never does. Validation and codec adoption stay with the
+// caller.
 func (v *requestView) recordAccepted(identity HookIdentity, con RequestConsequence) {
 	v.applyConsequence(con)
 	v.contributors = append(v.contributors, identity)
@@ -546,9 +546,8 @@ func (h *Harness) projectCanonical(c *coordinator, operationID string) ([]model.
 }
 
 // projectEntry maps one committed entry to its one model message under the
-// kind-to-message mapping. An operation settlement and a hook result produce
-// no model message — hook results are execution evidence, never conversation
-// messages — and a compaction entry never materializes either: the register's
+// kind-to-message mapping. An operation settlement produces no model message,
+// and a compaction entry never materializes either: the register's
 // CompactionEntryID carries its summary into the projection instead. Request
 // evidence is likewise never conversation text: it lives on entry payloads and
 // register state, never in a projected message.

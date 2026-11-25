@@ -1510,47 +1510,6 @@ func TestAutomaticCheckpointRequestTransition(t *testing.T) {
 		testassert.NoError(t, perr)
 		testassert.Require(t, rec.State.Request.CheckpointEntryID == wantCheckpoint && rec.State.Request.BoundaryEntryID == wantBoundary && wantCheckpoint == comp.EntryID,
 			"running request refs = %+v, want the new checkpoint and the rebuilt tail boundary", rec.State.Request)
-		testassert.Equal(t, len(rec.State.Request.HookResults), 0)
-		close(release)
-		testassert.NoError(t, <-done)
-	})
-
-	t.Run("committed hook results survive the advanced transition", func(t *testing.T) {
-		hooks := []RequestHook{
-			{ID: "req.effectful.one", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-				prompt := "first effect"
-				return RequestConsequence{Prompt: &prompt}, nil
-			}},
-			{ID: "req.effectful.two", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-				prompt := "second effect"
-				return RequestConsequence{Prompt: &prompt}, nil
-			}},
-		}
-		arrived, release, conversation := parkedConversation(t)
-		exec := requestHookExecution(purposeExecution(conversation, forbiddenMaintenanceModel(t)), hooks...)
-		exec.ResolveStrategy = fixedStrategyResolver(fixtureStrategyBinding(checkpointStrategy))
-		h, store, c, sessionID := strategyHarness(t, exec)
-		done := make(chan error, 1)
-		go func() { done <- runAutomaticMaintenance(t, h, c, exec) }()
-		<-arrived
-		graph, gerr := validateFixture(t, store, sessionID)
-		testassert.NoError(t, gerr)
-		comp := compactedEntryOf(t, graph)
-		rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
-		testassert.NoError(t, err)
-		testassert.Require(t, rec.State.Request != nil && rec.State.Request.RequestID != "" && len(rec.State.Request.HookResults) == 2,
-			"running request state after the hook effects = %+v, want the published request with both committed results", rec.State.Request)
-		_, wantCheckpoint, wantBoundary, _, perr := h.projectContextRefs(c, testOpID)
-		testassert.NoError(t, perr)
-		testassert.Require(t, rec.State.Request.CheckpointEntryID == wantCheckpoint && rec.State.Request.BoundaryEntryID == wantBoundary && wantCheckpoint == comp.EntryID,
-			"advanced refs = %+v, want the new checkpoint and the rebuilt tail boundary", rec.State.Request)
-		committed := hookGraphHookResults(t, store, sessionID)
-		testassert.Require(t, len(committed) == 2 && committed[0].HookID == "req.effectful.one" && committed[1].HookID == "req.effectful.two",
-			"hook results = %+v, want both effects in committed order", committed)
-		for i, ref := range rec.State.Request.HookResults {
-			testassert.Require(t, ref.SessionID == sessionID && ref.EntryID == committed[i].EntryID,
-				"hook result reference %d = %+v, want the full SessionID and identity of committed effect %s", i, ref, committed[i].EntryID)
-		}
 		close(release)
 		testassert.NoError(t, <-done)
 	})

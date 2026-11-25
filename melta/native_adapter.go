@@ -144,7 +144,7 @@ func registeredRequestHooks(stage *nativeSnapshot, sel selection, session harnes
 	for _, entry := range stage.hooks["request"] {
 		hook := entry.value.(nativeHook)
 		hooks = append(hooks, harness.RequestHook{
-			ID: entry.id, ExtensionID: entry.activation.id, Mode: harness.HookMode(hook.mode),
+			ID: entry.id, ExtensionID: entry.activation.id,
 			Run: func(ctx context.Context, input harness.RequestHookInput) (harness.RequestConsequence, error) {
 				if err := entry.activation.unavailable(); err != nil {
 					return harness.RequestConsequence{}, err
@@ -163,7 +163,7 @@ func registeredArgumentHooks(stage *nativeSnapshot, sel selection, session harne
 	for _, entry := range stage.hooks["arguments"] {
 		hook := entry.value.(nativeHook)
 		hooks = append(hooks, harness.ToolArgumentsHook{
-			ID: entry.id, ExtensionID: entry.activation.id, Mode: harness.HookMode(hook.mode),
+			ID: entry.id, ExtensionID: entry.activation.id,
 			Run: func(ctx context.Context, input model.ToolCall) (harness.ToolArgumentsResult, error) {
 				if err := entry.activation.unavailable(); err != nil {
 					return harness.ToolArgumentsResult{}, err

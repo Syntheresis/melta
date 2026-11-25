@@ -83,14 +83,10 @@ func factFixtureGraph() *testGraph {
 	call.Extra = model.Extra{"call": json.RawMessage(`"x"`)}
 	assistant1.ToolCalls = []toolCallRecord{call}
 
-	hook := validHookResultEntry(hookSucceeded)
-	hook.EntryID = hexID(3)
-
 	result := validToolResultEntry(testOpID)
 	result.EntryID = testResultID
 	result.AssistantEntry.EntryID = hexID(2)
 	result.Metadata = json.RawMessage(`{"n":1}`)
-	result.HookIDs = []HookIdentity{{ExtensionID: hook.ExtensionID, HookID: hook.HookID}}
 
 	assistant2 := validAssistantEntry(testOpID)
 	assistant2.RequestID = "request-two"
@@ -126,7 +122,6 @@ func factFixtureGraph() *testGraph {
 		entries: []testEntry{
 			{env: entry(hexID(1), testOpID, EntryInput, 1), input: &input},
 			{env: entry(hexID(2), testOpID, EntryAssistant, 2), assistant: &assistant1},
-			{env: entry(hexID(3), testOpID, EntryHookResult, 3), hookResult: &hook},
 			{env: entry(testResultID, testOpID, EntryToolResult, 4), toolResult: &result},
 			{env: entry(hexID(5), testOpID, EntryAssistant, 5), assistant: &assistant2},
 			{env: entry(hexID(6), testOpID, EntrySignal, 6), signal: &signal},
@@ -146,13 +141,11 @@ type FactIdentity struct {
 }
 
 // FactFixture is the owning fact fixture's committed history exposed to the
-// external storage-axis test: the Session identity, each expected committed
-// entry's envelope identity and kind in order (hook evidence excluded), and
-// the hook entry identity that must never appear.
+// external storage-axis test: the Session identity and each expected committed
+// entry's envelope identity and kind in order.
 type FactFixture struct {
-	SessionID   string
-	Identities  []FactIdentity
-	HookEntryID string
+	SessionID  string
+	Identities []FactIdentity
 }
 
 // seedTestGraph writes one fixture graph into any Storage through the public
@@ -195,10 +188,6 @@ func SeedFactFixture(t *testing.T, store Storage) FactFixture {
 	seedTestGraph(t, store, g)
 	fixture := FactFixture{SessionID: g.session.Identity.SessionID}
 	for _, entry := range g.entries {
-		if entry.env.Kind == EntryHookResult {
-			fixture.HookEntryID = entry.env.ID
-			continue
-		}
 		fixture.Identities = append(fixture.Identities, FactIdentity{
 			EntryID:     entry.env.ID,
 			OperationID: entry.env.OperationID,
@@ -498,10 +487,6 @@ func TestHistoryViewAccessorsPure(t *testing.T) {
 			Content: []model.ContentPart{{Kind: model.PartText, Text: "hi"}},
 		},
 	}
-	hook := graphEntry{
-		Envelope:   Entry{ID: "hook-1", Sequence: 2, Kind: EntryHookResult, CommittedAt: testTime},
-		HookResult: &hookResultEntry{EntryID: "hook-1", Status: hookSucceeded},
-	}
 	assistantValue := graphEntry{
 		Envelope: Entry{ID: "assistant-1", Sequence: 3, Kind: EntryAssistant, CommittedAt: testTime},
 		Assistant: &assistantEntry{
@@ -509,7 +494,7 @@ func TestHistoryViewAccessorsPure(t *testing.T) {
 			Usage: &UsageCount{InputTokens: 7, CachedInputTokens: 2, OutputTokens: 1},
 		},
 	}
-	view := HistoryReadView{prefix: []graphEntry{inputEntryValue, hook, assistantValue}}
+	view := HistoryReadView{prefix: []graphEntry{inputEntryValue, assistantValue}}
 
 	wantHeaders := []HistoryEntryHeader{
 		{EntryID: "input-1", Kind: EntryInput, InputOrigin: InputOriginUser},

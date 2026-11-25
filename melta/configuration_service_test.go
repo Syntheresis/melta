@@ -539,7 +539,7 @@ func TestRuntimePreparedReservationSurvivesUntilOpening(t *testing.T) {
 	}}
 	bound := make(chan string, 1)
 	operation := extension.Extension{Manifest: registrarManifest("operation"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachRequest(extension.HookModePure, func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		_, err := api.AttachRequest(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			result, err := call.Call(ctx, "capability.alpha", "call", json.RawMessage(`{}`))
 			if err != nil {
 				return harness.RequestConsequence{}, err

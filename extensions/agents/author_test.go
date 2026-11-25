@@ -46,11 +46,11 @@ func (a *authorAPI) AttachAdmission(h extension.AdmissionHook, _ extension.Regis
 	a.admission = h
 	return nil, nil
 }
-func (a *authorAPI) AttachRequest(_ extension.HookMode, h extension.AuthorRequestHook, _ extension.Registration) (extension.Registration, error) {
+func (a *authorAPI) AttachRequest(h extension.AuthorRequestHook, _ extension.Registration) (extension.Registration, error) {
 	a.request = h
 	return nil, nil
 }
-func (a *authorAPI) AttachArguments(_ extension.HookMode, h extension.ArgumentsHook, _ extension.Registration) (extension.Registration, error) {
+func (a *authorAPI) AttachArguments(h extension.ArgumentsHook, _ extension.Registration) (extension.Registration, error) {
 	a.arguments = h
 	return nil, nil
 }

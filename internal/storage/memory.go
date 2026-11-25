@@ -586,7 +586,6 @@ func validEntryKind(kind harness.EntryKind) bool {
 		harness.EntryAssistant,
 		harness.EntryToolResult,
 		harness.EntrySignal,
-		harness.EntryHookResult,
 		harness.EntryCompaction,
 		harness.EntryOperationSettlement:
 		return true

@@ -545,17 +545,17 @@ func (a *authorAPI) AttachAdmission(h extension.AdmissionHook, r extension.Regis
 	}
 	return a.register("admission", struct{}{}, h, r)
 }
-func (a *authorAPI) AttachRequest(mode extension.HookMode, h extension.AuthorRequestHook, r extension.Registration) (extension.Registration, error) {
+func (a *authorAPI) AttachRequest(h extension.AuthorRequestHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {
 		return nil, errors.New("invalid hook")
 	}
-	return a.register("request", mode, h, r)
+	return a.register("request", struct{}{}, h, r)
 }
-func (a *authorAPI) AttachArguments(mode extension.HookMode, h extension.ArgumentsHook, r extension.Registration) (extension.Registration, error) {
+func (a *authorAPI) AttachArguments(h extension.ArgumentsHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {
 		return nil, errors.New("invalid hook")
 	}
-	return a.register("arguments", mode, h, r)
+	return a.register("arguments", struct{}{}, h, r)
 }
 func (a *authorAPI) AttachAuthorization(h extension.AuthorizationHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {

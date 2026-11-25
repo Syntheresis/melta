@@ -440,23 +440,9 @@ func TestConversationProjectionHookEvidenceExcluded(t *testing.T) {
 
 		runtimeSeen, _ := e.argHooks[0].received()
 		testassert.Require(t, len(runtimeSeen) == 1, "argument hook received = %v, want the one real call", runtimeSeen)
-		entries, err := store.ReadEntries(context.Background(), session, 0)
-		testassert.NoError(t, err)
-		var hookEntries int
-		for _, entry := range entries {
-			if entry.Kind == harness.EntryHookResult {
-				hookEntries++
-			}
-		}
-		// the hooky type's four argument hooks, one entry each
-		testassert.Equal(t, hookEntries, 4)
-
 		view, err := e.sessionView(context.Background(), session)
 		testassert.NoError(t, err)
 		hookFacts := historyFactsOf(view.History)
-		for _, fact := range hookFacts {
-			testassert.Require(t, fact.Kind != harness.EntryHookResult, "hook evidence became a client fact")
-		}
 		items, err := projectConversation(view.Header.Identity.SessionID, hookFacts)
 		testassert.NoError(t, err)
 		if len(items) != 4 { // input, publishing assistant, continuation assistant, end

@@ -67,7 +67,7 @@ func writeAdaptationEntries(t *testing.T, configPath, entries string) {
 // the effective prompt, so attachment order is observable on the wire.
 func shRequestMarker(id, marker string) extension.Extension {
 	return testNative(id, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		_, err := api.AttachRequest(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			prompt := input.Prompt + "|" + marker
 			return harness.RequestConsequence{Prompt: &prompt}, nil
 		}, nil)

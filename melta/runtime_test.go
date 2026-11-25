@@ -1631,7 +1631,7 @@ func TestRuntimeSettingsSectionsHaveOneOwner(t *testing.T) {
 // execution callbacks before a subsequent explicit admission.
 func shortScopeProbe(id string, calls *atomic.Int64) extension.Extension {
 	return extension.Extension{Manifest: registrarManifest(id), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		_, err := api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			calls.Add(1)
 			return harness.RequestConsequence{}, nil
 		}, nil)

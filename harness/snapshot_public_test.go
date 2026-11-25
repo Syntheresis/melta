@@ -61,7 +61,7 @@ func snapshotTurnPrepared(script *scriptModel) harness.PreparedExecution {
 
 // TestPublicReadSessionHistoryOwnedCapture proves the narrow history
 // producer over both stores: exact envelope identity/kind/order of every
-// committed entry with hook evidence excluded, the revision pair of the same
+// committed entry, the revision pair of the same
 // capture, and nested returned-value ownership against a serialized
 // expectation captured before mutation.
 func TestPublicReadSessionHistoryOwnedCapture(t *testing.T) {
@@ -84,11 +84,10 @@ func TestPublicReadSessionHistoryOwnedCapture(t *testing.T) {
 		view, err := h.ReadHistoryView(ctx, fixture.SessionID)
 		testassert.NoError(t, err)
 		facts := view.HistoryFacts(historyIDsOf(view.HistoryHeaders()))
-		testassert.Require(t, fixture.HookEntryID != "", "%v", "the owning fixture lost its hook evidence entry")
 		testassert.Equal(t, len(facts), len(fixture.Identities))
 		for i, want := range fixture.Identities {
 			got := facts[i]
-			testassert.Require(t, got.EntryID == want.EntryID && got.OperationID == want.OperationID && got.Kind == want.Kind && got.EntryID != fixture.HookEntryID, "fact %d = (%s/%s/%s), want the fixture envelope (%s/%s/%s); fact %d leaked the hook evidence entry", i, got.EntryID, got.OperationID, got.Kind, want.EntryID, want.OperationID, want.Kind, i)
+			testassert.Require(t, got.EntryID == want.EntryID && got.OperationID == want.OperationID && got.Kind == want.Kind, "fact %d = (%s/%s/%s), want the fixture envelope (%s/%s/%s)", i, got.EntryID, got.OperationID, got.Kind, want.EntryID, want.OperationID, want.Kind)
 		}
 		testassert.Require(t, view.Revision.LocalRevision == 0 && view.Revision.DurableRevision > 0, "history revision pair = %+v, want the durable register revision with a fresh coordinator's zero local counter", view.Revision)
 

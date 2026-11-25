@@ -1039,7 +1039,7 @@ func TestNativeNormalizeUsesCompleteIdentityCarrier(t *testing.T) {
 		if _, err := api.RegisterTool(testDescribeTool("identity_tool"), normalizeIdentityTool{state: state}, nil); err != nil {
 			return nil, err
 		}
-		_, err := api.AttachArguments(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, _ model.ToolCall) (extension.ArgumentsResult, error) {
+		_, err := api.AttachArguments(func(_ context.Context, _ extension.AuthorContext, _ model.ToolCall) (extension.ArgumentsResult, error) {
 			return extension.ArgumentsResult{Arguments: json.RawMessage(`{"repaired":true}`)}, nil
 		}, nil)
 		return nil, err

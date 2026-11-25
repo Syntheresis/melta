@@ -162,7 +162,7 @@ type preparation struct {
 
 	// artifacts is the Melta's private per-Session artifact interval
 	// registry. Every committed opener acquires its Session's token here
-	// before any scope, plugin, model, tool or hook effect and releases it
+	// before any scope, plugin, model or tool work and releases it
 	// last, after the scoped cleanup; nil leaves an isolated preparation
 	// without artifact ownership.
 	artifacts *artifactIntervals
@@ -396,8 +396,8 @@ func (p *preparation) permissionEvaluator(snapshot *configuration, workspace str
 }
 
 // open turns the committed admission into the execution: it first acquires
-// the Session's whole artifact interval — before any scope, plugin, model,
-// tool or hook effect — then opens only the Operation scope and enters its
+// the Session's whole artifact interval — before any scope, plugin, model or
+// tool work — then opens only the Operation scope and enters its
 // guard. The returned Execution carries the invocation factory: every Engine
 // call — the conversation run and each maintenance model request — opens its
 // own Agent-tier scope over the same Operation, enters its guard, selects the

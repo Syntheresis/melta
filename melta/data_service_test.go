@@ -1347,7 +1347,7 @@ func (p *hookClaimProbe) native(cleanup func() error) extension.Extension {
 		}
 		switch p.boundary {
 		case "arguments":
-			_, err = api.AttachArguments(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
+			_, err = api.AttachArguments(func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
 				if _, err := claimAndHold(ctx, call); err != nil {
 					p.err <- err
 					return extension.ArgumentsResult{}, err
@@ -1355,7 +1355,7 @@ func (p *hookClaimProbe) native(cleanup func() error) extension.Extension {
 				return extension.ArgumentsResult{Arguments: toolCall.Arguments}, nil
 			}, nil)
 		case "request":
-			_, err = api.AttachRequest(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			_, err = api.AttachRequest(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				if _, err := claimAndHold(ctx, call); err != nil {
 					p.err <- err
 					return harness.RequestConsequence{}, err

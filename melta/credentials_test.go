@@ -381,12 +381,12 @@ func (credentialNestedTool) Execute(ctx context.Context, tc extension.AuthorCont
 	return credentialOutcome("call", "caller="+credentialString(own)+"|provider="+credentialString(nested))
 }
 
-// TestCredentialEffectfulHookUsesOperationCapture proves every callback kind
+// TestCredentialHookUsesOperationCapture proves every callback kind
 // receives the retained Operation capture through the same handoff: the
 // admission hook changes the declared environment variable to a third value
 // before its own read, and every hook still observes the later value captured
 // for the Operation.
-func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
+func TestCredentialHookUsesOperationCapture(t *testing.T) {
 	const name = "MELTA_EFFECTFUL_HOOK"
 	t.Setenv(name, "hook-value")
 	h := newServiceHarness(t)
@@ -416,13 +416,13 @@ func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
 		}, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachRequest(extension.HookModePure, func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		if _, err := api.AttachRequest(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			read("request", call, ctx)
 			return harness.RequestConsequence{}, nil
 		}, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachArguments(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
+		if _, err := api.AttachArguments(func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
 			read("arguments", call, ctx)
 			return extension.ArgumentsResult{Arguments: toolCall.Arguments}, nil
 		}, nil); err != nil {
@@ -484,7 +484,7 @@ func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
 		defer arguments.Release()
 	}
 	testassert.NoError(t, arguments.Error)
-	testassert.Require(t, len(arguments.Hooks) == 1 && arguments.Hooks[0].Mode == harness.HookModeEffectful, "tool hooks = %d, want one effectful hook", len(arguments.Hooks))
+	testassert.Require(t, len(arguments.Hooks) == 1, "tool hooks = %d, want one", len(arguments.Hooks))
 	_, err = arguments.Hooks[0].Run(context.Background(), model.ToolCall{ID: "call-hook", Name: "cred_tool", Arguments: json.RawMessage(`{}`)})
 	testassert.NoError(t, err)
 

@@ -677,7 +677,6 @@ func executableFailure(err error) *worker.Error {
 	var typed *worker.Error
 	if errors.As(err, &typed) {
 		failure.Interrupted = typed.Interrupted
-		failure.Evidence = typed.Evidence
 		if len(typed.Partial) != 0 {
 			failure.Partial = append(worker.JSONBytes(nil), typed.Partial...)
 		}

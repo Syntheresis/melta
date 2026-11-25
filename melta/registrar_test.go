@@ -917,10 +917,10 @@ func TestRegistrarReentrantReplacementDoesNotWait(t *testing.T) {
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error
-			handle, err = a.AttachArguments(extension.HookModePure, func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
+			handle, err = a.AttachArguments(func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
 				close(entered)
 				<-proceed
-				_, err := api.AttachArguments(extension.HookModePure, func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
+				_, err := api.AttachArguments(func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
 					return extension.ArgumentsResult{}, nil
 				}, handle)
 				return extension.ArgumentsResult{}, err
@@ -1032,15 +1032,15 @@ func TestRegistrarParkedStageReplacementAndRelease(t *testing.T) {
 	first := extension.Extension{Manifest: manifest("first"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 		api = a
 		var err error
-		old, err = api.AttachArguments(extension.HookModePure, hook("old"), nil)
+		old, err = api.AttachArguments(hook("old"), nil)
 		if err != nil {
 			return nil, err
 		}
-		_, err = api.AttachArguments(extension.HookModePure, hook("second"), nil)
+		_, err = api.AttachArguments(hook("second"), nil)
 		return func(context.Context) error { closed = append(closed, "first"); return nil }, err
 	}}
 	second := extension.Extension{Manifest: manifest("second"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
-		_, err := a.AttachArguments(extension.HookModePure, hook("other"), nil)
+		_, err := a.AttachArguments(hook("other"), nil)
 		return func(context.Context) error { closed = append(closed, "second"); return nil }, err
 	}}
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: first, section: []byte(`{}`)}, {extension: second, section: []byte(`{}`)}})
@@ -1048,14 +1048,14 @@ func TestRegistrarParkedStageReplacementAndRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	parked := candidate.snapshotForTest()
-	replacement, err := api.AttachArguments(extension.HookModePure, hook("new"), old)
+	replacement, err := api.AttachArguments(hook("new"), old)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := api.Remove(old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := api.AttachArguments(extension.HookModePure, hook("bad"), old); err == nil {
+	if _, err := api.AttachArguments(hook("bad"), old); err == nil {
 		t.Fatal("stale replacement accepted")
 	}
 	current := candidate.snapshotForTest()
@@ -1123,12 +1123,12 @@ func TestRegistrationAllContributions(t *testing.T) {
 			}, nil); err != nil {
 				return nil, err
 			}
-			if _, err := api.AttachRequest(extension.HookModeEffectful, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			if _, err := api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				return harness.RequestConsequence{}, nil
 			}, nil); err != nil {
 				return nil, err
 			}
-			if _, err := api.AttachArguments(extension.HookModePure, func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
+			if _, err := api.AttachArguments(func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
 				return extension.ArgumentsResult{}, nil
 			}, nil); err != nil {
 				return nil, err
@@ -1188,11 +1188,6 @@ func TestRegistrationRejectsInvalidAndForeignHandles(t *testing.T) {
 		}
 		if _, err := api.RegisterTool(model.ToolDefinition{Name: "bad", Parameters: []byte(`[]`)}, registrarTestTool{}, nil); err == nil {
 			t.Fatal("invalid tool accepted")
-		}
-		if _, err := api.AttachRequest(extension.HookMode("invalid"), func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
-			return harness.RequestConsequence{}, nil
-		}, nil); err == nil {
-			t.Fatal("invalid hook mode accepted")
 		}
 		return nil, nil
 	}}

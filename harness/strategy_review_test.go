@@ -345,7 +345,7 @@ func TestReviewStripsOnlyInjectedPrompt(t *testing.T) {
 // request-only contribution.
 func TestReviewRetainAndContextSources(t *testing.T) {
 	t.Run("identical canonical and contribution values permit the canonical reference", func(t *testing.T) {
-		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Edits: appendRequestFixture(in, in.CanonicalMessages[0])}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
@@ -362,7 +362,7 @@ func TestReviewRetainAndContextSources(t *testing.T) {
 	})
 
 	t.Run("explicit authored context equal to a contribution stays authored", func(t *testing.T) {
-		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Edits: appendRequestFixture(in, in.CanonicalMessages[0])}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
@@ -379,7 +379,7 @@ func TestReviewRetainAndContextSources(t *testing.T) {
 	})
 
 	t.Run("a source position can never address a request-only contribution", func(t *testing.T) {
-		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Edits: appendRequestFixture(in, model.Message{Role: model.RoleUser, Content: admissionContent("steered addition")})}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)
@@ -497,7 +497,7 @@ func TestReviewRetainResolution(t *testing.T) {
 	t.Run("a mutating callback cannot rewrite the frozen source copy", func(t *testing.T) {
 		strategy := &mutatingStrategy{}
 		addition := model.Message{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "addition", Extra: model.Extra{"raw": json.RawMessage(` { "n" : 1 } `)}}}}
-		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+		hook := RequestHook{ID: "req.contribute", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Edits: appendRequestFixture(in, addition)}, nil
 		}}
 		exec := requestHookExecution(purposeExecution(quietConversation(), forbiddenMaintenanceModel(t)), hook)

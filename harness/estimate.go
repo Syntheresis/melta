@@ -113,7 +113,7 @@ func (e *costEstimate) value() *float64 {
 // (operationless envelopes) and every informational signal — background
 // completion reports included — contribute nothing, so a copied producer never
 // charges twice and a copied absent usage never turns a zero-cost fork
-// unknown. Tool results, inputs, and hook evidence are not model producers.
+// unknown. Tool results and inputs are not model producers.
 //
 // It returns one estimate per Operation identity and the Session estimate
 // summed over the same single walk, so one coherent SessionReadView needs one

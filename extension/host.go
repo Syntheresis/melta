@@ -20,14 +20,6 @@ const (
 // extension may use it as its ID.
 const HostProvider = "host"
 
-// HookMode is one hook attachment's semantic mode.
-type HookMode string
-
-const (
-	HookModePure      HookMode = "pure"
-	HookModeEffectful HookMode = "effectful"
-)
-
 // ExposedTargetKind is the closed target-scope kind a client operation
 // accepts.
 type ExposedTargetKind string

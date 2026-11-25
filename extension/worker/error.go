@@ -43,14 +43,13 @@ func (c Class) valid() bool {
 // Error is one author or infrastructure failure carried as the closed public
 // class plus a non-secret message. Unwrap exposes the matching Harness
 // sentinel where the class has one, so decoded failures classify with
-// errors.Is. Interrupted and Evidence carry the author's declared effect
-// knowledge when the author error is a *harness.EffectError.
+// errors.Is. Interrupted carries the author's declared interruption when the
+// author error is a *harness.EffectError.
 type Error struct {
-	Class       Class                     `json:"class"`
-	Message     string                    `json:"message"`
-	Interrupted bool                      `json:"interrupted,omitempty"`
-	Evidence    harness.ExecutionEvidence `json:"evidence,omitempty"`
-	Partial     JSONBytes                 `json:"partial,omitempty"`
+	Class       Class     `json:"class"`
+	Message     string    `json:"message"`
+	Interrupted bool      `json:"interrupted,omitempty"`
+	Partial     JSONBytes `json:"partial,omitempty"`
 }
 
 // Error returns the class and message.
@@ -102,7 +101,6 @@ func classifyError(err error) *Error {
 	var typed *Error
 	if errors.As(err, &typed) {
 		failure.Interrupted = typed.Interrupted
-		failure.Evidence = typed.Evidence
 		if len(typed.Partial) != 0 {
 			failure.Partial = append(JSONBytes(nil), typed.Partial...)
 		}
@@ -110,7 +108,6 @@ func classifyError(err error) *Error {
 	var effect *harness.EffectError
 	if errors.As(err, &effect) {
 		failure.Interrupted = harness.EffectInterrupted(err)
-		failure.Evidence = harness.DeclaredExecutionKnowledge(err)
 	}
 	var callErr *extension.CallError
 	if errors.As(err, &callErr) && len(callErr.Partial) != 0 {

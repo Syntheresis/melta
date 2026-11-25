@@ -366,10 +366,10 @@ func (e *prepEnv) plugins() []extension.Extension {
 		if _, err := api.AttachAdmission(e.hooks[1].Admit, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachArguments(extension.HookModeEffectful, e.argHooks[0].AdmitArgs, nil); err != nil {
+		if _, err := api.AttachArguments(e.argHooks[0].AdmitArgs, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachArguments(extension.HookModeEffectful, e.argHooks[1].AdmitArgs, nil); err != nil {
+		if _, err := api.AttachArguments(e.argHooks[1].AdmitArgs, nil); err != nil {
 			return nil, err
 		}
 		if _, err := api.RegisterTool(testDescribeTool("echo"), e.echo, nil); err != nil {
@@ -387,10 +387,10 @@ func (e *prepEnv) plugins() []extension.Extension {
 		if _, err := api.RegisterService(testServiceCapability("cap.other"), nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachArguments(extension.HookModeEffectful, e.argHooks[2].AdmitArgs, nil); err != nil {
+		if _, err := api.AttachArguments(e.argHooks[2].AdmitArgs, nil); err != nil {
 			return nil, err
 		}
-		_, err := api.AttachArguments(extension.HookModeEffectful, e.argHooks[3].AdmitArgs, nil)
+		_, err := api.AttachArguments(e.argHooks[3].AdmitArgs, nil)
 		return nil, err
 	})
 	return []extension.Extension{hooks, caps}
@@ -1390,47 +1390,47 @@ func TestPreparationForwardsToolArgumentHooks(t *testing.T) {
 		_, executed, toolInput := e.echo.counters()
 		testassert.Require(t, executed == 1 && len(toolInput) == 1 && toolInput[0] == `{"repaired":"arg.agent"}`, "concrete tool ran %d times on %q, want once with the final committed replacement", executed, toolInput)
 
-		// The committed hook evidence: one success hook_result per argument
-		// hook in attachment order, under the minted registration IDs, each
-		// repairing from its received bytes.
+		// The committed tool result records every accepted argument hook's
+		// minted identity in attachment order.
 		entries, err := store.ReadEntries(context.Background(), session, 0)
 		testassert.NoError(t, err)
-		type hookWire struct {
-			HookID      string `json:"hook_id"`
-			ExtensionID string `json:"extension_id"`
-			ToolCallID  string `json:"tool_call_id"`
-			Status      string `json:"status"`
-			Arguments   []byte `json:"arguments_base64"`
+		type resultWire struct {
+			ToolCallID          string `json:"tool_call_id"`
+			NormalizedArguments []byte `json:"normalized_arguments_base64"`
+			HookIDs             []struct {
+				ExtensionID string `json:"extension_id"`
+				HookID      string `json:"hook_id"`
+			} `json:"hook_ids"`
 		}
-		var hookResults []hookWire
+		var result *resultWire
 		for _, entry := range entries {
-			if entry.Kind != harness.EntryHookResult {
+			if entry.Kind != harness.EntryToolResult {
 				continue
 			}
-			var wire hookWire
+			var wire resultWire
 			testassert.NoError(t, json.Unmarshal(entry.Payload, &wire))
-			hookResults = append(hookResults, wire)
+			if wire.ToolCallID == "call-1" {
+				result = &wire
+			}
 		}
-		wantExtensions := []string{"hooks", "hooks", "caps", "caps"} // the owning extension of each registered hook
-		testassert.Require(t, len(hookResults) == len(wantExtensions), "committed hook results = %+v, want one per argument hook", hookResults)
+		testassert.Require(t, result != nil, "no committed tool result for call-1")
+		wantExtensions := []string{"agents", "hooks", "hooks", "caps", "caps"} // the owning extension of each registered hook
+		testassert.Require(t, len(result.HookIDs) == len(wantExtensions), "committed hook identities = %+v, want one per argument hook", result.HookIDs)
 		seenIDs := make(map[string]bool)
 		for i, want := range wantExtensions {
-			got := hookResults[i]
-			testassert.Require(t, got.ExtensionID == want && got.HookID != "arg.runtime" && got.HookID != want && !seenIDs[got.HookID] && len(got.HookID) == 32 && got.ToolCallID == "call-1" && got.Status == "success", "hook result %d = %+v, want a minted id from extension %q succeeding for call-1", i, got, want)
+			got := result.HookIDs[i]
+			testassert.Require(t, got.ExtensionID == want && got.HookID != "arg.runtime" && got.HookID != want && !seenIDs[got.HookID] && len(got.HookID) == 32, "hook identity %d = %+v, want a minted id from extension %q", i, got, want)
 			seenIDs[got.HookID] = true
 		}
-		testassert.Require(t, string(hookResults[3].Arguments) == `{"repaired":"arg.agent"}`, "last committed arguments = %s, want the final hook's replacement", hookResults[3].Arguments)
+		testassert.Require(t, string(result.NormalizedArguments) == `{"repaired":"arg.agent"}`, "last committed arguments = %s, want the final hook's replacement", result.NormalizedArguments)
 
-		// The chain: the first hook received the invalid raw arguments, every
-		// later one the preceding hook's committed replacement; the owning
-		// extension identity reached every hook.
+		// The chain: the first hook received the invalid raw arguments and
+		// every later one the preceding replacement; the owning extension
+		// identity reached every hook.
 		for i, hook := range e.argHooks {
 			seen, owners := hook.received()
 			testassert.Require(t, len(seen) == 1, "hook %d ran %d times, want once", i, len(seen))
-			if i > 0 && seen[0] != string(hookResults[i-1].Arguments) {
-				t.Fatalf("hook %d received %q, want the preceding committed replacement %q", i, seen[0], hookResults[i-1].Arguments)
-			}
-			testassert.Require(t, owners[0] == wantExtensions[i], "hook %d owner = %q, want %q", i, owners[0], wantExtensions[i])
+			testassert.Require(t, owners[0] == wantExtensions[i+1], "hook %d owner = %q, want %q", i, owners[0], wantExtensions[i+1])
 		}
 		{
 			first, _ := e.argHooks[0].received()
@@ -1440,8 +1440,8 @@ func TestPreparationForwardsToolArgumentHooks(t *testing.T) {
 		// The registered admission hooks ran at preparation and never bound
 		// as an argument hook.
 		testassert.Require(t, len(e.hooks[0].calls()) != 0, "admission hook never ran")
-		for _, result := range hookResults {
-			testassert.Require(t, result.HookID != "hook.first", "admission hook bound as an argument hook")
+		for _, identity := range result.HookIDs {
+			testassert.Require(t, identity.HookID != "hook.first", "admission hook bound as an argument hook")
 		}
 	})
 }
@@ -1538,7 +1538,7 @@ func TestPreparationVisibilityRestoresThroughRequestHooks(t *testing.T) {
 			}, nil); err != nil {
 				return nil, err
 			}
-			_, err := api.AttachRequest(extension.HookModePure, func(_ context.Context, call extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			_, err := api.AttachRequest(func(_ context.Context, call extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				var state struct {
 					Agent string `json:"agent"`
 				}
@@ -1696,7 +1696,7 @@ func TestRequestBodyParametersAcrossRetries(t *testing.T) {
 	enableFixturePlugin(t, e.configPath, "gate")
 	var attempts, hooks atomic.Int64
 	gate := testNative("gate", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		if _, err := api.AttachRequest(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			hooks.Add(1)
 			want := `"model-value"`
 			if input.Purpose == harness.InvocationPurposeMaintenance {
@@ -1709,7 +1709,7 @@ func TestRequestBodyParametersAcrossRetries(t *testing.T) {
 		}, nil); err != nil {
 			return nil, err
 		}
-		_, err := api.AttachRequest(extension.HookModeEffectful, func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		_, err := api.AttachRequest(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			hooks.Add(1)
 			if string(input.Parameters["shared"]) != `"first"` || string(input.Parameters[""]) != `true` {
 				return harness.RequestConsequence{}, fmt.Errorf("preceding view: %s", input.Parameters)

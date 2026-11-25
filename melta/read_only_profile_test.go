@@ -93,7 +93,7 @@ func TestReadOnlyProfileForegroundTimeoutIgnoresModelOverride(t *testing.T) {
 // captured authorization refuses it and the command result never appears.
 func TestReadOnlyProfileLaterArgumentHookTimeoutRefused(t *testing.T) {
 	gate := testNative("gate", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachArguments(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
+		_, err := api.AttachArguments(func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
 			if call.Name != "run_command" {
 				return extension.ArgumentsResult{}, nil
 			}

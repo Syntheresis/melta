@@ -70,7 +70,6 @@ type EffectKind string
 const (
 	EffectModel EffectKind = "model"
 	EffectTool  EffectKind = "tool"
-	EffectHook  EffectKind = "hook"
 )
 
 // SignalKind is the closed kind of one durable signal entry. The signal kind
@@ -123,18 +122,16 @@ type RequestEvidence struct {
 }
 
 // RunningRequest is the one suspended request state: the request identity
-// bound before contributions, the frozen canonical
-// boundary/checkpoint references of the projection or strategy request that
-// request is shaping, and the committed effectful request-hook
-// result references in commit order. It is published and advanced only inside
-// existing effect/checkpoint transactions; a conversation request and a
-// maintenance summary request both use this one slot.
+// bound before contributions and the frozen canonical boundary/checkpoint
+// references of the projection or strategy request that request is shaping.
+// It is published and advanced only inside existing effect/checkpoint
+// transactions; a conversation request and a maintenance summary request both
+// use this one slot.
 type RunningRequest struct {
 	RequestID         string            `json:"request_id"`
 	Purpose           InvocationPurpose `json:"purpose"`
 	CheckpointEntryID string            `json:"checkpoint_entry_id,omitempty"`
 	BoundaryEntryID   string            `json:"boundary_entry_id"`
-	HookResults       []EntryRef        `json:"hook_results,omitempty"`
 }
 
 // operationRef addresses one Operation of one Session. It is a codec value
@@ -344,25 +341,19 @@ type OperationAdmission struct {
 // effective request evidence it consumes, a maintenance effect never does. A
 // tool effect requires the tool-call ID, addresses the matching first pending
 // call, and carries the bound implementation, accepted normalized selection,
-// and contributing argument-hook provenance. A hook effect carries its
-// extension and hook identities plus its consumed input under exactly one
-// binding: the tool-call ID of the first pending call, or the request identity of a
-// request-bound hook.
+// and contributing argument-hook provenance.
 type ActiveEffect struct {
 	Kind          EffectKind `json:"kind"`
 	ResultEntryID string     `json:"result_entry_id"`
 	ToolCallID    string     `json:"tool_call_id,omitempty"`
-	HookID        string     `json:"hook_id,omitempty"`
 
-	RequestID            string              `json:"request_id,omitempty"`
-	Model                *model.ModelRef     `json:"model,omitempty"`
-	Purpose              InvocationPurpose   `json:"purpose,omitempty"`
-	Evidence             *RequestEvidence    `json:"evidence,omitempty"`
-	ExtensionID          string              `json:"hook_extension_id,omitempty"`
-	InputArgumentsBase64 string              `json:"input_arguments_base64,omitempty"`
-	FinalArguments       json.RawMessage     `json:"final_arguments,omitempty"`
-	ContributionIDs      []HookIdentity      `json:"hook_ids,omitempty"`
-	Implementation       *ToolImplementation `json:"implementation,omitempty"`
+	RequestID       string              `json:"request_id,omitempty"`
+	Model           *model.ModelRef     `json:"model,omitempty"`
+	Purpose         InvocationPurpose   `json:"purpose,omitempty"`
+	Evidence        *RequestEvidence    `json:"evidence,omitempty"`
+	FinalArguments  json.RawMessage     `json:"final_arguments,omitempty"`
+	ContributionIDs []HookIdentity      `json:"hook_ids,omitempty"`
+	Implementation  *ToolImplementation `json:"implementation,omitempty"`
 }
 
 // ToolImplementation identifies the bound host tool or extension capability.
@@ -501,47 +492,7 @@ type toolResultEntry struct {
 	NormalizedArguments json.RawMessage        `json:"normalized_arguments,omitempty"`
 	HookIDs             []HookIdentity         `json:"hook_ids,omitempty"`
 	Implementation      *ToolImplementation    `json:"implementation,omitempty"`
-}
-
-// hookResultStatus is the closed status of one settled effectful hook
-// execution.
-type hookResultStatus string
-
-const (
-	hookSucceeded   hookResultStatus = "success"
-	hookFailed      hookResultStatus = "error"
-	hookInterrupted hookResultStatus = "interrupted"
-)
-
-// hookResultEntry is one settled effectful-hook execution: the independent
-// immutable historical evidence of one hook's outcome under the executing
-// effect's own reserved identity — never a conversation message. Its binding
-// is exactly one of a tool call (argument hook) or a request (request hook),
-// never both. Every entry carries the extension and hook identities, the
-// consumed input evidence the hook actually received before I/O, and the
-// execution knowledge independently of status. A successful tool-bound result
-// carries its raw consequence bytes or the refusal that denied the call; a
-// successful request-bound result carries the closed consequence (an empty
-// consequence is a valid no-op); every other status carries a non-empty error
-// and no consequence.
-type hookResultEntry struct {
-	SessionID   string            `json:"session_id"`
-	EntryID     string            `json:"entry_id"`
-	OperationID string            `json:"operation_id"`
-	HookID      string            `json:"hook_id"`
-	ExtensionID string            `json:"extension_id"`
-	ToolCallID  string            `json:"tool_call_id,omitempty"`
-	RequestID   string            `json:"request_id,omitempty"`
-	Purpose     InvocationPurpose `json:"purpose,omitempty"`
-	Status      hookResultStatus  `json:"status"`
-	Evidence    ExecutionEvidence `json:"evidence"`
-	Arguments   json.RawMessage   `json:"arguments,omitempty"`
-	Refusal     string            `json:"refusal,omitempty"`
-	Error       string            `json:"error,omitempty"`
-
-	InputArgumentsBase64 string              `json:"input_arguments_base64,omitempty"`
-	InputEvidence        *RequestEvidence    `json:"input_evidence,omitempty"`
-	Consequence          *RequestConsequence `json:"consequence,omitempty"`
+	RefusedBy           *HookIdentity          `json:"refused_by,omitempty"`
 }
 
 // relatedMember addresses the background member whose completion one
@@ -635,8 +586,7 @@ type contextCheckpointEntry struct {
 }
 
 // Exported aliases of the validated entry payloads: the HistoryFact union
-// exposes these exact structs, their JSON tags, and their nested members. A
-// hook_result payload stays execution evidence and has no exported alias.
+// exposes these exact structs, their JSON tags, and their nested members.
 type (
 	InputEntry               = inputEntry
 	AssistantEntry           = assistantEntry

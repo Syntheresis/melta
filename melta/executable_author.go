@@ -218,20 +218,17 @@ func (a *executableActivation) authorRegistration(frame worker.Frame) error {
 			return value.(*string), nil
 		}, replacement)
 	case "request":
-		var mode extension.HookMode
-		if err = json.Unmarshal(params.Spec, &mode); err == nil {
-			handle, err = a.author.api.AttachRequest(mode, func(ctx context.Context, call extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
-				args, err := worker.EncodeAuthorRequest(input)
-				if err != nil {
-					return harness.RequestConsequence{}, err
-				}
-				value, err := a.authorCall(ctx, params.Handle, "request", call, args, typed(worker.DecodeRequestHookResult))
-				if err != nil {
-					return harness.RequestConsequence{}, err
-				}
-				return value.(harness.RequestConsequence), nil
-			}, replacement)
-		}
+		handle, err = a.author.api.AttachRequest(func(ctx context.Context, call extension.AuthorContext, input extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			args, err := worker.EncodeAuthorRequest(input)
+			if err != nil {
+				return harness.RequestConsequence{}, err
+			}
+			value, err := a.authorCall(ctx, params.Handle, "request", call, args, typed(worker.DecodeRequestHookResult))
+			if err != nil {
+				return harness.RequestConsequence{}, err
+			}
+			return value.(harness.RequestConsequence), nil
+		}, replacement)
 	case "result":
 		handle, err = a.author.api.AttachResult(func(ctx context.Context, call extension.AuthorContext, input harness.ToolOutputInput) (string, error) {
 			args, err := worker.EncodeAfterToolHookParams(input)
@@ -245,20 +242,17 @@ func (a *executableActivation) authorRegistration(frame worker.Frame) error {
 			return value.(string), nil
 		}, replacement)
 	case "arguments":
-		var mode extension.HookMode
-		if err = json.Unmarshal(params.Spec, &mode); err == nil {
-			handle, err = a.author.api.AttachArguments(mode, func(ctx context.Context, call extension.AuthorContext, input model.ToolCall) (extension.ArgumentsResult, error) {
-				args, err := worker.EncodeBeforeToolHookParams(input)
-				if err != nil {
-					return extension.ArgumentsResult{}, err
-				}
-				value, err := a.authorCall(ctx, params.Handle, "arguments", call, args, typed(worker.DecodeAuthorArgumentsResult))
-				if err != nil {
-					return extension.ArgumentsResult{}, err
-				}
-				return value.(extension.ArgumentsResult), nil
-			}, replacement)
-		}
+		handle, err = a.author.api.AttachArguments(func(ctx context.Context, call extension.AuthorContext, input model.ToolCall) (extension.ArgumentsResult, error) {
+			args, err := worker.EncodeBeforeToolHookParams(input)
+			if err != nil {
+				return extension.ArgumentsResult{}, err
+			}
+			value, err := a.authorCall(ctx, params.Handle, "arguments", call, args, typed(worker.DecodeAuthorArgumentsResult))
+			if err != nil {
+				return extension.ArgumentsResult{}, err
+			}
+			return value.(extension.ArgumentsResult), nil
+		}, replacement)
 	case "strategy":
 		var spec struct {
 			ID                    string `json:"id"`

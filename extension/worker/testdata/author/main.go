@@ -124,13 +124,13 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachArguments(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
+			_, err = api.AttachArguments(func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
 				return extension.ArgumentsResult{Arguments: append(json.RawMessage(nil), call.Arguments...)}, nil
 			}, nil)
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			_, err = api.AttachRequest(func(_ context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				prompt := "worker prompt"
 				return harness.RequestConsequence{Prompt: &prompt}, nil
 			}, nil)

@@ -122,7 +122,7 @@ func (h *noopArgumentHook) received() []string {
 // argumentHookPlugin attaches one effectful arguments hook.
 func argumentHookPlugin(hook extension.ArgumentsHook) extension.Extension {
 	return testNative("arghooks", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachArguments(extension.HookModeEffectful, hook, nil)
+		_, err := api.AttachArguments(hook, nil)
 		return nil, err
 	})
 }

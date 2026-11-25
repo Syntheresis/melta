@@ -1532,16 +1532,16 @@ func TestExecutableOwnerCloseRunsWorkerClose(t *testing.T) {
 	}
 }
 
-func TestExecutableEffectfulHookCancelledAuthorEvidence(t *testing.T) {
+func TestExecutableHookCancelledAuthorEvidence(t *testing.T) {
 	entered := make(chan struct{})
 	var once sync.Once
 	callback := func(ctx context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 		once.Do(func() { close(entered) })
 		<-ctx.Done()
-		return harness.RequestConsequence{}, &harness.EffectError{Interrupted: true, Evidence: harness.ExecutionObserved, Err: context.Canceled}
+		return harness.RequestConsequence{}, &harness.EffectError{Interrupted: true, Err: context.Canceled}
 	}
 	_, stage := publishAdapterWorker(t, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachRequest(extension.HookModeEffectful, callback, nil)
+		_, err := api.AttachRequest(callback, nil)
 		return nil, err
 	}, nil)
 	if len(stage.hooks["request"]) != 1 {
@@ -1558,17 +1558,16 @@ func TestExecutableEffectfulHookCancelledAuthorEvidence(t *testing.T) {
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("worker effectful hook never started")
+		t.Fatal("worker hook never started")
 	}
 	cancel()
 	var got error
 	select {
 	case got = <-result:
 	case <-time.After(5 * time.Second):
-		t.Fatal("worker effectful hook did not settle after cancellation")
+		t.Fatal("worker hook did not settle after cancellation")
 	}
 	testassert.Equal(t, harness.EffectInterrupted(got), true)
-	testassert.Equal(t, harness.DeclaredExecutionKnowledge(got), harness.ExecutionObserved)
 	testassert.Require(t, errors.Is(got, context.Canceled), "worker hook error = %v, want the author's cancellation cause", got)
 }
 

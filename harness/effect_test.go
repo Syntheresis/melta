@@ -2022,7 +2022,7 @@ func TestToolEffectAdvertisementGate(t *testing.T) {
 			prepared++
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
 		}
-		hide := RequestHook{ID: "req.hide.echo", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		hide := RequestHook{ID: "req.hide.echo", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Tools: fixtureDefinitions()}, nil // the admitted catalog has echo; the request advertises none
 		}}
 		testassert.Require(t, len(testCapture().Tools) == 1 && testCapture().Tools[0].Name == "echo", "fixture catalog = %+v, want the admitted echo tool", testCapture().Tools)
@@ -2592,20 +2592,16 @@ func TestToolResultAdoptsIntoView(t *testing.T) {
 	_ = sessionID
 }
 
-// TestBuildToolResultContent pins the shared final-content builder's three
+// TestBuildToolResultContent pins the shared final-content builder's two
 // cases against the exact contract literals: an unknown concrete execution
-// and an unknown-outcome pre-tool hook each prefix their fixed uncertainty
-// text joined to the unchanged base by one blank line, and every other result
-// stores its base verbatim. The builder never alters the base.
+// prefixes its fixed uncertainty text joined to the unchanged base by one
+// blank line, and every other result stores its base verbatim. The builder
+// never alters the base.
 func TestBuildToolResultContent(t *testing.T) {
-	testassert.Equal(t, buildToolResultContent(ExecutionUnknown, false, "Tool call interrupted."),
+	testassert.Equal(t, buildToolResultContent(ExecutionUnknown, "Tool call interrupted."),
 		"Execution outcome unknown; the action may have occurred.\n\nTool call interrupted.")
-	testassert.Equal(t, buildToolResultContent(ExecutionNotStarted, true, "Tool call interrupted."),
-		"Pre-tool hook outcome unknown; the hook may have taken effect. The tool was not executed.\n\nTool call interrupted.")
-	testassert.Equal(t, buildToolResultContent(ExecutionNotStarted, true, "hook broke"),
-		"Pre-tool hook outcome unknown; the hook may have taken effect. The tool was not executed.\n\nhook broke")
-	testassert.Equal(t, buildToolResultContent(ExecutionObserved, false, "base"), "base")
-	testassert.Equal(t, buildToolResultContent(ExecutionNotStarted, false, "base"), "base")
+	testassert.Equal(t, buildToolResultContent(ExecutionObserved, "base"), "base")
+	testassert.Equal(t, buildToolResultContent(ExecutionNotStarted, "base"), "base")
 }
 
 // TestToolResultEvidenceByProducer proves the closed producer-assigned
@@ -2704,8 +2700,7 @@ func shapingHook(id string, run func(context.Context, ToolOutputInput) (string, 
 }
 
 // storedShapingResult returns the single committed tool result after the
-// store round trip (the codec re-validating decode) and requires that pure
-// output hooks left no hook_result evidence.
+// store round trip (the codec re-validating decode).
 func storedShapingResult(t *testing.T, store *graphStorage, sessionID string) toolResultEntry {
 	t.Helper()
 	graph, err := validateFixture(t, store, sessionID)
@@ -2713,7 +2708,6 @@ func storedShapingResult(t *testing.T, store *graphStorage, sessionID string) to
 	found := 0
 	var stored toolResultEntry
 	for _, entry := range graph.Entries {
-		testassert.Require(t, entry.HookResult == nil, "entry %s carries hook evidence; output hooks are pure", entry.Envelope.ID)
 		if entry.ToolResult == nil {
 			continue
 		}
@@ -2793,7 +2787,7 @@ func TestToolOutputShaping(t *testing.T) {
 		inv := InvocationExecution{
 			LookupTool: fixtureToolLookup(shapingExecutor(model.ResultSuccess, "raw output", nil), objectNormalize),
 			ToolOutputHooks: []ToolOutputHook{shapingHook("shaper.interrupted", func(context.Context, ToolOutputInput) (string, error) {
-				return "", &EffectError{Evidence: ExecutionUnknown, Err: context.Canceled, Interrupted: true}
+				return "", &EffectError{Err: context.Canceled, Interrupted: true}
 			})},
 		}
 		_, store, sessionID, result, err := freshToolBoundary(t, testCapture(), inv, testToolCall("call-1"))
@@ -3130,7 +3124,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 		exec := requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			t.Error("a failed request hook dispatched a conversation request")
 			return nil, nil
-		}, nil, RequestHook{ID: "req.broke", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		}, nil, RequestHook{ID: "req.broke", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{}, hookErr
 		}})
 		prepared := preparedExecuting(exec)
@@ -3335,7 +3329,7 @@ func TestSettleAgentTerminalClassifiesRunError(t *testing.T) {
 					<-ctx.Done()
 					return nil, ctx.Err()
 				}
-				exec := requestHookFixtureExecution(modelFn, nil, RequestHook{ID: "req.storage", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+				exec := requestHookFixtureExecution(modelFn, nil, RequestHook{ID: "req.storage", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 					once.Do(func() { close(started) })
 					return RequestConsequence{}, hookErr
 				}})

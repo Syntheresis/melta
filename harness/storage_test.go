@@ -18,11 +18,10 @@ func TestClosedKinds(t *testing.T) {
 		harness.EntryAssistant:           "assistant",
 		harness.EntryToolResult:          "tool_result",
 		harness.EntrySignal:              "signal",
-		harness.EntryHookResult:          "hook_result",
 		harness.EntryCompaction:          "context_checkpoint",
 		harness.EntryOperationSettlement: "operation_settlement",
 	}
-	testassert.Equal(t, len(entryKinds), 7)
+	testassert.Equal(t, len(entryKinds), 6)
 	for kind, want := range entryKinds {
 		testassert.Check(t, string(kind) == want, "EntryKind %q, want %q", kind, want)
 		testassert.Check(t, kind != "", "EntryKind zero value is a declared constant; the kind set must be closed to non-zero kinds")

@@ -329,9 +329,9 @@ func TestAuthorServeOversizedResultIsCallLocal(t *testing.T) {
 	}
 }
 
-// TestAuthorServeOpaqueArgumentsAndEffectKnowledge proves argument bytes cross
-// unchanged and a declared effect error keeps its interruption evidence.
-func TestAuthorServeOpaqueArgumentsAndEffectKnowledge(t *testing.T) {
+// TestAuthorServeOpaqueArgumentsAndInterruption proves argument bytes cross
+// unchanged and a declared interruption crosses without execution evidence.
+func TestAuthorServeOpaqueArgumentsAndInterruption(t *testing.T) {
 	opaque := []byte{0xff, 0x00, 0x7b}
 	var seen []byte
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
@@ -342,7 +342,7 @@ func TestAuthorServeOpaqueArgumentsAndEffectKnowledge(t *testing.T) {
 			Target: extension.ExposedTargetHarness,
 			Method: extension.Method{Name: "effect", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
-				return extension.Result{}, &harness.EffectError{Evidence: harness.ExecutionObserved, Interrupted: true, Err: errors.New("hook boom")}
+				return extension.Result{}, &harness.EffectError{Interrupted: true, Err: errors.New("hook boom")}
 			},
 		}, nil); err != nil {
 			return nil, err
@@ -373,8 +373,19 @@ func TestAuthorServeOpaqueArgumentsAndEffectKnowledge(t *testing.T) {
 		t.Fatalf("normalized bytes = %s, %v", reply.Result, err)
 	}
 	reply = p.call("effect", registered[1].Handle, "effect", json.RawMessage(`{}`), worker.AuthorCallContext{Token: "t"})
-	if reply.Error == nil || !reply.Error.Interrupted || reply.Error.Evidence != harness.ExecutionObserved {
+	if reply.Error == nil || !reply.Error.Interrupted {
 		t.Fatalf("effect error reply = %+v", reply)
+	}
+	encoded, merr := json.Marshal(reply.Error)
+	if merr != nil {
+		t.Fatalf("marshal error frame: %v", merr)
+	}
+	var frame map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &frame); err != nil {
+		t.Fatalf("unmarshal error frame: %v", err)
+	}
+	if _, present := frame["evidence"]; present {
+		t.Fatalf("error frame carries evidence: %s", encoded)
 	}
 }
 

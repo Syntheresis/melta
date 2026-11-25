@@ -222,7 +222,6 @@ type nativeTool struct {
 }
 
 type nativeHook struct {
-	mode    extension.HookMode
 	handler any
 }
 
@@ -770,31 +769,31 @@ func (api nativeAPI) AttachAdmission(h extension.AdmissionHook, r extension.Regi
 	if h == nil {
 		return nil, errors.New("missing hook")
 	}
-	return api.register("admission", "", nativeHook{extension.HookModePure, h}, r)
+	return api.register("admission", "", nativeHook{h}, r)
 }
-func (api nativeAPI) AttachRequest(mode extension.HookMode, h extension.AuthorRequestHook, r extension.Registration) (extension.Registration, error) {
-	if h == nil || (mode != extension.HookModePure && mode != extension.HookModeEffectful) {
+func (api nativeAPI) AttachRequest(h extension.AuthorRequestHook, r extension.Registration) (extension.Registration, error) {
+	if h == nil {
 		return nil, errors.New("invalid hook")
 	}
-	return api.register("request", "", nativeHook{mode, h}, r)
+	return api.register("request", "", nativeHook{h}, r)
 }
-func (api nativeAPI) AttachArguments(mode extension.HookMode, h extension.ArgumentsHook, r extension.Registration) (extension.Registration, error) {
-	if h == nil || (mode != extension.HookModePure && mode != extension.HookModeEffectful) {
+func (api nativeAPI) AttachArguments(h extension.ArgumentsHook, r extension.Registration) (extension.Registration, error) {
+	if h == nil {
 		return nil, errors.New("invalid hook")
 	}
-	return api.register("arguments", "", nativeHook{mode, h}, r)
+	return api.register("arguments", "", nativeHook{h}, r)
 }
 func (api nativeAPI) AttachAuthorization(h extension.AuthorizationHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {
 		return nil, errors.New("missing hook")
 	}
-	return api.register("authorization", "", nativeHook{extension.HookModePure, h}, r)
+	return api.register("authorization", "", nativeHook{h}, r)
 }
 func (api nativeAPI) AttachResult(h extension.ResultHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {
 		return nil, errors.New("missing hook")
 	}
-	return api.register("result", "", nativeHook{extension.HookModePure, h}, r)
+	return api.register("result", "", nativeHook{h}, r)
 }
 func (api nativeAPI) RegisterCleanup(h extension.CleanupHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {

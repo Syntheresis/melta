@@ -1543,7 +1543,7 @@ func foreignCorruptRevision(tx Transaction, sessionID string) error {
 	if _, err := tx.ReplaceRegister(key, reg.Revision, payload); err != nil {
 		return err
 	}
-	_, err = tx.InsertEntry(EntryDraft{SessionID: sessionID, ID: hexID(77), Kind: EntryHookResult, Payload: json.RawMessage(`{}`)})
+	_, err = tx.InsertEntry(EntryDraft{SessionID: sessionID, ID: hexID(77), Kind: EntryKind("unknown"), Payload: json.RawMessage(`{}`)})
 	return err
 }
 

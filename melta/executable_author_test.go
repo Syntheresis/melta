@@ -428,8 +428,8 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}
 			defer captured.release()
 			_, err = candidate.callServiceScoped(context.Background(), "worker-service", "crash", json.RawMessage(`{}`), &nativeCallScope{})
-			if err == nil || harness.DeclaredExecutionKnowledge(err) != harness.ExecutionUnknown {
-				t.Fatalf("lost terminal evidence: %v", err)
+			if err == nil {
+				t.Fatal("lost worker served a call")
 			}
 			if _, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{}`), &nativeCallScope{}); err == nil {
 				t.Fatal("lost activation served another call")

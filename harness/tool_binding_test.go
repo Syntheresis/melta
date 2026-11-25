@@ -184,21 +184,19 @@ func TestOpaqueArgumentHookConsequences(t *testing.T) {
 	for _, raw := range [][]byte{nil, []byte("not json"), {0xff, 0xfe}, []byte(`[1,2]`)} {
 		t.Run(base64.StdEncoding.EncodeToString(raw), func(t *testing.T) {
 			hooks := []ToolArgumentsHook{
-				{ID: "keep", ExtensionID: "ext", Mode: HookModeEffectful, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+				{ID: "keep", ExtensionID: "ext", Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 					return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 				}},
-				{ID: "repair", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+				{ID: "repair", ExtensionID: "ext", Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 					testassert.Require(t, bytes.Equal(call.Arguments, raw), "repair input = %q, want %q", call.Arguments, raw)
 					return ToolArgumentsResult{Arguments: json.RawMessage(`{"fixed":true}`)}, nil
 				}},
 			}
 			spy := &hookToolSpy{}
 			exec := hookFixtureExecution(spy.tool, objectNormalize, hooks...)
-			_, store, _, sessionID, results, err := freshExecutionToolCalls(t, testCapture(), exec, model.ToolCall{ID: "call-1", Name: "echo", Arguments: raw})
+			_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, model.ToolCall{ID: "call-1", Name: "echo", Arguments: raw})
 			testassert.NoError(t, err)
 			testassert.Equal(t, results[0].Status, model.ResultSuccess)
-			history := hookGraphHookResults(t, store, sessionID)
-			testassert.Require(t, len(history) == 1 && bytes.Equal(history[0].Arguments, raw), "retained consequence = %+v, want %q", history, raw)
 			testassert.Require(t, string(results[0].NormalizedArguments) == `{"fixed":true}`, "effective arguments = %q", results[0].NormalizedArguments)
 		})
 	}
@@ -207,7 +205,7 @@ func TestOpaqueArgumentHookConsequences(t *testing.T) {
 func TestToolLookupAfterHooksKeepsBoundImplementation(t *testing.T) {
 	current := "before"
 	var prepared, executed string
-	hook := ToolArgumentsHook{ID: "replace", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+	hook := ToolArgumentsHook{ID: "replace", ExtensionID: "ext", Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		current = "after"
 		return ToolArgumentsResult{Arguments: call.Arguments}, nil
 	}}

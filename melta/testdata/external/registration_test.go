@@ -731,7 +731,7 @@ func TestRequestHookReplacementKeepsRecordedRegistration(t *testing.T) {
 		Activate: func(_ context.Context, registered extension.API) (func(context.Context) error, error) {
 			api = registered
 			var err error
-			first, err = api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			first, err = api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				close(entered)
 				<-release
 				return harness.RequestConsequence{}, nil
@@ -763,7 +763,7 @@ func TestRequestHookReplacementKeepsRecordedRegistration(t *testing.T) {
 		t.Fatal("first hook did not run")
 	}
 	secondCalled := make(chan struct{}, 1)
-	_, err = api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+	_, err = api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 		secondCalled <- struct{}{}
 		return harness.RequestConsequence{}, nil
 	}, first)
@@ -841,7 +841,7 @@ func TestReusedActivationKeepsPerSessionCandidates(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			_, err = api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				return harness.RequestConsequence{}, nil
 			}, nil)
 			return nil, err

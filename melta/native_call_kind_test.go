@@ -265,7 +265,7 @@ func (p *callKindProbe) extension() extension.Extension {
 		}, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachRequest(extension.HookModePure, func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		if _, err := api.AttachRequest(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			p.waitBeforeRequest()
 			p.observe(call, kindPhaseRequest, "interrupt", json.RawMessage(`{}`))
 			p.callSecondExtensions(ctx, call, kindPhaseRequest)
@@ -273,7 +273,7 @@ func (p *callKindProbe) extension() extension.Extension {
 		}, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachArguments(extension.HookModePure, func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
+		if _, err := api.AttachArguments(func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
 			p.observe(call, kindPhaseArguments, "interrupt", json.RawMessage(`{}`))
 			return extension.ArgumentsResult{Arguments: toolCall.Arguments}, nil
 		}, nil); err != nil {
