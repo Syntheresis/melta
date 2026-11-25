@@ -92,6 +92,10 @@ func TestBackgroundBridgeArmingAcrossPublication(t *testing.T) {
 	testassert.NoError(t, r.Close(ctx))
 }
 
+// TestNativeToolPlansDoNotExecuteBeforeAuthorization proves the native plan
+// boundary on an extension's three prepared calls: an immediate-error plan
+// never reaches Execute; an empty plan and a plan with declared pairs are both
+// valid executor plans and each runs once, because no pair is evaluated.
 func TestNativeToolPlansDoNotExecuteBeforeAuthorization(t *testing.T) {
 	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
 		stopper := newLifecycleStopper()
@@ -128,6 +132,6 @@ func TestNativeToolPlansDoNotExecuteBeforeAuthorization(t *testing.T) {
 		})
 		submitThroughRuntime(t, bg.r, session, "op-gate", "run")
 		awaitOperation(t, bg.r, session, "op-gate", harness.OperationSuccess)
-		testassert.Equal(t, executes.Load(), int64(1))
+		testassert.Equal(t, executes.Load(), int64(2))
 	})
 }

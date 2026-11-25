@@ -396,16 +396,30 @@ func TestToolArgumentHookDenialSettlesAfterHooks(t *testing.T) {
 	t.Run("denial forbids the concrete start", func(t *testing.T) {
 		var executed int
 		exec := buildExec(func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{ // an executor plan with no declarations is denied
+			return PreparedTool{ // an executor plan the authorization hook refuses
+				Permissions: fixturePermission,
 				Execute: func(context.Context) ToolOutcome {
 					executed++
 					return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
 				},
 			}
 		})
+		open := exec.OpenInvocation
+		exec.OpenInvocation = func(ctx context.Context, request InvocationRequest) (InvocationExecution, error) {
+			inv, err := open(ctx, request)
+			if err != nil {
+				return inv, err
+			}
+			inv.BindLocation = func(string) (string, func() error, error) { return "/w", func() error { return nil }, nil }
+			inv.AuthorizationHooks = []AuthorizationHook{{Run: func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) {
+				reason := "restricted"
+				return &reason, nil
+			}}}
+			return inv, nil
+		}
 		_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, testToolCall("call-1"))
 		testassert.NoError(t, err)
-		testassert.Equal(t, model.ToolResult{CallID: results[0].ToolCallID, Status: results[0].Status, Content: results[0].Content}, (model.ToolResult{CallID: "call-1", Status: model.ResultDenied, Content: PermissionDeniedContent}))
+		testassert.Equal(t, model.ToolResult{CallID: results[0].ToolCallID, Status: results[0].Status, Content: results[0].Content}, (model.ToolResult{CallID: "call-1", Status: model.ResultDenied, Content: "restricted"}))
 		testassert.Equal(t, executed, 0)
 	})
 

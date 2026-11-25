@@ -239,9 +239,8 @@ func newProductionEnv(t *testing.T, store harness.Storage) *productionEnv {
 
 func (e *productionEnv) locations() Locations {
 	return Locations{
-		GlobalRulesDir:     filepath.Join(e.home, ".melta"),
-		DiscoveryCacheDir:  filepath.Join(e.home, ".melta", "cache", "discovery"),
-		WorkspacePolicyDir: filepath.Join(e.home, ".melta", "projects"),
+		GlobalRulesDir:    filepath.Join(e.home, ".melta"),
+		DiscoveryCacheDir: filepath.Join(e.home, ".melta", "cache", "discovery"),
 	}
 }
 

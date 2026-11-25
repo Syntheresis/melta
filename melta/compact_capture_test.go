@@ -96,7 +96,7 @@ func compactPrepWith(t *testing.T, agentsDoc, configDoc, endpoint string) (confi
 	svc := sh.preparedService(owner, compactToolsPlugin(), fixtureAgentPlugin())
 	captured, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	return captured, newPreparation(svc, sh.locations(), "", nil, nil, newArtifactIntervals(), nil, nil)
+	return captured, newPreparation(svc, sh.locations(), "", nil, nil, newArtifactIntervals(), nil)
 }
 
 // compactToolsPlugin registers the fixture's noop tools through the

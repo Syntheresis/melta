@@ -462,7 +462,7 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 		defer svc.current().resources.release()
 		adapter := newObservationAdapter(r.obs, r.warnings)
 		adapter.h = r.harness
-		p := newPreparation(svc, sh.locations(), "", nil, adapter, nil, nil, nil)
+		p := newPreparation(svc, sh.locations(), "", nil, adapter, nil, nil)
 
 		request := compactPrepRequest()
 		request.Session.Identity.SessionID = sessionID

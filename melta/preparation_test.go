@@ -57,13 +57,6 @@ func prepConfigDocument(endpoint, tag string) string {
 			`"zero":{"name":"Z","context_window":0}}`) + `},"extensions":{"hooks":{"enabled":true,"tag":` + fixtureString(tag) + `},"caps":{"enabled":true}}}`
 }
 
-// prepPolicyConfigDocument adds one global deny rule for the declared
-// file.write pair of the fixture's echo tool.
-func prepPolicyConfigDocument(endpoint, tag string) string {
-	return strings.TrimSuffix(prepConfigDocument(endpoint, tag), "}") + `,"permissions":{"rules":[{"permission":"file.write","target":"*","access":"deny"}]}}`
-}
-
-// prepAgentsDocument keeps duplicate configured tool names on "dup", leaves
 // "solo" with no selection, gives "ghostly" no model at all, selects the
 // catalog model without a positive context window on "shallow", and names
 // the tool pairs the visibility rows work with.
@@ -1274,95 +1267,6 @@ func TestPreparationStoredChoicesMergeWithDefaults(t *testing.T) {
 	})
 }
 
-// TestPreparationForwardsCapturedPolicyAndNormalizer proves the opened
-// execution's permission capture and registered normalization reach the shared
-// Harness boundary through the concrete opener on both stores: the
-// advertised call's bound normalization runs exactly once at dispatch, the
-// configured policy denies the declared file.write pair so
-// the call settles the fixed denial without starting the concrete effect, the
-// denial is visible in the next model projection on the wire, and the
-// Operation still reaches terminal success.
-func TestPreparationForwardsCapturedPolicyAndNormalizer(t *testing.T) {
-	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
-		e := newPrepEnv(t, store)
-		t.Cleanup(func() { e.converge() })
-		writeServiceFile(t, e.configPath, prepPolicyConfigDocument(e.server.URL, "A"))
-		writeAgentDefinitions(t, e.configPath, prepAgentsDocument)
-		{
-			err := e.Reload()
-			testassert.NoError(t, err)
-		}
-		e.server.setScript(func(_ context.Context, body string) []string {
-			if lastMessageRole(body) == "tool" {
-				return nil // the default completed text turn
-			}
-			return toolCallTurnEvents("call-1", "echo", ` {"x": 1} `)
-		})
-		session := e.session("solo")
-		e.admit(session, "op-1", "one")
-		{
-			rec := e.awaitTerminal(session, "op-1", harness.OperationSuccess)
-			testassert.Require(t, rec.State.Status == harness.OperationSuccess, "operation = %+v, want terminal success after the denial settled its call", rec.State)
-		}
-		normalized, executed, _ := e.echo.counters()
-		testassert.Equal(t, executed, 0)
-		testassert.Equal(t, normalized, 1)
-		entries, err := store.ReadEntries(context.Background(), session, 0)
-		testassert.NoError(t, err)
-		var denial bool
-		published := 0
-		for _, entry := range entries {
-			if entry.Kind != harness.EntryAssistant && entry.Kind != harness.EntryToolResult {
-				continue
-			}
-			var obj map[string]json.RawMessage
-			{
-				err := json.Unmarshal(entry.Payload, &obj)
-				testassert.Require(t, err == nil, "decode %s payload: %v", entry.ID, err)
-			}
-			switch entry.Kind {
-			case harness.EntryAssistant:
-				var calls []struct {
-					ID                  string `json:"id"`
-					NormalizedArguments []byte `json:"normalized_arguments_base64"`
-				}
-				testassert.NoError(t, json.Unmarshal(obj["tool_calls"], &calls))
-				if len(calls) == 0 {
-					continue // the continuation turn's text-only assistant
-				}
-				published++
-				testassert.Require(t, len(calls) == 1 && calls[0].ID == "call-1", "assistant tool calls = %s, want the one published call", obj["tool_calls"])
-				testassert.Require(t, len(calls[0].NormalizedArguments) == 0, "assistant recorded speculative arguments: %s", calls[0].NormalizedArguments)
-			case harness.EntryToolResult:
-				testassert.Require(t, string(obj["status"]) == `"denied"` && string(obj["content"]) == `"Permission denied."`, "tool result = %s, want the fixed denial", entry.Payload)
-				var args []byte
-				testassert.NoError(t, json.Unmarshal(obj["normalized_arguments_base64"], &args))
-				var implementation harness.ToolImplementation
-				testassert.NoError(t, json.Unmarshal(obj["implementation"], &implementation))
-				testassert.Require(t, string(args) == `{"repaired":"arg.agent"}` && implementation.ExtensionID == "hooks" && implementation.ID != "echo" && len(implementation.ID) == 32, "denial lost the minted binding or the effective hook arguments: %s", entry.Payload)
-				{
-					_, present := obj["metadata_base64"]
-					testassert.Require(t, !present, "denied result carries a metadata member")
-				}
-				denial = true
-			}
-		}
-		testassert.Require(t, published == 1 && denial, "committed entries: %d publishing assistants and denial=%v, want 1 and true", published, denial)
-		testassert.Equal(t, e.server.requests(), 2)
-		var projected string
-		doc := decodeWireChatBody(t, e.server.bodyAt(1))
-		for _, msg := range doc.Messages {
-			if msg.Role == "tool" {
-				var text string
-				if json.Unmarshal(msg.Content, &text) == nil {
-					projected = text
-				}
-			}
-		}
-		testassert.Equal(t, projected, "Permission denied.")
-	})
-}
-
 // TestPreparationForwardsToolArgumentHooks proves the argument hook row
 // through the real preparation, Harness and Agent on both stores: the
 // registered argument hooks bind in attachment order, carry their owning
@@ -1387,16 +1291,18 @@ func TestPreparationForwardsToolArgumentHooks(t *testing.T) {
 			testassert.Require(t, rec.State.Status == harness.OperationSuccess, "operation = %+v, want terminal success after the hook chain", rec.State)
 		}
 
-		_, executed, toolInput := e.echo.counters()
+		normalized, executed, toolInput := e.echo.counters()
+		testassert.Require(t, normalized == 1, "bound normalization ran %d times, want once at dispatch", normalized)
 		testassert.Require(t, executed == 1 && len(toolInput) == 1 && toolInput[0] == `{"repaired":"arg.agent"}`, "concrete tool ran %d times on %q, want once with the final committed replacement", executed, toolInput)
 
-		// The committed tool result records every accepted argument hook's
-		// minted identity in attachment order.
+		// The committed tool result records the minted implementation and
+		// every accepted argument hook's identity in attachment order.
 		entries, err := store.ReadEntries(context.Background(), session, 0)
 		testassert.NoError(t, err)
 		type resultWire struct {
-			ToolCallID          string `json:"tool_call_id"`
-			NormalizedArguments []byte `json:"normalized_arguments_base64"`
+			ToolCallID          string                     `json:"tool_call_id"`
+			NormalizedArguments []byte                     `json:"normalized_arguments_base64"`
+			Implementation      harness.ToolImplementation `json:"implementation"`
 			HookIDs             []struct {
 				ExtensionID string `json:"extension_id"`
 				HookID      string `json:"hook_id"`
@@ -1414,6 +1320,7 @@ func TestPreparationForwardsToolArgumentHooks(t *testing.T) {
 			}
 		}
 		testassert.Require(t, result != nil, "no committed tool result for call-1")
+		testassert.Require(t, result.Implementation.ExtensionID == "hooks" && result.Implementation.ID != "echo" && len(result.Implementation.ID) == 32, "committed implementation = %+v, want the minted binding", result.Implementation)
 		wantExtensions := []string{"agents", "hooks", "hooks", "caps", "caps"} // the owning extension of each registered hook
 		testassert.Require(t, len(result.HookIDs) == len(wantExtensions), "committed hook identities = %+v, want one per argument hook", result.HookIDs)
 		seenIDs := make(map[string]bool)

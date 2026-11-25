@@ -284,11 +284,11 @@ func chainSessionSignals(t *testing.T, store harness.Storage, sessionID string) 
 // hook-rewritten tool call, a mid-flight config reload, a buffered steering
 // submit with no group of its own while it waits whose delivered mutating
 // call derives its own group through the successor admission on the current
-// capture, a denied multi-target apply_patch move settling only its call, a
-// later allowed apply_patch call retaining the preview and snapshot
-// evidence, the next admitted operation on the reloaded revision, an
-// owner-context cancellation settling the standard interruption signal, and a
-// restart over the same data root with a post-repair admission.
+// capture, a multi-target apply_patch move into a sensitive destination that
+// now applies and settles only its call, a later apply_patch call that finds
+// its source already moved, the next admitted operation on the reloaded
+// revision, an owner-context cancellation settling the standard interruption
+// signal, and a restart over the same data root with a post-repair admission.
 func TestProductionCrossBoundaryComposition(t *testing.T) {
 	eachProductionStore(t, func(t *testing.T, e *productionEnv) {
 		ctx := context.Background()
@@ -428,17 +428,15 @@ func TestProductionCrossBoundaryComposition(t *testing.T) {
 			testassert.Require(t, len(got) == 2 && slices.Contains(got, admitted) && slices.Contains(got, steerAdmitted), "code groups after the delivered steering's mutating call = %v, want the predecessor's %q and the steering head's own %q", got, admitted, steerAdmitted)
 		}
 
-		// 4+5. The denied multi-target move settles only its call; the later
-		// allowed call in the subsequent turn succeeds. The steering head's
-		// Operation runs out on its scripted tail.
+		// 4+5. The sensitive-destination move now applies and settles only its
+		// call; the later call in the subsequent turn finds its source already
+		// moved. The steering head's Operation runs out on its scripted tail.
 		rec := awaitOperation(t, r, sessionID, "op-1", harness.OperationSuccess)
 		testassert.Equal(t, rec.Admission.Execution.ConfigurationRevision, "1")
 		steerRec := awaitOperation(t, r, sessionID, "op-1-steer", harness.OperationSuccess)
 		testassert.Equal(t, steerRec.Admission.Execution.ConfigurationRevision, "2")
-		{
-			_, err := os.Stat(filepath.Join(workspace, ".env"))
-			testassert.Require(t, errors.Is(err, os.ErrNotExist), ".env = err %v, want absent: the denied move's destination must never be written", err)
-		}
+		assertFileContent(t, filepath.Join(workspace, ".env"), "ALPHA\nbeta\ngamma\n")
+		assertPathMissing(t, filepath.Join(workspace, "notes.txt"))
 
 		// The steering input's delivery is durable evidence now: a committed
 		// input entry owned by the steering head's own Operation.
@@ -450,15 +448,15 @@ func TestProductionCrossBoundaryComposition(t *testing.T) {
 		}
 		testassert.Require(t, steeringCommitted, "the delivered steering input left no committed input entry")
 
-		// 6. The allowed apply_patch turn's retained preview evidence: the
-		// durable tool_result entry carries the edit_preview_files metadata
-		// with the move's file/op shape.
+		// 6. The sensitive move's retained preview evidence: the durable
+		// tool_result entry carries the edit_preview_files metadata with the
+		// move's file/op shape.
 		results := chainToolResults(t, e.store, sessionID)
-		denied, ok := results["call-4"]
-		testassert.Require(t, ok && denied.Status == model.ResultDenied && denied.Content == "Permission denied.", "denied move result = %+v (ok %v), want the fixed policy denial", denied, ok)
-		testassert.Require(t, denied.Metadata == nil, "denied move metadata = %s, want none", denied.Metadata)
+		sensitive, ok := results["call-4"]
+		testassert.Require(t, ok && sensitive.Status == model.ResultSuccess, "sensitive move result = %+v (ok %v), want success", sensitive, ok)
 		allowed, ok := results["call-5"]
-		testassert.Require(t, ok && allowed.Status == model.ResultSuccess, "allowed patch result = %+v (ok %v), want success after the denial settled only its own call", allowed, ok)
+		testassert.Require(t, ok && allowed.Status == model.ResultError, "later patch result = %+v (ok %v), want the moved-source error", allowed, ok)
+		testassert.Require(t, allowed.Metadata == nil, "failed patch metadata = %s, want none", allowed.Metadata)
 		var preview struct {
 			EditPreviewFiles []struct {
 				Path string `json:"path"`
@@ -466,10 +464,10 @@ func TestProductionCrossBoundaryComposition(t *testing.T) {
 			} `json:"edit_preview_files"`
 		}
 		{
-			err := json.Unmarshal(allowed.Metadata, &preview)
-			testassert.Require(t, err == nil, "decode allowed patch metadata %s: %v", allowed.Metadata, err)
+			err := json.Unmarshal(sensitive.Metadata, &preview)
+			testassert.Require(t, err == nil, "decode sensitive move metadata %s: %v", sensitive.Metadata, err)
 		}
-		testassert.Require(t, len(preview.EditPreviewFiles) == 2 && preview.EditPreviewFiles[0].Path == "renamed.txt" && preview.EditPreviewFiles[0].Op == "M" && preview.EditPreviewFiles[1].Path == "notes.txt" && preview.EditPreviewFiles[1].Op == "D", "edit_preview_files = %s, want the move's two entries: the M destination then the D source", allowed.Metadata)
+		testassert.Require(t, len(preview.EditPreviewFiles) == 2 && preview.EditPreviewFiles[0].Path == ".env" && preview.EditPreviewFiles[0].Op == "M" && preview.EditPreviewFiles[1].Path == "notes.txt" && preview.EditPreviewFiles[1].Op == "D", "edit_preview_files = %s, want the move's two entries: the M destination then the D source", sensitive.Metadata)
 
 		// 7. The retained snapshot evidence: the moved file's preimage in the
 		// steering head's own code group carries the original bytes.

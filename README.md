@@ -18,7 +18,7 @@
 |---|---|
 | **Model freedom** | No vendor lock-in — any OpenAI-compatible endpoint |
 | **Simplicity** | One binary, minimal moving parts, no external services |
-| **Reliability** | Reversion, permissions, and snapshots that don't break |
+| **Reliability** | Reversion and snapshots that don't break |
 | **Economics** | Bring your own providers, mix cloud and local |
 
 ---
@@ -32,8 +32,6 @@ Melta uses the OpenAI Chat Completions shape with streaming and tool calls. Prov
 **Tools** — `read_file` · `write_file` · `edit_file` · `run_command` · `process` · `sleep` · `task`; Adaptation supplies `apply_patch` for models that support it
 
 **Snapshots** — File edits are captured copy-based before they happen, grouped per admitted operation. Revert code at any owned input or fork the conversation from it. No git dependency.
-
-**Permissions** — One automatic allow/deny policy checked before every tool call: workspace file access, sensitive-file denials, and optional global/per-workspace rule lists. Nothing prompts.
 
 **Context compaction** — Automatic single-request summarization over the frozen conversation when provider-reported usage would exceed the model's context window; `/compact` triggers it manually.
 
@@ -153,25 +151,9 @@ printf 'OPENROUTER_API_KEY=...\n' >> ~/.melta/.env
 
 Shell-exported environment variables take precedence over values in `~/.melta/.env`.
 
-#### Permissions
+#### File access
 
-Every tool call is checked before execution against one automatic policy and never prompts. The built-in policy allows file reads and writes inside the workspace and denies sensitive file basenames (`.env`, private keys, credential files) even there. Its target permissions are scoped: `command.run`, `session.own`, and `process.own` allow any target, and `sleep` only its fixed target; anything undeclared is denied. Owned Sessions are gated by the same policy. Pair targets are canonical: a resolved file path for the file pairs, one parsed shell segment (or the complete normalized command) for `command.run`, `*` for `sleep`, `<extension-id>/<start-target>` with each component path-escaped for `session.own`, and `<session-id>/<job-id>` for `process.own` read/kill (or `*` for its list action).
-
-Optional rule lists refine that policy: global rules live in the `permissions` member of `~/.melta/config.json`, per-workspace rules in `~/.melta/projects/p-<full SHA-256 of the cleaned absolute workspace path>/permissions.json` (that directory name is a storage key for the permission file, not a durable project record):
-
-```json
-{
-  "permissions": {
-    "rules": [
-      { "permission": "command.run", "target": "git *", "access": "allow" },
-      { "permission": "file.write", "target": "**/generated/**", "access": "deny" }
-    ],
-    "default": "deny"
-  }
-}
-```
-
-Rule targets are globs matched against the pair's canonical target — for example a resolved file path, a parsed `command.run` segment or complete command text, an owned-start reference, a `<session-id>/<job-id>` job reference, or the fixed `*` (the rules above are illustrative). The last matching rule at a level wins, the workspace level decides before the global level, and a level's `default` applies when no rule matches. Permission names are `file.read`, `file.write`, `command.run`, `sleep`, `session.own`, and `process.own`. A malformed block discards both user levels for that resolution, leaving the built-in policy.
+File tools reach any path the operating-system user can reach, inside or outside the Workspace, including `.env`, key and credential files and Melta's own data directory. An extension's file operations through Melta have the same reach. Commands always could.
 
 #### Run
 
@@ -210,7 +192,7 @@ diagnostics), `upgrade` (self-update; verifies the release's SHA-256 checksum be
 
 #### Data locations
 
-- `~/.melta/config.json` — provider, baseline, extension and global permission settings, including Agent definitions
+- `~/.melta/config.json` — provider, baseline and extension settings, including Agent definitions
 - `~/.melta/.env` — local API keys
 - `~/.melta/melta.db` — durable session state (SQLite), owned by the managed owner
 - `~/.melta/runtime.json` — live Runtime owner record (present only while the owner runs)
@@ -234,9 +216,8 @@ valid, and Engine-only callers own persistence and recovery. See
 The complete baseline is [`melta/`](melta/): `melta.Open(ctx, Options)` in [`melta/melta.go`](melta/melta.go)
 composes the public [`harness/`](harness/) state machine, [`prompt/`](prompt/) assembler, standard tools, jobs and
 included SQLite storage. `DataDir`, `Configuration` and `Credentials` are required and explicit; the locations for
-global rules, discovery cache, workspace policies and wire debugging are optional, as are `Defaults` (Session input
-defaults, including the host model), `Strategy`, native `Extensions`, the storage factory and the permission
-evaluator. An empty `Extensions` slice with no installed packages is the supported zero-extension baseline: the
+global rules, discovery cache and wire debugging are optional, as are `Defaults` (Session input
+defaults, including the host model), `Strategy`, native `Extensions` and the storage factory. An empty `Extensions` slice with no installed packages is the supported zero-extension baseline: the
 six standard tools, SQLite storage, jobs and default prompt/rules handling are built in. The Agents and Adaptation
 extensions are optional; Adaptation also supplies the multi-file `apply_patch` tool for matching models. Creating a Session requires a non-empty local Workspace; no optional extension or network
 listener is required.

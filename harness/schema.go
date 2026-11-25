@@ -225,9 +225,7 @@ func (p *ModelPricing) Clone() *ModelPricing {
 // model identity, the system prompt, the advertised tool definitions in
 // preserved order, and the compaction configuration — the effective compact
 // model's selection and its prompt. Pricing is the captured conversation
-// model's rates; absence means the model's pricing was unknown. The captured
-// ConfigurationRevision also identifies the governing permission policy; no
-// rules are durable.
+// model's rates; absence means the model's pricing was unknown.
 // No resolved secret, callback, permission representation, retry policy or
 // executable value is durable; implementation provenance retains only the
 // extension identity/version and its non-secret captured section bytes.

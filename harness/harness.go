@@ -303,7 +303,8 @@ type InvocationExecution struct {
 	// preceding committed value.
 	ToolHooks     []ToolArgumentsHook
 	ArgumentStage func() ArgumentStage
-	// AuthorizationHooks run in order after policy allows the prepared action.
+	// AuthorizationHooks run in order over the prepared action of any plan
+	// that may produce an effect.
 	AuthorizationHooks []AuthorizationHook
 	AuthorizationStage func() AuthorizationStage
 	// BindLocation binds a location relative to the actual Session Workspace.
@@ -344,14 +345,13 @@ type ToolBinding struct {
 }
 
 // Execution is one opened execution: the required invocation opener the
-// Harness drives once per Engine call, the Operation's retry classifier and
-// permission evaluator, plus the cleanup of the Operation resources backing
-// them. OpenInvocation must be non-nil; it opens the conversation run's
-// invocation and a distinct maintenance invocation per strategy model
-// request, each with its own opened resources and Close. A nil Retry selects
-// the private standard retry classifier; a nil Permissions evaluator selects
-// the built-in policy; Close is optional when the concrete execution needs no
-// external disposal. The opener owns provisional cleanup on error.
+// Harness drives once per Engine call, the Operation's retry classifier, plus
+// the cleanup of the Operation resources backing them. OpenInvocation must be
+// non-nil; it opens the conversation run's invocation and a distinct
+// maintenance invocation per strategy model request, each with its own opened
+// resources and Close. A nil Retry selects the private standard retry
+// classifier; Close is optional when the concrete execution needs no external
+// disposal. The opener owns provisional cleanup on error.
 type Execution struct {
 	// OpenInvocation opens one Engine invocation's callback contracts over
 	// the Harness-issued request. Successful opening transfers the invoked
@@ -361,11 +361,6 @@ type Execution struct {
 	// Retry classifies one failed physical attempt for the next-attempt
 	// decision. Nil selects the private standard classifier.
 	Retry RetryPolicy
-	// Permissions is the permission evaluator deciding this Operation's
-	// prepared calls, resolved from the same immutable configuration
-	// revision its capture records. Nil selects the included built-in
-	// policy (the zero PermissionPolicy).
-	Permissions PermissionEvaluator
 	// ResolveStrategy resolves the captured strategy identity at one
 	// maintenance procedure start from the execution's own retained
 	// configuration and scopes. Nil supplies the included strategy for its own
@@ -394,11 +389,10 @@ type ToolOutcome struct {
 
 // PreparedTool is one immutable prepared call: exactly one immediate outcome
 // or executor, its declared permission/target pairs, and the canonical
-// bindings permission evaluation and concrete I/O consume. Normalized
-// arguments are Harness-supplied input, never a second value the preparer
-// replaces. Execution and immediate-success plans require a nonempty list of
-// nonempty permission/target pairs; immediate error, denied and interrupted
-// outcomes need no successful target declaration.
+// bindings authorization hooks and concrete I/O consume. Normalized arguments
+// are Harness-supplied input, never a second value the preparer replaces. A
+// plan with no pairs is valid; whatever pairs it declares are given to the
+// authorization hooks.
 type PreparedTool struct {
 	Permissions        []PermissionRequest
 	CanonicalWorkspace string

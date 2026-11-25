@@ -86,6 +86,13 @@ func TestToolBindingSettlement(t *testing.T) {
 				}
 				return binding, true
 			}}
+			if tc.denied {
+				inv.BindLocation = func(string) (string, func() error, error) { return "/w", func() error { return nil }, nil }
+				inv.AuthorizationHooks = []AuthorizationHook{{Run: func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) {
+					reason := "restricted"
+					return &reason, nil
+				}}}
+			}
 			_, _, _, result, err := freshToolBoundary(t, testCapture(), inv, model.ToolCall{ID: "call-1", Name: tc.callName, Arguments: json.RawMessage(`{"x":1}`)})
 			testassert.NoError(t, err)
 			testassert.Equal(t, result.Status, tc.wantStatus)

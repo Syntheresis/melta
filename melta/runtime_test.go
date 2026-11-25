@@ -118,9 +118,8 @@ func testOptions(dataDir, configPath, home string, plugins ...extension.Extensio
 		Configuration: NewFileConfigurationSource(configPath),
 		Credentials:   NewEnvironmentCredentialSource(filepath.Join(dataRoot, ".env")),
 		Locations: Locations{
-			GlobalRulesDir:     dataRoot,
-			DiscoveryCacheDir:  filepath.Join(dataRoot, "cache", "discovery"),
-			WorkspacePolicyDir: filepath.Join(dataRoot, "projects"),
+			GlobalRulesDir:    dataRoot,
+			DiscoveryCacheDir: filepath.Join(dataRoot, "cache", "discovery"),
 		},
 		Extensions: plugins,
 	}
@@ -188,9 +187,8 @@ func (e *ownerEnv) options(natives ...extension.Extension) options {
 		Configuration: NewFileConfigurationSource(e.configPath),
 		Credentials:   NewEnvironmentCredentialSource(e.envPath),
 		Locations: Locations{
-			GlobalRulesDir:     filepath.Join(e.home, ".melta"),
-			DiscoveryCacheDir:  filepath.Join(e.home, ".melta", "cache", "discovery"),
-			WorkspacePolicyDir: filepath.Join(e.home, ".melta", "projects"),
+			GlobalRulesDir:    filepath.Join(e.home, ".melta"),
+			DiscoveryCacheDir: filepath.Join(e.home, ".melta", "cache", "discovery"),
 		},
 		Extensions: natives,
 	}

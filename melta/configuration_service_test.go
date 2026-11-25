@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,7 +21,6 @@ import (
 	agents "github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
-	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/protocol"
@@ -67,9 +65,8 @@ func (h *serviceHarness) service(owner context.Context, plugins ...extension.Ext
 
 func (h *serviceHarness) locations() Locations {
 	return Locations{
-		GlobalRulesDir:     filepath.Join(h.home, ".melta"),
-		DiscoveryCacheDir:  filepath.Join(h.home, ".melta", "cache", "discovery"),
-		WorkspacePolicyDir: filepath.Join(h.home, ".melta", "projects"),
+		GlobalRulesDir:    filepath.Join(h.home, ".melta"),
+		DiscoveryCacheDir: filepath.Join(h.home, ".melta", "cache", "discovery"),
 	}
 }
 
@@ -1205,116 +1202,6 @@ func TestConfigurationServiceRestartsGenerationWithFreshCaptures(t *testing.T) {
 		t.Fatalf("post-restart capture = %q/%q, want revision 1 with the fresh content", (Invocation{snapshot: after.snapshot}).Revision(), snapshotModelName(after.snapshot, "prov", "m"))
 	}
 	testassert.Require(t, (Invocation{snapshot: before.snapshot}).Revision() == "1" && snapshotModelName(before.snapshot, "prov", "m") == "One", "the old-lifetime capture changed after the restart")
-}
-
-const captureGlobalAllow = `{"rules":[{"permission":"file.write","target":"*","access":"allow"}]}`
-
-func captureConfigDoc() string {
-	return `{"providers":{"prov":` + nominalProvMember("https://prov.test/v1", "", `{"m":{"name":"One","context_window":100}}`) + `},"permissions":` + captureGlobalAllow + `}`
-}
-
-// TestConfigurationServiceCapturesWorkspacePermissions proves the
-// permission-inventory rows over startup and reload: a missing inventory is
-// the fresh-install absent case, a present readable file is captured and
-// resolved against the captured global member, files added, changed or
-// removed later require Reload, the earlier revision keeps its complete old
-// capture, an unreadable file is absent policy for its Workspace alone, a
-// malformed file is built-in fallback without failing publication, and a
-// failed inventory enumeration leaves the whole Workspace level absent.
-func TestConfigurationServiceCapturesWorkspacePermissions(t *testing.T) {
-	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, captureConfigDoc())
-	svc := h.service(context.Background(), servicePlugin("alpha", &h.opens, nil))
-
-	var builtin harness.PermissionPolicy
-	globalOnly := harness.ResolvePermissionPolicy(json.RawMessage(captureGlobalAllow), nil)
-
-	// Startup on a fresh machine: no projects inventory, the Workspace level
-	// absent and the captured global member deciding.
-	first, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	{
-		got := first.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "fresh-install policy = %#v, want the global-only capture", got)
-	}
-
-	// A later file requires Reload: the old revision is untouched and the
-	// reload resolves the workspace rule over the captured global member.
-	dirID, err := config.WorkspacePermissionDirID("/ws")
-	testassert.NoError(t, err)
-	permissionPath := filepath.Join(h.home, ".melta", "projects", dirID, "permissions.json")
-	writeServiceFile(t, permissionPath, `{"rules":[{"permission":"file.write","target":"*","access":"deny"}]}`)
-	{
-		got := first.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "policy changed without Reload: %#v", got)
-	}
-	second, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	want := harness.ResolvePermissionPolicy(json.RawMessage(captureGlobalAllow), json.RawMessage(`{"rules":[{"permission":"file.write","target":"*","access":"deny"}]}`))
-	{
-		got := second.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, want), "reloaded policy = %#v, want the workspace deny over the global allow", got)
-	}
-	{
-		got := first.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "the old revision's capture changed after Reload: %#v", got)
-	}
-
-	// An unreadable file is absent policy for that Workspace alone; the
-	// global member still decides and publication succeeds.
-	testassert.NoError(t, os.Chmod(permissionPath, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(permissionPath, 0o600) })
-	third, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	{
-		got := third.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "unreadable-file policy = %#v, want the global-only level", got)
-	}
-	{
-		got := second.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, want), "the unreadable file changed the prior revision: %#v", got)
-	}
-	// A successfully read malformed file keeps publication and follows the
-	// built-in fallback posture for that Workspace, discarding both user
-	// levels there.
-	testassert.NoError(t, os.Chmod(permissionPath, 0o600))
-	writeServiceFile(t, permissionPath, `NOT JSON`)
-	fourth, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	{
-		got := fourth.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, builtin), "malformed-file policy = %#v, want the built-in fallback", got)
-	}
-
-	// A failed enumeration of the inventory directory leaves the whole
-	// Workspace policy level absent for the revision, uniformly, without
-	// failing publication.
-	testassert.NoError(t, os.Chmod(filepath.Join(h.home, ".melta", "projects"), 0o000))
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(h.home, ".melta", "projects"), 0o700) })
-	fifth, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	{
-		got := fifth.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "failed-enumeration policy = %#v, want the uniform absent Workspace level", got)
-	}
-	{
-		got := fifth.snapshot.permissionPolicy("/elsewhere")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "other-workspace policy under a failed enumeration = %#v, want the uniform absent level", got)
-	}
-
-	// A file removed again is absent policy at the reload that observes it.
-	testassert.NoError(t, os.Chmod(filepath.Join(h.home, ".melta", "projects"), 0o700))
-	testassert.NoError(t, os.Remove(permissionPath))
-	sixth, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	{
-		got := sixth.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "removed-file policy = %#v, want the absent Workspace level", got)
-	}
-	{
-		got := fifth.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "the removed file changed the prior revision: %#v", got)
-	}
 }
 
 // TestConfigurationServiceUnreadableMainDocumentFailsPublication proves the

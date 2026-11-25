@@ -202,51 +202,6 @@ func (t *originTool) Execute(_ context.Context, call extension.AuthorContext, _ 
 	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: t.callID, Status: model.ResultSuccess, Content: "ok"}}
 }
 
-func TestNativeDeniedPlanDoesNotExecute(t *testing.T) {
-	e := newOwnerEnv(t)
-	writeServiceFile(t, e.configPath, strings.TrimSuffix(ownerConfigDocument(e.server.URL), "}")+`,"permissions":{"rules":[{"permission":"command.run","target":"denied","access":"deny"}]}}`)
-	writeAgentDefinitions(t, e.configPath, `{"denied_agent":{"model":"prov/m","system_prompt":"simple","tools":["denied_tool"]}}`)
-	enableFixturePlugin(t, e.configPath, "deniedext")
-	e.fixtureStore(storage.NewMemory())
-	var executes atomic.Int64
-	native := testNative("deniedext", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(testDescribeTool("denied_tool"), &deniedTool{executes: &executes}, nil)
-		return nil, err
-	})
-	e.server.setScript(func(_ context.Context, body string) []string {
-		if lastMessageRole(body) == "tool" {
-			return textTurnEvents("done")
-		}
-		return toolCallTurnEvents("call-denied", "denied_tool", `{}`)
-	})
-	ctx := context.Background()
-	r, err := e.open(ctx, native)
-	testassert.NoError(t, err)
-	session, err := r.createSession(ctx, e.dataDir, "denied_agent")
-	testassert.NoError(t, err)
-	submitThroughRuntime(t, r, session.Identity.SessionID, "op-denied", "run")
-	awaitOperation(t, r, session.Identity.SessionID, "op-denied", harness.OperationSuccess)
-	testassert.Equal(t, executes.Load(), int64(0))
-	testassert.NoError(t, r.Close(ctx))
-}
-
-type deniedTool struct {
-	executes *atomic.Int64
-	callID   string
-}
-
-func (t *deniedTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (t *deniedTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	t.callID = call.ID
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "denied"}}}
-}
-func (t *deniedTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	t.executes.Add(1)
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: t.callID, Status: model.ResultSuccess, Content: "must not run"}}
-}
-
 func TestNativeCallbackViewCancelsAndJoinsThroughHarness(t *testing.T) {
 	e := newOwnerEnv(t)
 	enableFixturePlugin(t, e.configPath, "origin")
@@ -641,40 +596,6 @@ func TestNativeOwnedStartIgnoresPlanMutation(t *testing.T) {
 	for i := 0; i < e.server.requests(); i++ {
 		testassert.Require(t, !strings.Contains(e.server.bodyAt(i), "substituted"), "model request %d carried a substituted plan value: %s", i, e.server.bodyAt(i))
 	}
-}
-
-// TestNativeOwnedStartDeniedPlanDoesNotExecute proves the deny side of the
-// same real Harness boundary: a start plan denied by the configured policy
-// never reaches the executor, so it creates no Session, and the next model
-// request receives the fixed denied result instead.
-func TestNativeOwnedStartDeniedPlanDoesNotExecute(t *testing.T) {
-	e := newOwnerEnv(t)
-	writeServiceFile(t, e.configPath, strings.TrimSuffix(ownerConfigDocument(e.server.URL), "}")+`,"permissions":{"rules":[{"permission":"session.own","target":"grant/secondary","access":"deny"}]}}`)
-	enableFixturePlugin(t, e.configPath, "grant")
-	writeAgentDefinitions(t, e.configPath, `{"grant_agent":{"model":"prov/m","system_prompt":"simple","tools":["start_tool"]}}`)
-	store := storage.NewMemory()
-	e.fixtureStore(store)
-	probe := &ownedStartProbe{target: "secondary", content: "child work"}
-	e.server.setScript(func(_ context.Context, body string) []string {
-		if lastMessageRole(body) == "tool" {
-			return textTurnEvents("done")
-		}
-		return toolCallTurnEvents("call-start", "start_tool", `{}`)
-	})
-	ctx := context.Background()
-	r, err := e.open(ctx, ownedStartNative("grant", "start_tool", probe))
-	testassert.NoError(t, err)
-	t.Cleanup(func() { _ = r.Close(context.Background()) })
-	session, err := r.createSession(ctx, e.dataDir, "grant_agent")
-	testassert.NoError(t, err)
-	submitThroughRuntime(t, r, session.Identity.SessionID, "op-denied-start", "run")
-	awaitOperation(t, r, session.Identity.SessionID, "op-denied-start", harness.OperationSuccess)
-	testassert.Equal(t, probe.executes.Load(), int64(0))
-	testassert.Require(t, e.server.requests() == 2, "model requests = %d, want the tool-call turn and its denied follow-up", e.server.requests())
-	testassert.Require(t, strings.Contains(e.server.bodyAt(1), harness.PermissionDeniedContent), "denied follow-up request = %s, want the fixed denied content", e.server.bodyAt(1))
-	ids, err := store.ListSessionIDs(ctx)
-	testassert.NoError(t, err)
-	testassert.Equal(t, len(ids), 1)
 }
 
 // TestNativeOwnedStartAllowsAnotherExtensionToNest proves the owned start is

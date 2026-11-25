@@ -1175,24 +1175,6 @@ func TestToolEffectPlansAndOutcomes(t *testing.T) {
 			wantIntent: false,
 		},
 		{
-			name: "executor without declarations is denied and never executes",
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Execute: func(context.Context) ToolOutcome {
-					return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-				}}
-			},
-			want:       model.ToolResult{CallID: "call-1", Status: model.ResultDenied, Content: PermissionDeniedContent},
-			wantIntent: false, // denial settles through the intent-free transition
-		},
-		{
-			name: "immediate success without declarations is denied",
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
-			},
-			want:       model.ToolResult{CallID: "call-1", Status: model.ResultDenied, Content: PermissionDeniedContent},
-			wantIntent: false,
-		},
-		{
 			name: "immediate error needs no declaration and still commits",
 			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
 				return PreparedTool{Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "boom"}}}
@@ -1214,36 +1196,6 @@ func TestToolEffectPlansAndOutcomes(t *testing.T) {
 				return PreparedTool{Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultDenied, Content: "denied"}}}
 			},
 			want:       model.ToolResult{CallID: "call-1", Status: model.ResultDenied, Content: "denied"},
-			wantIntent: false,
-		},
-		{
-			name: "empty permission or target pair is denied",
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{
-					Permissions: []PermissionRequest{{Permission: PermissionCommandRun, Target: "fixture"}, {Permission: "", Target: "fixture"}},
-					Execute: func(context.Context) ToolOutcome {
-						return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-					},
-				}
-			},
-			want:       model.ToolResult{CallID: "call-1", Status: model.ResultDenied, Content: PermissionDeniedContent},
-			wantIntent: false,
-		},
-		{
-			name: "one built-in-denied pair denies the whole call",
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{
-					Permissions: []PermissionRequest{
-						{Permission: PermissionCommandRun, Target: "fixture"},
-						{Permission: PermissionFileWrite, Target: "/w/sub/.env"},
-					},
-					CanonicalWorkspace: "/w",
-					Execute: func(context.Context) ToolOutcome {
-						return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-					},
-				}
-			},
-			want:       model.ToolResult{CallID: "call-1", Status: model.ResultDenied, Content: PermissionDeniedContent},
 			wantIntent: false,
 		},
 		{
@@ -1323,18 +1275,13 @@ func TestToolEffectPlansAndOutcomes(t *testing.T) {
 	}
 }
 
-// TestToolEffectPermissionBoundary proves the fixed permission boundary every
-// effect plan passes before any effect begins: file targets must be canonical
-// and contained in the prepared canonical Workspace root under the built-in
-// policy, user policy can deny what the built-ins allow, a readonly Agent
-// with no write_dir denies every file.write pair, any configured write_dir
-// confines file.write to the prepared canonical write directory
-// independently of permission allow, non-file permissions need no canonical
-// binding, and one denied pair denies the whole call. A supplied evaluator
-// receives the complete prepared action and allow runs the call while deny,
-// an error and a decision outside the closed set settle the same denial; the
-// constraints are decided before the evaluator and cannot be delegated away;
-// a nil evaluator selects the included built-in policy.
+// TestToolEffectPermissionBoundary proves the prepared authorization boundary
+// every effect plan passes before any effect begins: authorization hooks run
+// in order over the complete prepared action and its permission pairs, an
+// abstention runs the call, a refusal settles the ordinary denial, an empty
+// reason is invalid, a callback error is an execution failure, and the bound
+// location's recheck failures settle their own statuses. The callback shape is
+// validated before the call runs.
 func TestToolEffectPermissionBoundary(t *testing.T) {
 	t.Run("authorization callback shape", func(t *testing.T) {
 		inv := defaultInvocation(InvocationExecution{AuthorizationHooks: []AuthorizationHook{{}}})
@@ -1347,97 +1294,20 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 			t.Fatalf("ordered callbacks without binder = %v", err)
 		}
 	})
-	t.Run("policy denial ignores missing binder", func(t *testing.T) {
-		inv := InvocationExecution{
-			LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-					t.Fatal("denied executor ran")
-					return ToolOutcome{}
-				}}
-			}, objectNormalize),
-			AuthorizationHooks: []AuthorizationHook{{Run: func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) {
-				t.Fatal("hook ran after policy denial")
-				return nil, nil
-			}}},
-		}
-		exec := executionForInvocation(inv)
-		exec.Permissions = permissionEvaluatorFunc(func(context.Context, PreparedAction) (PermissionDecision, error) { return PermissionDeny, nil })
-		_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, testToolCall("call-1"))
-		if err != nil || results[0].Status != model.ResultDenied {
-			t.Fatalf("result=%+v err=%v", results, err)
-		}
-	})
 	t.Run("immediate success survives cancellation without hooks", func(t *testing.T) {
-		for _, stage := range []string{"prepare", "policy"} {
-			t.Run(stage, func(t *testing.T) {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				capture := testCapture()
-				admission := preparedExecutionFor(capture, func(context.Context, OperationAdmission) (Execution, error) { return Execution{}, nil })
-				h, store, c, sessionID := newAdmittedHarness(t, context.Background(), admission)
-				plan := func(_ context.Context, call model.ToolCall) PreparedTool {
-					if stage == "prepare" {
-						cancel()
-					}
-					return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "produced"}}}
-				}
-				exec := executionForInvocation(InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize)})
-				exec.Permissions = permissionEvaluatorFunc(func(context.Context, PreparedAction) (PermissionDecision, error) {
-					if stage == "policy" {
-						cancel()
-					}
-					return PermissionAllow, nil
-				})
-				results, _ := runToolCalls(t, h, c, store, sessionID, ctx, testOpID, exec, capture, []model.ToolCall{testToolCall("call-1")})
-				if results[0].Status != model.ResultSuccess || results[0].Content != "produced" || results[0].Evidence != ExecutionObserved {
-					t.Fatalf("immediate result = %+v", results[0])
-				}
-			})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		capture := testCapture()
+		admission := preparedExecutionFor(capture, func(context.Context, OperationAdmission) (Execution, error) { return Execution{}, nil })
+		h, store, c, sessionID := newAdmittedHarness(t, context.Background(), admission)
+		plan := func(_ context.Context, call model.ToolCall) PreparedTool {
+			cancel()
+			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "produced"}}}
 		}
-	})
-	t.Run("policy action is independent of hooks", func(t *testing.T) {
-		for _, decision := range []PermissionDecision{PermissionAllow, PermissionDeny} {
-			var actions []PreparedAction
-			for _, withHook := range []bool{false, true} {
-				binds, hooks, executes := 0, 0, 0
-				plan := func(_ context.Context, call model.ToolCall) PreparedTool {
-					return PreparedTool{CanonicalWorkspace: "/prepared", Permissions: []PermissionRequest{{Permission: PermissionFileWrite, Target: "/prepared/a"}}, Execute: func(context.Context) ToolOutcome {
-						executes++
-						return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-					}}
-				}
-				inv := InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize), BindLocation: func(string) (string, func() error, error) {
-					binds++
-					return "/actual", func() error { return nil }, nil
-				}}
-				if withHook {
-					inv.AuthorizationHooks = []AuthorizationHook{{Run: func(_ context.Context, action PreparedAction, _ func(string) (string, error)) (*string, error) {
-						hooks++
-						if action.CanonicalWorkspace != "/actual" {
-							t.Fatalf("hook workspace = %q", action.CanonicalWorkspace)
-						}
-						return nil, nil
-					}}}
-				}
-				exec := executionForInvocation(inv)
-				exec.Permissions = permissionEvaluatorFunc(func(_ context.Context, action PreparedAction) (PermissionDecision, error) {
-					actions = append(actions, action)
-					return decision, nil
-				})
-				_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, testToolCall("call-1"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !withHook && binds != 0 {
-					t.Fatalf("no-hook path performed %d bindings", binds)
-				}
-				if decision == PermissionDeny && (binds != 0 || hooks != 0 || executes != 0 || results[0].Status != model.ResultDenied) {
-					t.Fatalf("denial: binds=%d hooks=%d executes=%d result=%+v", binds, hooks, executes, results[0])
-				}
-			}
-			if len(actions) != 2 || !reflect.DeepEqual(actions[0], actions[1]) || actions[0].CanonicalWorkspace != "/prepared" {
-				t.Fatalf("policy actions = %+v", actions)
-			}
+		exec := executionForInvocation(InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize)})
+		results, _ := runToolCalls(t, h, c, store, sessionID, ctx, testOpID, exec, capture, []model.ToolCall{testToolCall("call-1")})
+		if results[0].Status != model.ResultSuccess || results[0].Content != "produced" || results[0].Evidence != ExecutionObserved {
+			t.Fatalf("immediate result = %+v", results[0])
 		}
 	})
 	t.Run("authorization outcomes", func(t *testing.T) {
@@ -1453,7 +1323,6 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 			{"bounded reason", "long", false, model.ResultDenied, 0, 1},
 			{"invalid UTF-8 reason", "invalid-utf8", false, model.ResultDenied, 0, 1},
 			{"callback error", "error", false, model.ResultError, 0, 1},
-			{"missing file root", "missing-file-root", false, model.ResultDenied, 0, 0},
 			{"root relative", "root-relative", false, model.ResultError, 0, 0},
 			{"root missing recheck", "root-nil", false, model.ResultError, 0, 0},
 			{"root binding failure", "root-error", false, model.ResultError, 0, 0},
@@ -1490,9 +1359,6 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 						p.CanonicalWorkspace = "/actual"
 						p.Permissions = []PermissionRequest{{Permission: PermissionFileWrite, Target: "/actual/a"}}
 					}
-					if tc.mode == "missing-file-root" {
-						p.Permissions = []PermissionRequest{{Permission: PermissionFileWrite, Target: "/actual/a"}}
-					}
 					outcome := ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
 					if tc.immediate {
 						p.Immediate = &outcome
@@ -1504,9 +1370,6 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 				inv := InvocationExecution{
 					LookupTool: fixtureToolLookup(plan, objectNormalize),
 					BindLocation: func(path string) (string, func() error, error) {
-						if tc.mode == "missing-file-root" {
-							t.Fatal("malformed file plan attempted binding")
-						}
 						if path == "." {
 							if tc.mode == "root-error" {
 								return "", nil, errors.New("root failed")
@@ -1613,12 +1476,6 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 					inv.BindLocation = nil
 				}
 				exec := executionForInvocation(inv)
-				if tc.mode == "missing-file-root" {
-					exec.Permissions = permissionEvaluatorFunc(func(context.Context, PreparedAction) (PermissionDecision, error) {
-						t.Fatal("malformed file plan reached policy")
-						return PermissionAllow, nil
-					})
-				}
 				results, _ := runToolCalls(t, h, c, store, sessionID, ctx, testOpID, exec, capture, []model.ToolCall{testToolCall("call-1")})
 				got := results[0]
 				if got.Status != tc.want || hooks != tc.hooks || checks != tc.checks || (got.Status != model.ResultSuccess && executes != 0) {
@@ -1630,301 +1487,6 @@ func TestToolEffectPermissionBoundary(t *testing.T) {
 			})
 		}
 	})
-	allowAllWrites := ResolvePermissionPolicy(json.RawMessage(`{"rules":[{"permission":"file.write","target":"*","access":"allow"}]}`), nil)
-	filePlanRoot := func(workspace string, permissions ...PermissionRequest) func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{
-				Permissions:        permissions,
-				CanonicalWorkspace: workspace,
-				Execute: func(context.Context) ToolOutcome {
-					return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-				},
-			}
-		}
-	}
-	filePlan := func(permissions ...PermissionRequest) func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return filePlanRoot("/w", permissions...)
-	}
-	cases := []struct {
-		name         string
-		evaluator    PermissionEvaluator // nil selects the included built-in policy
-		plan         func(ctx context.Context, call model.ToolCall) PreparedTool
-		wantContent  string
-		wantDenied   bool
-		wantExecuted bool
-		wantCalls    int // recorded evaluator calls, asserted for recording evaluators
-		wantAction   *PreparedAction
-	}{
-		{
-			name:        "file.read inside the canonical Workspace is allowed",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name:        "file.write inside the canonical Workspace is allowed without readonly",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/a.txt"}),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name:        "file.read outside the canonical Workspace is denied",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/other/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "an explicit user rule allows a file.read target outside the canonical Workspace",
-			evaluator:   ResolvePermissionPolicy(json.RawMessage(`{"rules":[{"permission":"file.read","target":"*","access":"allow"}]}`), nil),
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/other/a.txt"}),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name:        "empty file target is denied",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: ""}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "relative file target is denied",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "lexically unclean file target is denied",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/../b.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name: "empty canonical Workspace root for a file plan is denied",
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{
-					Permissions: []PermissionRequest{{Permission: PermissionFileRead, Target: "/w/a.txt"}},
-					Execute: func(context.Context) ToolOutcome {
-						return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-					},
-				}
-			},
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "a relative canonical Workspace root is denied",
-			plan:        filePlanRoot("w", PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "a lexically unclean canonical Workspace root is denied",
-			plan:        filePlanRoot("/w/../w", PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "the built-in sensitive-basename denial applies to file.write",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/.env"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name:        "an explicit user rule overrides the sensitive denial",
-			evaluator:   allowAllWrites,
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/.env"}),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name: "command-only plan needs no canonical bindings",
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{
-					Permissions: []PermissionRequest{{Permission: PermissionCommandRun, Target: "git status"}},
-					Execute: func(context.Context) ToolOutcome {
-						return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-					},
-				}
-			},
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name:        "unknown permission namespace is denied",
-			plan:        filePlan(PermissionRequest{Permission: "file.exec", Target: "*"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name: "multi-target patch with every pair allowed executes once",
-			plan: filePlan(
-				PermissionRequest{Permission: PermissionFileRead, Target: "/w/src.txt"},
-				PermissionRequest{Permission: PermissionFileWrite, Target: "/w/dst.txt"},
-			),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name: "multi-target patch with a denied source denies the whole call",
-			plan: filePlan(
-				PermissionRequest{Permission: PermissionFileRead, Target: "/other/src.txt"},
-				PermissionRequest{Permission: PermissionFileWrite, Target: "/w/dst.txt"},
-			),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name: "multi-target patch with a denied destination denies the whole call",
-			plan: filePlan(
-				PermissionRequest{Permission: PermissionFileRead, Target: "/w/src.txt"},
-				PermissionRequest{Permission: PermissionFileWrite, Target: "/other/dst.txt"},
-			),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-		{
-			name: "immediate success passes through the same evaluation",
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{
-					Permissions:        []PermissionRequest{{Permission: PermissionFileWrite, Target: "/w/a.txt"}},
-					CanonicalWorkspace: "/w",
-					Immediate:          &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}},
-				}
-			},
-			wantContent: "done",
-		},
-		{
-			name:      "immediate success denied by the boundary carries no result content",
-			evaluator: &recordingEvaluator{decision: PermissionDeny},
-			plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{
-					Permissions:        []PermissionRequest{{Permission: PermissionFileWrite, Target: "/w/a.txt"}},
-					CanonicalWorkspace: "/w",
-					Immediate:          &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}},
-				}
-			},
-			wantContent: PermissionDeniedContent, wantDenied: true, wantCalls: 1,
-		},
-		{
-			name:      "supplied evaluator receives the complete prepared action and allows",
-			evaluator: &recordingEvaluator{decision: PermissionAllow},
-			plan:      filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantAction: &PreparedAction{
-				ToolName:           "echo",
-				Arguments:          json.RawMessage(`{"x":1}`),
-				CanonicalWorkspace: "/w",
-				Permissions:        []PermissionRequest{{Permission: PermissionFileRead, Target: "/w/a.txt"}},
-			},
-			wantContent: "ran", wantExecuted: true, wantCalls: 1,
-		},
-		{
-			name:        "supplied deny settles the ordinary denial without execution",
-			evaluator:   &recordingEvaluator{decision: PermissionDeny},
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true, wantCalls: 1,
-		},
-		{
-			name:        "evaluator error alongside an allow decision settles the ordinary denial without execution",
-			evaluator:   &recordingEvaluator{decision: PermissionAllow, err: errors.New("evaluator failure")},
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true, wantCalls: 1,
-		},
-		{
-			name:        "decision outside the closed set settles the ordinary denial without execution",
-			evaluator:   &recordingEvaluator{decision: PermissionDecision("maybe")},
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true, wantCalls: 1,
-		},
-		{
-			name:      "multi-target plan reaches the evaluator as one complete action",
-			evaluator: &recordingEvaluator{decision: PermissionAllow},
-			plan: filePlanRoot("/w",
-				PermissionRequest{Permission: PermissionFileRead, Target: "/w/src.txt"},
-				PermissionRequest{Permission: PermissionFileWrite, Target: "/w/sub/dst.txt"},
-			),
-			wantAction: &PreparedAction{
-				ToolName:           "echo",
-				Arguments:          json.RawMessage(`{"x":1}`),
-				CanonicalWorkspace: "/w",
-				Permissions: []PermissionRequest{
-					{Permission: PermissionFileRead, Target: "/w/src.txt"},
-					{Permission: PermissionFileWrite, Target: "/w/sub/dst.txt"},
-				},
-			},
-			wantContent: "ran", wantExecuted: true, wantCalls: 1,
-		},
-		{
-			name:        "nil evaluator allows what the built-in policy allows",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/w/a.txt"}),
-			wantContent: "ran", wantExecuted: true,
-		},
-		{
-			name:        "nil evaluator denies what the built-in policy denies",
-			plan:        filePlan(PermissionRequest{Permission: PermissionFileRead, Target: "/other/a.txt"}),
-			wantContent: PermissionDeniedContent, wantDenied: true,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			capture := testCapture()
-			preparedAdmission := preparedExecutionFor(capture, func(context.Context, OperationAdmission) (Execution, error) {
-				return Execution{}, nil
-			})
-			h, store, c, sessionID := newAdmittedHarness(t, context.Background(), preparedAdmission)
-			var executions int64
-			plan := func(ctx context.Context, call model.ToolCall) PreparedTool {
-				inner := tc.plan(ctx, call)
-				if inner.Execute == nil {
-					return inner
-				}
-				original := inner.Execute
-				inner.Execute = func(ctx context.Context) ToolOutcome {
-					executions++
-					return original(ctx)
-				}
-				return inner
-			}
-			exec := executionForInvocation(InvocationExecution{LookupTool: fixtureToolLookup(plan, objectNormalize)})
-			exec.Permissions = tc.evaluator
-			results, runErr := runToolCalls(t, h, c, store, sessionID, context.Background(), testOpID, exec, capture, []model.ToolCall{testToolCall("call-1")})
-			testassert.NoError(t, runErr)
-			got := model.ToolResult{CallID: results[0].ToolCallID, Status: results[0].Status, Content: results[0].Content}
-			wantStatus := model.ResultSuccess
-			if tc.wantDenied {
-				wantStatus = model.ResultDenied
-			}
-			testassert.Require(t, got.Status == wantStatus && got.Content == tc.wantContent, "committed result = %+v, want status %s content %q", got, wantStatus, tc.wantContent)
-			testassert.Require(t, tc.wantExecuted == (executions == 1) && executions <= 1, "executor ran %d times, want executed=%v", executions, tc.wantExecuted)
-			if rec, ok := tc.evaluator.(*recordingEvaluator); ok {
-				testassert.Require(t, len(rec.actions) == tc.wantCalls, "evaluator saw %d actions, want %d", len(rec.actions), tc.wantCalls)
-				if tc.wantAction != nil {
-					testassert.Require(t, len(rec.actions) == 1 && reflect.DeepEqual(rec.actions[0], *tc.wantAction), "evaluator action = %+v, want %+v", rec.actions, *tc.wantAction)
-				}
-			}
-			graph, err := validateFixture(t, store, sessionID)
-			testassert.NoError(t, err)
-			for _, entry := range graph.Entries {
-				if entry.ToolResult != nil {
-					testassert.Require(t, !tc.wantDenied || len(entry.ToolResult.Metadata) == 0, "denied result carries metadata %s, want none", entry.ToolResult.Metadata)
-				}
-			}
-		})
-	}
-}
-
-// recordingEvaluator is one scripted PermissionEvaluator: it records every
-// received PreparedAction in order and answers with its scripted decision and
-// error.
-type recordingEvaluator struct {
-	decision PermissionDecision
-	err      error
-	actions  []PreparedAction
-}
-
-func (r *recordingEvaluator) Evaluate(_ context.Context, action PreparedAction) (PermissionDecision, error) {
-	r.actions = append(r.actions, action)
-	return r.decision, r.err
-}
-
-// TestPermissionPolicyEvaluatorAdapter proves the included evaluator adapter
-// mirrors callAllowed: the zero policy allows an in-Workspace file.read pair
-// and denies a sensitive basename.
-func TestPermissionPolicyEvaluatorAdapter(t *testing.T) {
-	allow, err := PermissionPolicy{}.Evaluate(context.Background(), PreparedAction{
-		CanonicalWorkspace: "/w",
-		Permissions:        []PermissionRequest{{Permission: PermissionFileRead, Target: "/w/a.txt"}},
-	})
-	testassert.NoError(t, err)
-	testassert.Require(t, allow == PermissionAllow, "in-Workspace file.read decision = %q, want allow", allow)
-	deny, err := PermissionPolicy{}.Evaluate(context.Background(), PreparedAction{
-		CanonicalWorkspace: "/w",
-		Permissions:        []PermissionRequest{{Permission: PermissionFileWrite, Target: "/w/.env"}},
-	})
-	testassert.NoError(t, err)
-	testassert.Require(t, deny == PermissionDeny, "sensitive basename decision = %q, want deny", deny)
 }
 
 // TestToolEffectDeniedSettlesOnlyItsCall proves the denial settlement scope:
@@ -1964,14 +1526,26 @@ func TestToolEffectDeniedSettlesOnlyItsCall(t *testing.T) {
 		return nil
 	}
 	rounds := 0
+	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
+		rounds++
+		if rounds == 1 {
+			return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
+		}
+		return completedTurnStream(), nil
+	}
 	prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			rounds++
-			if rounds == 1 {
-				return completedTurnStream(testToolCall("call-1"), testToolCall("call-2")), nil
+		inv := invocationExecution(modelFn, plan)
+		inv.BindLocation = func(string) (string, func() error, error) { return "/w", func() error { return nil }, nil }
+		inv.AuthorizationHooks = []AuthorizationHook{{Run: func(_ context.Context, action PreparedAction, _ func(string) (string, error)) (*string, error) {
+			if len(action.Permissions) == 0 { // call-1 declares nothing; the hook supplies its denial
+				reason := "restricted"
+				return &reason, nil
 			}
-			return completedTurnStream(), nil
-		}, plan), nil
+			return nil, nil
+		}}}
+		return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
+			return inv, nil
+		}}, nil
 	})
 	done := make(chan error, 1)
 	go func() { done <- executeDirect(h, c, h.ctx, testOpID, prepared) }()
@@ -2650,11 +2224,6 @@ func TestToolResultEvidenceByProducer(t *testing.T) {
 			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "wrong-call", Status: model.ResultSuccess, Content: "done"}}}
 		}, []string{"echo"}, false, model.ResultError, invalidToolResultContent, ExecutionNotStarted},
 		{"unavailable name is not started", immediate(model.ResultSuccess, "done"), []string{"other"}, false, model.ResultError, `Tool "echo" is not available.`, ExecutionNotStarted},
-		{"permission denial is not started", func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{Execute: func(context.Context) ToolOutcome {
-				return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-			}}
-		}, []string{"echo"}, false, model.ResultDenied, PermissionDeniedContent, ExecutionNotStarted},
 		{"invalid plan shape is not started", func(context.Context, model.ToolCall) PreparedTool {
 			return PreparedTool{}
 		}, []string{"echo"}, false, model.ResultError, invalidToolResultContent, ExecutionNotStarted},

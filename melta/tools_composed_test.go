@@ -27,11 +27,10 @@ import (
 )
 
 // The composed standard-tools tests: the directly constructed baseline tools
-// run through a real Harness over real temporary SQLite — allow/deny at the
-// automatic policy boundary, file effects and code-group creation on disk,
-// and interruption recovery. The tools are built from owner state over one
-// data root with a scripted or real jobs service; no optional registration is
-// involved in opening them.
+// run through a real Harness over real temporary SQLite — file effects,
+// code-group creation on disk, snapshot reversion, and interruption recovery.
+// The tools are built from owner state over one data root with a scripted or
+// real jobs service; no optional registration is involved in opening them.
 
 const toolsComposedDocument = `{"providers":{"prov":{"transport":{"base_url":"https://prov.test/v1","api_key_env":""},"discovery":false,"models":{"m":{"name":"M","context_window":4096}}}},"tools":{"read_max_lines":77}}`
 
@@ -318,14 +317,13 @@ func toolsCapture(names []string) harness.ExecutionCapture {
 }
 
 // toolsHarnessOpts varies one composed tools Harness: the jobs provider (a
-// fake or the real service), the advertised tool set, the resolved permission
-// policy, the background bridge, the captured invocation, and the call-time
+// fake or the real service), the advertised tool set, the background bridge,
+// the captured invocation, the authorization hooks, and the call-time
 // subprocess environment producer.
 type toolsHarnessOpts struct {
 	jobsValue          jobs.Jobs // the tool-facing jobs provider; realJobs wins when set
 	realJobs           bool      // construct the real jobs service over the fixture data root
 	advertise          []string
-	permissions        harness.PermissionPolicy
 	background         BackgroundServices
 	invocation         Invocation
 	subprocessEnv      func(context.Context) ([]string, error)
@@ -409,7 +407,6 @@ func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Reque
 						SubprocessEnv: opts.subprocessEnv,
 					}
 					return harness.Execution{
-						Permissions: opts.permissions,
 						OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 							return harness.InvocationExecution{
 								Model:              modelFn,
@@ -564,11 +561,25 @@ func (th *toolsHarness) readToolResults(sessionID string) map[string]model.ToolR
 }
 
 // TestComposedToolsHarnessAllowDenyEffect runs concrete plugin tool calls
-// through the real Harness boundary: the built-in policy allows the
-// in-Workspace read and denies the sensitive-basename read whose denial
-// settles only its own call, and the allowed write lands on disk with the
-// calling Operation's one code group at the admitted-identity path.
+// through the real Harness boundary with nothing refusing them: the
+// in-Workspace read, the sensitive-basename read, an absolute read outside the
+// Workspace, and the in-Workspace and outside-Workspace writes all reach their
+// files. Both mutations are captured in the Session's snapshot group, and the
+// outside write reverts with it.
 func TestComposedToolsHarnessAllowDenyEffect(t *testing.T) {
+	outside := t.TempDir()
+	outsideRead := filepath.Join(outside, "outside.txt")
+	outsideWrite := filepath.Join(outside, "written.txt")
+	pathArgs := func(path string) string {
+		raw, err := json.Marshal(map[string]string{"path": path})
+		testassert.NoError(t, err)
+		return string(raw)
+	}
+	writeArgs := func(path, content string) string {
+		raw, err := json.Marshal(map[string]string{"path": path, "content": content})
+		testassert.NoError(t, err)
+		return string(raw)
+	}
 	attempt := 0
 	var mu sync.Mutex
 	modelFn := func(_ context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
@@ -577,12 +588,16 @@ func TestComposedToolsHarnessAllowDenyEffect(t *testing.T) {
 		n := attempt
 		mu.Unlock()
 		switch n {
-		case 1: // one assistant turn publishing both reads: the allowed sibling and the sensitive one
-			return toolCallStream("call-allowed", "read_file", `{"path":"notes.txt"}`), nil
+		case 1:
+			return toolCallStream("call-allowed", "read_file", pathArgs("notes.txt")), nil
 		case 2:
-			return toolCallStream("call-denied", "read_file", `{"path":".env"}`), nil
+			return toolCallStream("call-sensitive", "read_file", pathArgs(".env")), nil
 		case 3:
-			return toolCallStream("call-write", "write_file", `{"path":"out/new.txt","content":"written"}`), nil
+			return toolCallStream("call-outside", "read_file", pathArgs(outsideRead)), nil
+		case 4:
+			return toolCallStream("call-write", "write_file", writeArgs("out/new.txt", "written")), nil
+		case 5:
+			return toolCallStream("call-outside-write", "write_file", writeArgs(outsideWrite, "outside-written")), nil
 		default:
 			return stopStream("done"), nil
 		}
@@ -590,45 +605,60 @@ func TestComposedToolsHarnessAllowDenyEffect(t *testing.T) {
 	th := newToolsHarness(t, modelFn)
 	testassert.NoError(t, os.WriteFile(filepath.Join(th.workspace, "notes.txt"), []byte("hello\n"), 0o644))
 	testassert.NoError(t, os.WriteFile(filepath.Join(th.workspace, ".env"), []byte("SECRET=1\n"), 0o600))
+	testassert.NoError(t, os.WriteFile(outsideRead, []byte("outside-read-marker\n"), 0o600))
 	session := th.createSession()
 	th.submit(session, "op-1", "run the tools")
 	rec := th.awaitSettled(session, "op-1")
 	testassert.Require(t, rec.State.Status == harness.OperationSuccess, "operation settled %q, want success: %+v", rec.State.Status, rec.State.Terminal)
 
 	results := th.readToolResults(session)
-	testassert.Equal(t, len(results), 3)
+	testassert.Equal(t, len(results), 5)
 	allowed := results["call-allowed"]
 	testassert.Require(t, allowed.Status == model.ResultSuccess && strings.Contains(allowed.Content, "1\thello"), "allowed read = %+v, want the bounded numbered content", allowed)
-	denied := results["call-denied"]
-	testassert.Require(t, denied.Status == model.ResultDenied && denied.Content == "Permission denied.", "sensitive read = %+v, want the fixed denial", denied)
+	sensitive := results["call-sensitive"]
+	testassert.Require(t, sensitive.Status == model.ResultSuccess && strings.Contains(sensitive.Content, "SECRET=1"), "sensitive read = %+v, want the file content", sensitive)
+	outsideResult := results["call-outside"]
+	testassert.Require(t, outsideResult.Status == model.ResultSuccess && strings.Contains(outsideResult.Content, "outside-read-marker"), "outside read = %+v, want the file content", outsideResult)
 	written := results["call-write"]
 	testassert.Require(t, written.Status == model.ResultSuccess && strings.Contains(written.Content, "Wrote"), "write = %+v, want the write success", written)
+	outsideWritten := results["call-outside-write"]
+	testassert.Require(t, outsideWritten.Status == model.ResultSuccess && strings.Contains(outsideWritten.Content, "Wrote"), "outside write = %+v, want the write success", outsideWritten)
 	data, err := os.ReadFile(filepath.Join(th.workspace, "out", "new.txt"))
 	testassert.Require(t, err == nil && string(data) == "written", "written file = (%q, %v), want the effect on disk", data, err)
+	data, err = os.ReadFile(outsideWrite)
+	testassert.Require(t, err == nil && string(data) == "outside-written", "outside written file = (%q, %v), want the effect on disk", data, err)
 
-	// The mutating call's code group lives at DataDir/code/<SessionID>/<admitted input EntryID>/snapshots/1/.
+	// Both mutating calls' code group lives at DataDir/code/<SessionID>/<admitted input EntryID>/snapshots/1/.
 	th.mu.Lock()
 	admitted := th.admission
 	th.mu.Unlock()
-	group := filepath.Join(th.dataDir, "code", session, admitted.EntryID, "snapshots", "1")
-	entries, err := os.ReadDir(group)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("code group %s = (%d entries, %v), want exactly one snapshot entry", group, len(entries), err)
-	}
-	metaData, err := os.ReadFile(filepath.Join(group, entries[0].Name(), "meta.json"))
+	groupRoot := groupDir(th.dataDir, session, admitted.EntryID)
+	codeStore, err := snapshot.OpenCodeStore(groupRoot)
 	testassert.NoError(t, err)
-	var meta struct {
-		OriginalPath string `json:"original_path"`
-		Existed      bool   `json:"existed"`
+	entries, err := codeStore.ListEntries()
+	testassert.NoError(t, err)
+	testassert.Equal(t, len(entries), 2)
+	recorded := map[string]bool{}
+	for _, entry := range entries {
+		testassert.Require(t, !entry.Existed, "snapshot entry = %+v, want the new-file preimage of the declared target", entry)
+		for _, want := range []string{filepath.Join("out", "new.txt"), outsideWrite} {
+			if strings.HasSuffix(entry.OriginalPath, want) {
+				recorded[want] = true
+			}
+		}
 	}
-	{
-		err := json.Unmarshal(metaData, &meta)
-		testassert.Require(t, err == nil, "decode snapshot meta %s: %v", metaData, err)
-	}
-	testassert.Require(t, !meta.Existed && strings.HasSuffix(meta.OriginalPath, "out/new.txt"), "snapshot meta = %s, want the new-file preimage of the declared target", metaData)
+	testassert.Require(t, recorded[filepath.Join("out", "new.txt")] && recorded[outsideWrite], "snapshot inventory = %v, want both written targets", recorded)
 	{
 		_, err := os.Stat(filepath.Join(th.dataDir, "code", session, "missing"))
 		testassert.Require(t, errors.Is(err, os.ErrNotExist), "an unexpected second group directory exists")
+	}
+
+	reverted, err := snapshot.RevertCodeGroups([]string{groupRoot})
+	testassert.NoError(t, err)
+	testassert.Require(t, len(reverted.Skipped) == 0 && len(reverted.Restored) == 2, "revert = %+v, want both written targets restored", reverted)
+	{
+		_, err := os.Stat(outsideWrite)
+		testassert.Require(t, errors.Is(err, os.ErrNotExist), "the outside write survived its revert (%v)", err)
 	}
 }
 
@@ -1637,15 +1667,20 @@ func TestProcessToolValidationIsImmediateError(t *testing.T) {
 }
 
 // TestComposedPermissionDenialSettlesOnlyTheCall denies the background
-// command and the process permission under one configured policy: both
+// command and the process permission from one authorization hook: both
 // declarations settle as denials without reaching the jobs capability, and
 // the later allowed write still runs — the denial settles only its call.
 func TestComposedPermissionDenialSettlesOnlyTheCall(t *testing.T) {
 	fake := &fakeJobs{}
-	policy := harness.ResolvePermissionPolicy(json.RawMessage(`{"rules":[
-		{"permission":"command.run","target":"*","access":"deny"},
-		{"permission":"process.own","target":"*","access":"deny"}
-	]}`), nil)
+	hook := harness.AuthorizationHook{Run: func(_ context.Context, action harness.PreparedAction, _ func(string) (string, error)) (*string, error) {
+		for _, pair := range action.Permissions {
+			if pair.Permission == harness.PermissionCommandRun || pair.Permission == harness.PermissionProcessOwn {
+				reason := "restricted"
+				return &reason, nil
+			}
+		}
+		return nil, nil
+	}}
 	attempt := 0
 	var mu sync.Mutex
 	modelFn := func(_ context.Context, _ model.Request, _ model.Extra) (model.Stream, error) {
@@ -1665,9 +1700,9 @@ func TestComposedPermissionDenialSettlesOnlyTheCall(t *testing.T) {
 		}
 	}
 	th := newToolsHarnessWith(t, modelFn, toolsHarnessOpts{
-		jobsValue:   fake,
-		advertise:   []string{"run_command", "process", "write_file"},
-		permissions: policy,
+		jobsValue:          fake,
+		advertise:          []string{"run_command", "process", "write_file"},
+		authorizationHooks: []harness.AuthorizationHook{hook},
 	})
 	session := th.createSession()
 	th.submit(session, "op-1", "exercise the denied calls")
@@ -1677,7 +1712,7 @@ func TestComposedPermissionDenialSettlesOnlyTheCall(t *testing.T) {
 	testassert.Equal(t, len(results), 3)
 	for _, id := range []string{"call-bg", "call-list"} {
 		got := results[id]
-		testassert.Require(t, got.Status == model.ResultDenied && got.Content == "Permission denied.", "%s = %+v, want the fixed denial", id, got)
+		testassert.Require(t, got.Status == model.ResultDenied && got.Content == "restricted", "%s = %+v, want the hook's denial", id, got)
 	}
 	write := results["call-write"]
 	testassert.Require(t, write.Status == model.ResultSuccess && strings.Contains(write.Content, "Wrote"), "call-write = %+v, want the later allowed call to run", write)

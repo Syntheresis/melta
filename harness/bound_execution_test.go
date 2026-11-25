@@ -182,11 +182,6 @@ func TestToolPlanEvidence(t *testing.T) {
 			wantStatus: model.ResultError, wantContent: invalidToolResultContent, wantEvid: ExecutionNotStarted,
 		},
 		{
-			name:       "denied executor does not run",
-			plan:       PreparedTool{Execute: func(context.Context) ToolOutcome { return ToolOutcome{} }},
-			wantStatus: model.ResultDenied, wantContent: PermissionDeniedContent, wantEvid: ExecutionNotStarted,
-		},
-		{
 			name:       "observed executor success keeps its knowledge",
 			plan:       PreparedTool{Permissions: fixturePermission, Execute: executing("call-1", model.ResultSuccess, "ran", ExecutionObserved)},
 			wantStatus: model.ResultSuccess, wantContent: "ran", wantEvid: ExecutionObserved, wantExecute: true,
@@ -862,48 +857,10 @@ func assertOwnedCaptureProvenance(t *testing.T, capture ExecutionCapture) {
 }
 
 // TestPreparedPlanSnapshotFreezesMutableData proves plan ownership: the
-// permission pairs and immediate outcome are frozen immediately after
-// acquisition, so a permission evaluator that synchronously mutates the
-// producer-retained containers cannot change evaluation, the authorized
-// pairs or the committed result/metadata.
+// immediate outcome's value and metadata are frozen immediately after
+// acquisition, so an authorization hook that synchronously mutates the
+// producer-retained containers cannot change the committed result or metadata.
 func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
-	t.Run("permission pairs are frozen before evaluation", func(t *testing.T) {
-		rounds := 0
-		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			rounds++
-			if rounds == 1 {
-				return completedTurnStream(testToolCall("call-1")), nil
-			}
-			return completedTurnStream(), nil
-		}
-		permissions := []PermissionRequest{{Permission: PermissionCommandRun, Target: "original"}}
-		var evaluated []PermissionRequest
-		exec := effectExecution(modelFn, func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{Permissions: permissions, Execute: func(context.Context) ToolOutcome {
-				return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-			}}
-		})
-		exec.Permissions = permissionEvaluatorFunc(func(_ context.Context, action PreparedAction) (PermissionDecision, error) {
-			evaluated = append([]PermissionRequest(nil), action.Permissions...)
-			permissions[0] = PermissionRequest{Permission: PermissionFileWrite, Target: "/etc/passwd"}
-			return PermissionAllow, nil
-		})
-		prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return exec, nil
-		})
-		store := emptyStore(t)
-		h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
-			return prepared, nil
-		})
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
-		testassert.NoError(t, err)
-		c := leaseCoordinator(t, h, session.Identity.SessionID)
-		rec, adopted := admitPrepared(t, h, c, session.Identity.SessionID, testOpID, prepared)
-		testassert.NoError(t, executeDirect(h, c, h.ctx, rec.Admission.OperationID, adopted))
-		want := []PermissionRequest{{Permission: PermissionCommandRun, Target: "original"}}
-		testassert.Require(t, reflect.DeepEqual(evaluated, want), "evaluated pairs = %+v, want the frozen acquisition %+v", evaluated, want)
-	})
-
 	t.Run("immediate content and metadata are frozen at acceptance", func(t *testing.T) {
 		rounds := 0
 		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
@@ -913,17 +870,20 @@ func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
 			}
 			return completedTurnStream(), nil
 		}
-		permissions := []PermissionRequest{{Permission: PermissionCommandRun, Target: "original"}}
 		metadata := json.RawMessage(`{"k":1}`)
 		immediate := &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "original"}, Metadata: metadata}
-		exec := effectExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool {
-			return PreparedTool{Permissions: permissions, Immediate: immediate}
-		})
-		exec.Permissions = permissionEvaluatorFunc(func(context.Context, PreparedAction) (PermissionDecision, error) {
-			immediate.Result.Content = "mutated"
-			metadata[0] = 'X'
-			return PermissionAllow, nil
-		})
+		exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
+			inv := invocationExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool {
+				return PreparedTool{Immediate: immediate}
+			})
+			inv.BindLocation = func(string) (string, func() error, error) { return "/w", func() error { return nil }, nil }
+			inv.AuthorizationHooks = []AuthorizationHook{{Run: func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) {
+				immediate.Result.Content = "mutated"
+				metadata[0] = 'X'
+				return nil, nil
+			}}}
+			return inv, nil
+		}}
 		prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 			return exec, nil
 		})
@@ -947,13 +907,6 @@ func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
 		testassert.Require(t, result != nil && result.Status == model.ResultSuccess && result.Content == "original", "result = %+v, want the frozen immediate content, never the evaluator mutation", result)
 		testassert.Require(t, string(result.Metadata) == `{"k":1}`, "metadata = %s, want the frozen immediate metadata", result.Metadata)
 	})
-}
-
-// permissionEvaluatorFunc adapts one function to PermissionEvaluator.
-type permissionEvaluatorFunc func(context.Context, PreparedAction) (PermissionDecision, error)
-
-func (f permissionEvaluatorFunc) Evaluate(ctx context.Context, action PreparedAction) (PermissionDecision, error) {
-	return f(ctx, action)
 }
 
 // multiPassStrategy plans two maintenance models, then ends at none; it never

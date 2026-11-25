@@ -1184,10 +1184,11 @@ const (
 
 // heldConfigDocument is the held rows' provider set: the model provider's
 // binding names apiKeyEnv, the connectable provider names the separately
-// managed key, and denyCommands adds the reloaded command denial.
-func heldConfigDocument(modelEndpoint, apiKeyEnv string, denyCommands bool) string {
+// managed key, and withPermissions adds the reloaded `permissions` member that
+// names a command.run denial.
+func heldConfigDocument(modelEndpoint, apiKeyEnv string, withPermissions bool) string {
 	permissions := ""
-	if denyCommands {
+	if withPermissions {
 		permissions = `,
   "permissions": {"rules": [{"permission": "command.run", "target": "*", "access": "deny"}]}`
 	}
@@ -1337,11 +1338,12 @@ func heldOperationExecution(t *testing.T, store harness.Storage, sessionID, oper
 // boundary on the shipped foreground and background command children: while
 // one admitted Operation is held before its command environment exists, its
 // provider binding is renamed to another external key, a separate managed
-// key is connected, and the changed configuration is published with a command
-// denial. The held child sees none of the three credential names and still
-// sees the unrelated external sibling; the admitted capture and request
-// selection stay the preparation-time ones; the denial stops only the later
-// probe; and the parent values and external-key write rules stay intact.
+// key is connected, and the changed configuration is published with a
+// `permissions` member denying `command.run`. The held child sees none of the
+// three credential names and still sees the unrelated external sibling; the
+// admitted capture and request selection stay the preparation-time ones; the
+// unowned permissions member stops nothing, so the later probe runs; and the
+// parent values and external-key write rules stay intact.
 func TestProtocolComposedHeldCommandEnvironment(t *testing.T) {
 	run := func(t *testing.T, background bool) {
 		ctx := context.Background()
@@ -1394,8 +1396,8 @@ func TestProtocolComposedHeldCommandEnvironment(t *testing.T) {
 		// While the request is parked: rename the provider binding from the
 		// external OLD key to the external NEW one, retarget the agent model,
 		// connect the separate managed key through the generated operation,
-		// and publish the changed configuration — whose command policy denies
-		// every later command.
+		// and publish the changed configuration — whose `permissions` member
+		// names a command denial that no longer governs any call.
 		composedWriteFile(t, configPath, heldConfigDocument(model.URL, heldNewKeyEnv, true))
 		writeAgentDefinitionsForTest(t, configPath, heldAgentsRetargeted)
 		connectKey := heldManagedValue
@@ -1460,15 +1462,16 @@ func TestProtocolComposedHeldCommandEnvironment(t *testing.T) {
 			}
 		}
 
-		// The reloaded policy denies later commands; the already-admitted
-		// command above ran under its original allow policy.
+		// The reloaded configuration's unowned `permissions` member denies
+		// command.run; nothing reads it, so the later probe runs like any
+		// other command.
 		composedSubmit(t, c, sessionID, "op-deny", "probe the denial")
 		h = composedAwaitOp(t, c, sessionID, "op-deny", protocol.OperationStatusSuccess)
 		probe := composedAssistantOf(t, h.Conversation.Items, "op-deny")
-		testassert.Require(t, len(probe.ToolCalls) == 1 && probe.ToolCalls[0].Status != nil && *probe.ToolCalls[0].Status == protocol.ToolCallStatusDenied, "probe tool calls = %+v, want the denied command under the new permissions", probe.ToolCalls)
+		testassert.Require(t, len(probe.ToolCalls) == 1 && probe.ToolCalls[0].Status != nil && *probe.ToolCalls[0].Status == protocol.ToolCallStatusSuccess, "probe tool calls = %+v, want the command running under the new configuration", probe.ToolCalls)
 		{
 			_, err := os.Stat(filepath.Join(ws, "held-deny-marker"))
-			testassert.Require(t, os.IsNotExist(err), "the denied probe started its command (%v)", err)
+			testassert.Require(t, err == nil, "the later command did not run (%v)", err)
 		}
 
 		// The parent shell keeps every external value untouched and

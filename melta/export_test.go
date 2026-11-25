@@ -23,7 +23,7 @@ func ConfiguredInvocationForTest(tools, jobs, compaction string, sections map[st
 		Compaction: json.RawMessage(compaction),
 		Extensions: plugins,
 	}
-	snapshot, err := newConfiguration(1, doc, catalog.BuildResult{}, nil)
+	snapshot, err := newConfiguration(1, doc, catalog.BuildResult{})
 	if err != nil {
 		return Invocation{}, err
 	}

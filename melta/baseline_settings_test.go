@@ -40,7 +40,7 @@ func baselineSettingsPrep(t *testing.T, agentsDoc, endpoint string) (configurati
 	svc := sh.preparedService(owner, compactToolsPlugin(), fixtureAgentPlugin())
 	captured, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	return captured, newPreparation(svc, sh.locations(), "", nil, nil, nil, nil, nil)
+	return captured, newPreparation(svc, sh.locations(), "", nil, nil, nil, nil)
 }
 
 // TestBaselineSettingsDriveToolsJobsAndCompaction proves the top-level
@@ -171,7 +171,7 @@ func newBaselineSettingsService(t *testing.T, configDoc string) (*serviceHarness
 	svc := sh.preparedService(owner, compactToolsPlugin(), fixtureAgentPlugin())
 	captured, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	return sh, svc, newPreparation(svc, sh.locations(), "", nil, nil, nil, nil, nil), captured
+	return sh, svc, newPreparation(svc, sh.locations(), "", nil, nil, nil, nil), captured
 }
 
 // prepareCompactCapture runs one concrete preparation over a selection built

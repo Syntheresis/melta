@@ -66,11 +66,6 @@ type selection struct {
 	// an admitted execution.
 	lease *artifactCallLease
 
-	// permissions is the preparation-time permission evaluator, built before
-	// durable admission so a factory error or nil evaluator rejects the
-	// preparation instead of failing an admitted Operation.
-	permissions harness.PermissionEvaluator
-
 	// operationSecrets are the operation-lifetime declared credential values
 	// captured at preparation and retained through the prepared opener. Every
 	// tool and hook view of that execution carries them; no value reaches a
@@ -154,11 +149,10 @@ type preparation struct {
 	// inputs: the application persona text and the explicit global rules and
 	// wire-debug locations. Their zero values supply no identity, no global
 	// rules and no wire diagnostics, never an implicit fallback.
-	identity     string
-	locations    Locations
-	background   *backgroundBridge
-	passive      *observationAdapter
-	newEvaluator func(PolicyInputs) (harness.PermissionEvaluator, error)
+	identity   string
+	locations  Locations
+	background *backgroundBridge
+	passive    *observationAdapter
 
 	// artifacts is the Melta's private per-Session artifact interval
 	// registry. Every committed opener acquires its Session's token here
@@ -178,10 +172,9 @@ type preparation struct {
 // services bridge armed after harness.New returns, the Melta's passive
 // publication adapter (nil in isolated preparation tests, dropping only
 // passive presentation), the Melta's private artifact interval registry
-// (nil without a Melta), the Melta's live child-environment producer, and
-// the optional evaluator factory. One concrete preparation path serves every
-// admission.
-func newPreparation(config *configurationService, locations Locations, identity string, background *backgroundBridge, passive *observationAdapter, artifacts *artifactIntervals, subprocessEnv func(context.Context) ([]string, error), newEvaluator func(PolicyInputs) (harness.PermissionEvaluator, error)) *preparation {
+// (nil without a Melta), and the Melta's live child-environment producer. One
+// concrete preparation path serves every admission.
+func newPreparation(config *configurationService, locations Locations, identity string, background *backgroundBridge, passive *observationAdapter, artifacts *artifactIntervals, subprocessEnv func(context.Context) ([]string, error)) *preparation {
 	return &preparation{
 		config:        config,
 		identity:      identity,
@@ -190,7 +183,6 @@ func newPreparation(config *configurationService, locations Locations, identity 
 		passive:       passive,
 		artifacts:     artifacts,
 		subprocessEnv: subprocessEnv,
-		newEvaluator:  newEvaluator,
 	}
 }
 
@@ -328,17 +320,12 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 			return harness.PreparedExecution{}, err
 		}
 		workspace := req.Session.Identity.Workspace
-		evaluator, err := p.permissionEvaluator(snapshot, workspace)
-		if err != nil {
-			return harness.PreparedExecution{}, err
-		}
 		runtimeScope, workspaces := snapshot.resources.runtime, snapshot.resources.workspaces
 		workspaceInfo := ScopeInfo{Kind: ScopeWorkspace, DataDir: runtimeScope.info.DataDir, Workspace: workspace, Revision: snapshot.resources.revisionString()}
 		workspaceScope, err := workspaces.get(ctx, workspaceInfo)
 		if err != nil {
 			return harness.PreparedExecution{}, err
 		}
-		sel.permissions = evaluator
 
 		callCtx, release, err := workspaceScope.enter(ctx)
 		if err != nil {
@@ -376,23 +363,6 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		}
 		return prepared, nil
 	}
-}
-
-// permissionEvaluator builds the preparation-time evaluator from the
-// captured policy inputs. A nil factory selects the included resolver; a
-// factory error, nil evaluator or empty evaluator is an invalid preparation.
-func (p *preparation) permissionEvaluator(snapshot *configuration, workspace string) (harness.PermissionEvaluator, error) {
-	if p.newEvaluator == nil {
-		return snapshot.permissionPolicy(workspace), nil
-	}
-	built, err := p.newEvaluator(snapshot.policyInputs(workspace))
-	if err != nil {
-		return nil, fmt.Errorf("prepare permission evaluator: %w", err)
-	}
-	if built == nil {
-		return nil, fmt.Errorf("prepare permission evaluator: nil evaluator: %w", harness.ErrInvalid)
-	}
-	return built, nil
 }
 
 // open turns the committed admission into the execution: it first acquires
@@ -499,7 +469,6 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 	}
 	return harness.Execution{
 		OpenInvocation:  openInvocation,
-		Permissions:     sel.permissions,
 		ResolveStrategy: lookup,
 		Close: func() error {
 			releaseOperation()

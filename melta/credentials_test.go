@@ -110,7 +110,7 @@ func TestOperationCredentialsUsePreparedOpeningCapture(t *testing.T) {
 	defer svc.current().resources.release()
 
 	artifacts := newArtifactIntervals()
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), artifacts, nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), artifacts, nil)
 	sessionID := testSessionID
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
@@ -171,7 +171,7 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), newArtifactIntervals(), nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), newArtifactIntervals(), nil)
 	sessionID := testSessionID
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
@@ -338,7 +338,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil)
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
@@ -452,7 +452,7 @@ func TestCredentialHookUsesOperationCapture(t *testing.T) {
 		testassert.NoError(t, err)
 	}
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil)
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
@@ -628,7 +628,7 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), newArtifactIntervals(), nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), newArtifactIntervals(), nil)
 	request := func(session string) harness.PreparationRequest {
 		return harness.PreparationRequest{
 			Session: harness.PreparationSession{

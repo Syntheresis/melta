@@ -1262,55 +1262,14 @@ func validToolPlan(p PreparedTool) bool {
 }
 
 // authorizationRequired reports whether one shape-valid plan may produce an
-// effect and therefore requires successfully evaluated declarations: an
-// executor-backed plan or an immediate success. Immediate error, denied and
-// interrupted outcomes need no target declaration.
+// effect and therefore reaches the authorization hooks: an executor-backed
+// plan or an immediate success. Immediate error, denied and interrupted
+// outcomes do not.
 func authorizationRequired(p PreparedTool) bool {
 	if p.Execute != nil {
 		return true
 	}
 	return p.Immediate.Result.Status == model.ResultSuccess
-}
-
-// toolCallAllowed decides one prepared plan at the Harness permission
-// boundary: every declared pair must be a nonempty permission/target pair;
-// file.read/file.write targets must be canonical and their prepared canonical
-// Workspace root must be a required canonical that is nonempty, absolute and
-// lexically clean. Target preparation is never delegated. Only then does the
-// evaluator decide the complete prepared
-// action, and the plan is allowed exactly when it returns allow without
-// error: a deny, a decision outside the closed set, or an error denies the
-// call alike. A nil evaluator selects the included built-in policy.
-func toolCallAllowed(ctx context.Context, evaluator PermissionEvaluator, plan PreparedTool, name string, args json.RawMessage) bool {
-	if len(plan.Permissions) == 0 {
-		return false
-	}
-	var hasFile bool
-	for _, req := range plan.Permissions {
-		if req.Permission == "" || req.Target == "" {
-			return false
-		}
-		switch req.Permission {
-		case PermissionFileRead, PermissionFileWrite:
-			hasFile = true
-		}
-		if (req.Permission == PermissionFileRead || req.Permission == PermissionFileWrite) && !canonicalPathValue(req.Target) {
-			return false
-		}
-	}
-	if hasFile && !canonicalPathValue(plan.CanonicalWorkspace) {
-		return false
-	}
-	if evaluator == nil {
-		evaluator = PermissionPolicy{}
-	}
-	decision, err := evaluator.Evaluate(ctx, PreparedAction{
-		ToolName:           name,
-		Arguments:          append(json.RawMessage(nil), args...),
-		CanonicalWorkspace: plan.CanonicalWorkspace,
-		Permissions:        append([]PermissionRequest(nil), plan.Permissions...),
-	})
-	return err == nil && decision == PermissionAllow
 }
 
 func authorizationFailure(ctx context.Context, callID string, err error) model.ToolResult {
@@ -1321,8 +1280,8 @@ func authorizationFailure(ctx context.Context, callID string, err error) model.T
 	return validationToolResult(callID, err)
 }
 
-// authorizeHooks runs pure restrictions after policy, retaining only locations
-// explicitly bound by the hooks, not the Workspace fact itself.
+// authorizeHooks runs pure restrictions, retaining only locations explicitly
+// bound by the hooks, not the Workspace fact itself.
 func authorizeHooks(ctx context.Context, inv InvocationExecution, callID, name string, args json.RawMessage, plan PreparedTool) (func() error, *model.ToolResult) {
 	if len(inv.AuthorizationHooks) == 0 {
 		return nil, nil
@@ -1467,13 +1426,6 @@ func pendingToolCallRecord(c *coordinator, operationID, callID string) (pendingT
 // advertised set.
 func unavailableToolResult(callID, name string) model.ToolResult {
 	return model.ToolResult{CallID: callID, Status: model.ResultError, Content: fmt.Sprintf("Tool %q is not available.", name)}
-}
-
-// permissionDeniedToolResult is the ordinary policy-denial result settled for
-// the original call under its reserved identity: no effect began and no tool
-// active intent was written.
-func permissionDeniedToolResult(callID string) model.ToolResult {
-	return model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: PermissionDeniedContent}
 }
 
 // refusedToolResult is the deliberate before-tool refusal result: the settled
@@ -1627,9 +1579,6 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		}
 		var recheck func() error
 		if authorizationRequired(plan) {
-			if !toolCallAllowed(ctx, d.execution.Permissions, plan, record.Name, selection.arguments) {
-				return settle(ToolOutcome{Result: permissionDeniedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, false, selection)
-			}
 			callbacks := inv.callbacks
 			if callbacks.AuthorizationStage != nil {
 				stage := callbacks.AuthorizationStage()

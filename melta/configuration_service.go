@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -573,8 +571,7 @@ func (s *configurationService) build(ctx context.Context, generation uint64) (*c
 // capture and a mutation's edited bytes — runs: the captured document is
 // decoded once, the captured providers layer is delegated to the Loader so
 // provider assembly and every cost protection use that one read, session
-// settings are parsed, the Workspace permission inventory is enumerated once
-// into the candidate, and each enabled extension section is validated against
+// settings are parsed, and each enabled extension section is validated against
 // its activation's manifest before its resource set is prepared or reused.
 // Agent definitions are not parsed here; the Agents activation owns them.
 // Nothing is returned until the complete candidate survives all of it. conn is
@@ -624,7 +621,7 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 			return nil, configurationFailure(err)
 		}
 	}
-	snapshot, err := newConfiguration(generation, doc, built, captureWorkspacePermissions(s.locations.WorkspacePolicyDir))
+	snapshot, err := newConfiguration(generation, doc, built)
 	if err != nil {
 		return nil, configurationFailure(err)
 	}
@@ -679,38 +676,6 @@ var (
 	candidateBarrier  func()
 	prePublishBarrier func()
 )
-
-// captureWorkspacePermissions enumerates the selected per-Workspace
-// permission inventory during one configuration build and captures each
-// present readable permissions.json's raw bytes keyed by its directory ID. An
-// empty location is the absent Workspace policy level; a missing directory is
-// the fresh-install absent case and a failed enumeration leaves the whole
-// Workspace policy level absent for this revision; a missing or unreadable
-// file inside the inventory is absent policy for that Workspace alone. A
-// successfully read malformed file is captured unchanged — resolution
-// determines validity from the raw bytes. No enumeration failure fails
-// publication, and nothing here reads project records, meta.json, or locks.
-func captureWorkspacePermissions(root string) map[string]json.RawMessage {
-	if root == "" {
-		return nil
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil
-	}
-	captured := make(map[string]json.RawMessage, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(root, entry.Name(), "permissions.json"))
-		if err != nil {
-			continue
-		}
-		captured[entry.Name()] = data
-	}
-	return captured
-}
 
 // sectionEnabled recognizes the host-owned participation flag without
 // interpreting other members of an inactive document.

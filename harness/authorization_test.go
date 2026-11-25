@@ -37,15 +37,8 @@ func TestAuthorizationRunsAfterRewriteAndPreparation(t *testing.T) {
 		}}},
 	}
 	exec := executionForInvocation(inv)
-	exec.Permissions = permissionEvaluatorFunc(func(_ context.Context, action PreparedAction) (PermissionDecision, error) {
-		steps = append(steps, "policy")
-		if string(action.Arguments) != `{"x":2}` {
-			t.Fatalf("policy %s", action.Arguments)
-		}
-		return PermissionAllow, nil
-	})
 	_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, testToolCall("call-1"))
-	if err != nil || results[0].Status != model.ResultSuccess || strings.Join(steps, ",") != "rewrite,prepare,policy,hook,execute" {
+	if err != nil || results[0].Status != model.ResultSuccess || strings.Join(steps, ",") != "rewrite,prepare,hook,execute" {
 		t.Fatalf("steps=%v results=%+v err=%v", steps, results, err)
 	}
 }
@@ -106,14 +99,6 @@ func TestPreparedAuthorizationFrozenAndMixed(t *testing.T) {
 		},
 	}
 	exec := executionForInvocation(inv)
-	exec.Permissions = permissionEvaluatorFunc(func(_ context.Context, action PreparedAction) (PermissionDecision, error) {
-		if action.CanonicalWorkspace != "" || action.ToolName != "echo" || len(action.Permissions) != 1 || action.Permissions[0].Target != "one" {
-			t.Fatalf("unexpected policy action: %+v", action)
-		}
-		action.Arguments[0] = '!'
-		action.Permissions[0].Target = "mutated"
-		return PermissionAllow, nil
-	})
 	var calls []model.ToolCall
 	for i, args := range []string{`{"x":1}`, `{"x":2}`, `{"x":3}`, `{"x":4}`, `{"x":5}`, `{"x":6}`, `{"x":7}`} {
 		calls = append(calls, model.ToolCall{ID: string(rune('a' + i)), Name: "echo", Arguments: json.RawMessage(args)})

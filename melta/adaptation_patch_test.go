@@ -118,9 +118,10 @@ func TestAdaptationPatchCorpusThroughRuntime(t *testing.T) {
 	testassert.Require(t, strings.Contains(string(encoded), `"apply_patch"`) && strings.Contains(string(encoded), "Success. Updated the following files:"), "cold history = %.400s, want the recorded patch call and result", encoded)
 }
 
-// TestAdaptationPatchDeniesOneMemberBeforeAnyWrite proves one denied
-// authorization member leaves the complete patch unapplied.
-func TestAdaptationPatchDeniesOneMemberBeforeAnyWrite(t *testing.T) {
+// TestAdaptationPatchMovesIntoDotEnv proves a patch whose move destination is
+// a sensitive basename applies: the destination is written, the source is
+// removed, and both targets are captured in the Operation's snapshot group.
+func TestAdaptationPatchMovesIntoDotEnv(t *testing.T) {
 	ctx := context.Background()
 	e := newProductionEnv(t, storage.NewMemory())
 	writeServiceFile(t, e.configPath, adaptationConfigDocument(e.server.URL, `[]`))
@@ -131,24 +132,24 @@ func TestAdaptationPatchDeniesOneMemberBeforeAnyWrite(t *testing.T) {
 		if lastMessageRole(body) == "tool" {
 			return textTurnEvents("done")
 		}
-		return toolCallTurnEvents("denied-patch", "apply_patch", string(arguments))
+		return toolCallTurnEvents("dotenv-patch", "apply_patch", string(arguments))
 	})
 	r, err := e.openPlugins(ctx, agentsTestNative(), adaptation.Author())
 	testassert.NoError(t, err)
 	defer func() { _ = r.Close(ctx) }()
-	workspace := adaptationWorkspace(t, e, "patch-denied")
+	workspace := adaptationWorkspace(t, e, "patch-dotenv")
 	testassert.NoError(t, os.WriteFile(filepath.Join(workspace, "notes.txt"), []byte("alpha\n"), 0o600))
 	session, err := r.createSession(ctx, workspace, "patcher")
 	testassert.NoError(t, err)
-	submitThroughRuntime(t, r, session.Identity.SessionID, "op-denied", "move notes")
-	awaitOperation(t, r, session.Identity.SessionID, "op-denied", harness.OperationSuccess)
+	submitThroughRuntime(t, r, session.Identity.SessionID, "op-dotenv", "move notes")
+	awaitOperation(t, r, session.Identity.SessionID, "op-dotenv", harness.OperationSuccess)
 
-	result := toolResultFact(t, r, session.Identity.SessionID, "op-denied")
-	testassert.Require(t, result.Status == model.ResultDenied && result.Content == harness.PermissionDeniedContent, "denied patch = %+v, want the fixed policy denial", result)
-	assertFileContent(t, filepath.Join(workspace, "notes.txt"), "alpha\n")
-	assertPathMissing(t, filepath.Join(workspace, ".env"))
+	result := toolResultFact(t, r, session.Identity.SessionID, "op-dotenv")
+	testassert.Require(t, result.Status == model.ResultSuccess && strings.Contains(result.Content, "Success. Updated the following files:"), "patch = %+v, want the applied move", result)
+	assertPathMissing(t, filepath.Join(workspace, "notes.txt"))
+	assertFileContent(t, filepath.Join(workspace, ".env"), "ALPHA\n")
 	groups, err := r.ListSessionCodeSnapshots(ctx, testCaller(r), session.Identity.SessionID)
-	testassert.Require(t, err == nil && len(groups) == 0, "snapshot groups = %+v (%v), want none for the denied patch", groups, err)
+	testassert.Require(t, err == nil && len(groups) == 1 && len(groups[0].Files) == 2, "snapshot groups = %+v (%v), want both moved targets", groups, err)
 }
 
 // TestAdaptationPatchBindsBeforeEffects proves a bound path repointed before

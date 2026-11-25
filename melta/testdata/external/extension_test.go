@@ -221,9 +221,8 @@ func TestPublicExtensionIntegration(t *testing.T) {
 		Configuration: melta.NewFileConfigurationSource(configPath),
 		Credentials:   credentials,
 		Locations: melta.Locations{
-			GlobalRulesDir:     filepath.Join(t.TempDir(), "rules"),
-			DiscoveryCacheDir:  filepath.Join(t.TempDir(), "discovery"),
-			WorkspacePolicyDir: filepath.Join(t.TempDir(), "projects"),
+			GlobalRulesDir:    filepath.Join(t.TempDir(), "rules"),
+			DiscoveryCacheDir: filepath.Join(t.TempDir(), "discovery"),
 		},
 		Identity:   "external extension application",
 		Defaults:   inputs,

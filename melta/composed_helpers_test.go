@@ -102,9 +102,8 @@ func composedOptions(dataDir, configPath, home string, plugins []extension.Exten
 		Configuration: melta.NewFileConfigurationSource(configPath),
 		Credentials:   melta.NewEnvironmentCredentialSource(filepath.Join(dataRoot, ".env")),
 		Locations: melta.Locations{
-			GlobalRulesDir:     dataRoot,
-			DiscoveryCacheDir:  filepath.Join(dataRoot, "cache", "discovery"),
-			WorkspacePolicyDir: filepath.Join(dataRoot, "projects"),
+			GlobalRulesDir:    dataRoot,
+			DiscoveryCacheDir: filepath.Join(dataRoot, "cache", "discovery"),
 		},
 		Extensions: plugins,
 	}

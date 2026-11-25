@@ -1370,7 +1370,7 @@ func TestObserveRefusalFacts(t *testing.T) {
 // fact without a started one for a terminal settlement's synthetic unstarted
 // result. Hooks have no progress kind.
 func TestObserveToolLifecycle(t *testing.T) {
-	run := func(t *testing.T, rounds int, plan func(context.Context, model.ToolCall) PreparedTool, cancelOnClose bool) (*factCollector, error) {
+	run := func(t *testing.T, rounds int, plan func(context.Context, model.ToolCall) PreparedTool, cancelOnClose bool, hooks ...AuthorizationHook) (*factCollector, error) {
 		t.Helper()
 		h, _, c, _ := newEffectHarness(t, nil)
 		col := observeHarness(h)
@@ -1388,8 +1388,15 @@ func TestObserveToolLifecycle(t *testing.T) {
 			}
 			return stream, nil
 		}
+		inv := invocationExecution(modelFn, plan)
+		inv.AuthorizationHooks = hooks
+		if len(hooks) > 0 {
+			inv.BindLocation = func(string) (string, func() error, error) { return "/w", func() error { return nil }, nil }
+		}
 		err := executeDirect(h, c, ctx, testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return effectExecution(modelFn, plan), nil
+			return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
+				return inv, nil
+			}}, nil
 		}))
 		return col, err
 	}
@@ -1400,10 +1407,14 @@ func TestObserveToolLifecycle(t *testing.T) {
 		return PreparedTool{Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "boom"}}}
 	}
 	deniedPlan := func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return PreparedTool{Execute: func(context.Context) ToolOutcome {
+		return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
 			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
 		}}
 	}
+	denyAll := AuthorizationHook{Run: func(context.Context, PreparedAction, func(string) (string, error)) (*string, error) {
+		reason := "restricted"
+		return &reason, nil
+	}}
 
 	t.Run("statuses share one lifecycle", func(t *testing.T) {
 		cases := []struct {
@@ -1412,10 +1423,11 @@ func TestObserveToolLifecycle(t *testing.T) {
 			status        model.ToolResultStatus
 			cancelOnClose bool
 			synthetic     bool
+			hooks         []AuthorizationHook
 		}{
 			{name: "success", plan: successPlan, status: model.ResultSuccess},
 			{name: "error", plan: errorPlan, status: model.ResultError},
-			{name: "denied", plan: deniedPlan, status: model.ResultDenied},
+			{name: "denied", plan: deniedPlan, status: model.ResultDenied, hooks: []AuthorizationHook{denyAll}},
 			{name: "executor interrupted", plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
 				return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
 					return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: interruptedToolResultContent}}
@@ -1425,7 +1437,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				col, err := run(t, 1, tc.plan, tc.cancelOnClose)
+				col, err := run(t, 1, tc.plan, tc.cancelOnClose, tc.hooks...)
 				testassert.NoError(t, err)
 				facts := col.snapshot()
 				var startedAt, finishedAt = -1, -1

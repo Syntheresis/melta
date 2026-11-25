@@ -554,7 +554,7 @@ func TestFailedPreparationReleasesHeldCredentialNames(t *testing.T) {
 	defer svc.current().resources.release()
 	testassert.Require(t, !slices.Contains(svc.heldCredentialNames(), name), "published provider name was held without a reserving capture")
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil)
 	_, err = p.bind()(context.Background(), harness.PreparationRequest{Session: harness.PreparationSession{Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir}}})
 	testassert.Require(t, err != nil, "discarded preparation without a selection succeeded")
 	testassert.Require(t, !slices.Contains(svc.heldCredentialNames(), name), "discarded preparation leaked held name %q: %v", name, svc.heldCredentialNames())

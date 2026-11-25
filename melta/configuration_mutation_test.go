@@ -20,7 +20,6 @@ import (
 	taskplugin "github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/atomicfs"
-	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/protocol"
@@ -945,30 +944,6 @@ func TestConfigurationMutateAgentEditInvalidCandidateLeavesEverythingUnchanged(t
 			testassert.Require(t, err == nil && candidate.snapshot.generation == 2 && svc.current() == candidate.snapshot, "inverse edit = (%v, generation %d), want a successful publication at 2", err, candidate.snapshot.generation)
 			nextConfigurationEvent(t, sub, "2")
 		})
-	}
-}
-
-// TestConfigurationMutateMalformedPermissionsFallbackPublishes proves a
-// hand-edited malformed Workspace permissions.json is captured and resolved
-// to the built-in fallback without failing the mutation's publication.
-func TestConfigurationMutateMalformedPermissionsFallbackPublishes(t *testing.T) {
-	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, mutationConfigDocument())
-	svc := h.service(context.Background(), servicePlugin("capowner", &h.opens, acceptValidator))
-	{
-		_, err := svc.publish(context.Background())
-		testassert.NoError(t, err)
-	}
-	dirID, err := config.WorkspacePermissionDirID("/ws")
-	testassert.NoError(t, err)
-	permissionPath := filepath.Join(h.home, ".melta", "projects", dirID, "permissions.json")
-	writeServiceFile(t, permissionPath, `NOT JSON`)
-	candidate, err := svc.mutate(context.Background(), editSettings(mutationSettings()))
-	testassert.NoError(t, err)
-	var builtin harness.PermissionPolicy
-	{
-		got := candidate.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, fmt.Sprint(got) == fmt.Sprint(builtin), "malformed permission policy = %#v, want the built-in fallback %#v", got, builtin)
 	}
 }
 

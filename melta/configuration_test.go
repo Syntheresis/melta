@@ -10,7 +10,6 @@ import (
 
 	"github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/prompt"
@@ -188,57 +187,4 @@ func TestNewConfigurationKeepsExistingWarningTypes(t *testing.T) {
 		`{}`)
 	testassert.NoError(t, err)
 	testassert.Require(t, len(snapshot.catalogWarnings) == 1 && snapshot.catalogWarnings[0].Kind == "user_config_skip", "catalog warnings = %+v, want the retained catalog warning type", snapshot.catalogWarnings)
-}
-
-// TestConfigurationPermissionCapture proves the captured permission inputs:
-// the raw global member and the Workspace bytes keyed by directory ID resolve
-// through the same revision, an unknown Workspace resolves global-only, a
-// malformed block follows the built-in fallback posture without failing the
-// candidate, and the retained legacy interactive member is malformed target
-// policy.
-func TestConfigurationPermissionCapture(t *testing.T) {
-	const globalAllow = `{"rules":[{"permission":"file.write","target":"*","access":"allow"}]}`
-	const workspaceDeny = `{"rules":[{"permission":"file.write","target":"*","access":"deny"}]}`
-	const globalDoc = `{"providers":{"prov":{"transport":{"base_url":"https://api.prov.test/v1","api_key_env":""},"models":{"m":{"name":"M","context_window":100}}}},"permissions":` + globalAllow + `}`
-
-	snapshot, err := assembleConfiguration(t, 2, globalDoc, `{"agent":{"model":"prov/m"}}`)
-	testassert.NoError(t, err)
-	testassert.Require(t, string(snapshot.permissions) == globalAllow, "captured global member = %q, want the raw bytes unchanged", snapshot.permissions)
-	wsID, err := config.WorkspacePermissionDirID("/ws")
-	testassert.NoError(t, err)
-	snapshot.workspacePermissions = map[string]json.RawMessage{wsID: json.RawMessage(workspaceDeny)}
-
-	// The Workspace rule decides over the global rule from the same capture.
-	want := harness.ResolvePermissionPolicy(json.RawMessage(globalAllow), json.RawMessage(workspaceDeny))
-	{
-		got := snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, want), "workspace policy = %#v, want the resolved workspace-over-global capture", got)
-	}
-	// An unknown Workspace resolves global-only.
-	globalOnly := harness.ResolvePermissionPolicy(json.RawMessage(globalAllow), nil)
-	{
-		got := snapshot.permissionPolicy("/other")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "unknown-workspace policy = %#v, want the global-only capture", got)
-	}
-	// A malformed Workspace block discards both user levels for that
-	// Workspace's resolutions: built-in fallback despite the valid global
-	// member.
-	snapshot.workspacePermissions = map[string]json.RawMessage{wsID: json.RawMessage(`{"rules":5}`)}
-	var builtin harness.PermissionPolicy
-	{
-		got := snapshot.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, builtin), "malformed-workspace policy = %#v, want the built-in fallback", got)
-	}
-	{
-		got := snapshot.permissionPolicy("/other")
-		testassert.Require(t, reflect.DeepEqual(got, globalOnly), "other-workspace policy after the malformed sibling = %#v, want the untouched global capture", got)
-	}
-
-	// The retained legacy interactive permissions shape is not migrated: it
-	// is malformed target policy, and the candidate still builds.
-	legacy := testSnapshot(t)
-	{
-		got := legacy.permissionPolicy("/ws")
-		testassert.Require(t, reflect.DeepEqual(got, builtin), "legacy-member policy = %#v, want the built-in fallback", got)
-	}
 }

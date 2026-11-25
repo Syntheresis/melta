@@ -52,9 +52,8 @@ func newComposeEnv(t *testing.T) *composeEnv {
 // openComposed constructs the Melta over the included store.
 func (e *composeEnv) locations() Locations {
 	return Locations{
-		GlobalRulesDir:     filepath.Join(e.home, ".melta"),
-		DiscoveryCacheDir:  filepath.Join(e.home, ".melta", "cache", "discovery"),
-		WorkspacePolicyDir: filepath.Join(e.home, ".melta", "projects"),
+		GlobalRulesDir:    filepath.Join(e.home, ".melta"),
+		DiscoveryCacheDir: filepath.Join(e.home, ".melta", "cache", "discovery"),
 	}
 }
 

@@ -1917,12 +1917,12 @@ func TestPublicToolMetadataPersistsOpaqueAcrossStores(t *testing.T) {
 }
 
 // TestPublicPreparedPermissionBoundarySurvivesRestart proves the prepared
-// permission boundary through the public surface on both stores: the
+// authorization boundary through the public surface on both stores: the
 // advertised call is normalized at dispatch and the allowed executor consumes
 // the intent's committed bytes; an immediate-success plan that
-// omits its declarations is denied through the public path with the fixed
-// bounded content and no metadata; and recovery revalidates the whole result
-// with the capture and normalization unchanged.
+// omits its declarations is denied by an authorization hook through the
+// public path with the hook's bounded content and no metadata; and recovery
+// revalidates the whole result with the capture and normalization unchanged.
 func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		capture := publicCapture()
@@ -1937,23 +1937,39 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 		f.prepareHook = func(_ int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
 			return harness.PreparedExecution{
 				Capture: capture,
-				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-					return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-						if call.ID == "call-2" { // the exit-condition omission through the public path
-							return harness.PreparedTool{Immediate: &harness.ToolOutcome{
-								Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "undeclared success"},
-								Metadata: json.RawMessage(`{"would":"leak"}`),
-							}}
-						}
-						return harness.PreparedTool{
-							Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "fixture"}},
-							Execute: func(context.Context) harness.ToolOutcome {
-								executions++
-								consumed = call.Arguments
-								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
-							},
-						}
-					}), nil
+				Open: func(ctx context.Context, admission harness.OperationAdmission) (harness.Execution, error) {
+					return harness.Execution{
+						OpenInvocation: func(ctx context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
+							inv, err := publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+								if call.ID == "call-2" { // the undeclared success through the public path
+									return harness.PreparedTool{Immediate: &harness.ToolOutcome{
+										Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "undeclared success"},
+										Metadata: json.RawMessage(`{"would":"leak"}`),
+									}}
+								}
+								return harness.PreparedTool{
+									Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "fixture"}},
+									Execute: func(context.Context) harness.ToolOutcome {
+										executions++
+										consumed = call.Arguments
+										return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
+									},
+								}
+							}).OpenInvocation(ctx, request)
+							if err != nil {
+								return inv, err
+							}
+							inv.BindLocation = func(string) (string, func() error, error) { return "/w", func() error { return nil }, nil }
+							inv.AuthorizationHooks = []harness.AuthorizationHook{{Run: func(_ context.Context, action harness.PreparedAction, _ func(string) (string, error)) (*string, error) {
+								if len(action.Permissions) == 0 { // call-2 declares nothing; the hook supplies its denial
+									reason := "restricted"
+									return &reason, nil
+								}
+								return nil, nil
+							}}}
+							return inv, nil
+						},
+					}, nil
 				},
 			}, nil
 		}
@@ -1997,7 +2013,7 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 				}
 				if callID == "call-2" {
 					denial++
-					testassert.Require(t, status == "denied" && string(wire["content"]) == `"Permission denied."`, "call-2 result = %s, want the fixed public denial", entry.Payload)
+					testassert.Require(t, status == "denied" && string(wire["content"]) == `"restricted"`, "call-2 result = %s, want the hook's denial", entry.Payload)
 					{
 						_, present := wire["metadata_base64"]
 						testassert.Require(t, !present, "denied call-2 carries a metadata member")
