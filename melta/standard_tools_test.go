@@ -106,11 +106,11 @@ func TestValidateConfigSettings(t *testing.T) {
 	}
 }
 
-// TestStandardToolDeclarations proves the baseline advertisement: the seven
+// TestStandardToolDeclarations proves the baseline advertisement: the five
 // standard declarations arrive in order, each with its own name, a nonempty
 // description and a valid parameters schema.
 func TestStandardToolDeclarations(t *testing.T) {
-	want := []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"}
+	want := []string{"read_file", "write_file", "edit_file", "run_command", "process"}
 	declarations := standardToolDeclarations()
 	testassert.Equal(t, len(declarations), len(want))
 	for i, declaration := range declarations {
@@ -144,7 +144,7 @@ func assertJSONEqual(t *testing.T, got json.RawMessage, want any) {
 const wantRunCommandDescription = `Executes a shell command and returns combined stdout and stderr.
 - Each call starts a fresh shell in the project root. Environment variables, aliases, and working directory do not persist between calls. Use "cd /path && command" if you need a different working directory.
 - Foreground commands use the default timeout. Background commands run until they exit, are killed, or reach an explicit timeout parameter.
-- For commands that may run for a long time, keep producing output, wait on external state, and are not needed before your next step, set background=true. It returns immediately with a process ID. You will be notified when it finishes. To read output while it is still running, use sleep to wait, then process to read the output. To kill it, use process. Do not use background=true for commands that will probably finish in a few seconds.
+- For commands that may run for a long time, keep producing output, wait on external state, and are not needed before your next step, set background=true. It returns immediately with a process ID. You will be notified when it finishes. To read its output while it is still running, or to kill it, use process. Do not use background=true for commands that will probably finish in a few seconds.
 - Do not use this tool to read file contents — use read_file. Do not use this tool to edit files — use edit_file or write_file.`
 
 // wantRunCommandParameters is the independent golden fixture for the one
@@ -293,7 +293,7 @@ func TestNormalizeArguments(t *testing.T) {
 	})
 	t.Run("malformed, null and trailing argument bytes are validation errors", func(t *testing.T) {
 		for _, args := range []string{``, `not json`, `null`, `[1]`, `{"path":"a"} trailing`, `"str"`} {
-			for _, name := range []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"} {
+			for _, name := range []string{"read_file", "write_file", "edit_file", "run_command", "process"} {
 				{
 					_, err := normalize(t, byID[name], tc, name, args)
 					testassert.Check(t, err != nil, "%s normalized %q, want rejection", name, args)

@@ -14,12 +14,11 @@ func TestPermissionNamesKeepPublishedLiterals(t *testing.T) {
 		PermissionFileRead:   "file.read",
 		PermissionFileWrite:  "file.write",
 		PermissionCommandRun: "command.run",
-		PermissionSleep:      "sleep",
 		PermissionSessionOwn: "session.own",
 		PermissionProcessOwn: "process.own",
 	}
 	// distinct literals: a duplicated value would collapse the map.
-	testassert.Equal(t, len(want), 6)
+	testassert.Equal(t, len(want), 5)
 	for name, literal := range want {
 		testassert.Check(t, name == literal, "permission constant %q = %q, want the published literal", name, literal)
 	}

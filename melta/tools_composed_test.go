@@ -86,9 +86,6 @@ func TestComposedToolsSettingsPublication(t *testing.T) {
 	testassert.NoError(t, r.Close(ctx))
 }
 
-// toolExportIDs are the baseline standard tools in declaration order.
-var toolExportIDs = []string{"read_file", "write_file", "edit_file", "run_command", "process", "sleep"}
-
 // fakeJobs is the scriptable jobs.Jobs test double: it records every call
 // and serves scripted errors, reservations, and live results.
 type fakeJobs struct {
@@ -166,7 +163,7 @@ func openTools(t *testing.T, dataDir string) map[string]Tool {
 }
 
 // TestStandardToolsReservedAgainstShadowing proves the baseline tool universe:
-// the six standard tool values are constructed directly with no
+// the five standard tool values are constructed directly with no
 // registration, and a registration naming one standard tool is refused while
 // the extension's own names still register.
 func TestStandardToolsReservedAgainstShadowing(t *testing.T) {
@@ -185,7 +182,7 @@ func TestStandardToolsReservedAgainstShadowing(t *testing.T) {
 	defer stage.release()
 	testassert.Require(t, stage.tools["custom_tool"] != nil && stage.tools["read_file"] == nil, "registrations = %v, want only the extension's own name", stage.tools)
 	byID, _ := openToolsComposed(t, t.TempDir(), &fakeJobs{}, nil)
-	testassert.Equal(t, len(byID), 6)
+	testassert.Equal(t, len(byID), 5)
 }
 
 // stubManagedEnv returns one real manager bound to a throwaway .env whose
@@ -246,7 +243,7 @@ func (b *harnessBackground) StartJob(jobID string, spawn func(context.Context, f
 
 // backgroundImmediatePattern is the retained complete immediate template;
 // the captured group is the job ID.
-var backgroundImmediatePattern = regexp.MustCompile("^Command running in the background with ID: `([0-9a-f]{8})`\\. You will be notified when it finishes\\. If your next steps do not depend on its output, continue with them; otherwise use sleep to wait and process to read the output\\.\\nRunning in the background: `[^`]*`\\.$")
+var backgroundImmediatePattern = regexp.MustCompile("^Command running in the background with ID: `([0-9a-f]{8})`\\. You will be notified when it finishes\\. If your next steps do not depend on its output, continue with them; otherwise use process to read the output\\.\\nRunning in the background: `[^`]*`\\.$")
 
 // assertBackgroundImmediate validates one complete retained immediate
 // template and returns its job ID.
@@ -840,66 +837,6 @@ func TestRunCommandExecuteOutcomes(t *testing.T) {
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "result = %+v, want success", outcome.Result)
 		content := outcome.Result.Content
 		testassert.Require(t, strings.Contains(content, "env-value|") && !strings.Contains(content, "managed-secret") && strings.Contains(content, ws), "result = %q, want the unlisted key visible and the managed key scrubbed; result = %q, want the workspace cwd", content, content)
-	})
-}
-
-func TestSleepTool(t *testing.T) {
-	byID := openTools(t, t.TempDir())
-	tc := callToolContext(t.TempDir())
-	sleepTool := byID["sleep"]
-
-	t.Run("normalization strips private fields, requires strict integers and clamps to 1..300", func(t *testing.T) {
-		for _, args := range []string{
-			`{"seconds":1.5}`,                  // fraction
-			`{"seconds":"5"}`,                  // wrong type
-			`{"seconds":true}`,                 // wrong type
-			`{"seconds":null}`,                 // present null
-			`null`,                             // whole-null arguments
-			`{"seconds":99999999999999999999}`, // too large
-		} {
-			{
-				_, err := normalize(t, sleepTool, tc, "sleep", args)
-				testassert.Check(t, err != nil, "sleep normalized %s, want rejection", args)
-			}
-		}
-		raw, err := normalize(t, sleepTool, tc, "sleep", `{"seconds":2,"_melta_receipt":"x"}`)
-		testassert.NoError(t, err)
-		testassert.Require(t, strings.Contains(string(raw), `"seconds":2`) && !strings.Contains(string(raw), "_melta_receipt"), "normalized = %s, want the clamped value with private fields stripped", raw)
-		raw, err = normalize(t, sleepTool, tc, "sleep", `{"seconds":5000}`)
-		testassert.Require(t, err == nil && strings.Contains(string(raw), `"seconds":300`), "normalized = (%s, %v), want the 300 clamp", raw, err)
-		for _, args := range []string{`{}`, `{"seconds":0}`, `{"seconds":-5}`} {
-			raw, err := normalize(t, sleepTool, tc, "sleep", args)
-			testassert.Require(t, err == nil && strings.Contains(string(raw), `"seconds":1`), "normalized = (%s, %v), want the retained default 1 for %s", raw, err, args)
-		}
-	})
-
-	t.Run("prepare declares the fixed sleep target", func(t *testing.T) {
-		plan := prepare(t, sleepTool, tc, "sleep", `{"seconds":1}`)
-		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "sleep" && plan.Permissions[0].Target == "*", "plan = %+v, want an executor plan; pairs = %+v, want the fixed sleep target *", plan, plan.Permissions)
-		outcome := plan.Execute(context.Background())
-		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "Slept for 1 seconds.", "result = %+v, want the retained sleep result", outcome.Result)
-	})
-
-	t.Run("cancellation settles as an interrupted result", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		plan := prepare(t, sleepTool, tc, "sleep", `{"seconds":30}`)
-		type outcome struct {
-			status model.ToolResultStatus
-			body   string
-		}
-		outcomeCh := make(chan outcome, 1)
-		go func() {
-			result := plan.Execute(ctx)
-			outcomeCh <- outcome{status: result.Result.Status, body: result.Result.Content}
-		}()
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-		select {
-		case got := <-outcomeCh:
-			testassert.Require(t, got.status == model.ResultInterrupted && got.body != "", "outcome = (%v, %q), want a nonempty interrupted result", got.status, got.body)
-		case <-time.After(5 * time.Second):
-			t.Fatal("cancelled sleep did not return")
-		}
 	})
 }
 

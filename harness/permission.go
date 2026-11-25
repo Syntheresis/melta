@@ -3,14 +3,13 @@ package harness
 import "encoding/json"
 
 // PermissionFileRead, PermissionFileWrite, PermissionCommandRun,
-// PermissionSleep, PermissionSessionOwn and PermissionProcessOwn are the
+// PermissionSessionOwn and PermissionProcessOwn are the
 // published semantic permission names tools declare in their plans. They are
 // exact strings; plugins may define new namespaced names.
 const (
 	PermissionFileRead   = "file.read"
 	PermissionFileWrite  = "file.write"
 	PermissionCommandRun = "command.run"
-	PermissionSleep      = "sleep"
 	PermissionSessionOwn = "session.own"
 	PermissionProcessOwn = "process.own"
 )

@@ -1,9 +1,9 @@
 package melta
 
-// The baseline standard tools: the six owner-constructed Tool
+// The baseline standard tools: the five owner-constructed Tool
 // implementations — read_file, write_file, and edit_file over the shared file
 // preparation, snapshot bookkeeping, and artifact-derived code groups, plus
-// the foreground/background command, process, and sleep tools.
+// the foreground/background command and process tools.
 // They are ordinary composition members compiled directly into every
 // Melta: they are never optional plugin exports, and file tools carry no
 // process dependency.
@@ -524,7 +524,7 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 	return harness.ToolOutcome{Result: model.ToolResult{
 		CallID: callID,
 		Status: model.ResultSuccess,
-		Content: fmt.Sprintf("Command running in the background with ID: `%s`. You will be notified when it finishes. If your next steps do not depend on its output, continue with them; otherwise use sleep to wait and process to read the output.\nRunning in the background: `%s`.",
+		Content: fmt.Sprintf("Command running in the background with ID: `%s`. You will be notified when it finishes. If your next steps do not depend on its output, continue with them; otherwise use process to read the output.\nRunning in the background: `%s`.",
 			jobID, strings.Join(jobsInst.Live(sessionID), ", ")),
 	}}
 }
@@ -619,42 +619,6 @@ func commandOutcome(ctx context.Context, callID, command, dir string, timeoutSec
 		return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
 	}
 	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: result}}
-}
-
-// sleepTool is the sleep tool: normalization clamps to integer seconds
-// 1..300, the fixed target * is the one the built-in policy allows, and
-// execution observes cancellation as an interrupted result.
-type sleepTool struct{}
-
-func (sleepTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	return normalizeCallArguments(call, tool.NormalizeSleepArgs)
-}
-
-func (sleepTool) Prepare(_ context.Context, _ ToolContext, call model.ToolCall) harness.PreparedTool {
-	args, err := toolargs.Decode(call.Arguments)
-	if err != nil {
-		return immediateError(call.ID, err)
-	}
-	seconds := 1.0
-	if v, ok := args["seconds"].(json.Number); ok {
-		if n, err := v.Int64(); err == nil {
-			seconds = float64(n)
-		}
-	}
-	return harness.PreparedTool{
-		Permissions: []harness.PermissionRequest{{Permission: harness.PermissionSleep, Target: "*"}},
-		Execute: func(ctx context.Context) harness.ToolOutcome {
-			result, err := tool.Sleep{}.Execute(ctx, map[string]any{"seconds": seconds})
-			if err != nil {
-				status := model.ResultError
-				if ctx.Err() != nil {
-					status = model.ResultInterrupted
-				}
-				return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: status, Content: err.Error()}}
-			}
-			return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: result}}
-		},
-	}
 }
 
 // processTool is the process tool: always available; it maps the retained
@@ -754,7 +718,7 @@ type standardToolDeclaration struct {
 	definition model.ToolDefinition
 }
 
-// standardToolDeclarations returns the six standard tool declarations in
+// standardToolDeclarations returns the five standard tool declarations in
 // declaration order.
 func standardToolDeclarations() []standardToolDeclaration {
 	return []standardToolDeclaration{
@@ -763,18 +727,16 @@ func standardToolDeclarations() []standardToolDeclaration {
 		{id: "edit_file", definition: model.ToolDefinition{Name: "edit_file", Description: editFileDescription, Parameters: json.RawMessage(editFileParameters)}},
 		{id: "run_command", definition: model.ToolDefinition{Name: "run_command", Description: runCommandDescription, Parameters: json.RawMessage(runCommandParameters)}},
 		{id: "process", definition: model.ToolDefinition{Name: "process", Description: processDescription, Parameters: json.RawMessage(processParameters)}},
-		{id: "sleep", definition: model.ToolDefinition{Name: "sleep", Description: sleepDescription, Parameters: json.RawMessage(sleepParameters)}},
 	}
 }
 
-// newStandardTools constructs the six standard tool values over the owner
+// newStandardTools constructs the five standard tool values over the owner
 // data root, the jobs service and the owner's live-output registry: the file
 // tools share one state that carries no process dependency, run_command
-// carries the jobs service and registry beside that state, process carries
-// only the jobs service, and sleep needs neither; no
-// per-Session state is created here and no environment key set is captured —
-// the command paths resolve the live subprocess environment through the
-// ToolContext's call-time producer.
+// carries the jobs service and registry beside that state, and process
+// carries only the jobs service; no per-Session state is created here and no
+// environment key set is captured — the command paths resolve the live
+// subprocess environment through the ToolContext's call-time producer.
 func newStandardTools(dataDir string, jobsService jobs.Jobs, toolOutput *liveToolOutput) map[string]Tool {
 	inst := &standardTools{dataDir: dataDir}
 	return map[string]Tool{
@@ -783,6 +745,5 @@ func newStandardTools(dataDir string, jobsService jobs.Jobs, toolOutput *liveToo
 		"edit_file":   editTool{inst},
 		"run_command": runCommandTool{inst, jobsService, toolOutput},
 		"process":     processTool{jobsService},
-		"sleep":       sleepTool{},
 	}
 }

@@ -323,7 +323,7 @@ func (t *capturedCredentialTool) Normalize(_ extension.AuthorContext, call model
 }
 
 func (t *capturedCredentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionSleep, Target: "*"}}, Data: []byte(call.ID)}
+	return extension.ToolPlan{Data: []byte(call.ID)}
 }
 
 func (t *capturedCredentialTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
@@ -443,10 +443,7 @@ func (t replacementTool) Normalize(_ extension.AuthorContext, call model.ToolCal
 }
 
 func (t replacementTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{
-		Permissions: []harness.PermissionRequest{{Permission: harness.PermissionSleep, Target: "*"}},
-		Data:        []byte(call.ID),
-	}
+	return extension.ToolPlan{Data: []byte(call.ID)}
 }
 
 func (t replacementTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {

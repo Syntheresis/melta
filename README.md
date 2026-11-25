@@ -29,7 +29,7 @@
 
 Melta uses the OpenAI Chat Completions shape with streaming and tool calls. Provider compatibility still varies: some OpenAI-compatible models stream text correctly but do not reliably support streamed tool calls. Test a new provider/model with a real tool call before relying on it.
 
-**Tools** — `read_file` · `write_file` · `edit_file` · `run_command` · `process` · `sleep` · `task`; Adaptation supplies `apply_patch` for models that support it
+**Tools** — `read_file` · `write_file` · `edit_file` · `run_command` · `process` · `task`; Adaptation supplies `apply_patch` for models that support it
 
 **Snapshots** — File edits are captured copy-based before they happen, grouped per admitted operation. Revert code at any owned input or fork the conversation from it. No git dependency.
 
@@ -218,7 +218,7 @@ composes the public [`harness/`](harness/) state machine, [`prompt/`](prompt/) a
 included SQLite storage. `DataDir`, `Configuration` and `Credentials` are required and explicit; the locations for
 global rules, discovery cache and wire debugging are optional, as are `Defaults` (Session input
 defaults, including the host model), `Strategy`, native `Extensions` and the storage factory. An empty `Extensions` slice with no installed packages is the supported zero-extension baseline: the
-six standard tools, SQLite storage, jobs and default prompt/rules handling are built in. The Agents and Adaptation
+five standard tools, SQLite storage, jobs and default prompt/rules handling are built in. The Agents and Adaptation
 extensions are optional; Adaptation also supplies the multi-file `apply_patch` tool for matching models. Creating a Session requires a non-empty local Workspace; no optional extension or network
 listener is required.
 [`extension/`](extension/) is the activation-owned native contract (`extension.API`, typed callbacks and fixed host

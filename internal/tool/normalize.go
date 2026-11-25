@@ -165,25 +165,6 @@ func NormalizeRunCommandArgs(args map[string]any, defaultTimeout int) (map[strin
 	return clean, nil
 }
 
-// NormalizeSleepArgs performs target sleep argument normalization: private
-// `_melta_` fields are stripped and a present seconds must be a strict
-// integer before the retained 1..300 clamp applies; an absent seconds keeps
-// the retained default of 1. The normalized form carries the clamped value
-// as its canonical-integer lexeme.
-func NormalizeSleepArgs(args map[string]any) (map[string]any, error) {
-	clean := stripPrivateArgs(args)
-	if _, present := clean["seconds"]; present {
-		v, err := normalizeIntArg(clean, "sleep", "seconds")
-		if err != nil {
-			return nil, err
-		}
-		clean["seconds"] = canonicalInt(normalizeSleepSeconds(v))
-	} else {
-		clean["seconds"] = canonicalInt(1)
-	}
-	return clean, nil
-}
-
 // NormalizeWriteArgs performs target write_file argument normalization:
 // private `_melta_` fields are stripped and the schema-required path
 // and content must be strings — an absent, null or wrong-typed required
