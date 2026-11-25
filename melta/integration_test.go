@@ -130,7 +130,7 @@ func (probeTool) Execute(_ context.Context, _ extension.AuthorContext, _ extensi
 // shPureService is one pure "call" service named name, answered by handler.
 func shPureService(name string, handler extension.AuthorHandler) extension.Service {
 	return extension.Service{Name: name, Methods: []extension.RegisteredMethod{{
-		Method:  extension.Method{Name: "call", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{"type":"object"}`)},
+		Method:  extension.Method{Name: "call", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{"type":"object"}`)},
 		Handler: handler,
 	}}}
 }

@@ -227,24 +227,6 @@ func (e ExtensionInvocationTargetKind) Valid() bool {
 	}
 }
 
-// Defines values for ExtensionMethodMode.
-const (
-	Pure      ExtensionMethodMode = "pure"
-	ServiceIo ExtensionMethodMode = "service_io"
-)
-
-// Valid indicates whether the value is a known member of the ExtensionMethodMode enum.
-func (e ExtensionMethodMode) Valid() bool {
-	switch e {
-	case Pure:
-		return true
-	case ServiceIo:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for ExtensionSuccessKind.
 const (
 	ExtensionSuccessKindSuccess ExtensionSuccessKind = "success"
@@ -262,13 +244,13 @@ func (e ExtensionSuccessKind) Valid() bool {
 
 // Defines values for HealthProtocolVersion.
 const (
-	N24 HealthProtocolVersion = "24"
+	N25 HealthProtocolVersion = "25"
 )
 
 // Valid indicates whether the value is a known member of the HealthProtocolVersion enum.
 func (e HealthProtocolVersion) Valid() bool {
 	switch e {
-	case N24:
+	case N25:
 		return true
 	default:
 		return false
@@ -1297,7 +1279,6 @@ type ExtensionMethod struct {
 
 	// Input One extension configuration document as exact JSON text.
 	Input ExtensionConfigDocument `json:"input"`
-	Mode  ExtensionMethodMode     `json:"mode"`
 	Name  string                  `json:"name"`
 
 	// Partial One extension configuration document as exact JSON text.
@@ -1306,9 +1287,6 @@ type ExtensionMethod struct {
 	// Success One extension configuration document as exact JSON text.
 	Success ExtensionConfigDocument `json:"success"`
 }
-
-// ExtensionMethodMode defines model for ExtensionMethod.Mode.
-type ExtensionMethodMode string
 
 // ExtensionPackage One installed executable extension's live loaded implementation version and the package selected for the next start. Package installation never changes the live loaded set.
 type ExtensionPackage struct {

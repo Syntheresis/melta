@@ -778,7 +778,7 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"24\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"25\"}"
     }
    ],
    "reject": [
@@ -792,16 +792,16 @@
     },
     {
      "name": "bad-instance-pattern",
-     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"24\"}",
+     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"25\"}",
      "typescript": false
     },
     {
      "name": "missing-instance",
-     "json": "{\"protocol_version\":\"24\"}"
+     "json": "{\"protocol_version\":\"25\"}"
     },
     {
      "name": "unknown-member",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"24\",\"extra\":true}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"25\",\"extra\":true}"
     }
    ]
   },
@@ -2460,8 +2460,8 @@
   },
   {
    "schema": "RegisteredExtensionOperation",
-   "accept": [{"name":"minimal","json":"{\"method\":{\"name\":\"echo\",\"mode\":\"pure\",\"input\":\"{}\",\"success\":\"{}\"},\"target\":\"harness\"}"}],
-   "reject": [{"name":"wrong-target","json":"{\"method\":{\"name\":\"echo\",\"mode\":\"pure\",\"input\":\"{}\",\"success\":\"{}\"},\"target\":\"other\"}"}]
+   "accept": [{"name":"minimal","json":"{\"method\":{\"name\":\"echo\",\"input\":\"{}\",\"success\":\"{}\"},\"target\":\"harness\"}"}],
+   "reject": [{"name":"wrong-target","json":"{\"method\":{\"name\":\"echo\",\"input\":\"{}\",\"success\":\"{}\"},\"target\":\"other\"}"}]
   },
   {
    "schema": "ExtensionFailure",
@@ -2495,9 +2495,9 @@
   },
   {
    "schema": "ExtensionMethod",
-   "accept": [{"name":"minimal","json":"{\"name\":\"echo\",\"mode\":\"service_io\",\"input\":\"{}\",\"success\":\"{}\"}"},
-    {"name":"full","json":"{\"name\":\"echo\",\"mode\":\"service_io\",\"input\":\"{}\",\"success\":\"{}\",\"error\":\"{}\",\"partial\":\"{}\"}"}],
-   "reject": [{"name":"wrong-mode","json":"{\"name\":\"echo\",\"mode\":\"other\",\"input\":\"{}\",\"success\":\"{}\"}"}]
+   "accept": [{"name":"minimal","json":"{\"name\":\"echo\",\"input\":\"{}\",\"success\":\"{}\"}"},
+    {"name":"full","json":"{\"name\":\"echo\",\"input\":\"{}\",\"success\":\"{}\",\"error\":\"{}\",\"partial\":\"{}\"}"}],
+   "reject": []
   },
   {
    "schema": "ExtensionSuccess",

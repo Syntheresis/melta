@@ -118,7 +118,7 @@ func (s *nativeSnapshot) cleanupOwner(ctx context.Context, sessionID, owner stri
 			continue
 		}
 		callCtx, cancel := context.WithTimeout(ctx, cleanupCallDeadline)
-		scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel}, candidate: s.candidate, activation: activation})
+		scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel}, candidate: s.candidate, activation: activation, kind: callKindHook, host: s.candidate.owner.composition})
 		call := extension.AuthorContext{ExtensionID: owner, Settings: append(json.RawMessage(nil), activation.section...), Call: scope.call}
 		err := func() error {
 			defer scope.end()

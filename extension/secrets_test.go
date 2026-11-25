@@ -73,7 +73,7 @@ func TestSecretRefPointerGrammarAtManifestValidation(t *testing.T) {
 
 func TestCredentialsHostContract(t *testing.T) {
 	methods, ok := HostService(ContractCredentials)
-	if !ok || len(methods) != 1 || methods[0].Name != "get" || methods[0].Mode != ModeServiceIO {
-		t.Fatalf("host credentials methods = %+v, want the one service_io get method", methods)
+	if !ok || len(methods) != 1 || methods[0].Name != "get" {
+		t.Fatalf("host credentials methods = %+v, want the one get method", methods)
 	}
 }

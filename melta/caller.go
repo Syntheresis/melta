@@ -2,17 +2,17 @@ package melta
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 )
 
-// ErrDenied is the one authority class: the command target lies outside the
-// Caller's granted scope.
-var ErrDenied = errors.New("melta: denied")
+// ErrDenied is the one authority class: a call outside what its caller, its
+// kind or its target allows.
+var ErrDenied = extension.ErrDenied
 
 // CallerScopeKind is the closed union kind used for both a Caller grant and one
 // command target.

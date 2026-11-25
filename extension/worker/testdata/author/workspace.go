@@ -97,7 +97,7 @@ func workspaceFixture() extension.Extension {
 		Manifest: extension.Manifest{ID: "workspace-worker", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{}`), Services: []string{"melta.workspace"}},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			if _, err := api.RegisterService(extension.Service{Name: "workspace-relay", Methods: []extension.RegisteredMethod{{
-				Method: extension.Method{Name: "read", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Method: extension.Method{Name: "read", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 				Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return call.Call(ctx, "melta.workspace", "read", args)
 				},

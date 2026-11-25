@@ -56,9 +56,9 @@ func externalExtension(calls *externalCalls) extension.Extension {
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			calls.opens.Add(1)
 			for _, operation := range []extension.Operation{
-				{Target: extension.ExposedTargetSession, Method: extension.ServiceIOMethod("work", workInput, `{"type":"object"}`), Handler: externalWork},
-				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("fail", extension.ModeServiceIO, `{}`, `{}`, `{}`, `{}`), Handler: externalFail},
-				{Target: extension.ExposedTargetHarness, Method: extension.ServiceIOMethod("raw", `{}`, `{}`), Handler: externalRaw},
+				{Target: extension.ExposedTargetSession, Method: extension.ServiceMethod("work", workInput, `{"type":"object"}`, "", ""), Handler: externalWork},
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("fail", `{}`, `{}`, `{}`, `{}`), Handler: externalFail},
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("raw", `{}`, `{}`, "", ""), Handler: externalRaw},
 			} {
 				if _, err := api.RegisterOperation(operation, nil); err != nil {
 					return nil, err

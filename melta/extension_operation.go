@@ -77,7 +77,7 @@ func (r *Melta) ListExtensions(ctx context.Context, c Caller) ([]protocol.Regist
 					method nativeServiceMethod
 				})
 				method := op.method.contract.Method
-				projected := protocol.ExtensionMethod{Name: method.Name, Mode: protocol.ExtensionMethodMode(method.Mode), Input: string(method.Input), Success: string(method.Success)}
+				projected := protocol.ExtensionMethod{Name: method.Name, Input: string(method.Input), Success: string(method.Success)}
 				if len(method.Error) != 0 {
 					value := string(method.Error)
 					projected.Error = &value
@@ -142,11 +142,6 @@ func (r *Melta) invocationTarget(ctx context.Context, caller Caller, h *harness.
 		return target, header.Identity, nil
 	}
 	return target, harness.SessionIdentity{Workspace: target.Workspace}, nil
-}
-
-func recheckInvocationSession(ctx context.Context, h *harness.Harness, target CallerScope) error {
-	_, err := h.ReadSessionHeader(context.WithoutCancel(ctx), target.SessionID)
-	return err
 }
 
 // validateInvocationAddress enforces the nonempty addressing strings and the

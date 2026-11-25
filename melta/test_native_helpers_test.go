@@ -23,7 +23,7 @@ func testNative(id string, activate func(context.Context, extension.API) (func(c
 // "call" service-IO method answered by testServiceHandler.
 func testServiceCapability(name string) extension.Service {
 	return extension.Service{Name: name, Methods: []extension.RegisteredMethod{{
-		Method:  extension.Method{Name: "call", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+		Method:  extension.Method{Name: "call", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 		Handler: testServiceHandler(),
 	}}}
 }

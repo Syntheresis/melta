@@ -68,8 +68,8 @@ func (s *configurationService) editAgentModel(ctx context.Context, agentType, re
 	callCtx, cancel := context.WithCancel(ctx)
 	scope := callbackScope(&nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel},
-		candidate:          candidate, activation: entry.activation,
-		commandScope: harnessScope, receipt: &nativeReceipt{},
+		candidate:          candidate, activation: entry.activation, kind: callKindOperation,
+		commandScope: harnessScope,
 	})
 	author := extension.AuthorContext{
 		ExtensionID: entry.activation.id, Settings: bytes.Clone(entry.activation.section), Call: scope.call,

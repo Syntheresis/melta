@@ -157,7 +157,7 @@ func TestNativeOperationRequestIdentity(t *testing.T) {
 	service := extension.Extension{
 		Manifest: extension.Manifest{ID: "identity-provider", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			method := extension.ServiceMethod("echo", extension.ModeServiceIO, `{}`, `{}`, "", "")
+			method := extension.ServiceMethod("echo", `{}`, `{}`, "", "")
 			_, err := api.RegisterService(extension.Service{Name: "identity/echo", Methods: []extension.RegisteredMethod{{Method: method, Handler: func(_ context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				if call.RequestID != "native-request" || call.ExtensionID != "identity-provider" || !strings.Contains(string(call.Settings), `"provider"`) {
 					t.Errorf("nested identity = %q, %q, %s", call.RequestID, call.ExtensionID, call.Settings)
@@ -170,7 +170,7 @@ func TestNativeOperationRequestIdentity(t *testing.T) {
 	guest := extension.Extension{
 		Manifest: extension.Manifest{ID: "identity", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			method := extension.ServiceMethod("echo", extension.ModeServiceIO, `{}`, `{}`, "", "")
+			method := extension.ServiceMethod("echo", `{}`, `{}`, "", "")
 			_, err := api.RegisterOperation(extension.Operation{Target: extension.ExposedTargetHarness, Method: method, Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				if call.RequestID != "native-request" || !strings.Contains(string(call.Settings), `"caller"`) {
 					t.Errorf("operation request = %q, %s", call.RequestID, call.Settings)
@@ -203,11 +203,11 @@ func main() {
  e := extension.Extension{
   Manifest: extension.Manifest{ID:"installed",Version:"1",APIVersion:extension.APIVersion,SettingsSchema:json.RawMessage("{\"type\":\"object\"}")},
   Activate: func(_ context.Context, api extension.API)(func(context.Context) error,error) {
-   _,err:=api.RegisterService(extension.Service{Name:"fixture/identity",Methods:[]extension.RegisteredMethod{{Method:extension.ServiceMethod("echo",extension.ModeServiceIO,"{}","{}","",""),Handler:func(_ context.Context,c extension.AuthorContext,args json.RawMessage)(extension.Result,error){if c.RequestID!="worker-raw"{panic("wrong nested request identity")};return extension.Result{Value:args},nil}}}},nil)
+   _,err:=api.RegisterService(extension.Service{Name:"fixture/identity",Methods:[]extension.RegisteredMethod{{Method:extension.ServiceMethod("echo","{}","{}","",""),Handler:func(_ context.Context,c extension.AuthorContext,args json.RawMessage)(extension.Result,error){if c.RequestID!="worker-raw"{panic("wrong nested request identity")};return extension.Result{Value:args},nil}}}},nil)
    if err!=nil{return nil,err}
    ops:=[]extension.Operation{
-    {Target:extension.ExposedTargetHarness,Method:extension.ServiceMethod("raw",extension.ModeServiceIO,"{}","{}","",""),Handler:func(ctx context.Context,c extension.AuthorContext,args json.RawMessage)(extension.Result,error){if c.RequestID!="worker-raw"{panic("wrong request identity")};return c.Call(ctx,"fixture/identity","echo",args)}},
-    {Target:extension.ExposedTargetHarness,Method:extension.ServiceMethod("fail",extension.ModeServiceIO,"{}","{}","{}","{}"),Handler:func(_ context.Context,_ extension.AuthorContext,_ json.RawMessage)(extension.Result,error){return extension.Result{Failure:&extension.Failure{Code:"fixture",Message:"refused",Partial:json.RawMessage("[1,null]")}},nil}},
+    {Target:extension.ExposedTargetHarness,Method:extension.ServiceMethod("raw","{}","{}","",""),Handler:func(ctx context.Context,c extension.AuthorContext,args json.RawMessage)(extension.Result,error){if c.RequestID!="worker-raw"{panic("wrong request identity")};return c.Call(ctx,"fixture/identity","echo",args)}},
+    {Target:extension.ExposedTargetHarness,Method:extension.ServiceMethod("fail","{}","{}","{}","{}"),Handler:func(_ context.Context,_ extension.AuthorContext,_ json.RawMessage)(extension.Result,error){return extension.Result{Failure:&extension.Failure{Code:"fixture",Message:"refused",Partial:json.RawMessage("[1,null]")}},nil}},
    }
    for _,op:=range ops {if _,err:=api.RegisterOperation(op,nil);err!=nil{return nil,err}}
    return nil,nil

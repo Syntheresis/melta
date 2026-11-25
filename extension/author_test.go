@@ -29,7 +29,7 @@ func TestRegistrationMethodAndManifestValidation(t *testing.T) {
 	if err := ValidateManifestSection(manifest, json.RawMessage(`[]`)); err == nil {
 		t.Fatal("invalid section accepted")
 	}
-	method := Method{Name: "get", Mode: ModePure, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"string"}`)}
+	method := Method{Name: "get", Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"string"}`)}
 	bound, err := CompileMethod(method)
 	if err != nil {
 		t.Fatal(err)

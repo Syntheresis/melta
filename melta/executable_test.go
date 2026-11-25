@@ -715,7 +715,7 @@ func TestExecutableWorkerCredentialHostService(t *testing.T) {
 	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
 		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "peer.service", Methods: []extension.RegisteredMethod{{
-				Method: extension.ServiceMethod("echo", extension.ModeServiceIO, `{"type":"object"}`, `{}`, "", ""),
+				Method: extension.ServiceMethod("echo", `{"type":"object"}`, `{}`, "", ""),
 				Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 					return call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/token"}`))
 				},
@@ -733,7 +733,7 @@ func TestExecutableWorkerCredentialHostService(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 	defer service.current().resources.release()
-	result, err := service.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{"query":1}`), &nativeCallScope{host: service.current().composition})
+	result, err := service.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{"query":1}`), &nativeCallScope{kind: callKindHook, host: service.current().composition})
 	if err != nil {
 		t.Fatalf("service: %v", err)
 	}
@@ -1575,14 +1575,14 @@ func TestExecutableEffectfulHookCancelledAuthorEvidence(t *testing.T) {
 func TestWorkerServiceErrorClassReachesClassifier(t *testing.T) {
 	service, _ := publishAdapterWorker(t, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "peer.service", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "echo", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "echo", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{}, &worker.Error{Class: worker.ClassDenied, Message: "denied by worker"}
 			},
 		}}}, nil)
 		return nil, err
 	}, nil)
-	_, err := service.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{}`), &nativeCallScope{host: service.current().composition})
+	_, err := service.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{}`), &nativeCallScope{kind: callKindHook, host: service.current().composition})
 	if err == nil {
 		t.Fatal("worker service denial returned no error")
 	}
@@ -1605,7 +1605,7 @@ func TestExecutableCredentialRotationRetiresWorkerKeepsCapture(t *testing.T) {
 	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
 		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "peer.service", Methods: []extension.RegisteredMethod{{
-				Method: extension.ServiceMethod("echo", extension.ModeServiceIO, `{}`, `{}`, "", ""),
+				Method: extension.ServiceMethod("echo", `{}`, `{}`, "", ""),
 				Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					if string(args) == `{"park":true}` {
 						enteredOnce.Do(func() { close(entered) })
@@ -1664,7 +1664,7 @@ func TestExecutableCredentialRotationRetiresWorkerKeepsCapture(t *testing.T) {
 	}
 	parked := make(chan serviceOutcome, 1)
 	go func() {
-		value, err := first.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{"park":true}`), &nativeCallScope{host: host})
+		value, err := first.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{"park":true}`), &nativeCallScope{kind: callKindHook, host: host})
 		parked <- serviceOutcome{value: value, err: err}
 	}()
 	select {
@@ -1698,7 +1698,7 @@ func TestExecutableCredentialRotationRetiresWorkerKeepsCapture(t *testing.T) {
 	}
 
 	// New work is admitted on the new activation with the rotated value.
-	result, err := owner.config.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{}`), &nativeCallScope{host: host})
+	result, err := owner.config.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{}`), &nativeCallScope{kind: callKindHook, host: host})
 	if err != nil {
 		t.Fatalf("rotated service call: %v", err)
 	}

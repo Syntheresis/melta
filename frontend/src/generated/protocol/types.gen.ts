@@ -76,7 +76,6 @@ export type RegisteredExtensionOperation = {
 
 export type ExtensionMethod = {
     name: string;
-    mode: 'pure' | 'service_io';
     input: ExtensionConfigDocument;
     success: ExtensionConfigDocument;
     error?: ExtensionConfigDocument;
@@ -179,7 +178,7 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '24';
+    protocol_version: '25';
 };
 
 /**

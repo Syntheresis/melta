@@ -35,12 +35,12 @@ func (t registeredExtensionTool) check() error {
 	return activation.unavailableLocked()
 }
 
-func (t registeredExtensionTool) authorScope(ctx context.Context, tc ToolContext, workspace *nativeWorkspace, bind, pure bool, permissions []harness.PermissionRequest) (*nativeCallScope, extension.AuthorContext) {
+func (t registeredExtensionTool) authorScope(ctx context.Context, tc ToolContext, workspace *nativeWorkspace, bind bool, kind nativeCallKind, permissions []harness.PermissionRequest) (*nativeCallScope, extension.AuthorContext) {
 	child, cancel := context.WithCancel(ctx)
 	activation := t.binding.entry.activation
 	scope := callbackScope(&nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
-		candidate:          t.binding.candidate, activation: activation, pure: pure,
+		candidate:          t.binding.candidate, activation: activation, kind: kind,
 		workspace: workspace, workspaceBind: bind, permissions: permissions,
 		session: tc.Session, states: t.states, host: t.host, lease: t.lease, operationSecrets: t.operationSecrets,
 	})
@@ -54,7 +54,7 @@ func (t registeredExtensionTool) Normalize(ctx context.Context, tc ToolContext, 
 	if err := t.check(); err != nil {
 		return nil, err
 	}
-	scope, author := t.authorScope(ctx, tc, nil, false, true, nil)
+	scope, author := t.authorScope(ctx, tc, nil, false, callKindHook, nil)
 	defer scope.end()
 	return t.binding.entry.value.(nativeTool).tool.Normalize(author, call)
 }
@@ -64,7 +64,7 @@ func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, ca
 		return immediateError(call.ID, err)
 	}
 	workspace := newNativeWorkspace(tc.Workspace, t.dataDir, tc.AdmittedEntry, t.lease)
-	scope, author := t.authorScope(ctx, tc, workspace, true, true, nil)
+	scope, author := t.authorScope(ctx, tc, workspace, true, callKindHook, nil)
 	plan := func() extension.ToolPlan {
 		defer scope.end()
 		return t.binding.entry.value.(nativeTool).tool.Prepare(scope.ctx, author, call).Owned()
@@ -90,7 +90,7 @@ func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, ca
 		if err := t.check(); err != nil {
 			return harness.ToolOutcome{Result: bindingToolResult(call.ID, err, false), Evidence: harness.ExecutionNotStarted}
 		}
-		scope, author := t.authorScope(ctx, tc, workspace, false, false, permissions)
+		scope, author := t.authorScope(ctx, tc, workspace, false, callKindTool, permissions)
 		scope.start = start
 		defer scope.end()
 		return t.binding.entry.value.(nativeTool).tool.Execute(scope.ctx, author, plan)
@@ -112,7 +112,7 @@ func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]ha
 			child, cancel := context.WithCancel(ctx)
 			scope := callbackScope(&nativeCallScope{
 				nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
-				candidate:          s.candidate, activation: activation, pure: true,
+				candidate:          s.candidate, activation: activation, kind: callKindHook,
 				workspace: workspace, workspaceBind: true, session: tc.Session, states: states, host: host, lease: lease, operationSecrets: secrets,
 			})
 			defer scope.end()
@@ -124,11 +124,11 @@ func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]ha
 	return hooks
 }
 
-func registeredHookScope(ctx context.Context, stage *nativeSnapshot, entry *nativeRegistration, sel selection, session harness.SessionIdentity, pure bool) (*nativeCallScope, extension.AuthorContext) {
+func registeredHookScope(ctx context.Context, stage *nativeSnapshot, entry *nativeRegistration, sel selection, session harness.SessionIdentity) (*nativeCallScope, extension.AuthorContext) {
 	child, cancel := context.WithCancel(ctx)
 	scope := callbackScope(&nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
-		candidate:          stage.candidate, activation: entry.activation, pure: pure,
+		candidate:          stage.candidate, activation: entry.activation, kind: callKindHook,
 		session: session, states: sel.states, host: sel.invocation.snapshot.composition,
 		lease: sel.lease, operationSecrets: sel.operationSecrets,
 	})
@@ -149,7 +149,7 @@ func registeredRequestHooks(stage *nativeSnapshot, sel selection, session harnes
 				if err := entry.activation.unavailable(); err != nil {
 					return harness.RequestConsequence{}, err
 				}
-				scope, call := registeredHookScope(ctx, stage, entry, sel, session, hook.mode == extension.HookModePure)
+				scope, call := registeredHookScope(ctx, stage, entry, sel, session)
 				defer scope.end()
 				return hook.handler.(extension.AuthorRequestHook)(scope.ctx, call, extension.AuthorRequestInput{RequestHookInput: input, PromptAssembled: sel.candidate.Prompt == nil})
 			},
@@ -168,7 +168,7 @@ func registeredArgumentHooks(stage *nativeSnapshot, sel selection, session harne
 				if err := entry.activation.unavailable(); err != nil {
 					return harness.ToolArgumentsResult{}, err
 				}
-				scope, call := registeredHookScope(ctx, stage, entry, sel, session, hook.mode == extension.HookModePure)
+				scope, call := registeredHookScope(ctx, stage, entry, sel, session)
 				defer scope.end()
 				result, err := hook.handler.(extension.ArgumentsHook)(scope.ctx, call, input)
 				if err != nil {
@@ -197,7 +197,7 @@ func registeredResultHooks(stage *nativeSnapshot, sel selection, session harness
 				if err := entry.activation.unavailable(); err != nil {
 					return "", err
 				}
-				scope, call := registeredHookScope(ctx, stage, entry, sel, session, true)
+				scope, call := registeredHookScope(ctx, stage, entry, sel, session)
 				defer scope.end()
 				return hook.handler.(extension.ResultHook)(scope.ctx, call, input)
 			},

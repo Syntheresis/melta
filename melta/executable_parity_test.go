@@ -122,7 +122,7 @@ func (t *parityFixtureTool) Execute(_ context.Context, _ extension.AuthorContext
 // nativeAuthorFixture is the in-process counterpart of the worker fixture's
 // default entry: same manifest, same registrations, same handler semantics.
 // Its "crash" method is the worker fixture's process exit; the parity script
-// never dispatches it, only proves both transports refuse it in a pure scope.
+// never dispatches it.
 func nativeAuthorFixture() extension.Extension {
 	return extension.Extension{
 		Manifest: authorFixtureManifest(),
@@ -139,13 +139,13 @@ func nativeAuthorFixture() extension.Extension {
 			}
 			_, err = api.RegisterService(extension.Service{Name: "worker-service", Methods: []extension.RegisteredMethod{
 				{
-					Method: extension.Method{Name: "relay", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "relay", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						return call.Call(ctx, "host-service", "echo", args)
 					},
 				},
 				{
-					Method: extension.Method{Name: "crash", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "crash", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 						return extension.Result{}, errors.New("native crash stand-in")
 					},
@@ -201,7 +201,7 @@ func nativeAuthorFixture() extension.Extension {
 			}
 			_, err = api.RegisterOperation(extension.Operation{
 				Target: extension.ExposedTargetHarness,
-				Method: extension.Method{Name: "operation", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Method: extension.Method{Name: "operation", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 				Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return extension.Result{Value: args}, nil
 				},
@@ -247,8 +247,8 @@ func (parityStrategy) Consume(harness.ConsumeInput) (harness.PlanOutput, error) 
 
 // TestAuthorTransportBoundaryParity runs the author fixture's registered
 // service values, tool handler chain, strategy, hooks, operation, activation
-// hostcall, activation failure, and pure-scope refusal through both
-// transports and compares the semantic observations.
+// hostcall and activation failure through both transports and compares the
+// semantic observations.
 func TestAuthorTransportBoundaryParity(t *testing.T) {
 	corpus := []string{
 		"{\n  \"a\": 1,\n  \"nested\": {\"b\": [true, null]}\n}",
@@ -287,22 +287,18 @@ func TestAuthorTransportBoundaryParity(t *testing.T) {
 		testassert.NoError(t, candidate.publishForTest())
 		observation.set("activation", "ok")
 
-		callScoped := func(service, method string, args json.RawMessage, pure bool) (extension.Result, error) {
-			scope := &nativeCallScope{}
-			if pure {
-				scope = &nativeCallScope{pure: true}
-			}
-			return candidate.callServiceScoped(ctx, service, method, args, scope)
+		callScoped := func(service, method string, args json.RawMessage) (extension.Result, error) {
+			return candidate.callServiceScoped(ctx, service, method, args, &nativeCallScope{})
 		}
 		for index, payload := range corpus {
-			result, err := callScoped("worker-service", "relay", json.RawMessage(payload), true)
+			result, err := callScoped("worker-service", "relay", json.RawMessage(payload))
 			testassert.NoError(t, err)
 			testassert.Require(t, string(result.Value) == payload, "service relay %d = %q, want the exact arguments %q", index, result.Value, payload)
 			observation.set(fmt.Sprintf("relay-%d", index), hashHex(result.Value))
 		}
-		_, err := callScoped("worker-service", "crash", json.RawMessage(`{}`), true)
-		testassert.Require(t, errors.Is(err, ErrDenied) && errors.Is(err, ErrComposition), "pure-scope ServiceIO call = %v, want the composition refusal", err)
-		observation.set("pure-refused", "denied")
+		_, err := callScoped("worker-service", "crash", json.RawMessage(`{}`))
+		testassert.Require(t, err != nil, "crash service = %v, want its handler's error", err)
+		observation.set("crash", string(ErrorCode(err)))
 
 		stage := candidate.snapshotForTest()
 		defer stage.release()

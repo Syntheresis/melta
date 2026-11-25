@@ -95,8 +95,8 @@ func TestCreateDefaultSessionDiscoveryAndNoRetry(t *testing.T) {
 		wantID     string
 	}{
 		{"absent", `[]`, false, "/v1/sessions", "ordinary"},
-		{"present", `[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","mode":"service_io","input":"{}","success":"{}"},"target":"workspace"}]}]`, false, "/v1/extensions/invoke", "selected"},
-		{"uncertain", `[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","mode":"service_io","input":"{}","success":"{}"},"target":"workspace"}]}]`, true, "/v1/extensions/invoke", ""},
+		{"present", `[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","input":"{}","success":"{}"},"target":"workspace"}]}]`, false, "/v1/extensions/invoke", "selected"},
+		{"uncertain", `[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","input":"{}","success":"{}"},"target":"workspace"}]}]`, true, "/v1/extensions/invoke", ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c, transport := newScriptFixture(t)

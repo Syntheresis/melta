@@ -16,7 +16,7 @@ func TestScopedServiceWarningsBufferAndPublish(t *testing.T) {
 	r, _ := openProjectionRuntime(t, storage.NewMemory())
 	defer closeProjectionRuntime(r)
 	manifest := registrarManifest("warning-test")
-	manifest.Services = []string{"melta.warnings"}
+	manifest.Services = []string{"melta.warnings", extension.ContractWorkspace}
 	var borrowed func(context.Context, string, string, json.RawMessage) (extension.Result, error)
 	e := extension.Extension{Manifest: manifest, Activate: func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 		if _, err := api.Call(ctx, "melta.warnings", "report", []byte(`{"kind":"entry","message":"before"}`)); err != nil {
@@ -24,7 +24,7 @@ func TestScopedServiceWarningsBufferAndPublish(t *testing.T) {
 		}
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "report", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "report", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				borrowed = call.Call
 				return call.Call(ctx, "melta.warnings", "report", args)
@@ -57,10 +57,11 @@ func TestScopedServiceWarningsBufferAndPublish(t *testing.T) {
 	if _, err := borrowed(context.Background(), "melta.warnings", "report", []byte(`{"kind":"late","message":"forbidden"}`)); !errors.Is(err, extension.ErrClosed) {
 		t.Fatalf("borrowed warning callback remained live: %v", err)
 	}
-	if _, err := acceptHostMethod(extension.ContractWarnings, "missing", []byte(`{}`), false); !errors.Is(err, harness.ErrNotFound) {
+	scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: context.Background()}, candidate: candidate, activation: candidate.activations[0], kind: callKindOperation, host: r.config.composition}
+	if _, err := scope.call(context.Background(), extension.ContractWarnings, "missing", []byte(`{}`)); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("unknown host method: %v", err)
 	}
-	if _, err := acceptHostMethod(extension.ContractWorkspace, "write", []byte(`{"binding":"x","bytes":"eA==","create_only":null}`), false); !errors.Is(err, harness.ErrInvalid) {
+	if _, err := scope.call(context.Background(), extension.ContractWorkspace, "write", []byte(`{"binding":"x","bytes":"eA==","create_only":null}`)); !errors.Is(err, harness.ErrInvalid) {
 		t.Fatalf("invalid host document: %v", err)
 	}
 	_, err = r.invokeRegisteredOperation(context.Background(), testCaller(r), "warning-test", "report", target, []byte(`{"kind":"spoof","message":"bad","source":"other"}`), "")

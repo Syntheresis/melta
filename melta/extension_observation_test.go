@@ -268,7 +268,7 @@ func (t independentCommandTool) Execute(ctx context.Context, call extension.Auth
 func nativeIndependentOperation(name string, handler extension.AuthorHandler) extension.Operation {
 	return extension.Operation{
 		Target:  extension.ExposedTargetSession,
-		Method:  extension.Method{Name: name, Mode: extension.ModeServiceIO, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{}`)},
+		Method:  extension.Method{Name: name, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{}`)},
 		Handler: handler,
 	}
 }

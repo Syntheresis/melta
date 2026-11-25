@@ -427,7 +427,7 @@ func TestObservationPluginReportsLandWithRealAttribution(t *testing.T) {
 			return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 				_, err := api.RegisterOperation(extension.Operation{
 					Target: extension.ExposedTargetHarness,
-					Method: extension.Method{Name: "report", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+					Method: extension.Method{Name: "report", Input: []byte(`{}`), Success: []byte(`{}`)},
 					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						return call.Call(ctx, "melta.warnings", "report", args)
 					},

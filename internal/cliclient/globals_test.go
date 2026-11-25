@@ -24,7 +24,7 @@ func configHint(n string) protocol.Event {
 
 // agentsCurrentDiscovery advertises the shipped Agents current operation.
 func agentsCurrentDiscovery() json.RawMessage {
-	return json.RawMessage(`[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"current","mode":"service_io","input":"{}","success":"{}"},"target":"session"}]}]`)
+	return json.RawMessage(`[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"current","input":"{}","success":"{}"},"target":"session"}]}]`)
 }
 
 func warningHint(n string) protocol.Event {

@@ -45,7 +45,7 @@ func newDataProbe(id string, cleanup func(context.Context, extension.AuthorConte
 	manifest.Services = []string{extension.ContractData}
 	probe.native = extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: probe.capability, Methods: []extension.RegisteredMethod{{
-			Method: extension.PureMethod("ping", `{"type":"object","additionalProperties":false}`, `{"type":"object","additionalProperties":false}`),
+			Method: extension.ServiceMethod("ping", `{"type":"object","additionalProperties":false}`, `{"type":"object","additionalProperties":false}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			},
@@ -101,7 +101,7 @@ func dataView(t *testing.T, r *Melta, capabilityID, sessionID string, _ nativeGr
 	ctx, cancel := context.WithCancel(context.Background())
 	scope := &nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
-		candidate:          candidate, activation: entry.activation, host: r.config.composition,
+		candidate:          candidate, activation: entry.activation, kind: callKindHook, host: r.config.composition,
 		session: harness.SessionIdentity{SessionID: sessionID},
 		lease:   &artifactCallLease{intervals: r.artifacts, key: sessionArtifactDir(r.dataDir, sessionID)},
 	}
@@ -164,7 +164,7 @@ func TestDataServiceActivationCallNamespaces(t *testing.T) {
 	}
 	testassert.NoError(t, json.Unmarshal(cacheResult.Value, &cache))
 	testassert.Require(t, cache.Directory == filepath.Join(e.dataDir, "extensions", extensionDataHash("data-activation"), "cache"), "cache directory = %q, want the extension cache path", cache.Directory)
-	testassert.Require(t, errors.Is(sessionErr, ErrClosed), "session_namespace = %v, want closed without a call-owned Session", sessionErr)
+	testassert.Require(t, errors.Is(sessionErr, ErrDenied), "session_namespace = %v, want denied without a call-owned Session", sessionErr)
 }
 
 // TestDataServiceAssignsExtensionOwnedDirectories proves the declared service
@@ -266,13 +266,13 @@ func TestDataServiceAssignsExtensionOwnedDirectories(t *testing.T) {
 		foreignView.end()
 		mustNotExist(t, filepath.Join(e.dataDir, "code", routingID, "extensions", extensionDataHash("probe_a")), "a refused namespace argument created a directory")
 		pureView, pureCalls := dataView(t, r, a.capability, routingID, nativeGrant{})
-		pureView.nativeCallScope.pure = true
+		pureView.nativeCallScope.kind = callKindAdmission
 		{
 			_, err := callData(t, pureCalls, "session_namespace")
-			testassert.Require(t, errors.Is(err, ErrDenied), "pure namespace call = %v, want the purity refusal", err)
+			testassert.Require(t, errors.Is(err, ErrDenied), "operation-less namespace call = %v, want the kind refusal", err)
 		}
 		pureView.end()
-		mustNotExist(t, filepath.Join(e.dataDir, "code", routingID, "extensions", extensionDataHash("probe_a")), "a pure namespace call created a directory")
+		mustNotExist(t, filepath.Join(e.dataDir, "code", routingID, "extensions", extensionDataHash("probe_a")), "a refused namespace call created a directory")
 	})
 }
 
@@ -1027,7 +1027,7 @@ func nestedProviderNative() extension.Extension {
 	manifest.Services = []string{extension.ContractData}
 	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "nested.provider", Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceIOMethod("namespace", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["directory"],"properties":{"directory":{"type":"string"}},"additionalProperties":false}`),
+			Method: extension.ServiceMethod("namespace", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["directory"],"properties":{"directory":{"type":"string"}},"additionalProperties":false}`, "", ""),
 			Handler: func(ctx context.Context, calls extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return calls.Call(ctx, extension.ContractData, "session_namespace", json.RawMessage(`{}`))
 			},
@@ -1039,7 +1039,7 @@ func nestedProviderNative() extension.Extension {
 func nestedCallerNative() extension.Extension {
 	return extension.Extension{Manifest: registrarManifest("nested_caller"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "nested.caller", Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceIOMethod("run", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["directory"],"properties":{"directory":{"type":"string"}},"additionalProperties":false}`),
+			Method: extension.ServiceMethod("run", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["directory"],"properties":{"directory":{"type":"string"}},"additionalProperties":false}`, "", ""),
 			Handler: func(ctx context.Context, calls extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return calls.Call(ctx, "nested.provider", "namespace", json.RawMessage(`{}`))
 			},
@@ -1526,7 +1526,7 @@ func TestDataServiceNestedClaimAcrossLifetime(t *testing.T) {
 		manifest.Services = []string{extension.ContractData}
 		provider := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "nested.provider", Methods: []extension.RegisteredMethod{{
-				Method: extension.ServiceIOMethod("run", `{"type":"object","additionalProperties":false}`, `{"type":"object","additionalProperties":false}`),
+				Method: extension.ServiceMethod("run", `{"type":"object","additionalProperties":false}`, `{"type":"object","additionalProperties":false}`, "", ""),
 				Handler: func(ctx context.Context, calls extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 					claimed, err := calls.Call(ctx, extension.ContractData, "claim_external_data", json.RawMessage(`{}`))
 					if err != nil || string(claimed.Value) != "null" {
@@ -1691,7 +1691,7 @@ func TestDataServiceCleanupHasNoSessionOrWorkAuthority(t *testing.T) {
 	testassert.Require(t, len(result.CleanupFailures) == 0, "cleanup result = %+v, want success", result)
 	testassert.Require(t, cleanupCompleted.Load(), "cleanup callback did not complete")
 	testassert.Require(t, observedSession == "" && observedRequest == "", "cleanup identity = session %q request %q, want empty", observedSession, observedRequest)
-	testassert.Require(t, errors.Is(dataErr, extension.ErrClosed), "cleanup Session namespace error = %v, want the closed refusal", dataErr)
+	testassert.Require(t, errors.Is(dataErr, ErrDenied), "cleanup Session namespace error = %v, want the kind refusal", dataErr)
 	testassert.Require(t, errors.Is(launchErr, ErrDenied), "cleanup child-launch error = %v, want the denied/unauthorized refusal", launchErr)
 	{
 		err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
@@ -1746,7 +1746,7 @@ func (p *retainedCleanupProbe) native() extension.Extension {
 			p.openNew.Add(1)
 		}
 		_, err := api.RegisterService(extension.Service{Name: "probe." + p.id, Methods: []extension.RegisteredMethod{{
-			Method: extension.PureMethod("tag", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["tag"],"properties":{"tag":{"type":"string"}},"additionalProperties":false}`),
+			Method: extension.ServiceMethod("tag", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["tag"],"properties":{"tag":{"type":"string"}},"additionalProperties":false}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				value, err := json.Marshal(struct {
 					Tag string `json:"tag"`

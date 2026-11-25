@@ -92,13 +92,13 @@ func main() {
 			}
 			_, err = api.RegisterService(extension.Service{Name: "worker-service", Methods: []extension.RegisteredMethod{
 				{
-					Method: extension.Method{Name: "relay", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "relay", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						return call.Call(ctx, "host-service", "echo", args)
 					},
 				},
 				{
-					Method: extension.Method{Name: "crash", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "crash", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 						os.Exit(17)
 						return extension.Result{}, nil
@@ -155,7 +155,7 @@ func main() {
 			}
 			_, err = api.RegisterOperation(extension.Operation{
 				Target: extension.ExposedTargetHarness,
-				Method: extension.Method{Name: "operation", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Method: extension.Method{Name: "operation", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 				Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return extension.Result{Value: args}, nil
 				},

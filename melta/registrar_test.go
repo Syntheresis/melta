@@ -140,7 +140,7 @@ func TestScopedServicePreservesIssuingContextValues(t *testing.T) {
 func TestScopedServiceNestedProviderIdentityAndState(t *testing.T) {
 	owner := &configurationService{}
 	method := func(name string) extension.Method {
-		return extension.Method{Name: name, Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)}
+		return extension.Method{Name: name, Input: []byte(`{}`), Success: []byte(`{}`)}
 	}
 	provider := extension.Extension{Manifest: registrarManifest("provider"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "inner/opaque", Methods: []extension.RegisteredMethod{{
@@ -181,7 +181,7 @@ func TestScopedServiceNestedProviderIdentityAndState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	scope := &nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
-		candidate:          candidate, activation: candidate.activations[2], pure: true,
+		candidate:          candidate, activation: candidate.activations[2], kind: callKindHook,
 		session: harness.SessionIdentity{SessionID: "session"},
 		states:  map[string]harness.SessionStateValue{"outer": []byte(`{"state":"outer"}`), "provider": []byte(`{"state":"provider"}`)},
 	}
@@ -315,7 +315,7 @@ func TestRegistrarOperationTupleAndCleanupAttachments(t *testing.T) {
 			Manifest: registrarManifest(id),
 			Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 				for _, name := range names {
-					op := extension.Operation{Target: extension.ExposedTargetSession, Method: extension.Method{Name: name, Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)}, Handler: handler}
+					op := extension.Operation{Target: extension.ExposedTargetSession, Method: extension.Method{Name: name, Input: []byte(`{}`), Success: []byte(`{}`)}, Handler: handler}
 					if _, err := api.RegisterOperation(op, nil); err != nil {
 						return nil, err
 					}
@@ -655,7 +655,7 @@ func TestRegisterServiceRejectsMeltaServiceNames(t *testing.T) {
 	var duplicateErr, hostErr, promptErr error
 	e := extension.Extension{Manifest: registrarManifest("service-names"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		service := extension.Service{Name: "duplicate", Methods: []extension.RegisteredMethod{{
-			Method: extension.PureMethod("ping", `{"type":"object"}`, `{"type":"null"}`),
+			Method: extension.ServiceMethod("ping", `{"type":"object"}`, `{"type":"null"}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage("null")}, nil
 			},
@@ -683,18 +683,18 @@ func TestRegistrarEntryServiceVisibility(t *testing.T) {
 	getCalls := 0
 	service := func(name string) extension.Service {
 		return extension.Service{Name: name, Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "get", Mode: extension.ModePure, Input: []byte(`{"type":"object"}`), Success: []byte(`{"type":"string"}`)},
+			Method: extension.Method{Name: "get", Input: []byte(`{"type":"object"}`), Success: []byte(`{"type":"string"}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				getCalls++
 				return extension.Result{Value: []byte(`"ok"`)}, nil
 			},
 		}, {
-			Method: extension.Method{Name: "bad_result", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{"type":"string"}`)},
+			Method: extension.Method{Name: "bad_result", Input: []byte(`{}`), Success: []byte(`{"type":"string"}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: []byte(`42`)}, nil
 			},
 		}, {
-			Method: extension.Method{Name: "bad_partial", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "bad_partial", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{}, &extension.CallError{Err: harness.ErrStorage, Partial: []byte(`{`)}
 			},
@@ -781,7 +781,7 @@ func TestRegistrarEntryCallExpiresAndJoins(t *testing.T) {
 	manifest := registrarManifest
 	provider := extension.Extension{Manifest: manifest("provider"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "svc", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "call", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "call", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				close(entered)
 				<-ctx.Done()
@@ -816,7 +816,7 @@ func TestRegistrarCanceledEntryJoinsBeforeClosingAndReportsErrors(t *testing.T) 
 	callerClose, providerClose := errors.New("caller close"), errors.New("provider close")
 	provider := extension.Extension{Manifest: registrarManifest("provider"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "svc", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "call", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "call", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				close(entered)
 				<-ctx.Done()
@@ -864,29 +864,23 @@ func TestRegistrarCanceledEntryJoinsBeforeClosingAndReportsErrors(t *testing.T) 
 func TestRegistrarNestedServiceScope(t *testing.T) {
 	owner := &configurationService{}
 	var borrowed func(context.Context, string, string, json.RawMessage) (extension.Result, error)
-	method := func(name string, mode extension.Mode) extension.Method {
-		return extension.Method{Name: name, Mode: mode, Input: []byte(`{}`), Success: []byte(`{}`)}
+	method := func(name string) extension.Method {
+		return extension.Method{Name: name, Input: []byte(`{}`), Success: []byte(`{}`)}
 	}
 	e := extension.Extension{
 		Manifest: extension.Manifest{ID: "provider", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "service", Methods: []extension.RegisteredMethod{
-				{Method: method("nested", extension.ModePure), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+				{Method: method("nested"), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 					return extension.Result{Value: []byte(`null`)}, nil
 				}},
-				{Method: method("effect", extension.ModeServiceIO), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
-					return extension.Result{Value: []byte(`null`)}, nil
-				}},
-				{Method: method("outer", extension.ModePure), Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
+				{Method: method("outer"), Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 					if call.Call == nil {
 						return extension.Result{}, errors.New("missing scoped call")
 					}
 					borrowed = call.Call
 					if _, err := call.Call(ctx, "service", "nested", []byte(`{}`)); err != nil {
 						return extension.Result{}, err
-					}
-					if _, err := call.Call(ctx, "service", "effect", []byte(`{}`)); !errors.Is(err, ErrDenied) {
-						return extension.Result{}, errors.New("pure call invoked effectful method")
 					}
 					return extension.Result{Value: []byte(`null`)}, nil
 				}},
@@ -1108,7 +1102,7 @@ func TestRegistrationAllContributions(t *testing.T) {
 	handler := func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 		return extension.Result{Value: []byte(`null`)}, nil
 	}
-	method := extension.Method{Name: "run", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)}
+	method := extension.Method{Name: "run", Input: []byte(`{}`), Success: []byte(`{}`)}
 	e := extension.Extension{
 		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
@@ -1324,7 +1318,7 @@ func TestScopedStateAndSessionArgumentsValidateByContract(t *testing.T) {
 			row := row
 			if _, err := api.RegisterOperation(extension.Operation{
 				Target: extension.ExposedTargetSession,
-				Method: extension.Method{Name: row.method, Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Method: extension.Method{Name: row.method, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 				Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 					return call.Call(ctx, row.service, row.serviceMethod, json.RawMessage(row.arguments))
 				},

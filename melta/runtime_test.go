@@ -221,7 +221,7 @@ func (e *ownerEnv) corePlugin(id, exportID string, _ any, closeFn func() error) 
 	return extension.Extension{Manifest: registrarManifest(id), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		e.events.add("open:" + id)
 		_, err := api.RegisterService(extension.Service{Name: exportID, Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{}`, "", ""),
+			Method: extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			},
@@ -245,7 +245,7 @@ func (e *ownerEnv) ordinaryPlugin(id, providesID string) extension.Extension {
 	return extension.Extension{Manifest: registrarManifest(id), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		e.events.add("open:" + id)
 		_, err := api.RegisterService(extension.Service{Name: providesID, Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{}`, "", ""),
+			Method: extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			},

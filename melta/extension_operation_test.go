@@ -113,7 +113,7 @@ func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extensi
 	manifest := registrarManifest(fixtureExtensionID)
 	manifest.Services = []string{extension.ContractCommands}
 	commandMethod := func(name string) extension.Method {
-		return extension.Method{Name: name, Mode: extension.ModeServiceIO, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{}`), Error: json.RawMessage(`{}`), Partial: json.RawMessage(`{}`)}
+		return extension.Method{Name: name, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{}`), Error: json.RawMessage(`{}`), Partial: json.RawMessage(`{}`)}
 	}
 	runCommand := func(mapped bool) extension.AuthorHandler {
 		return func(ctx context.Context, call extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
@@ -139,7 +139,7 @@ func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extensi
 		}
 		echoService := func(name string) extension.Service {
 			return extension.Service{Name: name, Methods: []extension.RegisteredMethod{{
-				Method: extension.Method{Name: "echo", Mode: extension.ModePure, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"object"}`)},
+				Method: extension.Method{Name: "echo", Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"object"}`)},
 				Handler: func(_ context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					events.add("service:" + name + ":request=" + call.RequestID)
 					return extension.Result{Value: append(json.RawMessage(nil), args...)}, nil
@@ -147,7 +147,7 @@ func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extensi
 			}}}
 		}
 		if _, err := api.RegisterService(extension.Service{Name: "fixture.service", Methods: append(echoService("fixture.service").Methods, extension.RegisteredMethod{
-			Method: extension.Method{Name: "retain", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "retain", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			},
@@ -160,7 +160,7 @@ func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extensi
 		exposedEcho := func(name, service string) extension.Operation {
 			return extension.Operation{
 				Target: extension.ExposedTargetHarness,
-				Method: extension.Method{Name: name, Mode: extension.ModePure, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"object"}`)},
+				Method: extension.Method{Name: name, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"object"}`)},
 				Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return call.Call(ctx, service, "echo", args)
 				},
@@ -174,7 +174,7 @@ func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extensi
 		}
 		if _, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetWorkspace,
-			Method: extension.Method{Name: "probe", Mode: extension.ModePure, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"object"}`)},
+			Method: extension.Method{Name: "probe", Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"object"}`)},
 			Handler: func(_ context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				value, _ := json.Marshal(map[string]string{"workspace": call.Session.Workspace})
 				return extension.Result{Value: value}, nil
@@ -220,7 +220,7 @@ func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extensi
 		}
 		if _, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "pure_command", Mode: extension.ModePure, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "pure_command", Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
 				envelope, err := decodeEnvelope(arguments)
 				if err != nil {
@@ -234,7 +234,7 @@ func operationFixtureExtensionDeferred(events *traceLog, deferred chan<- extensi
 		}
 		if _, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetSession,
-			Method: extension.Method{Name: "query_hold", Mode: extension.ModePure, Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"object"}`)},
+			Method: extension.Method{Name: "query_hold", Input: json.RawMessage(`{"type":"object"}`), Success: json.RawMessage(`{"type":"object"}`)},
 			Handler: func(_ context.Context, _ extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
 				var hold struct{ Hold, Release, Block string }
 				if err := json.Unmarshal(arguments, &hold); err != nil {
@@ -396,7 +396,7 @@ func TestExtensionCatalogAndAddressing(t *testing.T) {
 // TestExtensionSessionCommands proves the fixed melta.commands bridge uses
 // ordinary admission and attribution for every command route, derives the
 // Session only from the host-issued context, rejects malformed generated
-// arguments before mutation, and gives a pure callback no command grant.
+// arguments before mutation, and serves a client operation's command call.
 func TestExtensionSessionCommands(t *testing.T) {
 	r, e, events := openOperationFixture(t)
 	ctx := context.Background()
@@ -493,12 +493,12 @@ func TestExtensionSessionCommands(t *testing.T) {
 	testassert.NoError(t, json.Unmarshal(created.Value, &createdSession))
 	testassert.Require(t, createdSession.SessionID != "", "create_session returned no Session: %s", created.Value)
 
-	// A pure callback cannot dispatch the command bridge, and the refusal is
-	// the composition denial, not a partial.
+	// A client operation may dispatch the command bridge; the method's own
+	// arguments are then validated by the ordinary producer.
 	pure, err := r.InvokeExtension(ctx, harnessCaller, fixtureRequest(fixtureExtensionID, "pure_command", harnessTarget(), `{"method":"submit","arguments":{}}`, "req-pure"))
-	testassert.Require(t, err != nil && pure.Failure == nil && errors.Is(err, ErrDenied), "pure command = (%+v, %v), want the composition refusal", pure, err)
-	testassert.Require(t, countEvent(events.all(), "pure:submit:attempt") == 1, "pure callback did not attempt the refused bridge")
-	testassert.Require(t, countEvent(events.all(), "command:submit") == submitReached+2, "the refused pure attempt reached the command bridge: %v", events.all())
+	testassert.Require(t, err != nil && pure.Failure == nil && errors.Is(err, harness.ErrInvalid), "operation command = (%+v, %v), want the producer's argument refusal", pure, err)
+	testassert.Require(t, countEvent(events.all(), "pure:submit:attempt") == 1, "operation did not attempt the command bridge")
+	testassert.Require(t, countEvent(events.all(), "command:submit") == submitReached+2, "the command attempt reached the wrong producer: %v", events.all())
 }
 
 // TestExtensionCommandContractParity proves both melta.commands entry points
@@ -572,12 +572,10 @@ func firstItemID(t *testing.T, r *Melta, sessionID string) string {
 	return ""
 }
 
-// TestExtensionQueryDeletionAndCancellation proves the authoritative
-// Session-target completion: a parked read racing a successful fork receipt
-// cannot outrank it — after the source Session is deleted only the read
-// returns not-found while the committed fork remains — and a late request
-// cancellation cannot replace a produced result after its Session remains
-// available.
+// TestExtensionQueryDeletionAndCancellation proves a parked Session-target
+// operation returns its own value after its Session is deleted while a
+// committed fork receipt survives, and a late request cancellation cannot
+// replace a produced result after its Session remains available.
 func TestExtensionQueryDeletionAndCancellation(t *testing.T) {
 	r, e, _ := openOperationFixture(t)
 	ctx := context.Background()
@@ -625,7 +623,7 @@ func TestExtensionQueryDeletionAndCancellation(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("parked query never returned")
 	}
-	testassert.Require(t, errors.Is(deletion.err, harness.ErrNotFound), "query after Session deletion = %v, want not-found", deletion.err)
+	testassert.Require(t, deletion.err == nil && deletion.result.Failure == nil && string(deletion.result.Value) == `{"held":true}`, "query after Session deletion = (%+v, %v), want the handler's value", deletion.result, deletion.err)
 	awaitOperation(t, r, receipt.Session.SessionId, "fork-op", harness.OperationSuccess)
 	header := headerThroughRuntime(t, r, receipt.Session.SessionId)
 	testassert.Equal(t, header.Identity.SessionID, receipt.Session.SessionId)

@@ -71,7 +71,7 @@ func TestScopedServiceDataClaimRequiresRegisteredCleanup(t *testing.T) {
 		api = a
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetSession,
-			Method: extension.Method{Name: "claim", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "claim", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return call.Call(ctx, extension.ContractData, "claim_external_data", []byte(`{}`))
 			},

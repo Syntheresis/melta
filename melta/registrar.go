@@ -879,7 +879,11 @@ func (api nativeAPI) Command(ctx context.Context, target extension.CommandTarget
 	s.nativeMu.Unlock()
 
 	arguments := append(json.RawMessage(nil), args...)
-	if _, err := acceptHostMethod(extension.ContractCommands, method, arguments, false); err != nil {
+	entry := hostServiceMethods()[extension.ContractCommands][method]
+	if entry == nil {
+		return extension.Result{}, fmt.Errorf("host method %q: %w", method, harness.ErrNotFound)
+	}
+	if _, err := acceptNativeMethod(entry.contract, arguments); err != nil {
 		return extension.Result{}, err
 	}
 	handler, ok := s.composition.commandsHandler(method)
@@ -910,18 +914,15 @@ func (api nativeAPI) Call(ctx context.Context, service, method string, args json
 		return extension.Result{}, err
 	}
 	defer finish()
-	scope := &nativeCallScope{candidate: c, activation: a, host: s.composition}
-	if resulting, handled, err := scope.callHostService(callCtx, service, method, args); handled {
-		return resulting, err
-	}
-	return c.callServiceScoped(callCtx, service, method, args, &nativeCallScope{candidate: c, activation: a})
+	scope := &nativeCallScope{candidate: c, activation: a, kind: callKindActivation, host: s.composition}
+	return scope.dispatch(callCtx, service, method, args)
 }
 
 type nativeCallScope struct {
 	nativeCallLifetime
 	candidate        *nativeCandidate
 	activation       *nativeActivation
-	pure             bool
+	kind             nativeCallKind
 	workspace        *nativeWorkspace
 	workspaceBind    bool
 	permissions      []harness.PermissionRequest
@@ -932,7 +933,6 @@ type nativeCallScope struct {
 	lease            *artifactCallLease
 	operationSecrets map[string]map[string]string
 	commandScope     CallerScope
-	receipt          *nativeReceipt
 	start            *nativeSessionStart
 }
 
@@ -941,58 +941,6 @@ type nativeSessionStart struct {
 	consumed    bool
 	extensionID string
 	plan        extension.SessionStart
-}
-
-type nativeReceipt struct {
-	mu        sync.Mutex
-	committed bool
-	result    *extension.Result
-	partial   json.RawMessage
-}
-
-func (r *nativeReceipt) mark() {
-	if r != nil {
-		r.mu.Lock()
-		r.committed = true
-		r.mu.Unlock()
-	}
-}
-
-func (r *nativeReceipt) command(result extension.Result, err error) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err == nil {
-		owned := ownResult(result)
-		r.result = &owned
-		r.partial = nil
-		r.committed = true
-		return
-	}
-	var partial *extension.CallError
-	if errors.As(err, &partial) && len(partial.Partial) != 0 {
-		r.result = nil
-		r.partial = bytes.Clone(partial.Partial)
-		r.committed = true
-	}
-}
-
-func (r *nativeReceipt) observed() (*extension.Result, json.RawMessage) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.result != nil {
-		result := ownResult(*r.result)
-		return &result, bytes.Clone(r.partial)
-	}
-	return nil, bytes.Clone(r.partial)
-}
-
-func (r *nativeReceipt) hasCommit() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.committed
 }
 
 func (scope *nativeCallScope) call(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
@@ -1006,143 +954,7 @@ func (scope *nativeCallScope) call(ctx context.Context, service, method string, 
 			return extension.Result{}, err
 		}
 	}
-	if result, handled, err := scope.callHostService(callCtx, service, method, args); handled {
-		return result, err
-	}
-	if service == extension.ContractSession {
-		if scope.activation == nil || !scope.activation.services[service] || scope.session.SessionID == "" {
-			return extension.Result{}, ErrDenied
-		}
-		if scope.host == nil || scope.host.hosts == nil || scope.host.hosts.background == nil || scope.host.hosts.background.h == nil {
-			return extension.Result{}, extension.ErrClosed
-		}
-		if method == "start" && (scope.pure || scope.workspaceBind || scope.start == nil) {
-			return extension.Result{}, ErrDenied
-		}
-		args, err = acceptHostMethod(service, method, args, scope.pure)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		h := scope.host.hosts.background.h
-		switch method {
-		case "members":
-			members, err := h.SessionMembers(callCtx, scope.session.SessionID)
-			return commandResult(members, err)
-		case "start":
-			start := scope.start
-			start.mu.Lock()
-			if start.consumed {
-				start.mu.Unlock()
-				return extension.Result{}, fmt.Errorf("session start already consumed: %w", harness.ErrConflict)
-			}
-			start.consumed = true
-			start.mu.Unlock()
-			operationID, err := mintInstance()
-			if err != nil {
-				return extension.Result{}, err
-			}
-			var states map[string]harness.SessionStateValue
-			if start.plan.InitialState != nil {
-				states = map[string]harness.SessionStateValue{start.extensionID: bytes.Clone(start.plan.InitialState)}
-			}
-			launched, err := h.LaunchChildSession(callCtx, harness.LaunchChildRequest{
-				ParentSessionID: scope.session.SessionID, ExtensionID: start.extensionID,
-				OperationID: operationID, Inputs: start.plan.Inputs, ExtensionState: states,
-				Content: start.plan.Input, Report: start.plan.Report, OutputLimit: start.plan.OutputLimit,
-			})
-			value, marshalErr := json.Marshal(struct {
-				SessionID string `json:"session_id"`
-			}{launched.ChildSessionID})
-			if marshalErr != nil {
-				return extension.Result{}, marshalErr
-			}
-			if err != nil {
-				if launched.ChildSessionID != "" {
-					return extension.Result{}, &extension.CallError{Err: err, Partial: value}
-				}
-				return extension.Result{}, err
-			}
-			return extension.Result{Value: value}, nil
-		}
-	}
-	if service == extension.ContractState {
-		if scope.activation == nil || !scope.activation.services[service] || scope.pure || scope.session.SessionID == "" {
-			return extension.Result{}, ErrDenied
-		}
-		if scope.host == nil || scope.host.hosts == nil || scope.host.hosts.background == nil || scope.host.hosts.background.h == nil {
-			return extension.Result{}, extension.ErrClosed
-		}
-		args, err = acceptHostMethod(service, method, args, false)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		h := scope.host.hosts.background.h
-		var input struct {
-			Value json.RawMessage `json:"value"`
-		}
-		if err := json.Unmarshal(args, &input); err != nil {
-			return extension.Result{}, fmt.Errorf("state value: %v: %w", err, harness.ErrInvalid)
-		}
-		if _, err := h.SetSessionExtensionState(callCtx, scope.session.SessionID, scope.activation.id, harness.SessionStateValue(input.Value)); err != nil {
-			return extension.Result{}, err
-		}
-		scope.receipt.mark()
-		return extension.Result{Value: json.RawMessage("null")}, nil
-	}
-	if service == "melta.workspace" {
-		if scope.activation == nil || !scope.activation.services[service] || scope.workspace == nil {
-			return extension.Result{}, ErrDenied
-		}
-		args, err = acceptHostMethod(service, method, args, scope.pure && !scope.workspaceBind)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		if method == "bind" {
-			if !scope.workspaceBind {
-				return extension.Result{}, ErrDenied
-			}
-			return scope.workspace.bind(args)
-		}
-		if scope.pure || scope.workspaceBind {
-			return extension.Result{}, ErrDenied
-		}
-		return scope.workspace.execute(callCtx, method, args, scope.permissions)
-	}
-	if service == "melta.settings" {
-		if scope.activation == nil || !scope.activation.services[service] || scope.pure || scope.commandScope.Kind != CallerScopeHarness {
-			return extension.Result{}, ErrDenied
-		}
-		args, err = acceptHostMethod(service, method, args, false)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		result, err := scope.updateSettings(callCtx, args)
-		if err == nil {
-			scope.receipt.mark()
-		}
-		return result, err
-	}
-	if service == extension.ContractCommands {
-		if scope.activation == nil || !scope.activation.services[service] || scope.pure || scope.commandScope.Kind == "" {
-			return extension.Result{}, ErrDenied
-		}
-		if scope.host == nil {
-			return extension.Result{}, extension.ErrClosed
-		}
-		args, err = acceptHostMethod(service, method, args, false)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		handler, ok := scope.host.commandsHandler(method)
-		if !ok {
-			return extension.Result{}, fmt.Errorf("command method %q: %w", method, harness.ErrNotFound)
-		}
-		callCtx = context.WithValue(callCtx, grantContextKey{}, nativeGrant{commands: true, commandScope: scope.commandScope})
-		result, err := handler(callCtx, hostCall{ExtensionID: scope.activation.id, SessionID: scope.session.SessionID, Workspace: scope.session.Workspace}, args)
-		scope.receipt.command(result, err)
-		return result, err
-	}
-	return scope.candidate.callServiceScoped(callCtx, service, method, args, scope)
+	return scope.dispatch(callCtx, service, method, args)
 }
 
 func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method string, args json.RawMessage, parent *nativeCallScope) (extension.Result, error) {
@@ -1191,7 +1003,7 @@ func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method
 			release()
 		}
 	}()
-	args, err := acceptNativeMethod(binding.contract, args, parent.pure)
+	args, err := acceptNativeMethod(binding.contract, args)
 	if err != nil {
 		return extension.Result{}, err
 	}
@@ -1199,7 +1011,7 @@ func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method
 		return extension.Result{}, err
 	}
 	childCtx, cancel := context.WithCancel(ctx)
-	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, pure: parent.pure || binding.contract.Mode == extension.ModePure, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, receipt: parent.receipt, start: parent.start, requestID: parent.requestID})
+	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, kind: parent.kind, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, start: parent.start, requestID: parent.requestID})
 	return executeNativeProvider(scope.ctx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call, RequestID: scope.requestID}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 		defer scope.end()
 		return binding.handler(ctx, call, args)

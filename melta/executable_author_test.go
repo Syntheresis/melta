@@ -173,7 +173,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			spawns := 0
 			host := extension.Extension{Manifest: registrarManifest("host-fixture"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 				_, err := api.RegisterService(extension.Service{Name: "host-service", Methods: []extension.RegisteredMethod{{
-					Method: extension.Method{Name: "echo", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "echo", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						return extension.Result{Value: args}, nil
 					},
@@ -233,7 +233,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if err := candidate.publishForTest(); err != nil {
 				t.Fatal(err)
 			}
-			result, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"value":123}`), &nativeCallScope{pure: true})
+			result, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"value":123}`), &nativeCallScope{})
 			if err != nil || string(result.Value) != `{"value":123}` {
 				t.Fatalf("nested worker call: %s, %v", result.Value, err)
 			}
@@ -431,7 +431,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if err == nil || harness.DeclaredExecutionKnowledge(err) != harness.ExecutionUnknown {
 				t.Fatalf("lost terminal evidence: %v", err)
 			}
-			if _, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{}`), &nativeCallScope{pure: true}); err == nil {
+			if _, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{}`), &nativeCallScope{}); err == nil {
 				t.Fatal("lost activation served another call")
 			}
 			if _, err := captured.stage(); err == nil {
@@ -450,7 +450,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if nextStage.services["worker-service"] != nil || nextStage.services["host-service"] == nil {
 				t.Fatal("new admission did not omit only the failed worker")
 			}
-			if result, err := candidate.callServiceScoped(context.Background(), "host-service", "echo", json.RawMessage(`{"ok":true}`), &nativeCallScope{pure: true}); err != nil || string(result.Value) != `{"ok":true}` {
+			if result, err := candidate.callServiceScoped(context.Background(), "host-service", "echo", json.RawMessage(`{"ok":true}`), &nativeCallScope{}); err != nil || string(result.Value) != `{"ok":true}` {
 				t.Fatalf("healthy sibling: %s, %v", result.Value, err)
 			}
 			makeCandidate := func(section string, secret string, enabled bool) *nativeCandidate {
@@ -542,7 +542,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	spawns := 0
 	host := extension.Extension{Manifest: registrarManifest("host-fixture"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "host-service", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "echo", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "echo", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: args}, nil
 			},
@@ -642,7 +642,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 		t.Fatalf("healthy successor omitted: %v", err)
 	}
 	stage.release()
-	if result, err := successor.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"ok":true}`), &nativeCallScope{pure: true}); err != nil || string(result.Value) != `{"ok":true}` {
+	if result, err := successor.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"ok":true}`), &nativeCallScope{}); err != nil || string(result.Value) != `{"ok":true}` {
 		t.Fatalf("healthy successor: %s, %v", result.Value, err)
 	}
 	reused := build(`{"revision":2}`)

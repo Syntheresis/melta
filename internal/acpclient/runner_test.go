@@ -60,7 +60,7 @@ func newFixture(t *testing.T, routes map[string]http.HandlerFunc) *fixture {
 	}
 	f.handlers["/v1/events"] = f.idleEvents
 	f.handlers["/v1/configuration"] = jsonHandler(200, `{"agents":[{"name":"primary","definition":{"extension_id":"agents","capability_id":"agents.definitions","definition_id":"primary"},"description":"","subagent":false,"model":"","readonly":false,"write_dir":"","tools":[],"capabilities":[]}]}`)
-	f.handlers["/v1/extensions"] = jsonHandler(200, `[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","mode":"service_io","input":"{}","success":"{}"},"target":"workspace"}]}]`)
+	f.handlers["/v1/extensions"] = jsonHandler(200, `[{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","input":"{}","success":"{}"},"target":"workspace"}]}]`)
 	f.handlers["/v1/extensions/invoke"] = jsonHandler(200, `{"kind":"success","result":{"session_id":"`+startupSessionID+`"}}`)
 	// Startup composition defaults: an empty open-root list and one created
 	// primary Session over the selected Workspace's open-lifecycle list query.
@@ -270,7 +270,7 @@ func startBridge(t *testing.T, f *fixture, workspace string) *bridge {
 func startBridgeWith(t *testing.T, f *fixture, workspace string, writer io.Writer) *bridge {
 	t.Helper()
 	dataDir := t.TempDir()
-	record := fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"24","credential":%q}`,
+	record := fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"25","credential":%q}`,
 		f.server.URL, testInstance, testCredential)
 	testassert.NoError(t, os.WriteFile(filepath.Join(dataDir, "runtime.json"), []byte(record), 0o600))
 	return startRunner(t, clienthost.Options{
@@ -497,7 +497,7 @@ func sseFrame(document string) string {
 }
 
 func healthBody() string {
-	return fmt.Sprintf(`{"instance_id":%q,"protocol_version":"24"}`, testInstance)
+	return fmt.Sprintf(`{"instance_id":%q,"protocol_version":"25"}`, testInstance)
 }
 
 func hydrationBody(sessionID, workspace string) string {
@@ -788,7 +788,7 @@ func TestACPReturnsStructuredDeletionResult(t *testing.T) {
 }
 
 func TestACPStartupDiscoveryControlsCreation(t *testing.T) {
-	supplied := `{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","mode":"service_io","input":"{}","success":"{}"},"target":"workspace"}]}`
+	supplied := `{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","input":"{}","success":"{}"},"target":"workspace"}]}`
 	foreign := `{"extension_id":"guest","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[]}`
 	for _, tc := range []struct {
 		name     string
@@ -990,7 +990,7 @@ func TestACPEventsAndRepair(t *testing.T) {
 	connected := b.awaitFrame(t, methodFrame("runtime/connected"))
 	var health map[string]any
 	testassert.NoError(t, json.Unmarshal(connected["params"], &health))
-	testassert.Require(t, health["instance_id"] == testInstance && health["protocol_version"] == "24", "runtime/connected params = %v, want the generated Health", health)
+	testassert.Require(t, health["instance_id"] == testInstance && health["protocol_version"] == "25", "runtime/connected params = %v, want the generated Health", health)
 	resync := b.awaitFrame(t, methodFrame("runtime/resync_required"))
 	{
 		params, ok := resync["params"]

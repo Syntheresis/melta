@@ -2,7 +2,6 @@ package melta
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
@@ -28,7 +27,7 @@ func TestScopedServiceCredentialsUseServingActivation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	scope := &nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
-		candidate:          candidate, activation: candidate.activations[0], host: r.config.composition,
+		candidate:          candidate, activation: candidate.activations[0], kind: callKindHook, host: r.config.composition,
 	}
 	defer scope.end()
 	result, err := scope.call(ctx, extension.ContractCredentials, "get", []byte(`{"field":"/key"}`))
@@ -38,8 +37,8 @@ func TestScopedServiceCredentialsUseServingActivation(t *testing.T) {
 	if _, err := scope.call(ctx, extension.ContractCredentials, "get", []byte(`{"field":"/other"}`)); err == nil {
 		t.Fatal("undeclared credential accepted")
 	}
-	scope.pure = true
-	if _, err := scope.call(ctx, extension.ContractCredentials, "get", []byte(`{"field":"/key"}`)); !errors.Is(err, ErrDenied) {
-		t.Fatalf("pure credential call: %v", err)
+	scope.kind = callKindAdmission
+	if _, err := scope.call(ctx, extension.ContractCredentials, "get", []byte(`{"field":"/key"}`)); err != nil {
+		t.Fatalf("admission credential call: %v", err)
 	}
 }

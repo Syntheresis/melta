@@ -11,6 +11,18 @@ import (
 	"github.com/Syntheresis/melta/harness"
 )
 
+// nativeCallKind is what one call works for. It decides which host services
+// the call may reach and which stage conditions still apply.
+type nativeCallKind string
+
+const (
+	callKindActivation nativeCallKind = "activation"
+	callKindAdmission  nativeCallKind = "admission"
+	callKindHook       nativeCallKind = "hook"
+	callKindTool       nativeCallKind = "tool"
+	callKindOperation  nativeCallKind = "operation"
+)
+
 // nativeGrant is the private authority one callback scope carries. It never
 // appears in an authoring value.
 type nativeGrant struct {
@@ -120,10 +132,7 @@ func hostGrant(ctx context.Context) nativeGrant {
 	return grant
 }
 
-func acceptNativeMethod(method *extension.CompiledMethod, args json.RawMessage, pure bool) (json.RawMessage, error) {
-	if pure && method.Mode != extension.ModePure {
-		return nil, fmt.Errorf("pure callback cannot invoke %s method %q: %w: %w", method.Mode, method.Name, ErrDenied, ErrComposition)
-	}
+func acceptNativeMethod(method *extension.CompiledMethod, args json.RawMessage) (json.RawMessage, error) {
 	args = append(json.RawMessage(nil), args...)
 	if err := method.ValidateArguments(args); err != nil {
 		return nil, fmt.Errorf("%w: %w", harness.ErrInvalid, err)

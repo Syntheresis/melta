@@ -321,7 +321,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	h := newServiceHarness(t)
 	providerAuthor := credentialAuthor(t, "credprovider", []extension.SecretRef{{Field: "/provider", Lifetime: extension.SecretActivation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "cred_provider", Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""),
+			Method: extension.ServiceMethod("call", `{}`, `{"type":"object"}`, "", ""),
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/provider"}`))
 			},
@@ -381,25 +381,63 @@ func (credentialNestedTool) Execute(ctx context.Context, tc extension.AuthorCont
 	return credentialOutcome("call", "caller="+credentialString(own)+"|provider="+credentialString(nested))
 }
 
-// TestCredentialEffectfulHookUsesOperationCapture proves an effectful
-// arguments hook receives the retained Operation capture through the same
-// callback handoff as tools.
+// TestCredentialEffectfulHookUsesOperationCapture proves every callback kind
+// receives the retained Operation capture through the same handoff: the
+// admission hook changes the declared environment variable to a third value
+// before its own read, and every hook still observes the later value captured
+// for the Operation.
 func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
 	const name = "MELTA_EFFECTFUL_HOOK"
 	t.Setenv(name, "hook-value")
 	h := newServiceHarness(t)
-	var hookValue string
+	var mu sync.Mutex
+	values := map[string]string{}
+	var undeclared error
+	read := func(kind string, call extension.AuthorContext, hookCtx context.Context) {
+		result, err := call.Call(hookCtx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
+		if err != nil {
+			t.Errorf("%s hook credential read: %v", kind, err)
+			return
+		}
+		mu.Lock()
+		values[kind] = credentialString(result)
+		mu.Unlock()
+	}
 	author := credentialAuthor(t, "credhook", []extension.SecretRef{{Field: "/operation", Lifetime: extension.SecretOperation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 		if _, err := api.RegisterTool(testDescribeTool("cred_tool"), testRegisteredTool{}, nil); err != nil {
 			return nil, err
 		}
-		_, err := api.AttachArguments(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
-			result, err := call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
-			if err != nil {
-				return extension.ArgumentsResult{}, err
+		if _, err := api.AttachAdmission(func(ctx context.Context, call extension.AuthorContext, _ extension.AdmissionInput) (extension.AdmissionResult, error) {
+			if err := os.Setenv(name, "third-value"); err != nil {
+				return extension.AdmissionResult{}, err
 			}
-			hookValue = credentialString(result)
+			read("admission", call, ctx)
+			return extension.AdmissionResult{}, nil
+		}, nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.AttachRequest(extension.HookModePure, func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			read("request", call, ctx)
+			return harness.RequestConsequence{}, nil
+		}, nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.AttachArguments(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
+			read("arguments", call, ctx)
 			return extension.ArgumentsResult{Arguments: toolCall.Arguments}, nil
+		}, nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.AttachAuthorization(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorizationInput) (*string, error) {
+			read("authorization", call, ctx)
+			return nil, nil
+		}, nil); err != nil {
+			return nil, err
+		}
+		_, err := api.AttachResult(func(ctx context.Context, call extension.AuthorContext, input harness.ToolOutputInput) (string, error) {
+			read("result", call, ctx)
+			_, undeclared = call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/other"}`))
+			return input.Content, nil
 		}, nil)
 		return nil, err
 	})
@@ -424,21 +462,56 @@ func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
 	})
 	testassert.NoError(t, err)
 	defer prepared.Release()
+	testassert.Equal(t, os.Getenv(name), "third-value")
 	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-hook", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, execution.Close()) }()
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-hook", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	stage := inv.ArgumentStage()
-	if stage.Release != nil {
-		defer stage.Release()
+
+	request := inv.RequestStage()
+	if request.Release != nil {
+		defer request.Release()
 	}
-	testassert.NoError(t, stage.Error)
-	testassert.Require(t, len(stage.Hooks) == 1 && stage.Hooks[0].Mode == harness.HookModeEffectful, "tool hooks = %d, want one effectful hook", len(stage.Hooks))
-	_, err = stage.Hooks[0].Run(context.Background(), model.ToolCall{ID: "call-hook", Name: "cred_tool", Arguments: json.RawMessage(`{}`)})
+	testassert.NoError(t, request.Error)
+	testassert.Require(t, len(request.Hooks) == 1, "request hooks = %d, want one", len(request.Hooks))
+	_, err = request.Hooks[0].Run(context.Background(), harness.RequestHookInput{Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
-	testassert.Equal(t, hookValue, "later-value")
+
+	arguments := inv.ArgumentStage()
+	if arguments.Release != nil {
+		defer arguments.Release()
+	}
+	testassert.NoError(t, arguments.Error)
+	testassert.Require(t, len(arguments.Hooks) == 1 && arguments.Hooks[0].Mode == harness.HookModeEffectful, "tool hooks = %d, want one effectful hook", len(arguments.Hooks))
+	_, err = arguments.Hooks[0].Run(context.Background(), model.ToolCall{ID: "call-hook", Name: "cred_tool", Arguments: json.RawMessage(`{}`)})
+	testassert.NoError(t, err)
+
+	authorization := inv.AuthorizationStage()
+	if authorization.Release != nil {
+		defer authorization.Release()
+	}
+	testassert.NoError(t, authorization.Error)
+	testassert.Require(t, len(authorization.Hooks) == 1, "authorization hooks = %d, want one", len(authorization.Hooks))
+	_, err = authorization.Hooks[0].Run(context.Background(), harness.PreparedAction{}, func(string) (string, error) { return h.dataDir, nil })
+	testassert.NoError(t, err)
+
+	result := inv.ResultStage()
+	if result.Release != nil {
+		defer result.Release()
+	}
+	testassert.NoError(t, result.Error)
+	testassert.Require(t, len(result.Hooks) == 1, "result hooks = %d, want one", len(result.Hooks))
+	_, err = result.Hooks[0].Run(context.Background(), harness.ToolOutputInput{Content: "kept"})
+	testassert.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, kind := range []string{"admission", "request", "arguments", "authorization", "result"} {
+		testassert.Equal(t, values[kind], "later-value")
+	}
+	testassert.Require(t, undeclared != nil, "an undeclared credential field resolved")
 }
 
 // TestCustomProviderCreateRefreshesSharedDeclaredBinding proves a custom

@@ -71,8 +71,8 @@ func compileManifest(m Manifest) (*jsonschema.Schema, error) {
 
 // CompileMethod compiles one independently registered method.
 func CompileMethod(m Method) (*CompiledMethod, error) {
-	if m.Name == "" || !m.Mode.valid() {
-		return nil, invalid("invalid method name or mode")
+	if m.Name == "" {
+		return nil, invalid("invalid method name")
 	}
 	m.Input = append(json.RawMessage(nil), m.Input...)
 	m.Success = append(json.RawMessage(nil), m.Success...)

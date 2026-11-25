@@ -97,7 +97,7 @@ func shAuthorFixtureSource(t *testing.T, version string) (string, extension.Mani
 func shHostServicePlugin() extension.Extension {
 	return testNative("host-fixture", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "host-service", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "echo", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "echo", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: append(json.RawMessage(nil), args...)}, nil
 			},

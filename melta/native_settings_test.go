@@ -44,7 +44,7 @@ func TestSettingsReplace(t *testing.T) {
 	operation := func(name string, target extension.ExposedTargetKind) extension.Operation {
 		return extension.Operation{
 			Target: target,
-			Method: extension.Method{Name: name, Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: name, Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				if hook := takeBefore(); hook != nil {
 					hook()
@@ -113,7 +113,7 @@ func TestSettingsReplace(t *testing.T) {
 			t.Fatal("no published setting activation")
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel}, candidate: candidate, activation: activation, commandScope: harnessScope}
+		scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel}, candidate: candidate, activation: activation, kind: callKindOperation, commandScope: harnessScope}
 		t.Cleanup(func() {
 			scope.end()
 			capture.release()
@@ -336,7 +336,7 @@ func TestSettingsReplace(t *testing.T) {
 		}
 		defer denied.release()
 		ctx, cancel := context.WithCancel(context.Background())
-		scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel}, candidate: denied, activation: denied.activations[0], commandScope: harnessScope}
+		scope := &nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel}, candidate: denied, activation: denied.activations[0], kind: callKindOperation, commandScope: harnessScope}
 		defer scope.end()
 		before := string(mustRead(t, h.configPath))
 		if err := replaceThrough(t, scope, `{"enabled":true,"key":"SETTINGS_KEY"}`); !errors.Is(err, ErrDenied) {
@@ -413,7 +413,7 @@ func TestSettingsReplaceThroughWorker(t *testing.T) {
 				return nil, err
 			}
 			_, err := api.RegisterService(extension.Service{Name: "worker/transform", Methods: []extension.RegisteredMethod{{
-				Method: extension.Method{Name: "warn", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+				Method: extension.Method{Name: "warn", Input: []byte(`{}`), Success: []byte(`{}`)},
 				Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return call.Call(ctx, extension.ContractWarnings, "report", args)
 				},
@@ -421,7 +421,7 @@ func TestSettingsReplaceThroughWorker(t *testing.T) {
 			if err == nil {
 				_, err = api.RegisterOperation(extension.Operation{
 					Target: extension.ExposedTargetHarness,
-					Method: extension.Method{Name: "replace", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+					Method: extension.Method{Name: "replace", Input: []byte(`{}`), Success: []byte(`{}`)},
 					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						replacement, err := decodeRoot(call.Settings)
 						if err != nil {
@@ -462,7 +462,7 @@ func TestSettingsReplaceThroughWorker(t *testing.T) {
 	if !warningExists(svc.warnings, "plugin:settings-worker", "worker-entry") {
 		t.Fatal("worker entry warning missing")
 	}
-	if _, err := candidate.callServiceScoped(context.Background(), "worker/transform", "warn", []byte(`{"kind":"worker-later","message":"after"}`), &nativeCallScope{}); err != nil {
+	if _, err := candidate.callServiceScoped(context.Background(), "worker/transform", "warn", []byte(`{"kind":"worker-later","message":"after"}`), &nativeCallScope{kind: callKindHook}); err != nil {
 		t.Fatal(err)
 	}
 	if !warningExists(svc.warnings, "plugin:settings-worker", "worker-later") {

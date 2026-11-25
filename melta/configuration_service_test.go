@@ -527,7 +527,7 @@ func TestRuntimePreparedReservationSurvivesUntilOpening(t *testing.T) {
 	alpha := extension.Extension{Manifest: registrarManifest("alpha"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		opens.Add(1)
 		_, err := api.RegisterService(extension.Service{Name: "capability.alpha", Methods: []extension.RegisteredMethod{{
-			Method: extension.PureMethod("call", `{}`, `{}`),
+			Method: extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			},

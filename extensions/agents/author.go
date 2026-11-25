@@ -54,11 +54,11 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 	}
 	s := authorInstance{definitions: definitions}
 	operations := []extension.Operation{
-		{Target: extension.ExposedTargetHarness, Method: extension.PureMethod("list", emptyObject, rosterOutput), Handler: s.list},
-		{Target: extension.ExposedTargetSession, Method: extension.PureMethod("current", emptyObject, currentOutput), Handler: s.current},
-		{Target: extension.ExposedTargetSession, Method: extension.ServiceIOMethod("select", agentInput, `{"type":"null"}`), Handler: s.selectAgent},
-		{Target: extension.ExposedTargetWorkspace, Method: extension.ServiceMethod("create", extension.ModeServiceIO, createInput, `{"type":"object"}`, "", `{"type":"object"}`), Handler: s.create},
-		{Target: extension.ExposedTargetHarness, Method: extension.ServiceIOMethod("set_model", setModelInputSchema, `{"type":"null"}`), Handler: s.setModel},
+		{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("list", emptyObject, rosterOutput, "", ""), Handler: s.list},
+		{Target: extension.ExposedTargetSession, Method: extension.ServiceMethod("current", emptyObject, currentOutput, "", ""), Handler: s.current},
+		{Target: extension.ExposedTargetSession, Method: extension.ServiceMethod("select", agentInput, `{"type":"null"}`, "", ""), Handler: s.selectAgent},
+		{Target: extension.ExposedTargetWorkspace, Method: extension.ServiceMethod("create", createInput, `{"type":"object"}`, "", `{"type":"object"}`), Handler: s.create},
+		{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("set_model", setModelInputSchema, `{"type":"null"}`, "", ""), Handler: s.setModel},
 	}
 	for _, op := range operations {
 		if _, err := api.RegisterOperation(op, nil); err != nil {

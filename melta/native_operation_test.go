@@ -42,12 +42,12 @@ func TestScopedServiceReadVersusForkReceiptAfterDeletion(t *testing.T) {
 	manifest.Services = []string{extension.ContractCommands}
 	e := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		if _, err := api.RegisterService(extension.Service{Name: "relay", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "fork", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "fork", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				return call.Call(ctx, extension.ContractCommands, "fork", args)
 			},
 		}, {
-			Method: extension.Method{Name: "fake", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "fake", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: []byte(`{"session":{"session_id":"fake"}}`)}, nil
 			},
@@ -56,7 +56,7 @@ func TestScopedServiceReadVersusForkReceiptAfterDeletion(t *testing.T) {
 		}
 		read := extension.Operation{
 			Target: extension.ExposedTargetSession,
-			Method: extension.Method{Name: "read", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "read", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				close(readEntered)
 				<-release
@@ -68,7 +68,7 @@ func TestScopedServiceReadVersusForkReceiptAfterDeletion(t *testing.T) {
 		}
 		fake := extension.Operation{
 			Target: extension.ExposedTargetSession,
-			Method: extension.Method{Name: "fake", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "fake", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				result, err := call.Call(ctx, "relay", "fake", args)
 				close(fakeEntered)
@@ -81,7 +81,7 @@ func TestScopedServiceReadVersusForkReceiptAfterDeletion(t *testing.T) {
 		}
 		fork := extension.Operation{
 			Target: extension.ExposedTargetSession,
-			Method: extension.Method{Name: "fork", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "fork", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				result, err := call.Call(ctx, "relay", "fork", args)
 				close(forkEntered)
@@ -123,12 +123,12 @@ func TestScopedServiceReadVersusForkReceiptAfterDeletion(t *testing.T) {
 	}
 	close(release)
 	read := <-readDone
-	if !errors.Is(read.err, harness.ErrNotFound) {
+	if read.err != nil || string(read.result.Value) != `{"read":true}` {
 		t.Fatalf("read after deletion: %+v", read)
 	}
 	fake := <-fakeDone
-	if !errors.Is(fake.err, harness.ErrNotFound) {
-		t.Fatalf("fabricated nested receipt after deletion: %+v", fake)
+	if fake.err != nil || string(fake.result.Value) != `{"session":{"session_id":"fake"}}` {
+		t.Fatalf("handler value after deletion: %+v", fake)
 	}
 	fork := <-forkDone
 	if fork.err != nil || len(fork.result.Value) == 0 || fork.result.Failure != nil {
@@ -137,6 +137,9 @@ func TestScopedServiceReadVersusForkReceiptAfterDeletion(t *testing.T) {
 	var receipt protocol.ForkResult
 	if err := json.Unmarshal(fork.result.Value, &receipt); err != nil || receipt.Session.SessionId == "" || receipt.Operation.OperationId != "fork-op" {
 		t.Fatalf("invalid fork receipt: %+v %v", receipt, err)
+	}
+	if _, err := r.invokeRegisteredOperation(ctx, testCaller(r), "operation", "read", sessionTarget(session), []byte(`{}`), "req-after-delete"); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("operation started on a deleted Session = %v, want not-found", err)
 	}
 }
 
@@ -160,7 +163,7 @@ func TestScopedServiceBufferedSubmitReceiptSurvivesCancellation(t *testing.T) {
 	e := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetSession,
-			Method: extension.Method{Name: "submit", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "submit", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				result, err := call.Call(ctx, extension.ContractCommands, "submit", args)
 				close(entered)
@@ -176,7 +179,7 @@ func TestScopedServiceBufferedSubmitReceiptSurvivesCancellation(t *testing.T) {
 		}
 		_, err = api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetSession,
-			Method: extension.Method{Name: "submit-success", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "submit-success", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				result, err := call.Call(ctx, extension.ContractCommands, "submit", args)
 				close(successEntered)
@@ -189,7 +192,7 @@ func TestScopedServiceBufferedSubmitReceiptSurvivesCancellation(t *testing.T) {
 		}
 		_, err = api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetSession,
-			Method: extension.Method{Name: "partial", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "partial", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				if _, err := call.Call(ctx, extension.ContractCommands, "submit", args); err != nil {
 					return extension.Result{}, err
@@ -221,8 +224,8 @@ func TestScopedServiceBufferedSubmitReceiptSurvivesCancellation(t *testing.T) {
 	got := <-done
 	var receipt protocol.SubmitResult
 	var canceled *extension.CallError
-	if !errors.Is(got.err, context.Canceled) || !errors.As(got.err, &canceled) || json.Unmarshal(canceled.Partial, &receipt) != nil || receipt.Disposition != protocol.SubmitResultDispositionSteering || receipt.Operation != nil {
-		t.Fatalf("buffered receipt: %+v %+v", got, receipt)
+	if !errors.Is(got.err, context.Canceled) || errors.As(got.err, &canceled) {
+		t.Fatalf("buffered receipt: %+v, want the handler's cancellation without a partial", got)
 	}
 	partialArgs, err := json.Marshal(commandSubmitRequest(t, "partial-buffered", "partial"))
 	if err != nil {
@@ -264,7 +267,7 @@ func TestScopedServiceOperationSelfReplacementRetainsHandler(t *testing.T) {
 	makeOperation := func(value string) extension.Operation {
 		return extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "replace", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "replace", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: []byte(`"` + value + `"`)}, nil
 			},
@@ -295,15 +298,5 @@ func TestScopedServiceOperationSelfReplacementRetainsHandler(t *testing.T) {
 		if err != nil || string(result.Value) != want {
 			t.Fatalf("operation = %s, %v; want %s", result.Value, err, want)
 		}
-	}
-}
-
-func TestScopedServiceCommitMarkerPreservesReceipt(t *testing.T) {
-	receipt := &nativeReceipt{}
-	receipt.command(extension.Result{Value: []byte(`{"receipt":1}`)}, nil)
-	receipt.mark()
-	result, partial := receipt.observed()
-	if !receipt.hasCommit() || result == nil || string(result.Value) != `{"receipt":1}` || len(partial) != 0 {
-		t.Fatalf("receipt after marker: %+v %s", result, partial)
 	}
 }

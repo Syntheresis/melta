@@ -74,7 +74,7 @@ func nativeCallView(t *testing.T, id string, authors ...extension.Extension) *na
 	ctx, cancel := context.WithCancel(context.Background())
 	view := &nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
-		candidate:          candidate, activation: activation, host: &composition{},
+		candidate:          candidate, activation: activation, kind: callKindHook, host: &composition{},
 		session: harness.SessionIdentity{SessionID: testSessionID},
 	}
 	t.Cleanup(view.end)
@@ -110,7 +110,7 @@ func (noopNativeTool) Execute(context.Context, extension.AuthorContext, extensio
 }
 
 func TestNativeToolPlanOwnershipAndDeclaredFailureDispatch(t *testing.T) {
-	provider := serviceNative("provider", "provider", extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`,
+	provider := serviceNative("provider", "provider", extension.ServiceMethod("call", `{}`, `{"type":"object"}`,
 		`{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]}`, `{"type":"string"}`),
 		func(_ context.Context, _ extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
 			if string(arguments) == `{"fail":true}` {
@@ -163,7 +163,7 @@ func (t *planTool) Execute(ctx context.Context, call extension.AuthorContext, pl
 func TestNativeCallOwnsOriginAndJoinsBeforeReturn(t *testing.T) {
 	started := make(chan struct{})
 	finished := make(chan struct{})
-	provider := serviceNative("authprovider", "authprovider", extension.ServiceIOMethod("call", `{}`, `{}`),
+	provider := serviceNative("authprovider", "authprovider", extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 		func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 			close(started)
 			<-ctx.Done()
@@ -256,7 +256,7 @@ func TestNativeCallbackViewCancelsAndJoinsThroughHarness(t *testing.T) {
 	finished := make(chan struct{})
 	native := testNative("origin", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "origin.provider", Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceIOMethod("call", `{}`, `{}`),
+			Method: extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 			Handler: func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				close(started)
 				<-ctx.Done()
@@ -337,7 +337,7 @@ func (p *ownershipProbe) Execute(ctx context.Context, call extension.AuthorConte
 
 func TestNativeServiceArgumentsAndResultAreOwned(t *testing.T) {
 	kept := []byte(`{"ok":true}`)
-	provider := serviceNative("own", "own.provider", extension.ServiceIOMethod("call", `{}`, `{}`),
+	provider := serviceNative("own", "own.provider", extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 		func(_ context.Context, _ extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
 			if len(arguments) != 0 {
 				arguments[0] = 'x'
@@ -362,7 +362,7 @@ type narrowService struct {
 }
 
 func (n *narrowService) native() extension.Extension {
-	return serviceNative("narrowprovider", "narrow.provider", extension.ServiceIOMethod("call", `{}`, `{}`),
+	return serviceNative("narrowprovider", "narrow.provider", extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 		func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 			return n.handler(ctx, call, args)
 		})
@@ -433,14 +433,14 @@ func TestNativeSuppliedContextNarrowsButCannotDetachOrigin(t *testing.T) {
 func TestNativeSuppliedCancellationPropagatesTransitively(t *testing.T) {
 	innerEntered := make(chan struct{})
 	innerCanceled := make(chan struct{})
-	inner := serviceNative("inner", "inner.provider", extension.ServiceIOMethod("call", `{}`, `{}`),
+	inner := serviceNative("inner", "inner.provider", extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 		func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 			close(innerEntered)
 			<-ctx.Done()
 			close(innerCanceled)
 			return extension.Result{}, ctx.Err()
 		})
-	outer := serviceNative("outer", "outer.provider", extension.ServiceIOMethod("call", `{}`, `{}`),
+	outer := serviceNative("outer", "outer.provider", extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 		func(_ context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 			return call.Call(context.Background(), "inner.provider", "call", json.RawMessage(`{}`))
 		})
@@ -481,7 +481,7 @@ func (normalizeWaitTool) Execute(context.Context, extension.AuthorContext, exten
 // interrupts a waiting pure provider.
 func TestNativeNormalizeFollowsInvocationCancellation(t *testing.T) {
 	started := make(chan struct{})
-	provider := serviceNative("normprovider", "norm.provider", extension.PureMethod("wait", `{}`, `{}`),
+	provider := serviceNative("normprovider", "norm.provider", extension.ServiceMethod("wait", `{}`, `{}`, "", ""),
 		func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 			close(started)
 			<-ctx.Done()
@@ -1025,7 +1025,7 @@ func TestNativeNormalizeUsesCompleteIdentityCarrier(t *testing.T) {
 	state := &normalizeIdentityState{}
 	provider := testNative("identprovider", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "test.ident.provider", Methods: []extension.RegisteredMethod{{
-			Method: extension.PureMethod("call", `{}`, `{}`),
+			Method: extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 			Handler: func(_ context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				state.mu.Lock()
 				state.provider = append(state.provider, normalizeIdentity{extensionID: call.ExtensionID, requestID: call.RequestID, sessionID: call.Session.SessionID})

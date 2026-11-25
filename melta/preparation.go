@@ -307,7 +307,8 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 				Sections: promptProvider.sections, Rules: promptProvider.ruleSections, Environment: promptProvider.environment,
 			},
 		}
-		candidate, err = runRegisteredAdmission(ctx, stage, admission, req.Session.ExtensionState, snapshot.composition, known, p.config.strategy.ID)
+		operationSecrets := captured.operationSecrets()
+		candidate, err = runRegisteredAdmission(ctx, stage, admission, req.Session.ExtensionState, snapshot.composition, operationSecrets, known, p.config.strategy.ID)
 		if err != nil {
 			return harness.PreparedExecution{}, err
 		}
@@ -321,7 +322,7 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		for i, tool := range candidate.Tools {
 			finalNames[i] = tool.Name
 		}
-		sel := selection{candidate: candidate, native: native, states: req.Session.ExtensionState, prompt: promptProvider, catalog: catalog, defaultAll: defaults.Tools == nil && slices.Equal(initialNames, finalNames), strategy: strategy, invocation: invocation, credentials: captured.snapshot.credentials}
+		sel := selection{candidate: candidate, native: native, states: req.Session.ExtensionState, prompt: promptProvider, catalog: catalog, defaultAll: defaults.Tools == nil && slices.Equal(initialNames, finalNames), strategy: strategy, invocation: invocation, credentials: captured.snapshot.credentials, operationSecrets: operationSecrets}
 		entry, transport, err := p.bindModel(ctx, &sel)
 		if err != nil {
 			return harness.PreparedExecution{}, err
@@ -338,7 +339,6 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 			return harness.PreparedExecution{}, err
 		}
 		sel.permissions = evaluator
-		sel.operationSecrets = captured.operationSecrets()
 
 		callCtx, release, err := workspaceScope.enter(ctx)
 		if err != nil {
