@@ -2,7 +2,7 @@ package melta
 
 // Independent-command and committed-observation transport suite: the same
 // observer, timer submit, saved-callback reuse, in-callback command and target
-// containment run through the in-process native author and the real installed
+// containment run through the in-process native author and the installed
 // worker fixture at the owner boundary. Retained-work delivery and the
 // bounded-queue isolation rules are exercised once at their owner.
 
@@ -472,8 +472,11 @@ func independentOwnerAt(t *testing.T, workerMode bool, access map[string]Extensi
 	e.fixtureStore(storage.NewMemory())
 	opts := e.options()
 	if workerMode {
-		t.Setenv("AUTHOR_FIXTURE_MODE", "independent")
-		installExecutablePackage(t, e.dataDir, authorFixtureManifest(), buildAuthorWorker(t))
+		spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+			return nativeIndependentFixture(), nil
+		}}
+		spawner.install()
+		opts.Extensions = append(opts.Extensions, executableAuthorExtension(authorFixtureManifest(), "author-worker", adapterEnvironment))
 	} else {
 		opts.Extensions = append(opts.Extensions, nativeIndependentFixture())
 	}

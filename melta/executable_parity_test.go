@@ -1,11 +1,10 @@
 package melta
 
-// Native/worker transport-boundary parity: the shipped author worker fixture
-// (extension/worker/testdata/author) runs as a real stdio process, and its
-// in-process native counterpart runs the same manifest, registrations, and
-// handler semantics. Every case compares the semantic values both transports
-// produce at the owner boundary; the filesystem, lifecycle, and client cases
-// belong to their owners and are not reproduced in both forms.
+// Native/worker transport-boundary parity: one author fixture's manifest,
+// registrations, and handler semantics run directly and through the
+// in-process pipe adapter. Every case compares the semantic values both
+// transports produce at the owner boundary; the filesystem, lifecycle, and
+// client cases belong to their owners and are not reproduced in both forms.
 
 import (
 	"context"
@@ -14,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"testing"
 
@@ -45,11 +43,10 @@ func hashHex(raw []byte) string {
 }
 
 // eachAuthorTransport runs one case through the in-process native fixture and
-// the real worker process over the same candidate fixture, then compares the
-// two semantic observations.
-func eachAuthorTransport(t *testing.T, run func(t *testing.T, workerHost bool, binary string) parityObservation) {
+// the pipe adapter over the same candidate fixture, then compares the two
+// semantic observations.
+func eachAuthorTransport(t *testing.T, run func(t *testing.T, workerHost bool) parityObservation) {
 	t.Helper()
-	binary := buildAuthorWorker(t)
 	observed := make([]parityObservation, 2)
 	complete := true
 	for index, workerHost := range []bool{false, true} {
@@ -59,7 +56,13 @@ func eachAuthorTransport(t *testing.T, run func(t *testing.T, workerHost bool, b
 		}
 		index, workerHost := index, workerHost
 		if !t.Run(name, func(t *testing.T) {
-			observed[index] = run(t, workerHost, binary)
+			if workerHost {
+				spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+					return nativeAuthorFixture(), nil
+				}}
+				spawner.install()
+			}
+			observed[index] = run(t, workerHost)
 		}) {
 			complete = false
 		}
@@ -253,13 +256,11 @@ func TestAuthorTransportBoundaryParity(t *testing.T) {
 		"{\"big\":9007199254740993,\"precise\":1.0000000000000002}",
 		"{\"text\":\"line\\nbreak\\ttab <>& \\u2028 \\u00e9 \\\"quoted\\\"\"}",
 	}
-	eachAuthorTransport(t, func(t *testing.T, workerHost bool, binary string) parityObservation {
+	eachAuthorTransport(t, func(t *testing.T, workerHost bool) parityObservation {
 		manifest := authorFixtureManifest()
 		guest := nativeAuthorFixture()
 		if workerHost {
-			guest = executableAuthorExtension(manifest, binary, func(context.Context, []string) ([]string, error) {
-				return append([]string(nil), os.Environ()...), nil
-			})
+			guest = executableAuthorExtension(manifest, "author-worker", adapterEnvironment)
 		}
 		owner := &configurationService{}
 		ctx := context.Background()

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -46,19 +45,16 @@ func TestBuiltinPrimaryKeepsRegisteredTools(t *testing.T) {
 }
 
 func TestBundledAuthorNativeWorkerParity(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "bundled")
-	command := exec.Command("go", "build", "-o", binary, "./testdata/authorbundled")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v: %s", err, output)
-	}
 	for _, entry := range []extension.Extension{agents.Author(), adaptation.Author()} {
 		for _, worker := range []bool{false, true} {
 			t.Run(entry.Manifest.ID+map[bool]string{false: "/native", true: "/worker"}[worker], func(t *testing.T) {
 				selected := entry
 				if worker {
-					selected = executableAuthorExtension(entry.Manifest, binary, func(context.Context, []string) ([]string, error) {
-						return append(os.Environ(), "BUNDLED_EXTENSION="+entry.Manifest.ID), nil
-					})
+					spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+						return entry, nil
+					}}
+					spawner.install()
+					selected = executableAuthorExtension(entry.Manifest, "author-worker", adapterEnvironment)
 				}
 				owner := &configurationService{}
 				var section []byte

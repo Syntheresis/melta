@@ -73,12 +73,6 @@ func main() {
 		}
 		return
 	}
-	if os.Getenv("AUTHOR_FIXTURE_MODE") == "independent" {
-		if err := worker.Serve(context.Background(), independentFixture(), os.Stdin, os.Stdout); err != nil {
-			os.Exit(1)
-		}
-		return
-	}
 	if os.Getenv("AUTHOR_FIXTURE_SECRET") != "" {
 		os.Exit(18)
 	}

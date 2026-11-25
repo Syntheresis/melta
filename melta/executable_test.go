@@ -1624,7 +1624,7 @@ func TestExecutableCredentialRotationRetiresWorkerKeepsCapture(t *testing.T) {
 		return settings + `,"extensions":{"peer":{"enabled":true,"token":"` + name + `"}}}`
 	}
 	writeServiceFile(t, configPath, config(`{"providers":{}`))
-	installExecutablePackage(t, dataDir, manifest, buildAuthorWorker(t))
+	installExecutablePackage(t, dataDir, manifest, "author-worker")
 	owner, err := Open(context.Background(), Options{
 		DataDir:       dataDir,
 		Configuration: NewFileConfigurationSource(configPath),
