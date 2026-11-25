@@ -55,11 +55,8 @@ const (
 	mutationUncertain
 )
 
-// mutateBound revalidates around capture and keeps the mutation outcome separate from errors.
+// mutateBound revalidates after capture and keeps the mutation outcome separate from errors.
 func mutateBound(bound boundCall, store SnapshotStore, preflight func() error, mutate func() (mutationOutcome, []byte, bool, error)) (mutationOutcome, error) {
-	if err := bound.revalidate(); err != nil {
-		return mutationUntouched, fmt.Errorf("%s: resolve path: %w", bound.toolName, err)
-	}
 	if preflight != nil {
 		if err := preflight(); err != nil {
 			return mutationUntouched, err

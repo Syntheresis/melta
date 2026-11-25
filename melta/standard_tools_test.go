@@ -3,6 +3,7 @@ package melta
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,8 +13,52 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
+	"github.com/Syntheresis/melta/internal/tool"
 	"github.com/Syntheresis/melta/model"
 )
+
+func TestMutationOutcomeEvidence(t *testing.T) {
+	failure := errors.New("mutation failed")
+	for _, tc := range []struct {
+		name     string
+		outcome  tool.MutationOutcome
+		err      error
+		status   model.ToolResultStatus
+		evidence harness.ExecutionEvidence
+		content  string
+	}{
+		{"success", tool.MutationCompleted, nil, model.ResultSuccess, "", "written"},
+		{"untouched", tool.MutationUntouched, failure, model.ResultError, "", "mutation failed"},
+		{"completed", tool.MutationCompleted, failure, model.ResultError, "", "mutation failed"},
+		{"uncertain", tool.MutationUncertain, failure, model.ResultError, harness.ExecutionUnknown, "mutation failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mutationOutcome("call", "written", tc.outcome, tc.err)
+			testassert.Require(t, got.Result.CallID == "call" && got.Result.Status == tc.status && got.Result.Content == tc.content && got.Evidence == tc.evidence, "outcome = %+v", got)
+		})
+	}
+}
+
+func TestStandardToolErrorDiagnosticsAreBounded(t *testing.T) {
+	longError := errors.New(strings.Repeat("x", maxDiagnosticBytes+10))
+	got := mutationOutcome("call", "", tool.MutationUncertain, longError)
+	testassert.Require(t, got.Result.Status == model.ResultError && len(got.Result.Content) == maxDiagnosticBytes && got.Evidence == harness.ExecutionUnknown, "mutation outcome = %+v", got)
+	got = backgroundStartOutcome("call", longError)
+	testassert.Require(t, got.Result.Status == model.ResultError && len(got.Result.Content) == maxDiagnosticBytes, "background outcome = %+v", got)
+}
+
+func TestStandardToolInvalidNumericArgumentsReturnErrors(t *testing.T) {
+	tools := newStandardTools(t.TempDir(), nil, newLiveToolOutput(newObservation()))
+	tc := callToolContext(t.TempDir())
+	for _, test := range []struct{ name, args string }{
+		{"read_file", `{"path":"a","offset":"wrong"}`},
+		{"read_file", `{"path":"a","limit":null}`},
+		{"run_command", `{"command":"true","timeout":false}`},
+	} {
+		result := tools[test.name](context.Background(), tc, makeCall(t, test.name, test.args))
+		testassert.Require(t, result.Result.Status == model.ResultError, "%s %s: %+v", test.name, test.args, result)
+	}
+}
 
 // Direct standard-tool contract tests: the baseline tool values are built
 // from one constructed state the way the owner composes them; the zero
@@ -25,12 +70,6 @@ const (
 	testSessionID = "0123456789abcdef0123456789abcdef"
 	testEntryID   = "fedcba9876543210fedcba9876543210"
 )
-
-// directTools constructs the baseline tool values over one data root with no
-// jobs service, the way newStandardTools composes them.
-func directTools(dataDir string) map[string]Tool {
-	return newStandardTools(dataDir, nil, newLiveToolOutput(newObservation()))
-}
 
 // callToolContext is the ToolContext the direct tests prepare with: a real
 // temporary Workspace, a valid-looking admitted-input identity, and the zero
@@ -48,18 +87,6 @@ func makeCall(t *testing.T, name, args string) model.ToolCall {
 	call, err := model.NewToolCall(model.ToolCall{ID: "call-1", Name: name, Arguments: json.RawMessage(args)})
 	testassert.NoError(t, err)
 	return call
-}
-
-// prepare normalizes and prepares one call, returning the plan.
-func prepare(t *testing.T, tool Tool, tc ToolContext, name, args string) toolPlan {
-	t.Helper()
-	return tool.Prepare(context.Background(), tc, makeCall(t, name, args))
-}
-
-// normalize runs one tool's normalization over raw argument bytes.
-func normalize(t *testing.T, tool Tool, tc ToolContext, name, args string) (json.RawMessage, error) {
-	t.Helper()
-	return tool.Normalize(context.Background(), tc, makeCall(t, name, args))
 }
 
 // groupDir is the exact per-Operation code-group directory the mutating
@@ -89,7 +116,7 @@ func TestStandardToolSchemaRejectsBeforeRun(t *testing.T) {
 	testassert.Require(t, result.Implementation == nil && len(result.NormalizedArguments) == 0, "validation exit recorded selection: %+v", result)
 }
 
-func TestStandardToolPreparationFailureNotStarted(t *testing.T) {
+func TestStandardToolPathFailureObserved(t *testing.T) {
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
 	e.server.setScript(func(_ context.Context, body string) []string {
@@ -108,7 +135,7 @@ func TestStandardToolPreparationFailureNotStarted(t *testing.T) {
 	submitThroughRuntime(t, r, session.Identity.SessionID, "path", "read")
 	awaitOperation(t, r, session.Identity.SessionID, "path", harness.OperationSuccess)
 	result := toolResultFact(t, r, session.Identity.SessionID, "path")
-	testassert.Require(t, result.Status == model.ResultError && result.Evidence == harness.ExecutionNotStarted && strings.Contains(result.Content, "resolve path"), "result = %+v", result)
+	testassert.Require(t, result.Status == model.ResultError && result.Evidence == harness.ExecutionObserved && strings.Contains(result.Content, "resolve path"), "result = %+v", result)
 }
 
 func TestValidateConfigSettings(t *testing.T) {
@@ -263,135 +290,4 @@ func TestProcessDescriptionAndSchemaMatchRetained(t *testing.T) {
 	testassert.Check(t, got.Description == wantProcessDescription, "process description = %q, want the retained description %q", got.Description, wantProcessDescription)
 	assertJSONEqual(t, got.Parameters, json.RawMessage(wantProcessParameters))
 	testassert.Check(t, got.Name == "process", "process definition = %+v, want name process", got)
-}
-
-func TestNormalizeArguments(t *testing.T) {
-	byID := directTools(t.TempDir())
-	tc := callToolContext(t.TempDir())
-
-	t.Run("read_file applies defaults and strips private fields", func(t *testing.T) {
-		raw, err := normalize(t, byID["read_file"], tc, "read_file", `{"path":"a.txt","_melta_receipt":"x"}`)
-		testassert.NoError(t, err)
-		var args map[string]any
-		testassert.NoError(t, json.Unmarshal(raw, &args))
-		testassert.Require(t, args["path"] == "a.txt" && args["offset"] == float64(1) && args["limit"] == float64(500), "normalized = %s, want the path with default offset/limit", raw)
-		{
-			_, ok := args["_melta_receipt"]
-			testassert.Require(t, !ok, "normalized arguments retained a private field")
-		}
-	})
-	t.Run("read_file keeps exact integral spellings and rejects fractions and overflow", func(t *testing.T) {
-		raw, err := normalize(t, byID["read_file"], tc, "read_file", `{"path":"a","offset":1e0,"limit":2.0}`)
-		testassert.NoError(t, err)
-		testassert.Require(t, strings.Contains(string(raw), `"offset":1`) && strings.Contains(string(raw), `"limit":2`), "normalized = %s, want exact integral values", raw)
-		{
-			_, err := normalize(t, byID["read_file"], tc, "read_file", `{"path":"a","limit":2.5}`)
-			testassert.Check(t, err != nil, "fractional limit normalized, want rejection")
-		}
-		{
-			_, err := normalize(t, byID["read_file"], tc, "read_file", `{"path":"a","offset":99999999999999999999}`)
-			testassert.Check(t, err != nil, "overflowing offset normalized, want rejection")
-		}
-	})
-	t.Run("strict schema errors", func(t *testing.T) {
-		for name, args := range map[string]string{
-			"read_file":   `{"path":5}`,
-			"read_file2":  `{"path":"a","limit":"many"}`,
-			"write_file":  `{"path":"a"}`,
-			"write_file2": `{"path":"a","content":5}`,
-			"edit_file":   `{"path":"a","old_string":"x","new_string":5}`,
-			"edit_file2":  `{"path":"a","old_string":"x","new_string":"y","replace_all":"yes"}`,
-		} {
-			toolName := name
-			if strings.HasSuffix(toolName, "2") {
-				toolName = strings.TrimSuffix(toolName, "2")
-			}
-			{
-				_, err := normalize(t, byID[toolName], tc, toolName, args)
-				testassert.Check(t, err != nil, "%s normalized %s, want rejection", toolName, args)
-			}
-		}
-	})
-	t.Run("process requires string action and id members when present", func(t *testing.T) {
-		for _, args := range []string{
-			`{"action":5}`,
-			`{"action":null}`,
-			`{"action":"read","id":5}`,
-			`{"action":"list","id":true}`,
-		} {
-			{
-				_, err := normalize(t, byID["process"], tc, "process", args)
-				testassert.Check(t, err != nil, "process normalized %s, want rejection", args)
-			}
-		}
-		raw, err := normalize(t, byID["process"], tc, "process", `{"action":"read","id":"deadbeef","_melta_receipt":"x","_lightcode_receipt":"ordinary","note":"kept"}`)
-		testassert.NoError(t, err)
-		var normalized map[string]any
-		testassert.NoError(t, json.Unmarshal(raw, &normalized))
-		testassert.Require(t, normalized["action"] == "read" && normalized["id"] == "deadbeef" && normalized["note"] == "kept", "normalized = %s, want the members preserved", raw)
-		testassert.Equal(t, normalized["_lightcode_receipt"], any("ordinary"))
-		{
-			_, ok := normalized["_melta_receipt"]
-			testassert.Require(t, !ok, "normalized arguments retained a private field")
-		}
-	})
-	t.Run("malformed, null and trailing argument bytes are validation errors", func(t *testing.T) {
-		for _, args := range []string{``, `not json`, `null`, `[1]`, `{"path":"a"} trailing`, `"str"`} {
-			for _, name := range []string{"read_file", "write_file", "edit_file", "run_command", "process"} {
-				{
-					_, err := normalize(t, byID[name], tc, name, args)
-					testassert.Check(t, err != nil, "%s normalized %q, want rejection", name, args)
-				}
-			}
-		}
-	})
-}
-
-// TestPrepareBindingSurvivesCanonicalPathsRepoint proves the one-binding
-// contract at the plugin boundary: the canonical Workspace root the plugin
-// resolves for containment is the same witness the shared preparation binds,
-// so repointing the symlink between the plugin's resolution and the shared
-// preparation's binding fails the execution with the changed-binding error
-// instead of executing under the repointed tree.
-func TestPrepareBindingSurvivesCanonicalPathsRepoint(t *testing.T) {
-	cells := []struct {
-		name    string
-		toolID  string
-		args    string
-		content string // planted in the repointed-to directory when nonempty
-	}{
-		{"read_file revalidates the root witness", "read_file", `{"path":"target.txt"}`, "substituted\n"},
-		{"write_file revalidates the root witness", "write_file", `{"path":"target.txt","content":"after"}`, ""},
-		{"edit_file revalidates the root witness", "edit_file", `{"path":"target.txt","old_string":"beta","new_string":"BETA"}`, "beta\n"},
-	}
-	for _, cell := range cells {
-		cell := cell
-		t.Run(cell.name, func(t *testing.T) {
-			byID := directTools(t.TempDir())
-			realA, realB := t.TempDir(), t.TempDir()
-			flipTo := realB
-			link := filepath.Join(t.TempDir(), "w")
-			workspace := link
-			testassert.NoError(t, os.Symlink(realA, link))
-			if cell.content != "" {
-				testassert.NoError(t, os.WriteFile(filepath.Join(flipTo, "target.txt"), []byte(cell.content), 0o644))
-			}
-			// The seam repoints the symlink on its return: after the plugin's
-			// canonical resolution, before the shared preparation binds.
-			orig := canonicalPathsFn
-			canonicalPathsFn = func(root string) (string, error) {
-				w, err := orig(root)
-				if err != nil {
-					return w, err
-				}
-				testassert.NoError(t, os.Remove(link))
-				testassert.NoError(t, os.Symlink(flipTo, link))
-				return w, err
-			}
-			defer func() { canonicalPathsFn = orig }()
-			plan := prepare(t, byID[cell.toolID], callToolContext(workspace), cell.toolID, cell.args)
-			outcome := plan.Execute(context.Background())
-			testassert.Require(t, outcome.Result.Status == model.ResultError && strings.Contains(outcome.Result.Content, "changed"), "result = %+v, want the changed-binding failure without substitution", outcome.Result)
-		})
-	}
 }

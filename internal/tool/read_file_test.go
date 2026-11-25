@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -24,33 +23,20 @@ func readFileTestFileBytes(t *testing.T, name string, data []byte) string {
 	return path
 }
 
-// execRead runs one read through the exported Normalize* + Prepare* entries.
-// An empty rootCanonical is bound from root inside the helper.
-func execRead(t *testing.T, root, rootCanonical string, cfg config.ToolsConfig, args map[string]any) (string, error) {
+func execRead(t *testing.T, root string, cfg config.ToolsConfig, args map[string]any) (string, error) {
 	t.Helper()
-	if rootCanonical == "" {
-		var err error
-		rootCanonical, err = bindWorkspaceRoot(root)
-		if err != nil {
-			return "", err
-		}
-	}
-	norm, err := NormalizeReadArgs(args, cfg.ReadMaxLines)
+	path, offset, limit, err := ReadArgs(args, cfg.ReadMaxLines)
 	if err != nil {
 		return "", err
 	}
-	call, err := PrepareReadCall(root, rootCanonical, cfg, norm)
-	if err != nil {
-		return "", err
-	}
-	return call.Execute(context.Background(), nil)
+	return ReadFile(root, cfg, path, offset, limit)
 }
 
-func TestPreparedReadLineRangesAndFooter(t *testing.T) {
+func TestReadFileLineRangesAndFooter(t *testing.T) {
 	path := readFileTestFile(t, "lines.txt", "one\ntwo\nthree\nfour")
 	root := filepath.Dir(path)
 
-	result, err := execRead(t, root, "", config.ToolsConfig{ReadMaxLines: 500}, map[string]any{
+	result, err := execRead(t, root, config.ToolsConfig{ReadMaxLines: 500}, map[string]any{
 		"path":   path,
 		"offset": json.Number("2"),
 		"limit":  json.Number("2"),
@@ -65,11 +51,11 @@ func TestPreparedReadLineRangesAndFooter(t *testing.T) {
 	testassert.Equal(t, result, want)
 }
 
-func TestPreparedReadDefaultLimitAndFooter(t *testing.T) {
+func TestReadFileDefaultLimitAndFooter(t *testing.T) {
 	path := readFileTestFile(t, "lines.txt", "one\ntwo\nthree")
 	root := filepath.Dir(path)
 
-	result, err := execRead(t, root, "", config.ToolsConfig{ReadMaxLines: 2}, map[string]any{
+	result, err := execRead(t, root, config.ToolsConfig{ReadMaxLines: 2}, map[string]any{
 		"path":   path,
 		"offset": json.Number("-10"),
 		"limit":  json.Number("0"),
@@ -84,7 +70,7 @@ func TestPreparedReadDefaultLimitAndFooter(t *testing.T) {
 	testassert.Equal(t, result, want)
 }
 
-func TestPreparedReadRejectsBinaryFiles(t *testing.T) {
+func TestReadFileRejectsBinaryFiles(t *testing.T) {
 	tests := []struct {
 		name string
 		data []byte
@@ -98,26 +84,26 @@ func TestPreparedReadRejectsBinaryFiles(t *testing.T) {
 			path := readFileTestFileBytes(t, "binary.bin", tt.data)
 			root := filepath.Dir(path)
 
-			_, err := execRead(t, root, "", config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
+			_, err := execRead(t, root, config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
 			testassert.Require(t, err != nil && strings.Contains(err.Error(), "appears to be a binary file"), "Execute error = %v, want binary-file error", err)
 		})
 	}
 }
 
-func TestPreparedReadToleratesInvalidUTF8Text(t *testing.T) {
+func TestReadFileToleratesInvalidUTF8Text(t *testing.T) {
 	path := readFileTestFileBytes(t, "invalid.txt", []byte{'o', 'k', 0xff, '\n', 'n', 'e', 'x', 't'})
 	root := filepath.Dir(path)
 
-	result, err := execRead(t, root, "", config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
+	result, err := execRead(t, root, config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
 	testassert.NoError(t, err)
 	testassert.Require(t, strings.Contains(result, "1\tok") && strings.Contains(result, "2\tnext"), "Execute result = %q, want line-numbered fallback text", result)
 }
 
-func TestPreparedReadTruncatesLongLinesAndOutputBytes(t *testing.T) {
+func TestReadFileTruncatesLongLinesAndOutputBytes(t *testing.T) {
 	path := readFileTestFile(t, "long.txt", "abcdef\nsecond line")
 	root := filepath.Dir(path)
 
-	result, err := execRead(t, root, "", config.ToolsConfig{
+	result, err := execRead(t, root, config.ToolsConfig{
 		ReadMaxLines:     500,
 		ReadLineMaxChars: 3,
 		MaxOutputBytes:   24,

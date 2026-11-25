@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,26 +9,21 @@ import (
 	"github.com/Syntheresis/melta/internal/testassert"
 )
 
-// execEdit runs one edit through the exported Normalize* + Prepare* entries.
-// An empty rootCanonical is bound from root inside the helper.
-func execEdit(t *testing.T, root, rootCanonical string, store SnapshotStore, args map[string]any) (string, error) {
+func execEdit(t *testing.T, root string, store SnapshotStore, args map[string]any) (string, error) {
 	t.Helper()
-	norm, err := NormalizeEditArgs(args)
+	path, oldString, newString, replaceAll, err := EditArgs(args)
 	if err != nil {
 		return "", err
 	}
-	call, err := PrepareEditCall(root, rootCanonical, store, norm)
-	if err != nil {
-		return "", err
-	}
-	return call.Execute(context.Background(), nil)
+	result, _, err := EditFile(root, store, path, oldString, newString, replaceAll)
+	return result, err
 }
 
-func TestPreparedEditReplacesUniqueStringAndReportsLineRange(t *testing.T) {
+func TestEditFileReplacesUniqueStringAndReportsLineRange(t *testing.T) {
 	path := readFileTestFile(t, "file.txt", "alpha\nbeta\ngamma")
 	root := filepath.Dir(path)
 
-	result, err := execEdit(t, root, "", newTempCodeGroupStore(t), map[string]any{
+	result, err := execEdit(t, root, newTempCodeGroupStore(t), map[string]any{
 		"path":       path,
 		"old_string": "beta",
 		"new_string": "delta",
@@ -39,11 +33,11 @@ func TestPreparedEditReplacesUniqueStringAndReportsLineRange(t *testing.T) {
 	assertFileContent(t, path, "alpha\ndelta\ngamma")
 }
 
-func TestPreparedEditReplaceAllReportsAllLineRanges(t *testing.T) {
+func TestEditFileReplaceAllReportsAllLineRanges(t *testing.T) {
 	path := readFileTestFile(t, "file.txt", "same\nother\nsame")
 	root := filepath.Dir(path)
 
-	result, err := execEdit(t, root, "", newTempCodeGroupStore(t), map[string]any{
+	result, err := execEdit(t, root, newTempCodeGroupStore(t), map[string]any{
 		"path":        path,
 		"old_string":  "same",
 		"new_string":  "done",
@@ -54,11 +48,11 @@ func TestPreparedEditReplaceAllReportsAllLineRanges(t *testing.T) {
 	assertFileContent(t, path, "done\nother\ndone")
 }
 
-func TestPreparedEditRejectsAmbiguousMatchWithoutReplaceAll(t *testing.T) {
+func TestEditFileRejectsAmbiguousMatchWithoutReplaceAll(t *testing.T) {
 	path := readFileTestFile(t, "file.txt", "same\nsame")
 	root := filepath.Dir(path)
 
-	_, err := execEdit(t, root, "", newTempCodeGroupStore(t), map[string]any{
+	_, err := execEdit(t, root, newTempCodeGroupStore(t), map[string]any{
 		"path":       path,
 		"old_string": "same",
 		"new_string": "done",
@@ -67,7 +61,7 @@ func TestPreparedEditRejectsAmbiguousMatchWithoutReplaceAll(t *testing.T) {
 	assertFileContent(t, path, "same\nsame")
 }
 
-func TestPreparedEditValidatesOldString(t *testing.T) {
+func TestEditFileValidatesOldString(t *testing.T) {
 	path := readFileTestFile(t, "file.txt", "content")
 	root := filepath.Dir(path)
 
@@ -84,7 +78,7 @@ func TestPreparedEditValidatesOldString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := execEdit(t, root, "", newTempCodeGroupStore(t), map[string]any{
+			_, err := execEdit(t, root, newTempCodeGroupStore(t), map[string]any{
 				"path":       path,
 				"old_string": tt.oldString,
 				"new_string": tt.newString,
@@ -95,11 +89,11 @@ func TestPreparedEditValidatesOldString(t *testing.T) {
 	}
 }
 
-func TestPreparedEditMultilineReplacementLineRange(t *testing.T) {
+func TestEditFileMultilineReplacementLineRange(t *testing.T) {
 	path := readFileTestFile(t, "file.txt", "start\nold\nend")
 	root := filepath.Dir(path)
 
-	result, err := execEdit(t, root, "", newTempCodeGroupStore(t), map[string]any{
+	result, err := execEdit(t, root, newTempCodeGroupStore(t), map[string]any{
 		"path":       path,
 		"old_string": "old",
 		"new_string": "new\nline",
@@ -109,12 +103,12 @@ func TestPreparedEditMultilineReplacementLineRange(t *testing.T) {
 	assertFileContent(t, path, "start\nnew\nline\nend")
 }
 
-func TestPreparedEditWithSnapshotSnapshotsBeforeEdit(t *testing.T) {
+func TestEditFileCapturesSnapshotBeforeEdit(t *testing.T) {
 	path := readFileTestFile(t, "file.txt", "before")
 	root := filepath.Dir(path)
 	store := &recordingCodeGroupStore{testCodeGroupStore: newCodeGroupStore(t, filepath.Join(t.TempDir(), "group"))}
 
-	result, err := execEdit(t, root, "", store, map[string]any{
+	result, err := execEdit(t, root, store, map[string]any{
 		"path":       path,
 		"old_string": "before",
 		"new_string": "after",
@@ -127,7 +121,7 @@ func TestPreparedEditWithSnapshotSnapshotsBeforeEdit(t *testing.T) {
 	assertFileContent(t, path, "after")
 }
 
-func TestPreparedEditWithSnapshotUsesCanonicalTargetAndRequestedResult(t *testing.T) {
+func TestEditFileSnapshotUsesCanonicalTargetAndRequestedResult(t *testing.T) {
 	root := t.TempDir()
 	realDir := t.TempDir()
 	target := filepath.Join(realDir, "file.txt")
@@ -137,7 +131,7 @@ func TestPreparedEditWithSnapshotUsesCanonicalTargetAndRequestedResult(t *testin
 	requested := filepath.Join(linkDir, "file.txt")
 	store := &recordingCodeGroupStore{testCodeGroupStore: newCodeGroupStore(t, filepath.Join(t.TempDir(), "group"))}
 
-	result, err := execEdit(t, root, "", store, map[string]any{
+	result, err := execEdit(t, root, store, map[string]any{
 		"path":       requested,
 		"old_string": "before",
 		"new_string": "after",

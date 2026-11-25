@@ -56,26 +56,25 @@ func TestBaselineSettingsDriveToolsJobsAndCompaction(t *testing.T) {
 	// The real read tool consumes the top-level tools section.
 	byID := newStandardTools(t.TempDir(), &fakeJobs{}, newLiveToolOutput(newObservation()))
 	readTool := byID["read_file"]
+	ws := t.TempDir()
+	testassert.NoError(t, os.WriteFile(filepath.Join(ws, "a.txt"), []byte(strings.Repeat("x\n", 80)), 0644))
 	call, err := model.NewToolCall(model.ToolCall{ID: "call-1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.txt"}`)})
 	testassert.NoError(t, err)
-	normalized, err := readTool.Normalize(context.Background(), ToolContext{Invocation: invocation}, call)
-	testassert.NoError(t, err)
-	testassert.Require(t, string(normalized) == `{"limit":77,"offset":1,"path":"a.txt"}`, "read normalization = %s, want the top-level tools limit 77", normalized)
+	readResult := readTool(context.Background(), ToolContext{Workspace: ws, Invocation: invocation}, call)
+	testassert.Require(t, readResult.Result.Status == model.ResultSuccess && strings.Contains(readResult.Result.Content, "(Showing lines 1-77 of 81."), "read result = %+v", readResult.Result)
 
 	// The real background command path forwards the top-level jobs section.
 	jobsInst := &fakeJobs{}
 	tools := newStandardTools(t.TempDir(), jobsInst, newLiveToolOutput(newObservation()))
 	backgroundCall, err := model.NewToolCall(model.ToolCall{ID: "call-2", Name: "run_command", Arguments: json.RawMessage(`{"command":"true","background":true}`)})
 	testassert.NoError(t, err)
-	plan := tools["run_command"].Prepare(context.Background(), ToolContext{
+	outcome := tools["run_command"](context.Background(), ToolContext{
 		Workspace:     t.TempDir(),
 		AdmittedEntry: harness.EntryRef{SessionID: testSessionID, EntryID: testEntryID},
 		Invocation:    invocation,
 		Background:    scriptBackground{},
 		SubprocessEnv: func(context.Context) ([]string, error) { return []string{}, nil },
 	}, backgroundCall)
-	testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "background plan = %+v, want one executor", plan)
-	outcome := plan.Execute(context.Background())
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "background start = %+v, want success", outcome.Result)
 	testassert.Require(t, len(jobsInst.started) == 1, "jobs starts = %d, want one", len(jobsInst.started))
 	testassert.Equal(t, compactJSON(t, jobsInst.started[0].Config), `{"max_output_bytes":1024,"unknown_jobs_member":1}`)
@@ -201,15 +200,13 @@ func startBackgroundForTest(t *testing.T, invocation Invocation) jobs.StartReque
 	values := newStandardTools(t.TempDir(), recorder, newLiveToolOutput(newObservation()))
 	call, err := model.NewToolCall(model.ToolCall{ID: "call-bg", Name: "run_command", Arguments: json.RawMessage(`{"command":"true","background":true}`)})
 	testassert.NoError(t, err)
-	plan := values["run_command"].Prepare(context.Background(), ToolContext{
+	outcome := values["run_command"](context.Background(), ToolContext{
 		Workspace:     t.TempDir(),
 		AdmittedEntry: harness.EntryRef{SessionID: testSessionID, EntryID: testEntryID},
 		Invocation:    invocation,
 		Background:    scriptBackground{},
 		SubprocessEnv: func(context.Context) ([]string, error) { return []string{}, nil },
 	}, call)
-	testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "background plan = %+v, want one executor", plan)
-	outcome := plan.Execute(context.Background())
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess && len(recorder.started) == 1, "background start = %+v with %d starts, want one success", outcome.Result, len(recorder.started))
 	return recorder.started[0]
 }
@@ -233,13 +230,9 @@ func TestBaselineCapturesStayFrozenAcrossSettingsPublication(t *testing.T) {
 	readTool := newStandardTools(sh.dataDir, &fakeJobs{}, newLiveToolOutput(newObservation()))["read_file"]
 	read := func(t *testing.T, invocation Invocation) string {
 		t.Helper()
-		normalized, err := readTool.Normalize(context.Background(), ToolContext{Invocation: invocation}, readCall)
-		testassert.NoError(t, err)
-		call, err := model.NewToolCall(model.ToolCall{ID: "call-read", Name: "read_file", Arguments: normalized})
-		testassert.NoError(t, err)
-		plan := readTool.Prepare(context.Background(), ToolContext{Workspace: workspace, Invocation: invocation}, call)
-		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "read plan = %+v, want one executor", plan)
-		return plan.Execute(context.Background()).Result.Content
+		outcome := readTool(context.Background(), ToolContext{Workspace: workspace, Invocation: invocation}, readCall)
+		testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "read = %+v", outcome.Result)
+		return outcome.Result.Content
 	}
 	oldRead := read(t, oldInvocation)
 	testassert.Require(t, strings.Contains(oldRead, "(Showing lines 1-77 of 120."), "old read = %q, want the captured 77-line window", oldRead)
@@ -294,11 +287,12 @@ func TestBaselinePartialObjectSettingsUseAbsentDefaults(t *testing.T) {
 	invocation := Invocation{snapshot: fresh.snapshot}
 
 	readTool := newStandardTools(sh.dataDir, &fakeJobs{}, newLiveToolOutput(newObservation()))["read_file"]
+	ws := t.TempDir()
+	testassert.NoError(t, os.WriteFile(filepath.Join(ws, "a.txt"), []byte(strings.Repeat("x\n", 501)), 0644))
 	call, err := model.NewToolCall(model.ToolCall{ID: "call-read", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.txt"}`)})
 	testassert.NoError(t, err)
-	normalized, err := readTool.Normalize(context.Background(), ToolContext{Invocation: invocation}, call)
-	testassert.NoError(t, err)
-	testassert.Require(t, string(normalized) == `{"limit":500,"offset":1,"path":"a.txt"}`, "omitted read_max_lines normalization = %s, want the absent-member default 500", normalized)
+	readResult := readTool(context.Background(), ToolContext{Workspace: ws, Invocation: invocation}, call)
+	testassert.Require(t, readResult.Result.Status == model.ResultSuccess && strings.Contains(readResult.Result.Content, "(Showing lines 1-500 of 502."), "read result = %+v", readResult.Result)
 
 	// The real jobs manager consumes the forwarded object and applies its own
 	// absent-member max_output_bytes default.

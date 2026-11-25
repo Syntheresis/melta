@@ -22,11 +22,7 @@ const (
 
 // BindWorkspace resolves a target without accessing its contents.
 func BindWorkspace(root, path string) (WorkspaceBinding, string, bool, error) {
-	rootCanonical, err := bindApproved(root, "workspace", "")
-	if err != nil {
-		return WorkspaceBinding{}, "", false, err
-	}
-	bound, err := bindCanonicalTarget(root, "workspace", path, rootCanonical)
+	bound, err := bindCanonicalTarget(root, "workspace", path)
 	if err != nil {
 		return WorkspaceBinding{}, "", false, err
 	}

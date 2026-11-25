@@ -859,16 +859,7 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 						Identity: harness.ToolImplementation{ID: name},
 						Validate: standard.validate,
 						Run: func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
-							callTC := tc
-							background := &boundBackground{bridge: p.background, sessionID: sessionID}
-							callTC.Background = background
-							return runTool(ctx, call,
-								func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-									return standard.tool.Normalize(ctx, tc, call)
-								},
-								func(ctx context.Context, call model.ToolCall) toolPlan {
-									return background.bindPlan(standard.tool.Prepare(ctx, callTC, call))
-								})
+							return standard.tool(ctx, tc, call)
 						},
 					}, true, nil
 				}

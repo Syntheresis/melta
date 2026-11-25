@@ -27,14 +27,6 @@ type Row struct {
 	Text    string `json:"text"`
 }
 
-func MetadataFromArgs(args, result string) map[string]any {
-	var params map[string]any
-	if json.Unmarshal([]byte(args), &params) != nil {
-		return nil
-	}
-	return MetadataFromParams(params, result)
-}
-
 func MetadataFromParams(params map[string]any, result string) map[string]any {
 	oldString, _ := params["old_string"].(string)
 	newString, _ := params["new_string"].(string)

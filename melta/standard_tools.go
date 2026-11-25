@@ -2,7 +2,7 @@ package melta
 
 // The baseline standard tools: the five owner-constructed Tool
 // implementations — read_file, write_file, and edit_file over the shared file
-// preparation, snapshot bookkeeping, and artifact-derived code groups, plus
+// operations, snapshot bookkeeping, and artifact-derived code groups, plus
 // the foreground/background command and process tools.
 // They are ordinary composition members compiled directly into every
 // Melta: they are never optional plugin exports, and file tools carry no
@@ -24,12 +24,10 @@ import (
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/editpreview"
 	"github.com/Syntheresis/melta/internal/jobs"
-	"github.com/Syntheresis/melta/internal/pathutil"
 	"github.com/Syntheresis/melta/internal/snapshot"
 	"github.com/Syntheresis/melta/internal/tool"
 	"github.com/Syntheresis/melta/internal/toolargs"
 	"github.com/Syntheresis/melta/model"
-	"github.com/Syntheresis/melta/shellparse"
 )
 
 // maxDiagnosticBytes is the durable diagnostic bound for the
@@ -142,172 +140,87 @@ func boundedDiagnostic(cause error) string {
 	return msg
 }
 
-// canonicalPaths computes the canonical Workspace root used by preparation.
-func canonicalPaths(root string) (string, error) {
-	resolved, err := pathutil.ResolveFilePathFrom("", root)
-	if err != nil {
-		return "", err
-	}
-	return resolved.CanonicalPath, nil
-}
-
-// canonicalPathsFn is the test seam over preparation canonicalization.
-var canonicalPathsFn = canonicalPaths
-
 // runForegroundCommandFn is the one seam over the shared foreground runner:
 // commandOutcome routes through it, so tests drive the runner's settled
 // ExitError shapes with a context cancelled after the runner returns.
 // Nil-free in production; it simply delegates to tool.RunForegroundCommand.
 var runForegroundCommandFn = tool.RunForegroundCommand
 
-// stringOutcome runs one prepared string-result call and wraps the outcome:
-// the model-visible content is the shared body's own bounded output, and an
-// optional metadata converter turns the committed normalized arguments plus
-// the result into the owned metadata shape. A nil metadata map or a failed
-// well-formedness marshal drops the optional metadata; the result itself
-// always commits.
-func stringOutcome(ctx context.Context, callID string, call *tool.PreparedCall, args string, metadata func(args, result string) map[string]any) harness.ToolOutcome {
-	result, err := call.Execute(ctx, nil)
+func toolError(callID string, err error) harness.ToolOutcome {
+	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: boundedDiagnostic(err)}}
+}
+
+func mutationOutcome(callID, output string, outcome tool.MutationOutcome, err error) harness.ToolOutcome {
 	if err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
-	}
-	outcome := harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: result}}
-	if metadata != nil {
-		if m := metadata(args, result); m != nil {
-			if raw, err := json.Marshal(m); err == nil {
-				outcome.Metadata = raw
-			}
+		result := toolError(callID, err)
+		if outcome == tool.MutationUncertain {
+			result.Evidence = harness.ExecutionUnknown
 		}
+		return result
 	}
-	return outcome
+	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: output}}
 }
 
-// normalizeCallArguments is the one shared Normalize body for every tool:
-// the strict decode of the call arguments, the tool's single argument
-// normalization, and the marshaled normalized object.
-func normalizeCallArguments(call model.ToolCall, normalize func(map[string]any) (map[string]any, error)) (json.RawMessage, error) {
+func (in *standardTools) read(_ context.Context, tc ToolContext, call model.ToolCall) harness.ToolOutcome {
+	settings, err := in.settings(tc.Invocation)
+	if err != nil {
+		return toolError(call.ID, err)
+	}
 	args, err := toolargs.Decode(call.Arguments)
 	if err != nil {
-		return nil, err
+		return toolError(call.ID, err)
 	}
-	normalized, err := normalize(args)
+	path, offset, limit, err := tool.ReadArgs(args, settings.ReadMaxLines)
 	if err != nil {
-		return nil, err
+		return toolError(call.ID, err)
 	}
-	return json.Marshal(normalized)
+	output, err := tool.ReadFile(tc.Workspace, settings.toolsConfig(), path, offset, limit)
+	if err != nil {
+		return toolError(call.ID, err)
+	}
+	return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: output}}
 }
 
-// readTool is the read_file tool: always available, no metadata, the
-// nil-tracker read path that always returns the bounded requested content.
-type readTool struct{ inst *standardTools }
-
-func (t readTool) Normalize(_ context.Context, tc ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	s, err := t.inst.settings(tc.Invocation)
-	if err != nil {
-		return nil, err
-	}
-	return normalizeCallArguments(call, func(args map[string]any) (map[string]any, error) {
-		return tool.NormalizeReadArgs(args, s.ReadMaxLines)
-	})
-}
-
-func (t readTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) toolPlan {
-	s, err := t.inst.settings(tc.Invocation)
-	if err != nil {
-		return immediateError(call.ID, err)
-	}
-	// Preparation accepts only the committed normalized arguments: one
-	// strict decode-and-pass, never a second normalization.
+func (in *standardTools) write(_ context.Context, tc ToolContext, call model.ToolCall) harness.ToolOutcome {
 	args, err := toolargs.Decode(call.Arguments)
 	if err != nil {
-		return immediateError(call.ID, err)
+		return toolError(call.ID, err)
 	}
-	workspace, err := canonicalPathsFn(tc.Workspace)
+	path, content, err := tool.WriteArgs(args)
 	if err != nil {
-		return immediateError(call.ID, err)
-	}
-	prepared, err := tool.PrepareReadCall(tc.Workspace, workspace, s.toolsConfig(), args)
-	if err != nil {
-		return immediateError(call.ID, err)
-	}
-	return toolPlan{
-		Execute: func(ctx context.Context) harness.ToolOutcome {
-			return stringOutcome(ctx, call.ID, prepared, string(call.Arguments), nil)
-		},
-	}
-}
-
-// mutationPrepared is one mutation tool's outcome-wrapping executor.
-type mutationPrepared struct {
-	execute func(context.Context) harness.ToolOutcome
-}
-
-// prepareMutation is the one shared mutation-Prepare body: the strict
-// decode-and-pass of the committed normalized arguments, the canonical root
-// binding, the per-call code group, and the assembled executor plan. The
-// per-tool callback runs the shared preparation and
-// wraps the outcome; its error is a failed canonical preparation.
-func (in *standardTools) prepareMutation(tc ToolContext, call model.ToolCall, run func(root, rootCanonical string, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error)) toolPlan {
-	args, err := toolargs.Decode(call.Arguments)
-	if err != nil {
-		return immediateError(call.ID, err)
-	}
-	workspace, err := canonicalPathsFn(tc.Workspace)
-	if err != nil {
-		return immediateError(call.ID, err)
+		return toolError(call.ID, err)
 	}
 	group, err := in.openCodeGroup(tc)
 	if err != nil {
-		return immediateError(call.ID, err)
+		return toolError(call.ID, err)
 	}
-	prepared, err := run(tc.Workspace, workspace, group, args)
+	output, outcome, err := tool.WriteFile(tc.Workspace, group, path, content)
+	return mutationOutcome(call.ID, output, outcome, err)
+}
+
+func (in *standardTools) edit(_ context.Context, tc ToolContext, call model.ToolCall) harness.ToolOutcome {
+	args, err := toolargs.Decode(call.Arguments)
 	if err != nil {
-		return immediateError(call.ID, err)
+		return toolError(call.ID, err)
 	}
-	return toolPlan{Execute: prepared.execute}
-}
-
-// writeTool is the write_file tool.
-type writeTool struct{ inst *standardTools }
-
-func (writeTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	return normalizeCallArguments(call, tool.NormalizeWriteArgs)
-}
-
-func (t writeTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) toolPlan {
-	return t.inst.prepareMutation(tc, call, func(root, rootCanonical string, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
-		prepared, err := tool.PrepareWriteCall(root, rootCanonical, group, args)
-		if err != nil {
-			return mutationPrepared{}, err
+	path, oldString, newString, replaceAll, err := tool.EditArgs(args)
+	if err != nil {
+		return toolError(call.ID, err)
+	}
+	group, err := in.openCodeGroup(tc)
+	if err != nil {
+		return toolError(call.ID, err)
+	}
+	output, outcome, err := tool.EditFile(tc.Workspace, group, path, oldString, newString, replaceAll)
+	result := mutationOutcome(call.ID, output, outcome, err)
+	if err == nil {
+		if m := editpreview.MetadataFromParams(args, output); m != nil {
+			if raw, err := json.Marshal(m); err == nil {
+				result.Metadata = raw
+			}
 		}
-		return mutationPrepared{
-			execute: func(ctx context.Context) harness.ToolOutcome {
-				return stringOutcome(ctx, call.ID, prepared, string(call.Arguments), nil)
-			},
-		}, nil
-	})
-}
-
-// editTool is the edit_file tool; its metadata carries the edit_preview diff
-// built from the committed normalized arguments and the result.
-type editTool struct{ inst *standardTools }
-
-func (editTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	return normalizeCallArguments(call, tool.NormalizeEditArgs)
-}
-
-func (t editTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) toolPlan {
-	return t.inst.prepareMutation(tc, call, func(root, rootCanonical string, group *snapshot.CodeStore, args map[string]any) (mutationPrepared, error) {
-		prepared, err := tool.PrepareEditCall(root, rootCanonical, group, args)
-		if err != nil {
-			return mutationPrepared{}, err
-		}
-		return mutationPrepared{
-			execute: func(ctx context.Context) harness.ToolOutcome {
-				return stringOutcome(ctx, call.ID, prepared, string(call.Arguments), editpreview.MetadataFromArgs)
-			},
-		}, nil
-	})
+	}
+	return result
 }
 
 // runCommandTool is the run_command tool: always available and executed
@@ -324,74 +237,28 @@ type runCommandTool struct {
 	toolOutput *liveToolOutput
 }
 
-func (t runCommandTool) Normalize(_ context.Context, tc ToolContext, call model.ToolCall) (json.RawMessage, error) {
+func (t runCommandTool) run(ctx context.Context, tc ToolContext, call model.ToolCall) harness.ToolOutcome {
 	s, err := t.inst.settings(tc.Invocation)
 	if err != nil {
-		return nil, err
+		return toolError(call.ID, err)
 	}
-	return normalizeCallArguments(call, func(args map[string]any) (map[string]any, error) {
-		return tool.NormalizeRunCommandArgs(args, s.CommandTimeout)
-	})
-}
-
-func (t runCommandTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) toolPlan {
-	s, err := t.inst.settings(tc.Invocation)
-	if err != nil {
-		return immediateError(call.ID, err)
-	}
-	// Preparation accepts only the committed normalized arguments: one
-	// strict decode-and-pass, never a second normalization.
 	args, err := toolargs.Decode(call.Arguments)
 	if err != nil {
-		return immediateError(call.ID, err)
+		return toolError(call.ID, err)
 	}
-	command, _ := args["command"].(string)
-	timeoutSec := s.CommandTimeout
-	if command == "" {
-		return immediateError(call.ID, errors.New("run_command: command is required"))
+	command, timeout, background, err := tool.RunCommandArgs(args, s.CommandTimeout)
+	if err != nil {
+		return toolError(call.ID, err)
 	}
-	if v, ok := args["timeout"].(json.Number); ok {
-		if n, err := v.Int64(); err == nil {
-			timeoutSec = int(n)
-		}
+	if background {
+		return t.backgroundOutcome(ctx, call.ID, command, timeout, tc)
 	}
-	segments, simple := shellparse.ParseSimple(command)
-	if !simple || len(segments) == 0 {
-		// One complete-command fallback: the input with only leading
-		// ASCII blanks/newlines removed, or the complete original input
-		// when nothing remains.
-		fallback := strings.TrimLeft(command, " \t\n")
-		if fallback == "" {
-			fallback = command
-		}
-		command = fallback
-	}
-	// background=true swaps the execute body for
-	// the job-start path (the model timeout forwards when >= 1; absent or
-	// sub-one becomes 0).
-	background, _ := args["background"].(bool)
-	backgroundTimeoutSec := 0
-	if v, ok := args["timeout"].(json.Number); ok {
-		if n, err := v.Int64(); err == nil && n >= 1 {
-			backgroundTimeoutSec = int(n)
-		}
+	env, err := commandEnvironment(ctx, tc)
+	if err != nil {
+		return toolError(call.ID, err)
 	}
 	spillDir := filepath.Join(t.inst.dataDir, "code", tc.AdmittedEntry.SessionID, "output")
-	return toolPlan{
-		Execute: func(ctx context.Context) harness.ToolOutcome {
-			if background {
-				return t.backgroundOutcome(ctx, call.ID, command, backgroundTimeoutSec, tc)
-			}
-			// The environment resolves immediately at this process start,
-			// never at Prepare: a key connected after the call was prepared
-			// is still scrubbed, and a shell sibling stays visible.
-			env, envErr := commandEnvironment(ctx, tc)
-			if envErr != nil {
-				return commandEnvironmentFailure(call.ID, envErr)
-			}
-			return t.foregroundOutcome(ctx, call.ID, command, tc, timeoutSec, s, spillDir, env)
-		},
-	}
+	return t.foregroundOutcome(ctx, call.ID, command, tc, timeout, s, spillDir, env)
 }
 
 // errNoSubprocessEnv is the one missing-producer diagnostic shared by the
@@ -416,13 +283,7 @@ func commandEnvironment(ctx context.Context, tc ToolContext) ([]string, error) {
 	return env, nil
 }
 
-// commandEnvironmentFailure renders one environment-resolution failure as the
-// ordinary model-visible error outcome.
-func commandEnvironmentFailure(callID string, cause error) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: boundedDiagnostic(cause)}}
-}
-
-// backgroundOutcome starts one background job for the prepared call: it
+// backgroundOutcome starts one background job for the call: it
 // refuses a missing subprocess-environment producer before any reservation,
 // reserves the identity, registers the starting call's live output preview,
 // hands the spawn to the background bridge, resolves the job's exact
@@ -432,9 +293,9 @@ func commandEnvironmentFailure(callID string, cause error) harness.ToolOutcome {
 // entry and the same `tool_output_changed` notice a foreground command
 // publishes, addressed by the call that started the job. Every start failure —
 // reserve, handoff, or spawn — renders through the one legacy wrapper.
-func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command string, timeoutSec int, tc ToolContext) harness.ToolOutcome {
+func (t runCommandTool) backgroundOutcome(ctx context.Context, callID, command string, timeoutSec int, tc ToolContext) harness.ToolOutcome {
 	if tc.SubprocessEnv == nil {
-		return commandEnvironmentFailure(callID, errNoSubprocessEnv)
+		return toolError(callID, errNoSubprocessEnv)
 	}
 	jobsInst := t.jobs
 	sessionID := tc.AdmittedEntry.SessionID
@@ -445,9 +306,9 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 	t.toolOutput.register(sessionID, tc.OperationID, callID, func() string {
 		return jobsInst.Preview(sessionID, jobID)
 	})
-	err = tc.Background.StartJob(jobID, func(ctx context.Context, deliver func(string) error) error {
-		// The environment resolves at the admitted start handoff — never at
-		// Prepare — and the exact slice is the job process's environment; a
+	err = tc.Background.StartJob(ctx, jobID, func(ctx context.Context, deliver func(string) error) error {
+		// The environment resolves at the admitted start handoff, and the
+		// exact slice is the job process's environment; a
 		// nil snapshot fails the start instead of inheriting ambient secrets.
 		env, envErr := commandEnvironment(ctx, tc)
 		if envErr != nil {
@@ -473,6 +334,9 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 	if err != nil {
 		jobsInst.Abort(jobID) // idempotent: removes the reservation if it still exists
 		t.toolOutput.remove(sessionID, tc.OperationID, callID)
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultInterrupted, Content: "command cancelled"}}
+		}
 		return backgroundStartOutcome(callID, err)
 	}
 	return harness.ToolOutcome{Result: model.ToolResult{
@@ -486,11 +350,7 @@ func (t runCommandTool) backgroundOutcome(_ context.Context, callID, command str
 // backgroundStartOutcome renders one background start failure through the
 // single legacy wrapper.
 func backgroundStartOutcome(callID string, err error) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{
-		CallID:  callID,
-		Status:  model.ResultError,
-		Content: fmt.Errorf("run_command: background start: %w", err).Error(),
-	}}
+	return toolError(callID, fmt.Errorf("run_command: background start: %w", err))
 }
 
 // legacyCompletionText composes one job's terminal completion in the
@@ -530,7 +390,7 @@ func truncateCompletionText(text string, limit int) string {
 	return text[:max] + marker
 }
 
-// foregroundOutcome constructs and registers the prepared foreground call's
+// foregroundOutcome constructs and registers the foreground call's
 // output preview for live reads, publishes its throttled change notices on the
 // Operation scope, and removes it after the runner returns.
 func (t runCommandTool) foregroundOutcome(ctx context.Context, callID, command string, tc ToolContext, timeoutSec int, s toolSettings, spillDir string, env []string) harness.ToolOutcome {
@@ -549,7 +409,7 @@ func (t runCommandTool) foregroundOutcome(ctx context.Context, callID, command s
 	return commandOutcome(ctx, callID, command, tc.Workspace, timeoutSec, capture, env)
 }
 
-// commandOutcome runs one prepared foreground command through the shared
+// commandOutcome runs one foreground command through the shared
 // runner over the resolved subprocess environment and maps the retained
 // outcomes onto the model-visible result: a
 // completed run settles as success or — for a nonzero exit — the same
@@ -570,7 +430,7 @@ func commandOutcome(ctx context.Context, callID, command, dir string, timeoutSec
 		return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: status, Content: exitErr.Output}}
 	}
 	if err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
+		return toolError(callID, err)
 	}
 	return harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: result}}
 }
@@ -579,84 +439,30 @@ func commandOutcome(ctx context.Context, callID, command, dir string, timeoutSec
 // read/kill/list actions onto the jobs service under the owning session.
 type processTool struct{ jobs jobs.Jobs }
 
-func (processTool) Normalize(_ context.Context, _ ToolContext, call model.ToolCall) (json.RawMessage, error) {
-	return normalizeCallArguments(call, normalizeProcessArgs)
-}
-
-func (t processTool) Prepare(_ context.Context, tc ToolContext, call model.ToolCall) toolPlan {
+func (t processTool) run(_ context.Context, tc ToolContext, call model.ToolCall) harness.ToolOutcome {
 	args, err := toolargs.Decode(call.Arguments)
 	if err != nil {
-		return immediateError(call.ID, err)
+		return toolError(call.ID, err)
 	}
-	action, _ := args["action"].(string)
+	action, id, err := tool.ProcessArgs(args)
+	if err != nil {
+		return toolError(call.ID, err)
+	}
 	sessionID := tc.AdmittedEntry.SessionID
+	var output string
 	switch action {
-	case "read", "kill":
-		id, _ := args["id"].(string)
-		if id == "" {
-			return immediateError(call.ID, fmt.Errorf("process: id is required for %s", action))
-		}
-		if !isJobID(id) {
-			return immediateError(call.ID, fmt.Errorf("process: no process with ID %q", id))
-		}
-		return toolPlan{
-			Execute: func(_ context.Context) harness.ToolOutcome {
-				if action == "read" {
-					output, err := t.jobs.Read(sessionID, id)
-					if err != nil {
-						return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: err.Error()}}
-					}
-					return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: output}}
-				}
-				if err := t.jobs.Kill(sessionID, id); err != nil {
-					return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: err.Error()}}
-				}
-				return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: fmt.Sprintf("Process %s terminated.", id)}}
-			},
-		}
+	case "read":
+		output, err = t.jobs.Read(sessionID, id)
+	case "kill":
+		err = t.jobs.Kill(sessionID, id)
+		output = fmt.Sprintf("Process %s terminated.", id)
 	case "list":
-		return toolPlan{
-			Execute: func(_ context.Context) harness.ToolOutcome {
-				return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: t.jobs.List(sessionID)}}
-			},
-		}
-	default:
-		return immediateError(call.ID, fmt.Errorf("process: unknown action %q", action))
+		output = t.jobs.List(sessionID)
 	}
-}
-
-// normalizeProcessArgs is the process tool's member validator: private
-// `_melta_` fields are stripped, a present action or id must be a
-// string, and every other member is preserved; Prepare owns the semantics.
-func normalizeProcessArgs(args map[string]any) (map[string]any, error) {
-	clean := make(map[string]any, len(args))
-	for key, value := range args {
-		if strings.HasPrefix(key, "_melta_") {
-			continue
-		}
-		if key == "action" || key == "id" {
-			if _, ok := value.(string); !ok {
-				return nil, fmt.Errorf("process: %s must be a string", key)
-			}
-		}
-		clean[key] = value
+	if err != nil {
+		return toolError(call.ID, err)
 	}
-	return clean, nil
-}
-
-// isJobID reports whether id is inside the jobs service's
-// 8-lowercase-hex identity namespace.
-func isJobID(id string) bool {
-	if len(id) != 8 {
-		return false
-	}
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
+	return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: output}}
 }
 
 // standardToolDeclaration is one owner-constructed standard tool declaration:
@@ -689,10 +495,10 @@ func standardToolDeclarations() []standardToolDeclaration {
 func newStandardTools(dataDir string, jobsService jobs.Jobs, toolOutput *liveToolOutput) map[string]Tool {
 	inst := &standardTools{dataDir: dataDir}
 	return map[string]Tool{
-		"read_file":   readTool{inst},
-		"write_file":  writeTool{inst},
-		"edit_file":   editTool{inst},
-		"run_command": runCommandTool{inst, jobsService, toolOutput},
-		"process":     processTool{jobsService},
+		"read_file":   inst.read,
+		"write_file":  inst.write,
+		"edit_file":   inst.edit,
+		"run_command": (runCommandTool{inst, jobsService, toolOutput}).run,
+		"process":     (processTool{jobsService}).run,
 	}
 }
