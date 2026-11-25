@@ -92,4 +92,14 @@ func TestSessionStartDocumentIsStrict(t *testing.T) {
 	after, err := store.ListSessionIDs(callCtx)
 	testassert.NoError(t, err)
 	testassert.Equal(t, len(after), len(before))
+
+	call := extension.AuthorContext{Call: scope.call}
+	childID, err := call.StartSession(callCtx, extension.SessionStart{})
+	testassert.NoError(t, err)
+	testassert.Require(t, childID != "", "typed start returned no Session id")
+	_, err = r.harness.ReadSessionHeader(callCtx, childID)
+	testassert.NoError(t, err)
+	after, err = store.ListSessionIDs(callCtx)
+	testassert.NoError(t, err)
+	testassert.Equal(t, len(after), len(before)+1)
 }

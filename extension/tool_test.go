@@ -114,6 +114,15 @@ func TestSessionStartCodec(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, start) {
 		t.Fatalf("complete model round trip: %+v, %v", got, err)
 	}
+	start.Input = nil
+	raw, err = EncodeSessionStart(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = DecodeSessionStart(raw)
+	if err != nil || got.Input != nil || !reflect.DeepEqual(got, start) {
+		t.Fatalf("nil input round trip: %+v, %v", got, err)
+	}
 	encoded := func(document string) string {
 		return base64.StdEncoding.EncodeToString([]byte(document))
 	}

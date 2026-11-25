@@ -1337,10 +1337,12 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 	})
 
 	t.Run("an unknown id reaches the capability and returns the retained text", func(t *testing.T) {
-		for _, id := range []string{"deadbeef", "xyz", "DEADBEEF", "deadbeeg"} {
-			outcome := process(context.Background(), tc, makeCall(t, "process", fmt.Sprintf(`{"action":"read","id":%q}`, id)))
-			want := fmt.Sprintf("process: no process with ID %q", id)
-			testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == want, "id %q: result = %+v, want %q", id, outcome.Result, want)
+		for _, action := range []string{"read", "kill"} {
+			for _, id := range []string{"deadbeef", "xyz", "DEADBEEF", "deadbeeg"} {
+				outcome := process(context.Background(), tc, makeCall(t, "process", fmt.Sprintf(`{"action":%q,"id":%q}`, action, id)))
+				want := fmt.Sprintf("process: no process with ID %q", id)
+				testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == want, "%s id %q: result = %+v, want %q", action, id, outcome.Result, want)
+			}
 		}
 	})
 }

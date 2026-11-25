@@ -132,11 +132,7 @@ func EncodeSessionStart(start SessionStart) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	var parts []WireContentPart
-	if start.Input != nil {
-		parts = EncodeContentParts(start.Input)
-	}
-	rawParts, err := json.Marshal(parts)
+	rawParts, err := json.Marshal(EncodeContentParts(start.Input))
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +176,7 @@ func DecodeSessionStart(raw json.RawMessage) (SessionStart, error) {
 			start.Inputs.Strategy.Settings = append(json.RawMessage{}, (*inputs.Strategy.Settings)...)
 		}
 	}
-	if parts != nil {
+	if len(parts) != 0 {
 		start.Input = DecodeContentParts(parts)
 	}
 	return start, nil
