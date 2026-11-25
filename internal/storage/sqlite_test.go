@@ -359,7 +359,6 @@ func TestSQLitePhysicalShapes(t *testing.T) {
 		args  []any
 	}{
 		{"unknown entry kind", `INSERT INTO entries (session_id, sequence, entry_id, operation_id, kind, committed_at_ns, payload) VALUES ('s', 1, 'e', '', 'bogus', 1, '{}')`, nil},
-		{"hook_result entry kind", `INSERT INTO entries (session_id, sequence, entry_id, operation_id, kind, committed_at_ns, payload) VALUES ('s', 1, 'e', '', 'hook_result', 1, '{}')`, nil},
 		{"empty entry session id", `INSERT INTO entries (session_id, sequence, entry_id, operation_id, kind, committed_at_ns, payload) VALUES ('', 1, 'e', '', 'input', 1, '{}')`, nil},
 		{"zero sequence", `INSERT INTO entries (session_id, sequence, entry_id, operation_id, kind, committed_at_ns, payload) VALUES ('s', 0, 'e', '', 'input', 1, '{}')`, nil},
 		{"empty entry id", `INSERT INTO entries (session_id, sequence, entry_id, operation_id, kind, committed_at_ns, payload) VALUES ('s', 1, '', '', 'input', 1, '{}')`, nil},

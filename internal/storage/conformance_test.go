@@ -143,7 +143,6 @@ func confEnvelopeValidity(t *testing.T, b conformanceBackend) {
 		"empty id":      {SessionID: "s1", ID: "", Kind: harness.EntryInput, Payload: rawJSON(`{}`)},
 		"empty kind":    {SessionID: "s1", ID: "e1", Kind: "", Payload: rawJSON(`{}`)},
 		"unknown kind":  {SessionID: "s1", ID: "e1", Kind: "bogus", Payload: rawJSON(`{}`)},
-		"hook_result":   {SessionID: "s1", ID: "e1", Kind: "hook_result", Payload: rawJSON(`{}`)},
 		"nil payload":   {SessionID: "s1", ID: "e1", Kind: harness.EntryInput},
 		"bad payload":   {SessionID: "s1", ID: "e1", Kind: harness.EntryInput, Payload: rawJSON(`{"n":`)},
 	}

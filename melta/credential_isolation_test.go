@@ -468,7 +468,7 @@ func TestHeldCredentialNamesProtectOtherSessionsAfterReload(t *testing.T) {
 	testassert.Require(t, strings.Contains(afterOutput, "shell="+shellValue+"|old="+oldValue+"|new=|unrelated="+unrelatedV), "after output = %q, want released old/shell visible and the still-current new name excluded", afterOutput)
 }
 
-func TestProviderOnlyRenameUsesAdoptedResourcesAndHeldNames(t *testing.T) {
+func TestProviderOnlyRenameUsesHeldNames(t *testing.T) {
 	const (
 		oldProvider = "MELTA_HELD_PROVIDER_OLD"
 		newProvider = "MELTA_HELD_PROVIDER_NEW"
@@ -510,12 +510,9 @@ func TestProviderOnlyRenameUsesAdoptedResourcesAndHeldNames(t *testing.T) {
 			return out
 		}())
 	}
-	resources := r.config.current().resources
-
 	writeServiceFile(t, e.configPath, heldProviderConfig(e.server.URL, newProvider))
 	_, err = r.Reload(context.Background(), testCaller(r))
 	testassert.NoError(t, err)
-	testassert.Require(t, r.config.current().resources == resources, "provider-only rename did not adopt the existing resource set")
 
 	second := createHeldSession(t, r, e.workspace("provider-b"), []string{"run_command"})
 	submitThroughRuntime(t, r, second.Identity.SessionID, "op-provider", "fg")

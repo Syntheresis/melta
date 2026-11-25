@@ -3,6 +3,7 @@ package extension
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,6 +113,30 @@ func TestSessionStartCodec(t *testing.T) {
 	got, err = DecodeSessionStart(raw)
 	if err != nil || !reflect.DeepEqual(got, start) {
 		t.Fatalf("complete model round trip: %+v, %v", got, err)
+	}
+	encoded := func(document string) string {
+		return base64.StdEncoding.EncodeToString([]byte(document))
+	}
+	startDocument := func(inputs, input string) string {
+		return fmt.Sprintf(`{"inputs":%q,"initial_state":"","input":%q,"report":false,"output_limit":0}`, encoded(inputs), encoded(input))
+	}
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"null document", `null`},
+		{"trailing data", startDocument(`{}`, `[]`) + `{}`},
+		{"unknown start member", strings.Replace(startDocument(`{}`, `[]`), `"report":false`, `"report":false,"unknown":true`, 1)},
+		{"unknown inputs member", startDocument(`{"unknown":true}`, `[]`)},
+		{"unknown input member", startDocument(`{}`, `[{"kind":"text","text":"x","unknown":true}]`)},
+		{"null inputs", startDocument(`null`, `[]`)},
+		{"null input", startDocument(`{}`, `null`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := DecodeSessionStart(json.RawMessage(tc.raw)); err == nil {
+				t.Fatalf("accepted %s", tc.raw)
+			}
+		})
 	}
 }
 

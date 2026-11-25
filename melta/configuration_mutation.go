@@ -181,11 +181,10 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 		s.buildMu.Unlock()
 		return configurationCapture{}, err
 	}
-	fresh := s.freshResources(candidate)
-	discardNative := candidate.native
+	discardResources, discardNative := true, candidate.native
 	defer func() {
-		if fresh != nil {
-			fresh.release()
+		if discardResources && candidate.resources != nil {
+			candidate.resources.release()
 		}
 		if discardNative != nil {
 			_ = discardNative.release()
@@ -222,7 +221,7 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 			s.buildMu.Unlock()
 			return configurationCapture{}, err
 		}
-		fresh = nil
+		discardResources = false
 		discardNative = nil
 		return s.commit(candidate), nil
 	}
@@ -244,11 +243,11 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 			s.buildMu.Unlock()
 			return configurationCapture{}, configurationFailure(errors.Join(fmt.Errorf("persist API key %s: %w", conn.keyEnv, err), restoreErr))
 		}
-		fresh = nil
+		discardResources = false
 		discardNative = nil
 		return s.commit(candidate), nil
 	}
-	fresh = nil
+	discardResources = false
 	discardNative = nil
 	return s.commit(candidate), nil
 }

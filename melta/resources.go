@@ -1,17 +1,12 @@
 package melta
 
-import (
-	"bytes"
-	"maps"
-	"sync"
-)
+import "sync"
 
 // resourceSet owns one configuration revision's held credential names.
 // Publication holds one reference; preparations transfer their references to
 // the Harness.
 type resourceSet struct {
-	owner       *configurationService
-	composition *composition
+	owner *configurationService
 
 	mu        sync.Mutex
 	holds     int
@@ -28,33 +23,7 @@ func (s *configurationService) prepareResources(snapshot *configuration) {
 	if s.composition == nil {
 		return
 	}
-	previous := s.current()
-	if previous != nil {
-		equal := true
-		for _, author := range s.authors {
-			id := author.extension.Manifest.ID
-			a, aok := previous.extensions[id]
-			b, bok := snapshot.extensions[id]
-			aok = aok && sectionEnabled(a)
-			bok = bok && sectionEnabled(b)
-			if !aok && !bok {
-				continue
-			}
-			if aok != bok || !bytes.Equal(a, b) {
-				equal = false
-				break
-			}
-		}
-		if equal {
-			equal = maps.Equal(previous.declaredBindings, snapshot.declaredBindings)
-		}
-		if equal {
-			snapshot.resources = previous.resources
-			snapshot.composition = previous.resources.composition
-			return
-		}
-	}
-	r := &resourceSet{owner: s, holds: 1, composition: s.composition}
+	r := &resourceSet{owner: s, holds: 1}
 	// The candidate's declared names are held before anything else. The hold
 	// survives failed-prefix cleanup and transfers to the successful set.
 	r.heldNames = snapshot.declaredSecretNames()

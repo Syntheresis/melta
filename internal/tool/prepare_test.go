@@ -132,10 +132,14 @@ func TestWriteEditAndProcessArgs(t *testing.T) {
 		testassert.Require(t, err == nil && gotAction == action && id == "deadbeef", "process args = %q %q %v", gotAction, id, err)
 	}
 	for _, args := range []map[string]any{
-		{"action": "other"}, {"action": "read"}, {"action": "kill"}, {"action": "read", "id": "DEADBEEF"}, {"action": "read", "id": "abcdefg0"}, {"action": "read", "id": "abc"},
+		{"action": "other"}, {"action": "read"}, {"action": "kill"},
 	} {
 		_, _, err := ProcessArgs(args)
 		testassert.Require(t, err != nil, "accepted process args = %+v", args)
+	}
+	for _, id := range []string{"DEADBEEF", "abcdefg0", "abc"} {
+		gotAction, gotID, err := ProcessArgs(map[string]any{"action": "read", "id": id})
+		testassert.Require(t, err == nil && gotAction == "read" && gotID == id, "process id %q was refused before the lookup: %q %q %v", id, gotAction, gotID, err)
 	}
 }
 

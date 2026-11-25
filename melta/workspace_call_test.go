@@ -130,7 +130,7 @@ func TestWorkspaceCheckHookCanRead(t *testing.T) {
 	defer candidate.release()
 	stage := candidate.snapshotForTest()
 	defer stage.release()
-	hooks := stage.checkHooks(ToolContext{Session: harness.SessionIdentity{SessionID: "session", Workspace: root}, Workspace: root}, nil, nil, nil, nil)
+	hooks := stage.checkHooks(ToolContext{Session: harness.SessionIdentity{SessionID: "session", Workspace: root}, Workspace: root}, selection{invocation: Invocation{snapshot: &configuration{}}})
 	_, err = hooks[0].Run(context.Background(), model.ToolCall{})
 	if err != nil {
 		t.Fatalf("restriction witness: %v", err)

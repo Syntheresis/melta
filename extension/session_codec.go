@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
+	"github.com/Syntheresis/melta/protocol"
 )
 
 // WireBytes is an opaque byte value encoded as canonical padded base64.
@@ -141,17 +143,27 @@ func EncodeSessionStart(start SessionStart) (json.RawMessage, error) {
 	return json.Marshal(sessionStartJSON{Inputs: rawInputs, InitialState: WireBytes(start.InitialState), Input: rawParts, Report: start.Report, OutputLimit: start.OutputLimit})
 }
 
+// decodeSessionDocument decodes exactly one non-null JSON document with the
+// native strict rules, so an undeclared member or concatenated document is
+// refused wherever a session document is read.
+func decodeSessionDocument(raw []byte, dst any) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errors.New("document must not be null")
+	}
+	return protocol.DecodeDocument(raw, dst)
+}
+
 func DecodeSessionStart(raw json.RawMessage) (SessionStart, error) {
 	var wire sessionStartJSON
-	if err := json.Unmarshal(raw, &wire); err != nil {
+	if err := decodeSessionDocument(raw, &wire); err != nil {
 		return SessionStart{}, err
 	}
 	var inputs sessionInputsJSON
-	if err := json.Unmarshal(wire.Inputs, &inputs); err != nil {
+	if err := decodeSessionDocument(wire.Inputs, &inputs); err != nil {
 		return SessionStart{}, err
 	}
 	var parts []WireContentPart
-	if err := json.Unmarshal(wire.Input, &parts); err != nil {
+	if err := decodeSessionDocument(wire.Input, &parts); err != nil {
 		return SessionStart{}, err
 	}
 	start := SessionStart{InitialState: append(harness.SessionStateValue(nil), wire.InitialState...), Report: wire.Report, OutputLimit: wire.OutputLimit}

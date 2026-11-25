@@ -51,23 +51,16 @@ func (t registeredExtensionTool) Run(ctx context.Context, tc ToolContext, call m
 	return t.binding.entry.value.(nativeTool).tool(scope.ctx, author, call)
 }
 
-func (s *nativeSnapshot) checkHooks(tc ToolContext, states map[string]harness.SessionStateValue, host *composition, lease *artifactCallLease, secrets map[string]map[string]string) []harness.ToolCheckHook {
+func (s *nativeSnapshot) checkHooks(tc ToolContext, sel selection) []harness.ToolCheckHook {
 	var hooks []harness.ToolCheckHook
 	for _, registration := range s.hooks["check"] {
 		entry := registration
 		hooks = append(hooks, harness.ToolCheckHook{ID: entry.id, ExtensionID: entry.activation.id, Run: func(ctx context.Context, input model.ToolCall) (*string, error) {
-			activation := entry.activation
-			if err := activation.unavailable(); err != nil {
+			if err := entry.activation.unavailable(); err != nil {
 				return nil, err
 			}
-			child, cancel := context.WithCancel(ctx)
-			scope := callbackScope(&nativeCallScope{
-				nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
-				candidate:          s.candidate, activation: activation, kind: callKindHook,
-				session: tc.Session, states: states, host: host, lease: lease, operationSecrets: secrets,
-			})
+			scope, call := registeredHookScope(ctx, s, entry, sel, tc.Session)
 			defer scope.end()
-			call := extension.AuthorContext{ExtensionID: activation.id, Settings: bytes.Clone(activation.section), Session: tc.Session, State: bytes.Clone(states[activation.id]), Call: scope.call}
 			return entry.value.(nativeHook).handler.(extension.ToolCheckHook)(scope.ctx, call, input)
 		}})
 	}

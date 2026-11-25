@@ -122,17 +122,6 @@ func ProcessArgs(args map[string]any) (action, id string, err error) {
 			err = fmt.Errorf("process: id is required for %s", action)
 			return
 		}
-		if len(id) != 8 {
-			err = fmt.Errorf("process: no process with ID %q", id)
-			return
-		}
-		for i := range id {
-			c := id[i]
-			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-				err = fmt.Errorf("process: no process with ID %q", id)
-				return
-			}
-		}
 	default:
 		err = fmt.Errorf("process: unknown action %q", action)
 	}

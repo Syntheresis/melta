@@ -844,7 +844,7 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 				if err != nil {
 					return harness.CheckStage{Error: err}
 				}
-				return harness.CheckStage{Hooks: current.checkHooks(tc, sel.states, sel.invocation.snapshot.composition, sel.lease, sel.operationSecrets), Release: func() { _ = current.release() }}
+				return harness.CheckStage{Hooks: current.checkHooks(tc, sel), Release: func() { _ = current.release() }}
 			},
 			ResultStage: func() harness.ResultStage {
 				current, err := sel.native.stage()

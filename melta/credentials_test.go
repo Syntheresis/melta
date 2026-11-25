@@ -198,12 +198,11 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	testassert.Equal(t, second.values["b"], "shared-value|shared-value")
 }
 
-// TestDeclaredCredentialRotationReplacesResources proves a candidate whose
-// active sections are unchanged but whose declared binding value rotated
-// re-activates with the new captured value and prepares a replacement
-// resource set, while an identical candidate reuses the current activation
-// and resource set.
-func TestDeclaredCredentialRotationReplacesResources(t *testing.T) {
+// TestDeclaredCredentialRotationReactivates proves a candidate whose active
+// sections are unchanged but whose declared binding value rotated
+// re-activates with the new captured value, while an identical candidate
+// keeps the current activation.
+func TestDeclaredCredentialRotationReactivates(t *testing.T) {
 	const name = "MELTA_RES_ROTATE"
 	t.Setenv(name, "one")
 	h := newServiceHarness(t)
@@ -217,20 +216,15 @@ func TestDeclaredCredentialRotationReplacesResources(t *testing.T) {
 	svc := h.preparedService(context.Background(), author)
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	first := svc.current().resources
 	testassert.Equal(t, strings.Join(opens, ","), "one")
 
 	t.Setenv(name, "two")
 	_, err = svc.publish(context.Background())
 	testassert.NoError(t, err)
-	second := svc.current().resources
-	testassert.Require(t, second != first, "a rotated declared binding reused the old resource set")
 	testassert.Equal(t, strings.Join(opens, ","), "one,two")
 
 	_, err = svc.publish(context.Background())
 	testassert.NoError(t, err)
-	third := svc.current().resources
-	testassert.Require(t, third == second, "an identical candidate replaced the resource set")
 	testassert.Equal(t, strings.Join(opens, ","), "one,two")
 	defer svc.current().resources.release()
 }
@@ -274,7 +268,7 @@ func TestExternalSharedCredentialRotationKeepsProviderObservation(t *testing.T) 
 
 // TestManagedKeyEditRefreshesSharedDeclaredBinding proves a connection edit
 // that writes a managed key shared with a declared reference publishes the
-// new binding and replaces the resource set instead of reusing stale values.
+// new binding instead of keeping the stale value.
 func TestManagedKeyEditRefreshesSharedDeclaredBinding(t *testing.T) {
 	const name = "MELTA_SHARED_MANAGED"
 	h := newServiceHarness(t)
@@ -289,7 +283,6 @@ func TestManagedKeyEditRefreshesSharedDeclaredBinding(t *testing.T) {
 	svc := h.preparedService(context.Background(), author)
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	first := svc.current().resources
 	provider := svc.current().catalog.Providers["prov"]
 	testassert.Require(t, provider != nil, "provider fixture is missing")
 
@@ -297,8 +290,6 @@ func TestManagedKeyEditRefreshesSharedDeclaredBinding(t *testing.T) {
 		providerID: "prov", transport: provider.Transport, keyAction: keyActionSet, keyEnv: name, keyValue: "new-value",
 	}))
 	testassert.NoError(t, err)
-	second := svc.current().resources
-	testassert.Require(t, second != first, "a managed-key edit reused the stale resource set")
 	binding := mutation.snapshot.declaredBindings[declaredField{extensionID: "credmanaged", field: "/operation"}]
 	testassert.Equal(t, binding.value, "new-value")
 	testassert.Equal(t, captureValueForTest(t, managed, name), "new-value")
@@ -534,7 +525,6 @@ func TestCustomProviderCreateRefreshesSharedDeclaredBinding(t *testing.T) {
 			svc := h.preparedService(context.Background(), author)
 			_, err := svc.publish(context.Background())
 			testassert.NoError(t, err)
-			firstResources := svc.current().resources
 			testassert.Equal(t, opens.Load(), int64(1))
 
 			const keyValue = "supplied-create-key"
@@ -543,7 +533,6 @@ func TestCustomProviderCreateRefreshesSharedDeclaredBinding(t *testing.T) {
 			key := keyValue
 			mutation, err := svc.mutate(context.Background(), svc.editProviderCreate(context.Background(), "newp", protocol.ProviderEdit{BaseUrl: &baseURL, ApiKeyEnv: &testCase.envName}, map[string]protocol.ModelEdit{"m": {ContextWindow: &window}}, &key))
 			testassert.NoError(t, err)
-			testassert.Require(t, svc.current().resources != firstResources, "custom create reused the stale resource set")
 			testassert.Equal(t, opens.Load(), int64(2))
 			binding := mutation.snapshot.declaredBindings[declaredField{extensionID: "credcreate", field: "/operation"}]
 			testassert.Equal(t, binding.value, keyValue)
@@ -976,7 +965,6 @@ func TestDeclaredCredentialCapturesStayPerOperation(t *testing.T) {
 	}
 	firstSession := create()
 	submitThroughRuntime(t, r, firstSession.Identity.SessionID, "op-first", "hello")
-	firstResources := r.config.current().resources
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		probe.mu.Lock()
@@ -1003,7 +991,6 @@ func TestDeclaredCredentialCapturesStayPerOperation(t *testing.T) {
 	writeServiceFile(t, e.configPath, credentialConfigDocument(e.server.URL, second, second))
 	revision, err := r.Reload(context.Background(), testCaller(r))
 	testassert.Require(t, err == nil && revision.Generation == "3", "Reload = (%q, %v), want 3", revision, err)
-	testassert.Require(t, r.config.current().resources != firstResources, "the rotated declared binding reused the pre-reload resource set")
 	thirdSession := create()
 	submitThroughRuntime(t, r, thirdSession.Identity.SessionID, "op-third", "hello")
 	awaitOperation(t, r, thirdSession.Identity.SessionID, "op-third", harness.OperationSuccess)

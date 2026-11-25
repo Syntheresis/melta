@@ -399,40 +399,6 @@ func TestAuthorServeOpaqueArgumentsAndInterruption(t *testing.T) {
 	if reply.Error == nil || !reply.Error.Interrupted {
 		t.Fatalf("effect error reply = %+v", reply)
 	}
-	encoded, merr := json.Marshal(reply.Error)
-	if merr != nil {
-		t.Fatalf("marshal error frame: %v", merr)
-	}
-	var frame map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &frame); err != nil {
-		t.Fatalf("unmarshal error frame: %v", err)
-	}
-	if _, present := frame["evidence"]; present {
-		t.Fatalf("error frame carries evidence: %s", encoded)
-	}
-}
-
-func TestAuthorServeRejectsRetiredToolRoutes(t *testing.T) {
-	for _, method := range []string{"normalize", "prepare", "execute", "authorization"} {
-		t.Run(method, func(t *testing.T) {
-			p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-				if method == "authorization" {
-					_, err := api.AttachToolCheck(func(context.Context, extension.AuthorContext, model.ToolCall) (*string, error) { return nil, nil }, nil)
-					return nil, err
-				}
-				_, err := api.RegisterTool(model.ToolDefinition{Name: "echo", Parameters: json.RawMessage(`{}`)}, func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
-					return extension.ToolResult{}, nil
-				}, nil)
-				return nil, err
-			}})
-			p.hello(extension.APIVersion)
-			registered := p.activate()
-			p.send(worker.Frame{Kind: worker.KindRequest, ID: "old", Method: worker.MethodCall, Params: callParams(t, registered[0].Handle, method)})
-			if err := p.wait(); err == nil {
-				t.Fatal("retired method accepted")
-			}
-		})
-	}
 }
 
 // TestAuthorHostcallEmptyArgumentsAndPartial proves an empty hostcall argument

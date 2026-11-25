@@ -362,8 +362,8 @@ func capturedCredentialNames(cat *catalog.Catalog, secrets []declaredSecret) []s
 // captureDeclaredBindings derives the active declared field bindings from the
 // same build capture. A pending connection key action is applied to the
 // matching binding so a build that only later writes the managed key does not
-// publish a stale declared binding. The result is used for resource-set
-// adoption and every component activation value; it is never durable.
+// publish a stale declared binding. The result supplies the activation
+// bindings; it is never durable.
 func captureDeclaredBindings(secrets []declaredSecret, captured map[string]CredentialValue) map[declaredField]declaredBinding {
 	if len(secrets) == 0 {
 		return nil
@@ -447,10 +447,9 @@ func (s *configurationService) publish(ctx context.Context) (configurationCaptur
 	// checked once more under the Caller-first rule. A publication that wins
 	// this check may finish despite later cancellation; shutdown joins it.
 	if err := s.canceled(ctx); err != nil {
-		fresh := s.freshResources(candidate)
 		s.buildMu.Unlock()
-		if fresh != nil {
-			fresh.release()
+		if candidate.resources != nil {
+			candidate.resources.release()
 		}
 		if candidate.native != nil {
 			_ = candidate.native.release()
@@ -513,23 +512,13 @@ func (s *configurationService) commit(candidate *configuration) configurationCap
 		return events
 	})
 	s.nativeMu.Unlock()
-	if previous != nil && previous.resources != nil && previous.resources != candidate.resources {
+	if previous != nil && previous.resources != nil {
 		previous.resources.release()
 	}
 	if previous != nil && previous.native != nil && previous.native != candidate.native {
 		_ = previous.native.release()
 	}
 	return captured
-}
-
-func (s *configurationService) freshResources(candidate *configuration) *resourceSet {
-	if candidate != nil && candidate.resources != nil {
-		previous := s.current()
-		if previous == nil || previous.resources != candidate.resources {
-			return candidate.resources
-		}
-	}
-	return nil
 }
 
 // canceled applies the Caller-first cancellation rule: a done Caller context
@@ -562,7 +551,7 @@ func (s *configurationService) build(ctx context.Context, generation uint64) (*c
 // decoded once, the captured providers layer is delegated to the Loader so
 // provider assembly and every cost protection use that one read, session
 // settings are parsed, and each enabled extension section is validated against
-// its activation's manifest before its resource set is prepared or reused.
+// its activation's manifest before its resource set is prepared.
 // Agent definitions are not parsed here; the Agents activation owns them.
 // Nothing is returned until the complete candidate survives all of it. conn is
 // the catalog-loader input: nil builds over the ordinary LoadCaptured inputs
@@ -645,8 +634,8 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 	}
 	snapshot.native, err = s.prepareNativeCandidate(ctx, specs)
 	if err != nil {
-		if fresh := s.freshResources(snapshot); fresh != nil {
-			fresh.release()
+		if snapshot.resources != nil {
+			snapshot.resources.release()
 		}
 		return nil, err
 	}

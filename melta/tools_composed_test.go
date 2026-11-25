@@ -1278,8 +1278,8 @@ func reserveAndStart(t *testing.T, jobsInst jobs.Jobs, workspace, command string
 
 // TestProcessToolReturnsRetainedActionResults reproduces every legacy
 // process action's result text against a real jobs capability, including
-// session ownership and the capability's unknown-ID text for
-// well-shaped unknown and foreign identities.
+// session ownership and the capability's unknown-ID text for unknown and
+// foreign identities.
 func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 	jobsDir := t.TempDir()
 	jobsInst := realJobs(t, jobsDir)
@@ -1336,15 +1336,18 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == want, "result = %+v, want %q", outcome.Result, want)
 	})
 
-	t.Run("a well-shaped unknown id reaches the capability and returns the retained text", func(t *testing.T) {
-		outcome := process(context.Background(), tc, makeCall(t, "process", `{"action":"read","id":"deadbeef"}`))
-		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == `process: no process with ID "deadbeef"`, "result = %+v, want the retained unknown-ID text", outcome.Result)
+	t.Run("an unknown id reaches the capability and returns the retained text", func(t *testing.T) {
+		for _, id := range []string{"deadbeef", "xyz", "DEADBEEF", "deadbeeg"} {
+			outcome := process(context.Background(), tc, makeCall(t, "process", fmt.Sprintf(`{"action":"read","id":%q}`, id)))
+			want := fmt.Sprintf("process: no process with ID %q", id)
+			testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == want, "id %q: result = %+v, want %q", id, outcome.Result, want)
+		}
 	})
 }
 
 // TestProcessToolInvalidArgumentsReturnErrors pins the validation outcomes:
-// missing ids, unknown actions, and ids outside the 8-lowercase-hex
-// namespace return error results without calling the jobs capability.
+// missing ids and unknown actions return error results without calling the
+// jobs capability.
 func TestProcessToolInvalidArgumentsReturnErrors(t *testing.T) {
 	fake := &fakeJobs{}
 	byID, _ := openToolsComposed(t, t.TempDir(), fake, nil)
@@ -1358,11 +1361,6 @@ func TestProcessToolInvalidArgumentsReturnErrors(t *testing.T) {
 		{`{"action":"kill"}`, "process: id is required for kill"},
 		{`{"action":"drop","id":"deadbeef"}`, `process: unknown action "drop"`},
 		{`{}`, `process: unknown action ""`},
-		{`{"action":"read","id":"xyz"}`, `process: no process with ID "xyz"`},
-		{`{"action":"kill","id":"DEADBEEF"}`, `process: no process with ID "DEADBEEF"`},
-		{`{"action":"read","id":"deadbee"}`, `process: no process with ID "deadbee"`},
-		{`{"action":"read","id":"deadbeef0"}`, `process: no process with ID "deadbeef0"`},
-		{`{"action":"kill","id":"deadbeeg"}`, `process: no process with ID "deadbeeg"`},
 	}
 	for _, tc := range cases {
 		outcome := process(context.Background(), callToolContext(ws), makeCall(t, "process", tc.args))

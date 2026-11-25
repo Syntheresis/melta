@@ -239,13 +239,11 @@ func TestRuntimeConfigurationResourceReplacement(t *testing.T) {
 		defer r.Close(context.Background())
 		testassert.Equal(t, opens.Load(), int64(0))
 		testassert.Equal(t, activeOpens.Load(), int64(1))
-		resources := r.config.current().resources
 		writeServiceFile(t, e.configPath, `{"extensions":{"alpha":{"enabled":false,"value":[1,2]},"beta":{"enabled":true},"uninstalled":{"enabled":true,"data":5}}}`)
 		_, err = r.Reload(context.Background(), testCaller(r))
 		testassert.NoError(t, err)
 		testassert.Equal(t, opens.Load(), int64(0))
 		testassert.Equal(t, activeOpens.Load(), int64(1))
-		testassert.Require(t, r.config.current().resources == resources, "inactive edits replaced active resources")
 	})
 	e := newOwnerEnv(t)
 	e.fixtureStore(storage.NewMemory())
