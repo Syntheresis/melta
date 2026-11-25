@@ -821,12 +821,10 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 					}
 					present[name] = true
 				}
-				if sel.defaultAll {
-					for _, entry := range current.entries {
-						if entry.kind == "tool" && !present[entry.name] {
-							definitions = append(definitions, entry.value.(nativeTool).definition)
-							present[entry.name] = true
-						}
+				for _, entry := range current.entries {
+					if entry.kind == "tool" && !present[entry.name] {
+						definitions = append(definitions, entry.value.(nativeTool).definition)
+						present[entry.name] = true
 					}
 				}
 				var names []string
