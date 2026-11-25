@@ -1795,3 +1795,53 @@ func TestRequestBodyParametersAcrossRetries(t *testing.T) {
 			i+1, body["model"], body["model_side"], body["shared"], body[""], body["provider_number"], body["_melta_hidden"])
 	}
 }
+
+// TestPreparationInvocationOpeningFailurePublishesItsClosure proves one
+// Engine invocation's opening is published before its opener runs, so a
+// failing opener still returns after its own closure: the closure carries the
+// same invocation identity and purpose, and the opener's error is what the
+// Harness receives.
+func TestPreparationInvocationOpeningFailurePublishesItsClosure(t *testing.T) {
+	obs := newObservation()
+	svc := &configurationService{dataDir: t.TempDir(), obs: obs}
+	p := newPreparation(svc, Locations{}, "", nil, newObservationAdapter(obs, newWarningStore()), newArtifactIntervals(), nil)
+	sub, err := obs.subscribe(8)
+	testassert.NoError(t, err)
+	defer sub.Close()
+	openerFailure := errors.New("test opener failure")
+	openedBeforeOpener := false
+	opener := func(context.Context, harness.OperationAdmission, selection, harness.InvocationRequest) (harness.InvocationExecution, error) {
+		select {
+		case event := <-sub.Events():
+			body, err := event.AsScopeEvent()
+			testassert.NoError(t, err)
+			testassert.Equal(t, body.Kind, protocol.ScopeOpened)
+			invocation, err := body.Scope.AsInvocationScope()
+			testassert.NoError(t, err)
+			testassert.Require(t, invocation.InvocationId == "inv-opening-failure" && invocation.Purpose == protocol.Conversation, "opening scope = %+v, want the invocation's own identity and purpose", invocation)
+			openedBeforeOpener = true
+		default:
+			t.Fatal("the invocation opening was not published before the opener ran")
+		}
+		return harness.InvocationExecution{}, openerFailure
+	}
+	var artifactRelease func()
+	execution, err := p.open(context.Background(), harness.OperationAdmission{SessionID: "session-opening-failure", OperationID: "op-opening-failure"}, "/ws", selection{}, nil, opener, &artifactRelease)
+	testassert.NoError(t, err)
+	defer func() {
+		if artifactRelease != nil {
+			artifactRelease()
+		}
+	}()
+	_, err = execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-opening-failure", Purpose: harness.InvocationPurposeConversation})
+	testassert.Require(t, errors.Is(err, openerFailure), "opening failure = %v, want the opener's error", err)
+	testassert.Require(t, openedBeforeOpener, "the opener ran before the invocation opening was published")
+	closed, ok := nextEvent(t, sub)
+	testassert.Require(t, ok, "the subscription closed before the invocation closure")
+	body, err := closed.AsScopeEvent()
+	testassert.NoError(t, err)
+	testassert.Equal(t, body.Kind, protocol.ScopeClosed)
+	invocation, err := body.Scope.AsInvocationScope()
+	testassert.NoError(t, err)
+	testassert.Require(t, invocation.InvocationId == "inv-opening-failure" && invocation.Purpose == protocol.Conversation, "closure scope = %+v, want the invocation's own identity and purpose", invocation)
+}

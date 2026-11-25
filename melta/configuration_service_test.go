@@ -300,7 +300,7 @@ func TestResourceFactoryWithoutWarningSink(t *testing.T) {
 	svc := h.preparedService(context.Background(), servicePlugin("alpha", &h.opens, nil))
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	testassert.NoError(t, svc.current().resources.release())
+	svc.current().resources.release()
 }
 
 func TestRuntimeConfigurationCandidateResources(t *testing.T) {

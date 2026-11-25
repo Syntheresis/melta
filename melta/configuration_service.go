@@ -13,7 +13,6 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
-	"github.com/Syntheresis/melta/protocol"
 )
 
 // ErrConfiguration reports a complete candidate failure: nothing was
@@ -33,7 +32,7 @@ var ErrConfiguration = errors.New("melta: configuration failure")
 // readers Load once without a lock. A failed or canceled build publishes
 // nothing: initial publication uses generation 1, only a success increments
 // it, and the increment happens under the build mutex. Builds prepare the
-// candidate's long-lived plugin scope before publication. Each
+// candidate's long-lived resources before publication. Each
 // publication carries its passive configuration event inside the same
 // observation section as its atomic Store.
 type configurationService struct {
@@ -45,10 +44,6 @@ type configurationService struct {
 	credentials    CredentialSource
 	locations      Locations
 	strategy       *harness.StrategyBinding
-	// unusablePackages records selected packages that failed to load, keyed by
-	// their hash directory. An enabled section whose ID hashes to one of them
-	// rejects the candidate; a disabled section stays ignored.
-	unusablePackages map[string]error
 
 	owner       context.Context
 	obs         *observation
@@ -455,7 +450,7 @@ func (s *configurationService) publish(ctx context.Context) (configurationCaptur
 		fresh := s.freshResources(candidate)
 		s.buildMu.Unlock()
 		if fresh != nil {
-			_ = fresh.release()
+			fresh.release()
 		}
 		if candidate.native != nil {
 			_ = candidate.native.release()
@@ -506,11 +501,6 @@ func (s *configurationService) commit(candidate *configuration) configurationCap
 		if candidate.native != nil {
 			events = append(events, candidate.native.publishLocked()...)
 		}
-		if candidate.resources != nil && (previous == nil || previous.resources != candidate.resources) {
-			candidate.resources.runtime.obs = s.obs
-			warningChanged = candidate.resources.commitWarnings() || warningChanged
-			events = append(events, scopeEvent(protocol.ScopeOpened, candidate.resources.runtime.info))
-		}
 		revision := s.warnings.storeRevision()
 		s.heldMu.Lock()
 		s.published.Store(candidate)
@@ -524,7 +514,7 @@ func (s *configurationService) commit(candidate *configuration) configurationCap
 	})
 	s.nativeMu.Unlock()
 	if previous != nil && previous.resources != nil && previous.resources != candidate.resources {
-		_ = previous.resources.release()
+		previous.resources.release()
 	}
 	if previous != nil && previous.native != nil && previous.native != candidate.native {
 		_ = previous.native.release()
@@ -637,9 +627,7 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 	snapshot.credentialNames = credentialNames
 	snapshot.secrets = secrets
 	snapshot.declaredBindings = captureDeclaredBindings(secrets, credentials)
-	if err := s.prepareResources(ctx, snapshot); err != nil {
-		return nil, err
-	}
+	s.prepareResources(snapshot)
 	var specs []nativeActivationSpec
 	for _, author := range s.authors {
 		id := author.extension.Manifest.ID
@@ -658,7 +646,7 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 	snapshot.native, err = s.prepareNativeCandidate(ctx, specs)
 	if err != nil {
 		if fresh := s.freshResources(snapshot); fresh != nil {
-			_ = fresh.release()
+			fresh.release()
 		}
 		return nil, err
 	}

@@ -483,23 +483,9 @@ func TestComposedSQLiteRuntimeObservationShutdownAndOwnership(t *testing.T) {
 	want := []Event{
 		composedConfigurationEvent(2, r.InstanceID()),
 		composedConfigurationEvent(3, r.InstanceID()),
-		composedRuntimeScopeClosed(),
 	}
-	testassert.Require(t, slices.EqualFunc(observed, want, EqualEventForTest), "healthy subscriber events = %+v, want the observed revisions plus the Melta closure in publication order %+v", observed, want)
+	testassert.Require(t, slices.EqualFunc(observed, want, EqualEventForTest), "healthy subscriber events = %+v, want the observed revisions in publication order %+v", observed, want)
 	again, err := e.openComposed(ctx)
 	testassert.NoError(t, err)
 	testassert.NoError(t, again.Close(ctx))
-}
-
-// composedRuntimeScopeClosed builds the Melta closure scope event for the
-// composed order oracles.
-func composedRuntimeScopeClosed() Event {
-	var scope protocol.Scope
-	_ = scope.FromRuntimeScope(protocol.RuntimeScope{Kind: protocol.RuntimeScopeKindRuntime}) // plain members; the marshal cannot fail
-	var event protocol.Event
-	_ = event.FromScopeEvent(protocol.ScopeEvent{ // plain members; the marshal cannot fail
-		Kind:  protocol.ScopeClosed,
-		Scope: scope,
-	})
-	return event
 }

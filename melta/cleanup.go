@@ -60,9 +60,7 @@ func (r *Melta) cleanupDeletedSessions(ctx context.Context, deletions []deletedS
 	if err != nil || snapshot == nil || snapshot.resources == nil {
 		return appendOwnerFailures(failures, deletions)
 	}
-	defer func() {
-		_ = snapshot.resources.release()
-	}()
+	defer snapshot.resources.release()
 	r.config.nativeMu.Lock()
 	var registered *nativeSnapshot
 	if current := r.config.nativeCurrent; current != nil && current.holds > 0 {

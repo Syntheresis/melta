@@ -52,7 +52,8 @@ func TestObservationPausedFactEmitsCurrentRevision(t *testing.T) {
 			t.Fatalf("creation event = %s (ok=%v), want the session's first invalidation", eventJSON(t, creation), ok)
 		}
 
-		_, release := pauseObservation(t, r.obs, scopeEvent(protocol.ScopeOpened, ScopeInfo{Kind: ScopeWorkspace, Workspace: "/ws-paused-synthetic"}))
+		pausedPublish := configurationChangedEvent(r.instance, 1)
+		_, release := pauseObservation(t, r.obs, pausedPublish)
 		archiveDone := make(chan error, 1)
 		go func() {
 			archiveDone <- r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
@@ -84,7 +85,7 @@ func TestObservationPausedFactEmitsCurrentRevision(t *testing.T) {
 		testassert.NoError(t, <-reopenDone)
 
 		pausedEvent, ok := nextEvent(t, sub)
-		if !ok || !equalEvent(pausedEvent, scopeEvent(protocol.ScopeOpened, ScopeInfo{Kind: ScopeWorkspace, Workspace: "/ws-paused-synthetic"})) {
+		if !ok || !equalEvent(pausedEvent, pausedPublish) {
 			t.Fatalf("first event after release = %s (ok=%v), want the paused publication's own event", eventJSON(t, pausedEvent), ok)
 		}
 		// Both queued invalidations — the archive's own committed pair was
@@ -176,10 +177,9 @@ func TestObservationRootChildScopeTagging(t *testing.T) {
 				case "scope_opened", "scope_closed":
 					body, err := event.AsScopeEvent()
 					testassert.NoError(t, err)
-					if kind := scopeKind(t, body.Scope); kind == "operation" || kind == "agent" {
-						shortSession, _ := scopeSessionIdentity(t, body.Scope)
-						testassert.Require(t, shortSession == root || shortSession == child, "short scope event for a foreign session: %+v", body.Scope)
-					}
+					testassert.Require(t, scopeKind(t, body.Scope) == "invocation", "scope event = %+v, want an invocation scope", body.Scope)
+					shortSession, _ := scopeSessionIdentity(t, body.Scope)
+					testassert.Require(t, shortSession == root || shortSession == child, "invocation scope event for a foreign session: %+v", body.Scope)
 				default:
 					// configuration and warning events carry no session attribution.
 				}

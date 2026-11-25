@@ -21,9 +21,7 @@ import (
 
 // Passive-observation fixtures reuse the owner-lifecycle harness from
 // runtime_test.go: one controlled Melta over a real store, with ordinary
-// Workspace plugins for deterministic scope publications.
-
-const obsWorkspace = "/ws"
+// Workspace plugins for deterministic publications.
 
 // equalEvent compares two Events by their exact serialized union bodies: the
 // generated marshaling is the one wire form, so byte equality pins every
@@ -64,7 +62,7 @@ func scopeSessionIdentity(t *testing.T, scope protocol.Scope) (string, bool) {
 		body, err := scope.AsOperationScope()
 		testassert.NoError(t, err)
 		sessionID = body.SessionId
-	case "agent":
+	case "invocation":
 		body, err := scope.AsInvocationScope()
 		testassert.NoError(t, err)
 		sessionID = body.SessionId
@@ -79,8 +77,7 @@ func scopeSessionIdentity(t *testing.T, scope protocol.Scope) (string, bool) {
 }
 
 // scopeWorkspaceAttribution reads the optional Workspace attribution one
-// scope carries through its union branches; the Workspace scope carries it as
-// its required identity.
+// scope carries through its union branches.
 func scopeWorkspaceAttribution(t *testing.T, scope protocol.Scope) (string, bool) {
 	t.Helper()
 	var workspace *string
@@ -89,10 +86,6 @@ func scopeWorkspaceAttribution(t *testing.T, scope protocol.Scope) (string, bool
 		body, err := scope.AsRuntimeScope()
 		testassert.NoError(t, err)
 		workspace = body.Workspace
-	case "workspace":
-		body, err := scope.AsWorkspaceScope()
-		testassert.NoError(t, err)
-		return body.Workspace, true
 	case "session":
 		body, err := scope.AsSessionScope()
 		testassert.NoError(t, err)
@@ -101,7 +94,7 @@ func scopeWorkspaceAttribution(t *testing.T, scope protocol.Scope) (string, bool
 		body, err := scope.AsOperationScope()
 		testassert.NoError(t, err)
 		workspace = body.Workspace
-	case "agent":
+	case "invocation":
 		body, err := scope.AsInvocationScope()
 		testassert.NoError(t, err)
 		workspace = body.Workspace
@@ -195,24 +188,17 @@ func TestRuntimeObservationPublishesCommittedTransitionsInOrder(t *testing.T) {
 		testassert.Require(t, err == nil && revision.Generation == "2", "Reload = (%q, %v), want 2", revision, err)
 	}
 	{
-		_, err := r.config.current().resources.workspaces.get(context.Background(), ScopeInfo{Kind: ScopeWorkspace, DataDir: e.dataDir, Workspace: obsWorkspace})
-		testassert.NoError(t, err)
-	}
-	{
 		revision, err := r.Reload(context.Background(), testCaller(r))
 		testassert.Require(t, err == nil && revision.Generation == "3", "Reload = (%q, %v), want 3", revision, err)
 	}
 	testassert.NoError(t, r.Close(context.Background()))
 	want := []Event{
 		configurationChangedEvent(r.instance, 2),
-		scopeEvent(protocol.ScopeOpened, ScopeInfo{Kind: ScopeWorkspace, Workspace: obsWorkspace}),
 		configurationChangedEvent(r.instance, 3),
-		scopeEvent(protocol.ScopeClosed, ScopeInfo{Kind: ScopeWorkspace, Workspace: obsWorkspace}),
-		scopeEvent(protocol.ScopeClosed, ScopeInfo{Kind: ScopeRuntime}),
 	}
 	got := drainClosed(t, sub)
 	if !slices.EqualFunc(got, want, equalEvent) {
-		t.Fatalf("events = %s, want configuration revisions and scope open/close in publication order %s", eventsJSON(t, got), eventsJSON(t, want))
+		t.Fatalf("events = %s, want the configuration revisions in publication order %s", eventsJSON(t, got), eventsJSON(t, want))
 	}
 }
 
@@ -230,8 +216,7 @@ func TestObservationPausedPublisherOrdersTheNextPublication(t *testing.T) {
 	}()
 	sub, err := r.Subscribe(8)
 	testassert.NoError(t, err)
-	pausedEvent := scopeEvent(protocol.ScopeOpened, ScopeInfo{Kind: ScopeWorkspace, Workspace: "/ws-paused-synthetic"})
-	pausedSecond := scopeEvent(protocol.ScopeClosed, ScopeInfo{Kind: ScopeWorkspace, Workspace: "/ws-paused-synthetic"})
+	pausedEvent := configurationChangedEvent(r.instance, 1)
 
 	t.Run("a configuration publisher cannot commit or enqueue past a paused publication", func(t *testing.T) {
 		_, release := pauseObservation(t, r.obs, pausedEvent)
@@ -261,34 +246,6 @@ func TestObservationPausedPublisherOrdersTheNextPublication(t *testing.T) {
 		second, ok := nextEvent(t, sub)
 		if !ok || eventKind(t, second) != "configuration_changed" || eventGeneration(t, second) != "2" {
 			t.Fatalf("second event = %s (ok=%v), want configuration revision 2 enqueued in publication order", eventJSON(t, second), ok)
-		}
-	})
-
-	t.Run("a workspace publication cannot commit past a paused publication", func(t *testing.T) {
-		_, release := pauseObservation(t, r.obs, pausedSecond)
-		defer release()
-		getDone := make(chan error, 1)
-		go func() {
-			_, err := r.config.current().resources.workspaces.get(context.Background(), ScopeInfo{Kind: ScopeWorkspace, DataDir: e.dataDir, Workspace: "/ws-paused"})
-			getDone <- err
-		}()
-		select {
-		case err := <-getDone:
-			t.Fatalf("Workspace scope published while the observation section was held (%v)", err)
-		case event, ok := <-sub.Events():
-			t.Fatalf("event %s enqueued before its publication committed (ok=%v)", eventJSON(t, event), ok)
-		case <-time.After(200 * time.Millisecond):
-		}
-		release()
-		testassert.NoError(t, <-getDone)
-		first, ok := nextEvent(t, sub)
-		if !ok || !equalEvent(first, pausedSecond) {
-			t.Fatalf("first event = %s (ok=%v), want the paused publication's event first", eventJSON(t, first), ok)
-		}
-		second, ok := nextEvent(t, sub)
-		wantSecond := scopeEvent(protocol.ScopeOpened, ScopeInfo{Kind: ScopeWorkspace, Workspace: "/ws-paused"})
-		if !ok || !equalEvent(second, wantSecond) {
-			t.Fatalf("second event = %s (ok=%v), want %s", eventJSON(t, second), ok, eventJSON(t, wantSecond))
 		}
 	})
 }
@@ -524,17 +481,6 @@ func TestObservationSubscriptionCloseRacesPublication(t *testing.T) {
 		switch eventKind(t, event) {
 		case "configuration_changed":
 			revisions = append(revisions, eventGeneration(t, event))
-		case "scope_closed":
-			body, err := event.AsScopeEvent()
-			testassert.NoError(t, err)
-			if scopeKind(t, body.Scope) != "runtime" {
-				t.Fatalf("unexpected closure event %s, only the Melta scope closes here", eventJSON(t, event))
-			}
-			runtimeScope, err := body.Scope.AsRuntimeScope()
-			testassert.NoError(t, err)
-			if runtimeScope.Workspace != nil {
-				t.Fatalf("unexpected closure event %s, only the Melta scope closes here", eventJSON(t, event))
-			}
 		default:
 			t.Fatalf("unexpected event %s", eventJSON(t, event))
 		}
@@ -559,10 +505,6 @@ func TestRuntimeShutdownDoesNotWaitForUndrainedObservers(t *testing.T) {
 			revision, err := r.Reload(context.Background(), testCaller(r))
 			testassert.Require(t, err == nil && revision.Generation == want, "Reload = (%q, %v), want %s", revision, err, want)
 		}
-	}
-	{
-		_, err := r.config.current().resources.workspaces.get(context.Background(), ScopeInfo{Kind: ScopeWorkspace, DataDir: e.dataDir, Workspace: obsWorkspace})
-		testassert.NoError(t, err)
 	}
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- r.Close(context.Background()) }()
@@ -628,10 +570,7 @@ func TestObservationSubscriberLossDoesNotAffectExecution(t *testing.T) {
 		want := []Event{
 			configurationChangedEvent(r.instance, 2),
 			configurationChangedEvent(r.instance, 3),
-			scopeEvent(protocol.ScopeClosed, ScopeInfo{Kind: ScopeAgent, Workspace: e.dataDir, SessionID: sessionID, OperationID: "op-observed"}),
-			scopeEvent(protocol.ScopeClosed, ScopeInfo{Kind: ScopeOperation, Workspace: e.dataDir, SessionID: sessionID, OperationID: "op-observed"}),
-			scopeEvent(protocol.ScopeClosed, ScopeInfo{Kind: ScopeWorkspace, Workspace: e.dataDir}),
-			scopeEvent(protocol.ScopeClosed, ScopeInfo{Kind: ScopeRuntime}),
+			scopeEvent(protocol.ScopeClosed, e.dataDir, sessionID, "op-observed", "", ""),
 		}
 		// The committed scope/configuration order stays exact while the
 		// execution's passive facts are accounted separately: each must be

@@ -22,11 +22,9 @@ type surfaceRequest struct {
 	shell          string
 }
 
-// surfaceResult is one composed prompt with its captured rule diagnostics and
-// the exact baseline assembly inputs the prompt was rendered from.
+// surfaceResult is one composed prompt with its captured rule diagnostics.
 type surfaceResult struct {
 	Prompt   string
-	Assembly prompt.AssemblyInput
 	Warnings []prompt.Warning
 }
 
@@ -80,11 +78,10 @@ func (p *surfacePrompt) defaultPrompt() (surfaceResult, error) {
 		p.assembled = true
 		input := p.input
 		input.Rules = p.readRules()
-		p.result = surfaceResult{Prompt: prompt.Assemble(input), Assembly: input, Warnings: input.Rules.Warnings}
+		p.result = surfaceResult{Prompt: prompt.Assemble(input), Warnings: input.Rules.Warnings}
 	}
 	result := p.result
 	result.Warnings = slices.Clone(result.Warnings)
-	result.Assembly.Rules.Warnings = slices.Clone(result.Assembly.Rules.Warnings)
 	return result, nil
 }
 

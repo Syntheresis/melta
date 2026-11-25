@@ -16,6 +16,7 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
+	"github.com/Syntheresis/melta/protocol"
 )
 
 // Native compaction rows over the real preparation: the compaction observer
@@ -161,8 +162,16 @@ func TestCompactLifecycleNativeCompactionObservation(t *testing.T) {
 		testassert.Equal(t, compactions, 1)
 
 		// The observation set: every session invalidation names the real
-		// Session, every text progress the real running Operation, and no
+		// Session, every text progress the real running Operation, and every
+		// invocation's opening and closure carry the same invocation
+		// identity, the opening first. The automatic compaction's maintenance
+		// invocation brackets its summary request's own progress events. No
 		// other fact kind fires.
+		pairs := make(map[string]*shInvocationPair)
+		var invocationIDs []string
+		maintenanceID := ""
+		var summaryProgress []int
+		position := 0
 		sawInvalidation, sawDelta := false, false
 		for event := range sub.Events() {
 			switch eventKind(t, event) {
@@ -175,14 +184,54 @@ func TestCompactLifecycleNativeCompactionObservation(t *testing.T) {
 				sawInvalidation = true
 			case "text_delta":
 				testassert.NoError(t, assertProgressScopedToOperations(t, event, sessionID, "op-1", "op-2", "op-3"))
+				body, err := event.AsTextDeltaEvent()
+				testassert.NoError(t, err)
+				if body.Content == "native summary one" {
+					summaryProgress = append(summaryProgress, position)
+				}
 				sawDelta = true
-			case "scope_opened", "scope_closed", "warning_changed", "configuration_changed":
-				// scope lifecycle and publication facts stay allowed beside the passive set
+			case "scope_opened", "scope_closed":
+				body, err := event.AsScopeEvent()
+				testassert.NoError(t, err)
+				invocation, err := body.Scope.AsInvocationScope()
+				testassert.NoError(t, err)
+				testassert.Equal(t, invocation.SessionId, sessionID)
+				testassert.Require(t, invocation.InvocationId != "", "scope event = %+v, want an invocation identity", invocation)
+				pair := pairs[invocation.InvocationId]
+				if pair == nil {
+					pair = &shInvocationPair{purpose: invocation.Purpose, opened: -1, closed: -1}
+					pairs[invocation.InvocationId] = pair
+					invocationIDs = append(invocationIDs, invocation.InvocationId)
+					if invocation.Purpose == protocol.Maintenance {
+						maintenanceID = invocation.InvocationId
+					}
+				}
+				testassert.Equal(t, invocation.Purpose, pair.purpose)
+				if body.Kind == protocol.ScopeOpened {
+					pair.opens++
+					pair.opened = position
+				} else {
+					pair.closes++
+					pair.closed = position
+				}
+			case "warning_changed", "configuration_changed":
+				// publication facts stay allowed beside the passive set
 			default:
 				t.Fatalf("unexpected event %s", eventJSON(t, event))
 			}
+			position++
 		}
 		testassert.Require(t, sawInvalidation && sawDelta, "observation set: invalidation %v delta %v, want both", sawInvalidation, sawDelta)
+		testassert.Require(t, len(invocationIDs) != 0, "no invocation scope events observed")
+		for _, id := range invocationIDs {
+			pair := pairs[id]
+			testassert.Require(t, pair.opens == 1 && pair.closes == 1 && pair.opened < pair.closed, "invocation %q marks = %+v, want its one opening before its closure", id, pair)
+		}
+		testassert.Require(t, maintenanceID != "", "the automatic compaction published no maintenance invocation")
+		testassert.Require(t, len(summaryProgress) != 0, "the automatic compaction published no summary progress")
+		maintenance := pairs[maintenanceID]
+		testassert.Require(t, maintenance.opened < summaryProgress[0], "maintenance invocation opening = %d, summary progress = %v, want the opening before the summary", maintenance.opened, summaryProgress)
+		testassert.Require(t, maintenance.closed > summaryProgress[len(summaryProgress)-1], "maintenance invocation closure = %d, summary progress = %v, want the closure after the summary", maintenance.closed, summaryProgress)
 	})
 }
 

@@ -313,7 +313,6 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	}
 	configService.authors = append(configService.authors, installed...)
 	configService.authorFailures = packages.authorFailures
-	configService.unusablePackages = packages.unusable
 	configService.instance = instance
 	configService.attachWarnings(warnings)
 	// The private per-Session artifact interval registry initializes before
@@ -370,7 +369,9 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	background := &backgroundBridge{}
 	c.hosts.background = background
 	resources := initial.resources
-	acquired = append(acquired, resources.release)
+	// The resource set's release only drops its held credential names, so the
+	// unwind's error-returning closer shape carries no failure.
+	acquired = append(acquired, func() error { resources.release(); return nil })
 	tools := newStandardTools(dataDir, jobsService, toolOutput)
 	for _, declaration := range standardToolDeclarations() {
 		validate, err := compileToolValidator(declaration.definition)
@@ -652,7 +653,7 @@ func (r *Melta) joinShutdown() error {
 		errs = append(errs, err)
 	}
 	if current := r.config.current(); current != nil && current.resources != nil {
-		_ = current.resources.release()
+		current.resources.release()
 	}
 	if current := r.config.current(); current != nil && current.native != nil {
 		errs = append(errs, current.native.release())

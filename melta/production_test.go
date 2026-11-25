@@ -763,12 +763,6 @@ func TestProductionModelSelectionRejection(t *testing.T) {
 				testassert.Require(t, errors.Is(err, harness.ErrNotFound), "%s rejection left %v, want no Operation", row.agent, err)
 			}
 		}
-
-		// Both rejections happened before any scope opened.
-		r.config.current().resources.workspaces.mu.Lock()
-		live := len(r.config.current().resources.workspaces.live)
-		r.config.current().resources.workspaces.mu.Unlock()
-		testassert.Equal(t, live, 0)
 	})
 }
 

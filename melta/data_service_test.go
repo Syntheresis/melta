@@ -96,8 +96,9 @@ func dataView(t *testing.T, r *Melta, capabilityID, sessionID string, _ nativeGr
 	r.config.nativeMu.Unlock()
 	testassert.Require(t, candidate != nil, "no published candidate")
 	stage := candidate.snapshotForTest()
-	testassert.Require(t, stage != nil && stage.services[capabilityID] != nil, "service %q is not registered", capabilityID)
-	entry := stage.services[capabilityID]
+	testassert.Require(t, stage != nil, "no published stage")
+	entry := stagedService(stage, capabilityID)
+	testassert.Require(t, entry != nil, "service %q is not registered", capabilityID)
 	ctx, cancel := context.WithCancel(context.Background())
 	scope := &nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
@@ -1865,7 +1866,7 @@ func TestDataServiceCleanupBatchRetainsOriginalResourcesAcrossReload(t *testing.
 				current := r.config.nativeCurrent
 				r.config.nativeMu.Unlock()
 				stage := current.snapshotForTest()
-				testassert.Require(t, stage != nil && stage.services["probe.probe_b"] == nil, "disabled probe_b is still available in the reloaded set")
+				testassert.Require(t, stage != nil && stagedService(stage, "probe.probe_b") == nil, "disabled probe_b is still available in the reloaded set")
 				testassert.NoError(t, stage.release())
 				releaseFirst()
 				select {

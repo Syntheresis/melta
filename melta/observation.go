@@ -357,40 +357,19 @@ func operationEventScope(workspace, sessionID, operationID string) protocol.Scop
 	return scope
 }
 
-// scopeEvent projects one scope identity into its passive event: the scope
-// kind with every ancestor the ScopeInfo actually carries — runtime carries
-// nothing, a Workspace scope carries the lexical Workspace, and Operation and
-// Agent scopes carry the complete Workspace/Session/Operation identity. The
-// constructor-only DataDir and the passive warning callback never ride.
-func scopeEvent(kind protocol.ScopeEventKind, info ScopeInfo) Event {
+// scopeEvent projects one Engine invocation into its scope event: the
+// invocation kind with the Workspace/Session/Operation identity, the
+// invocation identity and its purpose.
+func scopeEvent(kind protocol.ScopeEventKind, workspace, sessionID, operationID, invocationID, purpose string) Event {
 	var scope protocol.Scope
-	switch info.Kind {
-	case ScopeRuntime:
-		_ = scope.FromRuntimeScope(protocol.RuntimeScope{ // plain members; the marshal cannot fail
-			Kind: protocol.RuntimeScopeKindRuntime,
-		})
-	case ScopeWorkspace:
-		_ = scope.FromWorkspaceScope(protocol.WorkspaceScope{ // plain members; the marshal cannot fail
-			Kind:      protocol.WorkspaceScopeKindWorkspace,
-			Workspace: info.Workspace,
-		})
-	case ScopeOperation:
-		_ = scope.FromOperationScope(protocol.OperationScope{ // plain members; the marshal cannot fail
-			Kind:        protocol.OperationScopeKindOperation,
-			Workspace:   eventString(info.Workspace),
-			SessionId:   info.SessionID,
-			OperationId: info.OperationID,
-		})
-	case ScopeAgent:
-		_ = scope.FromInvocationScope(protocol.InvocationScope{ // plain members; the marshal cannot fail
-			Kind:         protocol.Invocation,
-			Workspace:    eventString(info.Workspace),
-			SessionId:    info.SessionID,
-			OperationId:  info.OperationID,
-			InvocationId: info.InvocationID,
-			Purpose:      protocol.InvocationScopePurpose(info.Purpose),
-		})
-	}
+	_ = scope.FromInvocationScope(protocol.InvocationScope{ // plain members; the marshal cannot fail
+		Kind:         protocol.Invocation,
+		Workspace:    eventString(workspace),
+		SessionId:    sessionID,
+		OperationId:  operationID,
+		InvocationId: invocationID,
+		Purpose:      protocol.InvocationScopePurpose(purpose),
+	})
 	var event Event
 	_ = event.FromScopeEvent(protocol.ScopeEvent{ // plain string members; the marshal cannot fail
 		Kind:  kind,

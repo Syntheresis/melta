@@ -666,5 +666,4 @@ var contractGeneratedTypes = map[string]func() any{
 	"WarningsRevision":               func() any { return new(protocol.WarningsRevision) },
 	"WarningsSnapshot":               func() any { return new(protocol.WarningsSnapshot) },
 	"Workspace":                      func() any { return new(protocol.Workspace) },
-	"WorkspaceScope":                 func() any { return new(protocol.WorkspaceScope) },
 }

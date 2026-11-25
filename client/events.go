@@ -424,7 +424,6 @@ var (
 	}
 	scopeRequiredIdentities = map[string][]string{
 		"runtime":    nil,
-		"workspace":  {"workspace"},
 		"session":    {"session_id"},
 		"operation":  {"session_id", "operation_id"},
 		"invocation": {"session_id", "operation_id", "invocation_id", "purpose"},

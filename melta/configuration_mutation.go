@@ -185,7 +185,7 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 	discardNative := candidate.native
 	defer func() {
 		if fresh != nil {
-			_ = fresh.release()
+			fresh.release()
 		}
 		if discardNative != nil {
 			_ = discardNative.release()

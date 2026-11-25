@@ -368,7 +368,7 @@ func TestCandidateResourceHoldsNamesBeforeOpen(t *testing.T) {
 	built := <-buildDone
 	testassert.Require(t, built.err == nil && built.snapshot != nil && built.snapshot.native.inactive["credlife"] != nil, "candidate with a failing activation = (%v, %+v), want the extension left out with a reason", built.err, built.snapshot)
 	testassert.Require(t, built.snapshot.native.release() == nil, "releasing the unpublished candidate")
-	testassert.Require(t, built.snapshot.resources.release() == nil, "releasing the unpublished candidate resources")
+	built.snapshot.resources.release()
 	testassert.Require(t, slices.Contains(subprocessEnvForTest(t, svc), name+"=candidate-open-value"), "name stayed held after an unpublished candidate unwound")
 }
 

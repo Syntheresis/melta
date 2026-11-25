@@ -261,7 +261,7 @@ func TestMutationCaptureRunsBeforeOwningWrites(t *testing.T) {
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	if resources := svc.current().resources; resources != nil {
-		defer func() { _ = resources.release() }()
+		defer resources.release()
 	}
 
 	key := "ordering-secret-2"
@@ -346,7 +346,7 @@ func TestReservationLoadRetainUsesHeldMu(t *testing.T) {
 	case captured := <-done:
 		svc.heldMu.Unlock()
 		if captured.snapshot != nil && captured.snapshot.resources != nil {
-			_ = captured.snapshot.resources.release()
+			captured.snapshot.resources.release()
 		}
 		t.Fatal("a retaining capture loaded and retained without heldMu")
 	case <-time.After(100 * time.Millisecond):
@@ -355,7 +355,7 @@ func TestReservationLoadRetainUsesHeldMu(t *testing.T) {
 	select {
 	case captured := <-done:
 		testassert.Require(t, captured.snapshot != nil, "reserving capture returned no snapshot")
-		_ = captured.snapshot.resources.release()
+		captured.snapshot.resources.release()
 	case <-time.After(10 * time.Second):
 		t.Fatal("reserving capture did not resume after heldMu released")
 	}
@@ -472,7 +472,7 @@ func TestMutationWritesUseWithoutCancel(t *testing.T) {
 		_, err := svc.publish(context.Background())
 		testassert.NoError(t, err)
 		if resources := svc.current().resources; resources != nil {
-			defer func() { _ = resources.release() }()
+			defer resources.release()
 		}
 
 		key := "sk-without-cancel"
@@ -516,7 +516,7 @@ func TestMutationWritesUseWithoutCancel(t *testing.T) {
 		_, err := svc.publish(context.Background())
 		testassert.NoError(t, err)
 		if resources := svc.current().resources; resources != nil {
-			defer func() { _ = resources.release() }()
+			defer resources.release()
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -552,7 +552,7 @@ func TestDisconnectDecidesFromMutationCapture(t *testing.T) {
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	if resources := svc.current().resources; resources != nil {
-		defer func() { _ = resources.release() }()
+		defer resources.release()
 	}
 
 	memory.mu.Lock()
@@ -657,7 +657,7 @@ func TestProviderCreateCredentialCaptureUsesRequestContext(t *testing.T) {
 			_, err := svc.publish(context.Background())
 			testassert.NoError(t, err)
 			if resources := svc.current().resources; resources != nil {
-				defer func() { _ = resources.release() }()
+				defer resources.release()
 			}
 			before, err := os.ReadFile(h.configPath)
 			testassert.NoError(t, err)

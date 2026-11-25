@@ -1180,7 +1180,7 @@ func TestRegistrationAllContributions(t *testing.T) {
 	}
 	stage := c.snapshotForTest()
 	defer stage.release()
-	if len(stage.tools) != 1 || len(stage.strategies) != 1 || len(stage.services) != 1 || len(stage.operations) != 1 {
+	if len(stage.tools) != 1 || len(stage.strategies) != 1 || stagedService(stage, "svc") == nil || len(stage.operations) != 1 {
 		t.Fatal(stage)
 	}
 	for _, kind := range []string{"admission", "request", "arguments", "check", "result", "cleanup"} {

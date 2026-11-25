@@ -476,12 +476,6 @@ func TestWarningsCompactClosureRecordsWithPostEncodeFailure(t *testing.T) {
 			AdmittedAt:  time.Now(),
 		})
 		testassert.NoError(t, err)
-		defer func() {
-			{
-				err := execution.Close()
-				testassert.Check(t, err == nil, "execution close: %v", err)
-			}
-		}()
 		inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{
 			ID:      "inv-maintenance",
 			Purpose: harness.InvocationPurposeMaintenance,

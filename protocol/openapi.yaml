@@ -1209,8 +1209,8 @@ components:
     Scope:
       description: >
         One SSE event's applicable scope, discriminated by kind. Every
-        non-global kind must address its subject: workspace carries workspace,
-        session carries session_id, operation and invocation carry session_id
+        non-global kind must address its subject: session carries session_id,
+        operation and invocation carry session_id
         and operation_id, invocation additionally carries invocation_id and
         purpose, and job carries session_id and job_id. Each branch keeps
         the same closed member vocabulary, so attribution members beyond the
@@ -1218,7 +1218,6 @@ components:
         session_id always matches its pattern.
       oneOf:
         - $ref: "#/components/schemas/RuntimeScope"
-        - $ref: "#/components/schemas/WorkspaceScope"
         - $ref: "#/components/schemas/SessionScope"
         - $ref: "#/components/schemas/OperationScope"
         - $ref: "#/components/schemas/InvocationScope"
@@ -1227,7 +1226,6 @@ components:
         propertyName: kind
         mapping:
           runtime: "#/components/schemas/RuntimeScope"
-          workspace: "#/components/schemas/WorkspaceScope"
           session: "#/components/schemas/SessionScope"
           operation: "#/components/schemas/OperationScope"
           invocation: "#/components/schemas/InvocationScope"
@@ -1242,29 +1240,6 @@ components:
           type: string
           enum:
             - runtime
-        workspace:
-          type: string
-          minLength: 1
-        session_id:
-          type: string
-          pattern: "^[0-9a-f]{32}$"
-        operation_id:
-          type: string
-          minLength: 1
-        job_id:
-          type: string
-          minLength: 1
-    WorkspaceScope:
-      type: object
-      additionalProperties: false
-      required:
-        - kind
-        - workspace
-      properties:
-        kind:
-          type: string
-          enum:
-            - workspace
         workspace:
           type: string
           minLength: 1

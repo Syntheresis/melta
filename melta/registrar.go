@@ -229,7 +229,6 @@ type nativeSnapshot struct {
 	nativeCaptureHold
 	tools      map[string]*nativeRegistration
 	strategies map[string]*nativeRegistration
-	services   map[string]*nativeRegistration
 	operations map[nativeOperationKey]*nativeRegistration
 	hooks      map[string][]*nativeRegistration
 }
@@ -585,7 +584,7 @@ func (c *nativeAdmissionCapture) stage() (*nativeSnapshot, error) {
 
 func (c *nativeCandidate) snapshotLocked(activations []*nativeActivation) *nativeSnapshot {
 	c.holds++
-	out := &nativeSnapshot{nativeCaptureHold: nativeCaptureHold{candidate: c}, tools: make(map[string]*nativeRegistration), strategies: make(map[string]*nativeRegistration), services: make(map[string]*nativeRegistration), operations: make(map[nativeOperationKey]*nativeRegistration), hooks: make(map[string][]*nativeRegistration)}
+	out := &nativeSnapshot{nativeCaptureHold: nativeCaptureHold{candidate: c}, tools: make(map[string]*nativeRegistration), strategies: make(map[string]*nativeRegistration), operations: make(map[nativeOperationKey]*nativeRegistration), hooks: make(map[string][]*nativeRegistration)}
 	for _, a := range activations {
 		for _, r := range a.entries {
 			if r.kind == "observer" {
@@ -601,7 +600,7 @@ func (c *nativeCandidate) snapshotLocked(activations []*nativeActivation) *nativ
 			case "strategy":
 				out.strategies[r.name] = r
 			case "service":
-				out.services[r.name] = r
+				// A service registration is staged in entries only.
 			case "operation":
 				out.operations[nativeOperationKey{a.id, r.name}] = r
 			default:

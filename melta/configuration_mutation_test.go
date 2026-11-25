@@ -1622,7 +1622,7 @@ func TestMutationPublishesOneCoherentCredentialCapture(t *testing.T) {
 	testassert.NoError(t, err)
 	t.Cleanup(func() {
 		if resources := svc.current().resources; resources != nil {
-			_ = resources.release()
+			resources.release()
 		}
 	})
 

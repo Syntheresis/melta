@@ -31,7 +31,7 @@ func (r *Melta) ListExtensions(ctx context.Context, c Caller) ([]protocol.Regist
 	}
 	defer func() {
 		_ = captured.native.release()
-		_ = captured.snapshot.resources.release()
+		captured.snapshot.resources.release()
 		captured.releaseHeldNames()
 	}()
 	stage, err := captured.native.stage()

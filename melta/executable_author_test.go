@@ -436,7 +436,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer nextStage.release()
-			if nextStage.services["worker-service"] != nil || nextStage.services["host-service"] == nil {
+			if stagedService(nextStage, "worker-service") != nil || stagedService(nextStage, "host-service") == nil {
 				t.Fatal("new admission did not omit only the failed worker")
 			}
 			if result, err := candidate.callServiceScoped(context.Background(), "host-service", "echo", json.RawMessage(`{"ok":true}`), &nativeCallScope{}); err != nil || string(result.Value) != `{"ok":true}` {
@@ -623,7 +623,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	next := successor.capture()
 	defer next.release()
 	stage, err := next.stage()
-	if err != nil || stage.services["worker-service"] == nil {
+	if err != nil || stagedService(stage, "worker-service") == nil {
 		t.Fatalf("healthy successor omitted: %v", err)
 	}
 	stage.release()

@@ -116,12 +116,11 @@ func protocolWarnings(sessionID string, warnings []model.ProtocolWarning) []prot
 
 // preparation supplies the existing Harness preparation contract for every
 // admission producer: root, queued delivery and Fork all bind through the one
-// closure returned by bind, with only resource lifetime and the selected
-// invocation context added to what Harness already validates. The snapshot
-// pointer loads once per call, so a reload overlapping preparation affects the
-// next capture, not the in-flight one; the returned opener keeps the same
-// immutable snapshot while borrowed bindings and the call context stay inside
-// the preparation guard.
+// closure returned by bind, adding only the selected invocation context to
+// what Harness already validates. The snapshot pointer loads once per call, so
+// a reload overlapping preparation affects the next capture, not the in-flight
+// one; the returned opener keeps the same immutable snapshot while borrowed
+// bindings stay inside the given call context.
 type preparation struct {
 	config *configurationService
 
@@ -136,9 +135,9 @@ type preparation struct {
 
 	// artifacts is the Melta's private per-Session artifact interval
 	// registry. Every committed opener acquires its Session's token here
-	// before any scope, plugin, model or tool work and releases it
-	// last, after the scoped cleanup; nil leaves an isolated preparation
-	// without artifact ownership.
+	// before any plugin, model or tool work and releases it last, after the
+	// execution cleanup; nil leaves an isolated preparation without artifact
+	// ownership.
 	artifacts *artifactIntervals
 
 	// subprocessEnv is the Melta's live subprocess-environment producer.
@@ -185,7 +184,7 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		if snapshot != nil {
 			defer func() {
 				if resultErr != nil {
-					resultErr = errors.Join(resultErr, snapshot.resources.release())
+					snapshot.resources.release()
 					captured.releaseHeldNames()
 				}
 			}()
@@ -300,24 +299,12 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 			return harness.PreparedExecution{}, err
 		}
 		workspace := req.Session.Identity.Workspace
-		runtimeScope, workspaces := snapshot.resources.runtime, snapshot.resources.workspaces
-		workspaceInfo := ScopeInfo{Kind: ScopeWorkspace, DataDir: runtimeScope.info.DataDir, Workspace: workspace, Revision: snapshot.resources.revisionString()}
-		workspaceScope, err := workspaces.get(ctx, workspaceInfo)
-		if err != nil {
-			return harness.PreparedExecution{}, err
-		}
-
-		callCtx, release, err := workspaceScope.enter(ctx)
-		if err != nil {
-			return harness.PreparedExecution{}, err
-		}
-		defer release() // the one preparation guard covers the concrete preparation and every pure hook
 
 		// The per-preparation collector is allocated owned: only a successful
 		// preparation — validation, hooks and cancellation checks all passed —
 		// publishes its values under the admitted Session identity.
 		sel.warnings = &preparationWarnings{}
-		capture, opener, err := p.concretePrepare(callCtx, req, sel, entry, transport)
+		capture, opener, err := p.concretePrepare(ctx, req, sel, entry, transport)
 		if err != nil {
 			return harness.PreparedExecution{}, err
 		}
@@ -328,13 +315,14 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		prepared = harness.PreparedExecution{
 			Capture: capture,
 			Open: func(openCtx context.Context, admission harness.OperationAdmission) (harness.Execution, error) {
-				return p.open(openCtx, admission, workspace, runtimeScope, workspaceScope, sel, snapshot, warnings, opener, &releaseArtifacts)
+				return p.open(openCtx, admission, workspace, sel, warnings, opener, &releaseArtifacts)
 			},
 		}
 		p.passive.retainCapture(req.Session.Identity.SessionID, native)
 		prepared.Release = func() error {
 			p.passive.releaseCapture(req.Session.Identity.SessionID, native)
-			err := errors.Join(native.release(), snapshot.resources.release())
+			err := native.release()
+			snapshot.resources.release()
 			if releaseArtifacts != nil {
 				releaseArtifacts()
 			}
@@ -346,73 +334,46 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 }
 
 // open turns the committed admission into the execution: it first acquires
-// the Session's whole artifact interval — before any scope, plugin, model or
-// tool work — then opens only the Operation scope and enters its
-// guard. The returned Execution carries the invocation factory: every Engine
-// call — the conversation run and each maintenance model request — opens its
-// own Agent-tier scope over the same Operation, enters its guard, selects the
-// Agent's capabilities over the four scopes, and hands the new selection with
-// the actual committed admission and the Harness-issued request to this
-// preparation's opener, so hooks' final prompt and tools can never be replaced
-// by stale pre-hook values. The Operation guard covers opening and every
-// nested invocation until the returned Close releases it and closes the
-// Operation scope; each invocation's own Close releases its guard and closes
-// its Agent scope before that; the prepared reservation releases the artifact
-// token after the resource-set hold, and an opening failure releases it before returning. Only
-// after the opening succeeds does the collected prompt presentation publish,
-// so a failed fork or admission never creates warnings for an unpublished
-// Session and a successful opener publishes before any progress.
-func (p *preparation) open(ctx context.Context, admission harness.OperationAdmission, workspace string, runtimeScope, workspaceScope *scope, sel selection, snapshot *configuration, warnings *preparationWarnings, opener openInvocation, artifactRelease *func()) (harness.Execution, error) {
-	releaseArtifacts, err := p.artifacts.acquireExecution(ctx, sessionArtifactDir(runtimeScope.info.DataDir, admission.SessionID))
+// the Session's whole artifact interval, then publishes the invocation's
+// opening and closure around every Engine call — the conversation run and
+// each maintenance model request. The returned Execution carries the
+// invocation factory, which publishes scope_opened for the invocation before
+// it calls the opener and scope_closed when the invocation closes, also when
+// opening fails after the opened event. Hooks' final prompt and tools can
+// never be replaced by stale pre-hook values: each invocation hands the new
+// selection with the actual committed admission and the Harness-issued
+// request to this preparation's opener. The committed opener receives the
+// artifact token's release and runs it from the prepared execution's own
+// release. Only after the opening succeeds does the collected prompt
+// presentation publish, so a failed fork or admission never creates warnings
+// for an unpublished Session and a successful opener publishes before any
+// progress.
+func (p *preparation) open(ctx context.Context, admission harness.OperationAdmission, workspace string, sel selection, warnings *preparationWarnings, opener openInvocation, artifactRelease *func()) (harness.Execution, error) {
+	releaseArtifacts, err := p.artifacts.acquireExecution(ctx, sessionArtifactDir(p.config.dataDir, admission.SessionID))
 	if err != nil {
 		return harness.Execution{}, err
 	}
 	artifactLease := &artifactCallLease{
 		intervals: p.artifacts,
-		key:       sessionArtifactDir(runtimeScope.info.DataDir, admission.SessionID),
+		key:       sessionArtifactDir(p.config.dataDir, admission.SessionID),
 		borrowed:  true,
 		release:   releaseArtifacts,
 	}
-	base := ScopeInfo{DataDir: runtimeScope.info.DataDir, Workspace: workspace, SessionID: admission.SessionID, OperationID: admission.OperationID, Revision: snapshot.resources.revisionString()}
-	operationInfo := base
-	operationInfo.Kind = ScopeOperation
-	operation, err := snapshot.composition.openScope(ctx, operationInfo, []*scope{runtimeScope, workspaceScope})
-	if err != nil {
-		releaseArtifacts()
-		return harness.Execution{}, err
+	publishScope := func(kind protocol.ScopeEventKind, request harness.InvocationRequest) {
+		p.config.obs.publish(func() []Event {
+			return []Event{scopeEvent(kind, workspace, admission.SessionID, admission.OperationID, request.ID, string(request.Purpose))}
+		})
 	}
-	_, releaseOperation, err := operation.enter(ctx)
-	if err != nil {
-		err = errors.Join(err, operation.close())
-		releaseArtifacts() // the opened scope unwind finishes before the ownership releases
-		return harness.Execution{}, err
-	}
-	agentInfo := base
-	agentInfo.Kind = ScopeAgent
 	openInvocation := func(ctx context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
-		agentInfo.InvocationID = request.ID
-		agentInfo.Purpose = string(request.Purpose)
-		agentScope, err := snapshot.composition.openScope(ctx, agentInfo, []*scope{runtimeScope, workspaceScope, operation})
-		if err != nil {
-			return harness.InvocationExecution{}, err
-		}
-		unwind := func(cause error, release func()) (harness.InvocationExecution, error) {
-			if release != nil {
-				release()
-			}
-			return harness.InvocationExecution{}, errors.Join(cause, agentScope.close())
-		}
-		callCtx, releaseAgent, err := agentScope.enter(ctx)
-		if err != nil {
-			return unwind(err, nil)
-		}
+		publishScope(protocol.ScopeOpened, request)
 		// The invocation view carries the execution's artifact lease; the
 		// registered tool and hook lookups come from the retained capture.
 		invocationSelection := sel
 		invocationSelection.lease = artifactLease
-		invocation, err := opener(callCtx, admission, invocationSelection, request)
+		invocation, err := opener(ctx, admission, invocationSelection, request)
 		if err != nil {
-			return unwind(err, releaseAgent)
+			publishScope(protocol.ScopeClosed, request)
+			return harness.InvocationExecution{}, err
 		}
 		closeInvocation := invocation.Close
 		invocation.Close = func() error {
@@ -420,8 +381,8 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 			if closeInvocation != nil {
 				closeErr = closeInvocation()
 			}
-			releaseAgent()
-			return errors.Join(closeErr, agentScope.close())
+			publishScope(protocol.ScopeClosed, request)
+			return closeErr
 		}
 		return invocation, nil
 	}
@@ -450,11 +411,6 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 	return harness.Execution{
 		OpenInvocation:  openInvocation,
 		ResolveStrategy: lookup,
-		Close: func() error {
-			releaseOperation()
-			err := operation.close()
-			return err
-		},
 	}, nil
 }
 
@@ -761,8 +717,8 @@ func wireDebugDir(location string) string {
 }
 
 // concreteOpener returns the production invocation factory: per Engine call
-// it binds every advertised tool name from that invocation's view over all
-// four scopes, binds the selected argument hooks, owns one ToolContext
+// it binds every advertised tool name from that invocation's view, binds the
+// selected argument hooks, owns one ToolContext
 // carrying the prepare-time Workspace, the calling Operation's admitted-input
 // identity, the captured Invocation, the validated hard constraints and a
 // never-armed background object for normalization, and answers with the
@@ -778,7 +734,7 @@ func wireDebugDir(location string) string {
 // returns, never rereads the selected execution policy, and keeps the nil
 // producer and nil snapshot fail-closed shapes unchanged. The shared
 // advertisement gate rejects unknown names before dispatch; retry
-// classification and scope disposal belong to the shared machinery.
+// classification and disposal belong to the shared machinery.
 func (p *preparation) concreteOpener(transport, compactTransport preparedTransport, session harness.SessionIdentity, workspace string, catalog []model.ToolDefinition, visible []string, overridden map[string]bool, subprocessEnv func(context.Context) ([]string, error)) openInvocation {
 	return func(_ context.Context, admission harness.OperationAdmission, sel selection, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 		sessionID := admission.AdmittedEntry.SessionID
