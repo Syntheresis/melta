@@ -552,7 +552,7 @@ func TestAdoptedReservationReleasesOnceAfterClose(t *testing.T) {
 					OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 						return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 							return completedTurnStream(), nil
-						}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+						}, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 					},
 					Close: func() error {
 						events <- "execution-close"
@@ -654,7 +654,7 @@ func TestOpenedConversationInvocationOwnershipRows(t *testing.T) {
 					testassert.Require(t, request.Purpose == InvocationPurposeConversation, "conversation request purpose = %q, want conversation", request.Purpose)
 					return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return completedTurnStream(), nil
-					}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+					}, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 				}}, nil
 			},
 		}

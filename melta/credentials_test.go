@@ -149,7 +149,7 @@ func TestOperationCredentialsUsePreparedOpeningCapture(t *testing.T) {
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-prepared", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-prepared", Name: "cred_probe", Arguments: json.RawMessage(`{"key":"probe"}`)}).Execute(context.Background())
+	outcome := fixtureBinding(inv, "cred_probe").Run(context.Background(), model.ToolCall{ID: "call-prepared", Name: "cred_probe", Arguments: json.RawMessage(`{"key":"probe"}`)})
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "tool outcome = %+v, want success", outcome.Result)
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
@@ -190,8 +190,8 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-shared", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-a", Name: "cred_probe_a", Arguments: json.RawMessage(`{"key":"a"}`)}).Execute(context.Background())
-	fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-b", Name: "cred_probe_b", Arguments: json.RawMessage(`{"key":"b"}`)}).Execute(context.Background())
+	fixtureBinding(inv, "cred_probe_a").Run(context.Background(), model.ToolCall{ID: "call-a", Name: "cred_probe_a", Arguments: json.RawMessage(`{"key":"a"}`)})
+	fixtureBinding(inv, "cred_probe_b").Run(context.Background(), model.ToolCall{ID: "call-b", Name: "cred_probe_b", Arguments: json.RawMessage(`{"key":"b"}`)})
 	first.mu.Lock()
 	second.mu.Lock()
 	defer first.mu.Unlock()
@@ -354,7 +354,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-nested", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-nested", Name: "cred_caller", Arguments: json.RawMessage(`{}`)}).Execute(context.Background())
+	outcome := fixtureBinding(inv, "cred_caller").Run(context.Background(), model.ToolCall{ID: "call-nested", Name: "cred_caller", Arguments: json.RawMessage(`{}`)})
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "nested outcome = %+v, want success", outcome.Result)
 	testassert.Equal(t, outcome.Result.Content, "caller=caller-value|provider=provider-value")
 }
@@ -428,8 +428,8 @@ func TestCredentialHookUsesOperationCapture(t *testing.T) {
 		}, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachAuthorization(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorizationInput) (*string, error) {
-			read("authorization", call, ctx)
+		if _, err := api.AttachToolCheck(func(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) (*string, error) {
+			read("check", call, ctx)
 			return nil, nil
 		}, nil); err != nil {
 			return nil, err
@@ -488,13 +488,13 @@ func TestCredentialHookUsesOperationCapture(t *testing.T) {
 	_, err = arguments.Hooks[0].Run(context.Background(), model.ToolCall{ID: "call-hook", Name: "cred_tool", Arguments: json.RawMessage(`{}`)})
 	testassert.NoError(t, err)
 
-	authorization := inv.AuthorizationStage()
-	if authorization.Release != nil {
-		defer authorization.Release()
+	check := inv.CheckStage()
+	if check.Release != nil {
+		defer check.Release()
 	}
-	testassert.NoError(t, authorization.Error)
-	testassert.Require(t, len(authorization.Hooks) == 1, "authorization hooks = %d, want one", len(authorization.Hooks))
-	_, err = authorization.Hooks[0].Run(context.Background(), harness.PreparedAction{}, func(string) (string, error) { return h.dataDir, nil })
+	testassert.NoError(t, check.Error)
+	testassert.Require(t, len(check.Hooks) == 1, "check hooks = %d, want one", len(check.Hooks))
+	_, err = check.Hooks[0].Run(context.Background(), model.ToolCall{})
 	testassert.NoError(t, err)
 
 	result := inv.ResultStage()
@@ -508,7 +508,7 @@ func TestCredentialHookUsesOperationCapture(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	for _, kind := range []string{"admission", "request", "arguments", "authorization", "result"} {
+	for _, kind := range []string{"admission", "request", "arguments", "check", "result"} {
 		testassert.Equal(t, values[kind], "later-value")
 	}
 	testassert.Require(t, undeclared != nil, "an undeclared credential field resolved")
@@ -664,7 +664,7 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 			_ = stream.Close()
 		}
 		testassert.Require(t, server.requests() == before+1 && server.authAt(before) == "Bearer "+key, "provider authorization = %q, want %q", server.authAt(before), "Bearer "+key)
-		outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-" + key, Name: "cred_probe", Arguments: json.RawMessage(`{"key":"` + key + `"}`)}).Execute(context.Background())
+		outcome := fixtureBinding(inv, "cred_probe").Run(context.Background(), model.ToolCall{ID: "call-" + key, Name: "cred_probe", Arguments: json.RawMessage(`{"key":"` + key + `"}`)})
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "tool outcome = %+v, want success", outcome.Result)
 	}
 	run(newPrepared, "session-new", "op-new", "inv-new", "shared-later")
@@ -759,7 +759,7 @@ func (t *credentialTool) Normalize(_ extension.AuthorContext, call model.ToolCal
 }
 
 func (t *credentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "cred_probe"}}, Data: []byte(call.ID)}
+	return extension.ToolPlan{Data: []byte(call.ID)}
 }
 
 func (t *credentialTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
@@ -1093,7 +1093,7 @@ func (t *credentialGateTool) Prepare(_ context.Context, _ extension.AuthorContex
 		CallID    string          `json:"call_id"`
 		Arguments json.RawMessage `json:"arguments"`
 	}{CallID: call.ID, Arguments: call.Arguments})
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "cred_probe"}}, Data: data}
+	return extension.ToolPlan{Data: data}
 }
 
 func (t *credentialGateTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {

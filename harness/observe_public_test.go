@@ -64,11 +64,9 @@ func publicChildLaunch(root string) harness.LaunchChildRequest {
 }
 
 // publicImmediateTool is the suite's default tool plan: one immediate success.
-func publicImmediateTool(_ context.Context, call model.ToolCall) harness.PreparedTool {
-	return harness.PreparedTool{
-		Permissions: publicPermission,
-		Immediate:   &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}},
-	}
+func publicImmediateTool(_ context.Context, call model.ToolCall) harness.ToolOutcome {
+	return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
+
 }
 
 // newObservedPublicHarness builds one Harness over the store with the public
@@ -81,7 +79,7 @@ func newObservedPublicHarness(t *testing.T, store harness.Storage, script *scrip
 
 // newObservedPublicHarnessWithTool is the harness builder with the one
 // supplied concrete tool plan, so fixtures can park an executor.
-func newObservedPublicHarnessWithTool(t *testing.T, store harness.Storage, script *scriptModel, stopper harness.JobStopper, observe func(harness.HarnessFact), tool func(context.Context, model.ToolCall) harness.PreparedTool) (*harness.Harness, context.CancelFunc) {
+func newObservedPublicHarnessWithTool(t *testing.T, store harness.Storage, script *scriptModel, stopper harness.JobStopper, observe func(harness.HarnessFact), tool func(context.Context, model.ToolCall) harness.ToolOutcome) (*harness.Harness, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	h, err := harness.New(ctx, harness.Dependencies{
@@ -201,7 +199,7 @@ func TestPublicLaunchChildSessionAutomaticCompaction(t *testing.T) {
 								}
 								return harness.InvocationExecution{
 									Model:      attempt,
-									LookupTool: fixtureToolLookup(publicImmediateTool, publicNormalize),
+									LookupTool: fixtureToolLookup(publicImmediateTool),
 								}, nil
 							},
 							Close: func() error {
@@ -714,15 +712,10 @@ func observedBlockedToolFixture(t *testing.T, store harness.Storage) (*publicFac
 		releaseOnce sync.Once
 	)
 	release := func() { releaseOnce.Do(func() { close(released) }) }
-	tool := func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-		return harness.PreparedTool{
-			Permissions: publicPermission,
-			Execute: func(context.Context) harness.ToolOutcome {
-				startOnce.Do(func() { close(execStarted) })
-				<-released
-				return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-			},
-		}
+	tool := func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+		startOnce.Do(func() { close(execStarted) })
+		<-released
+		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
 	}
 	script := newScriptModel(publicTurn("call-1"), publicTurn())
 	h, cancel := newObservedPublicHarnessWithTool(t, store, script, nil, sink.observe, tool)

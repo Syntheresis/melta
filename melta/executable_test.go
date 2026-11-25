@@ -384,7 +384,7 @@ func TestExecutableCallEvidence(t *testing.T) {
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	plan := extension.ToolPlan{}
 
 	// The writer is blocked on the first frame, the second frame never leaves
 	// the queue, and the activation then ends.
@@ -445,7 +445,7 @@ func TestExecutableLostResult(t *testing.T) {
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
 
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{})
 	peer.next() // the call left the queue
 	peer.exit()
 	got := <-outcome
@@ -526,7 +526,7 @@ func TestExecutableMalformedTerminalFailsActivationWithoutRestart(t *testing.T) 
 
 func TestExecutableNestedCallLimits(t *testing.T) {
 	manifest := executableTestManifest()
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	plan := extension.ToolPlan{}
 
 	// The live-call cap refuses one more call without terminating the
 	// activation, and every call already admitted settles as unknown.
@@ -631,6 +631,42 @@ func TestExecutableEnvironmentUsesSecretExcludedProducer(t *testing.T) {
 		testassert.Require(t, !slices.Contains(environment, name+"="), "worker environment inherited %s", name)
 	}
 	testassert.Require(t, slices.Contains(environment, "EXEC_UNRELATED=kept"), "worker environment dropped an ordinary entry")
+}
+
+func TestExecutableRejectsInvalidToolSchemaWithoutReplacement(t *testing.T) {
+	manifest := executableTestManifest()
+	rejected := make(chan [2]error, 1)
+	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			definition := model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":"object"}`)}
+			old, err := api.RegisterTool(definition, registrarTestTool{}, nil)
+			if err != nil {
+				return nil, err
+			}
+			definition.Parameters = []byte(`{"type":7}`)
+			_, first := api.RegisterTool(definition, registrarTestTool{}, nil)
+			_, replacement := api.RegisterTool(definition, registrarTestTool{}, old)
+			rejected <- [2]error{first, replacement}
+			return nil, nil
+		}), nil
+	}}
+	spawner.install()
+	owner := &configurationService{}
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: executableAuthorExtension(manifest, "peer", func(context.Context, []string) ([]string, error) { return []string{}, nil }), section: []byte(`{}`), installed: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.release()
+	for _, err := range <-rejected {
+		if !errors.Is(err, harness.ErrInvalid) {
+			t.Fatalf("invalid schema = %v", err)
+		}
+	}
+	stage := candidate.snapshotForTest()
+	defer stage.release()
+	if stage.tools["probe"] == nil {
+		t.Fatal("invalid replacement removed the original registration")
+	}
 }
 
 func TestExecutableDisableKeepsParkedCall(t *testing.T) {
@@ -925,7 +961,7 @@ func (t *adapterBlockingTool) Normalize(_ extension.AuthorContext, call model.To
 }
 
 func (t *adapterBlockingTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	return extension.ToolPlan{}
 }
 
 func (t *adapterBlockingTool) Execute(_ context.Context, _ extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
@@ -978,7 +1014,7 @@ func TestExecutableTerminalBeforeFailureKeepsOutcome(t *testing.T) {
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	plan := extension.ToolPlan{}
 	first := runToolExecute(t, tool, extension.AuthorContext{RequestID: "first"}, plan)
 	second := runToolExecute(t, tool, extension.AuthorContext{RequestID: "second"}, plan)
 	frames := make(map[string]worker.Frame, 2)
@@ -1030,7 +1066,7 @@ func TestExecutableLeaderExitWithDescendantHoldingStdout(t *testing.T) {
 
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{})
 	peer.next() // the call was written
 	eventually(t, "call write acknowledgement", func() bool {
 		sent, _ := activationPending(activation)
@@ -1078,7 +1114,7 @@ func TestExecutableFailureReleasesAfterProcessGone(t *testing.T) {
 
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{})
 	call := peer.next()
 	peer.send(worker.Frame{Kind: worker.KindResponse, ID: call.ID, Result: json.RawMessage(`[]`)})
 	select {
@@ -1188,7 +1224,7 @@ func TestExecutableCancelledCallUnresponsiveWorker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	outcome := make(chan harness.ToolOutcome, 1)
 	go func() {
-		outcome <- tool.Execute(ctx, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+		outcome <- tool.Execute(ctx, extension.AuthorContext{}, extension.ToolPlan{})
 	}()
 	peer.next() // the call was delivered; the worker never answers
 	cancel()
@@ -1218,7 +1254,7 @@ func (t *adapterCancelTool) Normalize(_ extension.AuthorContext, call model.Tool
 	return call.Arguments, nil
 }
 func (t *adapterCancelTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	return extension.ToolPlan{}
 }
 func (t *adapterCancelTool) Execute(ctx context.Context, _ extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
 	if t.block {
@@ -1235,7 +1271,7 @@ func TestExecutableCooperativeAndLateCancellation(t *testing.T) {
 		return nil, err
 	}, nil)
 	executableTool := stagedExecutableTool(t, stage)
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	plan := extension.ToolPlan{}
 	ctx, cancel := context.WithCancel(context.Background())
 	outcome := make(chan harness.ToolOutcome, 1)
 	go func() { outcome <- executableTool.Execute(ctx, extension.AuthorContext{}, plan) }()
@@ -1280,8 +1316,7 @@ func TestExecutableOversizeCallFailsItselfOnly(t *testing.T) {
 	defer activation.stop()
 
 	oversize := extension.ToolPlan{
-		Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}},
-		Data:        make([]byte, worker.FrameLimit),
+		Data: make([]byte, worker.FrameLimit),
 	}
 	outcome := tool.Execute(context.Background(), extension.AuthorContext{}, oversize)
 	testassert.Equal(t, outcome.Evidence, harness.ExecutionNotStarted)
@@ -1309,7 +1344,7 @@ func TestExecutableTerminalRacingActivationFailure(t *testing.T) {
 
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{})
 	call := peer.next()
 	peer.sendValue(call.ID, encodeValue(t, worker.EncodeExecuteResult, harness.ToolOutcome{
 		Result:   model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "accepted"},
@@ -1368,7 +1403,7 @@ func TestExecutableWriteFailureTerminatesWithoutEarlySettlement(t *testing.T) {
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
 	process.writer.fail.Store(true)
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{})
 	select {
 	case got := <-outcome:
 		testassert.Equal(t, got.Evidence, harness.ExecutionUnknown)
@@ -1395,7 +1430,7 @@ func TestExecutableUnsentCancelSettlesNotStarted(t *testing.T) {
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	plan := extension.ToolPlan{}
 	first := runToolExecute(t, tool, extension.AuthorContext{}, plan)
 	eventually(t, "first call to block the writer", func() bool {
 		sent, _ := activationPending(activation)
@@ -1439,7 +1474,7 @@ func TestExecutableCancelledClassTerminalWithoutHostCancellationIsAuthorError(t 
 	activation := startPeerActivation(t, peer, manifest)
 	tool := &executableAuthorTool{activation: activation, handle: "peer"}
 	defer activation.stop()
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{})
 	call := peer.next()
 	peer.send(worker.Frame{Kind: worker.KindResponse, ID: call.ID, Error: &worker.Error{Class: worker.ClassCancelled, Message: "cancelled"}})
 	got := <-outcome

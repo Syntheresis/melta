@@ -44,12 +44,10 @@ func executorTurnFixture(t *testing.T) (*Harness, *graphStorage, *coordinator, s
 		}
 		return completedTurnStream(), nil
 	}
-	planFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
+	planFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
 		preparedCalls++
-		return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-			executed++
-			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
-		}}
+		executed++
+		return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 	}
 	h, store, c, sessionID, prepared, cancel := newExecutionHarness(t, modelFn, planFn)
 	return h, store, c, sessionID, prepared, cancel, &rounds, &preparedCalls, &executed
@@ -131,7 +129,7 @@ func TestToolEffectIntentPublicationFailureRetainsRunningState(t *testing.T) {
 				testassert.Require(t, errors.Is(err, cause), "error = %v, want the original publication cause %v preserved", err, cause)
 				testassert.Require(t, isPublicationFailure(err), "error = %v, want the publication-origin classification", err)
 				testassert.Equal(t, *executed, 0) // no execution was started past the failed intent
-				testassert.Equal(t, *preparedCalls, 1)
+				testassert.Equal(t, *preparedCalls, 0)
 				testassert.Equal(t, *rounds, 1) // no compensating later dispatch
 				assertRetainsRunningState(t, h, store, sessionID, func(ae *ActiveEffect) bool { return ae == nil })
 			})
@@ -164,11 +162,9 @@ func TestToolResultPublicationFailureRetainsActiveEffect(t *testing.T) {
 	}
 }
 
-// TestImmediateToolResultPublicationFailureRetainsNoActiveEffect proves the
-// same result-publication marking on the immediate plan shape: no effect
-// intent was ever committed, so the retained Running state carries no active
-// effect, and the failed result transaction fabricates nothing.
-func TestImmediateToolResultPublicationFailureRetainsNoActiveEffect(t *testing.T) {
+// TestCheckRefusalPublicationFailureRetainsNoActiveEffect proves a failed
+// refusal publication retains the Running state with no tool effect intent.
+func TestCheckRefusalPublicationFailureRetainsNoActiveEffect(t *testing.T) {
 	for _, cause := range publicationFailureCauses() {
 		t.Run(cause.Error(), func(t *testing.T) {
 			var rounds int
@@ -179,11 +175,27 @@ func TestImmediateToolResultPublicationFailureRetainsNoActiveEffect(t *testing.T
 				}
 				return completedTurnStream(), nil
 			}
-			planFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+			planFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 			}
 			h, store, c, sessionID, prepared, cancel := newExecutionHarness(t, modelFn, planFn)
 			defer cancel()
+			open := prepared.Open
+			prepared.Open = func(ctx context.Context, admission OperationAdmission) (Execution, error) {
+				exec, err := open(ctx, admission)
+				openInvocation := exec.OpenInvocation
+				exec.OpenInvocation = func(ctx context.Context, request InvocationRequest) (InvocationExecution, error) {
+					inv, err := openInvocation(ctx, request)
+					inv.CheckStage = func() CheckStage {
+						return CheckStage{Hooks: []ToolCheckHook{{ID: "check", ExtensionID: "ext", Run: func(context.Context, model.ToolCall) (*string, error) {
+							reason := "restricted"
+							return &reason, nil
+						}}}}
+					}
+					return inv, err
+				}
+				return exec, err
+			}
 			store.entryHook = func(draft EntryDraft) error {
 				if draft.Kind != EntryToolResult {
 					return nil
@@ -204,8 +216,7 @@ func TestImmediateToolResultPublicationFailureRetainsNoActiveEffect(t *testing.T
 	}
 }
 
-// TestHookEffectPublicationFailuresAtIntentAndResult proves the argument-hook
-// effect's two publication boundaries with the same rule.
+// TestCommitResultNotFoundBoundariesAreMarked checks publication error origin.
 func TestCommitResultNotFoundBoundariesAreMarked(t *testing.T) {
 	h, _, c, sessionID := newEffectHarness(t, nil)
 	_, err := h.commitToolResult(context.Background(), c, "op-foreign", PendingToolCall{CallID: "call-1", AssistantEntry: EntryRef{SessionID: sessionID, EntryID: "00000000000000000000000000000001"}, ResultEntryID: "00000000000000000000000000000002"},
@@ -238,9 +249,9 @@ func TestWaitRetainsPublicationFailureAtPendingCallBoundaries(t *testing.T) {
 			}
 			return completedTurnStream(), nil
 		}
-		planFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
+		planFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
 			preparedCalls++
-			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+			return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 		}
 		h, store, c, sessionID, prepared, cancel := newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
 			return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {

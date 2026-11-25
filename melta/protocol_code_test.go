@@ -1589,7 +1589,7 @@ func (parkingTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (js
 }
 
 func (parkingTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}, Data: []byte(call.ID)}
+	return extension.ToolPlan{Data: []byte(call.ID)}
 }
 
 func (t parkingTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {

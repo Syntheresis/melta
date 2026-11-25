@@ -74,7 +74,7 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 	if _, err := api.AttachArguments(s.arguments, nil); err != nil {
 		return nil, err
 	}
-	if _, err := api.AttachAuthorization(s.authorize, nil); err != nil {
+	if _, err := api.AttachToolCheck(s.check, nil); err != nil {
 		return nil, err
 	}
 	return nil, nil

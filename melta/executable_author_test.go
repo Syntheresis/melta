@@ -373,11 +373,11 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if err != nil || content != "worker: output" {
 				t.Fatalf("result hook: %q, %v", content, err)
 			}
-			if len(stage.hooks["authorization"]) != 1 {
-				t.Fatal("missing authorization hook")
+			if len(stage.hooks["check"]) != 1 {
+				t.Fatal("missing check hook")
 			}
-			authorization := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
-			refusal, err := authorization(context.Background(), extension.AuthorContext{}, extension.AuthorizationInput{Arguments: json.RawMessage{0xff, '{'}})
+			authorization := stage.hooks["check"][0].value.(nativeHook).handler.(extension.ToolCheckHook)
+			refusal, err := authorization(context.Background(), extension.AuthorContext{}, model.ToolCall{Arguments: json.RawMessage{0xff, '{'}})
 			if err != nil || refusal == nil || *refusal != "denied by worker" {
 				t.Fatalf("authorization: %v, %v", refusal, err)
 			}

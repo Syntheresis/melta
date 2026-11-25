@@ -8,14 +8,15 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-func fixtureToolLookup(prepare func(context.Context, model.ToolCall) harness.PreparedTool, normalize func(context.Context, model.ToolCall) (json.RawMessage, error)) func(string) (harness.ToolBinding, bool) {
-	if prepare == nil {
-		prepare = func(context.Context, model.ToolCall) harness.PreparedTool { return harness.PreparedTool{} }
+func fixtureToolLookup(run func(context.Context, model.ToolCall) harness.ToolOutcome) func(string) (harness.ToolBinding, bool, error) {
+	if run == nil {
+		run = func(context.Context, model.ToolCall) harness.ToolOutcome { return harness.ToolOutcome{} }
 	}
-	if normalize == nil {
-		normalize = publicNormalize
-	}
-	return func(name string) (harness.ToolBinding, bool) {
-		return harness.ToolBinding{Identity: harness.ToolImplementation{ID: name}, Normalize: normalize, Prepare: prepare}, true
+	return func(name string) (harness.ToolBinding, bool, error) {
+		return harness.ToolBinding{
+			Identity: harness.ToolImplementation{ID: name},
+			Validate: func(json.RawMessage) error { return nil },
+			Run:      run,
+		}, true, nil
 	}
 }

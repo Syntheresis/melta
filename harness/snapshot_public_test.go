@@ -49,11 +49,11 @@ func snapshotTurnPrepared(script *scriptModel) harness.PreparedExecution {
 	return harness.PreparedExecution{
 		Capture: publicCapture(),
 		Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-			return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+			return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+				return harness.ToolOutcome{
 					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call"},
 					Metadata: json.RawMessage(`{"n":[1,1.0],"s":"<>&"}`),
-				}}
+				}
 			}), nil
 		},
 	}
@@ -1334,22 +1334,20 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 			compactInput := 0.5
 			capture.Pricing = &harness.ModelPricing{Input: &conversationInput, Output: &conversationOutput}
 			capture.Compact.Pricing = &harness.ModelPricing{Input: &compactInput}
-			immediateTool := func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+			immediateTool := func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+				return harness.ToolOutcome{
 					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call"},
 					Metadata: json.RawMessage(`{"n":[1,1.0]}`),
-				}}
+				}
 			}
-			parkingTool := func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				return harness.PreparedTool{Permissions: publicPermission, Execute: func(execCtx context.Context) harness.ToolOutcome {
-					close(parkEntered)
-					select {
-					case <-parkRelease:
-						return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran parked"}}
-					case <-execCtx.Done():
-						return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: "canceled"}}
-					}
-				}}
+			parkingTool := func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+				close(parkEntered)
+				select {
+				case <-parkRelease:
+					return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran parked"}}
+				case <-ctx.Done():
+					return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: "canceled"}}
+				}
 			}
 			tool := immediateTool
 			if call == 1 { // the second admission runs the parking tool plan

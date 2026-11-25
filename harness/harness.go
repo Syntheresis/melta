@@ -132,11 +132,11 @@ type ToolArgumentsResult struct {
 	Refusal   *string
 }
 
-// ToolArgumentsHook is one argument hook: before a concrete tool call
-// prepares, it may rewrite the call's raw argument bytes or refuse the call
+// ToolArgumentsHook is one argument hook: after a concrete tool is bound,
+// it may rewrite the call's raw argument bytes or refuse the call
 // with a reason. Its successful unchanged output passes through verbatim; a
-// changed output must be one JSON object. The bound tool normalizes after the
-// hook chain. Hooks cannot replace the call identity, tool name, or another
+// changed output must be one JSON object. The final bytes are validated after
+// the hook chain. Hooks cannot replace the call identity, tool name, or another
 // call's arguments. Run receives owned call data.
 type ToolArgumentsHook struct {
 	ID          string
@@ -207,8 +207,9 @@ type ArgumentStage struct {
 	Release func()
 }
 
-type AuthorizationStage struct {
-	Hooks   []AuthorizationHook
+// CheckStage supplies the registered check hooks for one tool call.
+type CheckStage struct {
+	Hooks   []ToolCheckHook
 	Error   error
 	Release func()
 }
@@ -295,20 +296,17 @@ type InvocationExecution struct {
 	// RequestStage supplies the declarations before each request. When nil,
 	// the admitted catalog and advertisement are used without hooks.
 	RequestStage func() RequestStage
-	// LookupTool binds one implementation after argument hooks complete.
-	LookupTool func(string) (ToolBinding, bool)
+	// LookupTool binds one implementation before argument hooks run.
+	LookupTool func(name string) (ToolBinding, bool, error)
 	// ToolHooks are the selected argument hooks in configured order. Each
-	// runs after the advertisement gate and before concrete preparation; the
+	// runs after the advertisement gate and binding and before validation; the
 	// first receives the original raw call arguments, every later one the
-	// preceding committed value.
+	// preceding hook's value.
 	ToolHooks     []ToolArgumentsHook
 	ArgumentStage func() ArgumentStage
-	// AuthorizationHooks run in order over the prepared action of any plan
-	// that may produce an effect.
-	AuthorizationHooks []AuthorizationHook
-	AuthorizationStage func() AuthorizationStage
-	// BindLocation binds a location relative to the actual Session Workspace.
-	BindLocation func(string) (canonical string, recheck func() error, err error)
+	// CheckStage supplies the check hooks that run over any call whose final
+	// arguments passed validation.
+	CheckStage func() CheckStage
 	// ToolOutputHooks are the selected output-shaping hooks in configured
 	// order. They run over one settled tool outcome before its result
 	// commits: the first receives the producer's original content, every
@@ -319,29 +317,25 @@ type InvocationExecution struct {
 	Close           func() error
 }
 
-// AuthorizationHook is a pure restriction on a prepared action. Bind returns
-// a canonical location without granting access; the host revalidates it. A
-// nil reason abstains; a nonempty reason denies.
-type AuthorizationHook struct {
-	Run func(context.Context, PreparedAction, func(string) (string, error)) (*string, error)
+// ToolCheckHook is one before-tool check: it runs over the call's final
+// arguments after they pass the bound implementation's schema, and may refuse
+// the call with a model-facing reason. A nil reason abstains; a nonempty reason
+// denies. A check cannot change the call's arguments or identity.
+type ToolCheckHook struct {
+	ID          string
+	ExtensionID string
+	Run         func(context.Context, model.ToolCall) (*string, error)
 }
 
-type locationChecksKey struct{}
-
-// LocationRecheckFromContext returns the call's frozen host location checker,
-// or nil when no locations were bound.
-func LocationRecheckFromContext(ctx context.Context) func() error {
-	check, _ := ctx.Value(locationChecksKey{}).(func() error)
-	return check
-}
-
-// ToolBinding holds one implementation for normalization and preparation.
-// Normalize is pure and returns one JSON object or a per-call error.
+// ToolBinding holds one bound implementation and the parameter schema its
+// final arguments must satisfy. Validate reports whether the arguments are one
+// document the implementation's schema accepts; Run executes the call with
+// those final arguments.
 type ToolBinding struct {
-	Identity  ToolImplementation
-	Normalize func(context.Context, model.ToolCall) (json.RawMessage, error)
-	Prepare   func(context.Context, model.ToolCall) PreparedTool
-	Release   func()
+	Identity ToolImplementation
+	Validate func(json.RawMessage) error
+	Run      func(context.Context, model.ToolCall) ToolOutcome
+	Release  func()
 }
 
 // Execution is one opened execution: the required invocation opener the
@@ -370,34 +364,18 @@ type Execution struct {
 	Close           func() error
 }
 
-// ToolOutcome is one owned tool plan's complete outcome: the model-visible
+// ToolOutcome is one Run callback's complete outcome: the model-visible
 // result returned to the Agent, optional raw-JSON metadata whose semantics
 // belong to the producing tool, and the producer-declared execution knowledge.
-// The Harness validates only well-formedness, the declared knowledge against
-// the producing plan shape, and the durable size bound; it never interprets
-// the value.
+// The Harness validates the result, its evidence and the durable metadata
+// size bound; it never interprets the metadata.
 type ToolOutcome struct {
 	Result   model.ToolResult
 	Metadata json.RawMessage // optional, bounded, well-formed; semantics owned by the tool
-	// Evidence is the producing plan's execution knowledge. It is read only
-	// from executor outcomes, and an executor sets it only when it cannot
-	// report an observed result: empty means the valid returned result is the
-	// observation. An immediate plan's success is observed and every other
-	// immediate status is not_started, whatever value the producer supplied.
+	// Evidence is the Run callback's execution knowledge. Empty means
+	// observed. A malformed result, invalid evidence, or a success with
+	// non-observed evidence settles as invalid with unknown evidence.
 	Evidence ExecutionEvidence
-}
-
-// PreparedTool is one immutable prepared call: exactly one immediate outcome
-// or executor, its declared permission/target pairs, and the canonical
-// bindings authorization hooks and concrete I/O consume. Normalized arguments
-// are Harness-supplied input, never a second value the preparer replaces. A
-// plan with no pairs is valid; whatever pairs it declares are given to the
-// authorization hooks.
-type PreparedTool struct {
-	Permissions        []PermissionRequest
-	CanonicalWorkspace string
-	Immediate          *ToolOutcome
-	Execute            func(context.Context) ToolOutcome
 }
 
 // CreateSessionRequest is the input of one root Session creation.

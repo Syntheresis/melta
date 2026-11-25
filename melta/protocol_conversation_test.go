@@ -495,17 +495,16 @@ func TestConversationProjectionToolCallLifecycle(t *testing.T) {
 		// big-number metadata, the second parks until released, the rest
 		// settle immediately.
 		bg.tools.setPrepare(func(_ context.Context, call model.ToolCall) extension.ToolPlan {
-			permissions := []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}
 			switch call.ID {
 			case "call-1":
-				return extension.ToolPlan{Permissions: permissions, Immediate: &harness.ToolOutcome{
+				return extension.ToolPlan{Immediate: &harness.ToolOutcome{
 					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "first"},
 					Metadata: json.RawMessage(`{"n":9007199254740993}`),
 				}}
 			case "call-2":
-				return extension.ToolPlan{Permissions: permissions, Data: []byte(call.ID)}
+				return extension.ToolPlan{Data: []byte(call.ID)}
 			default:
-				return extension.ToolPlan{Permissions: permissions, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: call.ID + " ran"}}}
+				return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: call.ID + " ran"}}}
 			}
 		})
 		bg.tools.setExecute(func(_ context.Context, plan extension.ToolPlan) harness.ToolOutcome {
@@ -646,11 +645,10 @@ func twoReadCallTurnEvents() []string {
 // other call settles immediately.
 func setParkedReadCall(tools *lifecycleTools, releaseTool <-chan struct{}, toolStarted chan<- struct{}) {
 	tools.setPrepare(func(_ context.Context, call model.ToolCall) extension.ToolPlan {
-		permissions := []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}
 		if call.ID != "call-1" {
-			return extension.ToolPlan{Permissions: permissions, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: call.ID + " ran"}}}
+			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: call.ID + " ran"}}}
 		}
-		return extension.ToolPlan{Permissions: permissions, Data: []byte(call.ID)}
+		return extension.ToolPlan{Data: []byte(call.ID)}
 	})
 	tools.setExecute(func(execCtx context.Context, plan extension.ToolPlan) harness.ToolOutcome {
 		select {
@@ -844,7 +842,7 @@ func TestConversationProjectionForkPrefixIsIndependent(t *testing.T) {
 		// The declared read tool settles its call with the big-number
 		// metadata the projection keeps.
 		bg.tools.setPrepare(func(_ context.Context, call model.ToolCall) extension.ToolPlan {
-			return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}, Immediate: &harness.ToolOutcome{
+			return extension.ToolPlan{Immediate: &harness.ToolOutcome{
 				Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "first"},
 				Metadata: json.RawMessage(`{"n":9007199254740993}`),
 			}}

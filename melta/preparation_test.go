@@ -259,7 +259,7 @@ func (t *prepTool) Prepare(_ context.Context, _ extension.AuthorContext, call mo
 	t.mu.Lock()
 	t.input = append(t.input, string(call.Arguments))
 	t.mu.Unlock()
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "file.write", Target: "/w/a.txt"}}, CanonicalWorkspace: "/w", Data: []byte(call.ID)}
+	return extension.ToolPlan{Data: []byte(call.ID)}
 }
 
 func (t *prepTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
@@ -1359,7 +1359,7 @@ func (t visibilityTool) Normalize(_ extension.AuthorContext, call model.ToolCall
 	return call.Arguments, nil
 }
 func (t visibilityTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "test"}}, Data: []byte(call.ID)}
+	return extension.ToolPlan{Data: []byte(call.ID)}
 }
 func (t visibilityTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
 	t.executes.Add(1)

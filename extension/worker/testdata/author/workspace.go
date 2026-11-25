@@ -36,7 +36,7 @@ func (workspaceTool) Prepare(ctx context.Context, call extension.AuthorContext, 
 		targets = append(targets, target)
 	}
 	data, _ := json.Marshal(targets)
-	return extension.ToolPlan{Data: data, Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: targets[0].Path}}}
+	return extension.ToolPlan{Data: data}
 }
 
 func failPlan(err error) extension.ToolPlan {
@@ -61,8 +61,8 @@ func (workspaceTool) Execute(ctx context.Context, call extension.AuthorContext, 
 	if err != nil || string(result.Value) != `{"bytes":"YmVmb3Jl"}` {
 		return fail(errors.New("precondition read failed"))
 	}
-	if _, err := call.Call(ctx, "melta.workspace", "read", arg(targets[1].Binding)); err == nil {
-		return fail(errors.New("sibling read accepted"))
+	if _, err := call.Call(ctx, "melta.workspace", "read", arg(targets[1].Binding)); err != nil {
+		return fail(errors.New("sibling read failed"))
 	}
 	if _, err := call.Call(ctx, "melta.workspace", "read", arg("forged")); err == nil {
 		return fail(errors.New("unbound read accepted"))
@@ -76,8 +76,8 @@ func (workspaceTool) Execute(ctx context.Context, call extension.AuthorContext, 
 		return fail(errors.New("unbound write accepted"))
 	}
 	sibling, _ := json.Marshal(map[string]any{"binding": targets[1].Binding, "bytes": "YWZ0ZXI=", "create_only": false})
-	if _, err := call.Call(ctx, "melta.workspace", "write", sibling); err == nil {
-		return fail(errors.New("sibling write accepted"))
+	if _, err := call.Call(ctx, "melta.workspace", "write", sibling); err != nil {
+		return fail(errors.New("sibling write failed"))
 	}
 	if _, err := call.Call(ctx, "melta.workspace", "write", write(true)); err == nil {
 		return fail(errors.New("create-only overwrite accepted"))
@@ -108,7 +108,7 @@ func workspaceFixture() extension.Extension {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachAuthorization(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorizationInput) (*string, error) {
+			_, err = api.AttachToolCheck(func(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) (*string, error) {
 				result, err := call.Call(ctx, "melta.workspace", "bind", []byte(`{"path":"file"}`))
 				if err != nil {
 					return nil, err

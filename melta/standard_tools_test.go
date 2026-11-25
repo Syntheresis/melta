@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
@@ -50,7 +51,7 @@ func makeCall(t *testing.T, name, args string) model.ToolCall {
 }
 
 // prepare normalizes and prepares one call, returning the plan.
-func prepare(t *testing.T, tool Tool, tc ToolContext, name, args string) harness.PreparedTool {
+func prepare(t *testing.T, tool Tool, tc ToolContext, name, args string) toolPlan {
 	t.Helper()
 	return tool.Prepare(context.Background(), tc, makeCall(t, name, args))
 }
@@ -65,6 +66,49 @@ func normalize(t *testing.T, tool Tool, tc ToolContext, name, args string) (json
 // calls must derive from the ToolContext's admitted-input identity.
 func groupDir(dataDir, sessionID, entryID string) string {
 	return filepath.Join(dataDir, "code", sessionID, entryID)
+}
+
+func TestStandardToolSchemaRejectsBeforeRun(t *testing.T) {
+	e := newOwnerEnv(t)
+	e.fixtureStore(storage.NewMemory())
+	e.server.setScript(func(_ context.Context, body string) []string {
+		if lastMessageRole(body) == "tool" {
+			return textTurnEvents("done")
+		}
+		return toolCallTurnEvents("invalid", "read_file", `{"path":17}`)
+	})
+	r, err := e.open(context.Background())
+	testassert.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close(context.Background()) })
+	session, err := r.createSession(context.Background(), t.TempDir(), "")
+	testassert.NoError(t, err)
+	submitThroughRuntime(t, r, session.Identity.SessionID, "schema", "read")
+	awaitOperation(t, r, session.Identity.SessionID, "schema", harness.OperationSuccess)
+	result := toolResultFact(t, r, session.Identity.SessionID, "schema")
+	testassert.Require(t, result.Status == model.ResultError && result.Evidence == harness.ExecutionNotStarted && strings.Contains(result.Content, "path"), "result = %+v", result)
+	testassert.Require(t, result.Implementation == nil && len(result.NormalizedArguments) == 0, "validation exit recorded selection: %+v", result)
+}
+
+func TestStandardToolPreparationFailureNotStarted(t *testing.T) {
+	e := newOwnerEnv(t)
+	e.fixtureStore(storage.NewMemory())
+	e.server.setScript(func(_ context.Context, body string) []string {
+		if lastMessageRole(body) == "tool" {
+			return textTurnEvents("done")
+		}
+		return toolCallTurnEvents("invalid", "read_file", `{"path":"loop/file"}`)
+	})
+	r, err := e.open(context.Background())
+	testassert.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close(context.Background()) })
+	workspace := t.TempDir()
+	testassert.NoError(t, os.Symlink("loop", filepath.Join(workspace, "loop")))
+	session, err := r.createSession(context.Background(), workspace, "")
+	testassert.NoError(t, err)
+	submitThroughRuntime(t, r, session.Identity.SessionID, "path", "read")
+	awaitOperation(t, r, session.Identity.SessionID, "path", harness.OperationSuccess)
+	result := toolResultFact(t, r, session.Identity.SessionID, "path")
+	testassert.Require(t, result.Status == model.ResultError && result.Evidence == harness.ExecutionNotStarted && strings.Contains(result.Content, "resolve path"), "result = %+v", result)
 }
 
 func TestValidateConfigSettings(t *testing.T) {

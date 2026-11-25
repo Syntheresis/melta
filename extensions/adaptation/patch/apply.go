@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 )
 
 const workspaceService = "melta.workspace"
@@ -83,15 +82,10 @@ func (p *planData) UnmarshalJSON(data []byte) error {
 
 // preparePlan parses the patch, binds every source and destination through
 // the Workspace service and rejects two targets with the same canonical path.
-// It returns the canonical Workspace root and one file.write pair per target.
-func preparePlan(ctx context.Context, call callFunc, input string) (planData, string, []harness.PermissionRequest, error) {
+func preparePlan(ctx context.Context, call callFunc, input string) (planData, error) {
 	parsed, err := parsePatch(input)
 	if err != nil {
-		return planData{}, "", nil, err
-	}
-	root, err := bindTarget(ctx, call, ".")
-	if err != nil {
-		return planData{}, "", nil, fmt.Errorf("apply_patch: bind workspace: %w", err)
+		return planData{}, err
 	}
 	plan := planData{Ops: make([]fileOp, 0, len(parsed.ops))}
 	targets := make([]boundTarget, 0, len(parsed.ops)*2)
@@ -99,13 +93,13 @@ func preparePlan(ctx context.Context, call callFunc, input string) (planData, st
 		op := parsedOp
 		op.source, err = bindTarget(ctx, call, op.path)
 		if err != nil {
-			return planData{}, "", nil, err
+			return planData{}, err
 		}
 		targets = append(targets, op.source)
 		if op.movePath != "" {
 			destination, err := bindTarget(ctx, call, op.movePath)
 			if err != nil {
-				return planData{}, "", nil, err
+				return planData{}, err
 			}
 			op.destination = &destination
 			targets = append(targets, destination)
@@ -116,15 +110,11 @@ func preparePlan(ctx context.Context, call callFunc, input string) (planData, st
 	for _, target := range targets {
 		key := filepath.Clean(target.Canonical)
 		if seen[key] {
-			return planData{}, "", nil, fmt.Errorf("apply_patch: multiple patch entries resolve to the same file: %s", target.Canonical)
+			return planData{}, fmt.Errorf("apply_patch: multiple patch entries resolve to the same file: %s", target.Canonical)
 		}
 		seen[key] = true
 	}
-	pairs := make([]harness.PermissionRequest, 0, len(targets))
-	for _, target := range targets {
-		pairs = append(pairs, harness.PermissionRequest{Permission: harness.PermissionFileWrite, Target: target.Canonical})
-	}
-	return plan, root.Canonical, pairs, nil
+	return plan, nil
 }
 
 func bindTarget(ctx context.Context, call callFunc, path string) (boundTarget, error) {

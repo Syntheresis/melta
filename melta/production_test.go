@@ -120,9 +120,8 @@ func (t fileWriteTool) Prepare(_ context.Context, tc extension.AuthorContext, ca
 	if err := json.Unmarshal(call.Arguments, &args); err != nil || args.Path == "" || args.Content == "" {
 		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "prod_write requires path and content"}}}
 	}
-	target := filepath.Clean(filepath.Join(tc.Session.Workspace, args.Path))
 	data, _ := json.Marshal(args)
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "file.write", Target: target}}, CanonicalWorkspace: filepath.Clean(tc.Session.Workspace), Data: data}
+	return extension.ToolPlan{Data: data}
 }
 
 func (t fileWriteTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
@@ -160,9 +159,8 @@ func (t fileReadTool) Prepare(_ context.Context, tc extension.AuthorContext, cal
 	if err := json.Unmarshal(call.Arguments, &args); err != nil || args.Path == "" {
 		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "prod_read requires path"}}}
 	}
-	target := filepath.Clean(filepath.Join(tc.Session.Workspace, args.Path))
 	data, _ := json.Marshal(args)
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "file.read", Target: target}}, CanonicalWorkspace: filepath.Clean(tc.Session.Workspace), Data: data}
+	return extension.ToolPlan{Data: data}
 }
 
 func (t fileReadTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {

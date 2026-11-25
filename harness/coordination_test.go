@@ -294,8 +294,8 @@ func TestSteeringAdmitsHeadsInFIFOOrder(t *testing.T) {
 	openerArrived := make(chan struct{})
 	openerGate := make(chan struct{})
 	var once sync.Once
-	exec := effectExecution(script.model, func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
+	exec := effectExecution(script.model, func(ctx context.Context, call model.ToolCall) ToolOutcome {
+		return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}
 	})
 	prepared := PreparedExecution{
 		Capture: testCapture(),
@@ -1203,12 +1203,10 @@ func TestWaitConvergence(t *testing.T) {
 		script.gate = modelGate
 		toolGate := make(chan struct{})
 		toolArrived := make(chan struct{}, 1)
-		exec := effectExecution(script.model, func(context.Context, model.ToolCall) PreparedTool {
+		exec := effectExecution(script.model, func(context.Context, model.ToolCall) ToolOutcome {
 			toolArrived <- struct{}{}
 			<-toolGate
-			return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-				return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ran"}}
-			}}
+			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ran"}}
 		})
 		prepared := preparedExecuting(exec)
 		h, cancel := newCancelableHarness(t, store, prepared, nil)

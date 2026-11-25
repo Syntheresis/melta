@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"slices"
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
@@ -35,13 +33,13 @@ func (t registeredExtensionTool) check() error {
 	return activation.unavailableLocked()
 }
 
-func (t registeredExtensionTool) authorScope(ctx context.Context, tc ToolContext, workspace *nativeWorkspace, bind bool, kind nativeCallKind, permissions []harness.PermissionRequest) (*nativeCallScope, extension.AuthorContext) {
+func (t registeredExtensionTool) authorScope(ctx context.Context, tc ToolContext, workspace *nativeWorkspace, bind bool, kind nativeCallKind) (*nativeCallScope, extension.AuthorContext) {
 	child, cancel := context.WithCancel(ctx)
 	activation := t.binding.entry.activation
 	scope := callbackScope(&nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
 		candidate:          t.binding.candidate, activation: activation, kind: kind,
-		workspace: workspace, workspaceBind: bind, permissions: permissions,
+		workspace: workspace, workspaceBind: bind,
 		session: tc.Session, states: t.states, host: t.host, lease: t.lease, operationSecrets: t.operationSecrets,
 	})
 	return scope, extension.AuthorContext{
@@ -54,17 +52,17 @@ func (t registeredExtensionTool) Normalize(ctx context.Context, tc ToolContext, 
 	if err := t.check(); err != nil {
 		return nil, err
 	}
-	scope, author := t.authorScope(ctx, tc, nil, false, callKindHook, nil)
+	scope, author := t.authorScope(ctx, tc, nil, false, callKindHook)
 	defer scope.end()
 	return t.binding.entry.value.(nativeTool).tool.Normalize(author, call)
 }
 
-func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, call model.ToolCall) harness.PreparedTool {
+func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, call model.ToolCall) toolPlan {
 	if err := t.check(); err != nil {
 		return immediateError(call.ID, err)
 	}
 	workspace := newNativeWorkspace(tc.Workspace, t.dataDir, tc.AdmittedEntry, t.lease)
-	scope, author := t.authorScope(ctx, tc, workspace, true, callKindHook, nil)
+	scope, author := t.authorScope(ctx, tc, workspace, true, callKindHook)
 	plan := func() extension.ToolPlan {
 		defer scope.end()
 		return t.binding.entry.value.(nativeTool).tool.Prepare(scope.ctx, author, call).Owned()
@@ -74,23 +72,17 @@ func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, ca
 		if plan.Start.Target == "" {
 			return immediateError(call.ID, fmt.Errorf("session start target must not be empty: %w", harness.ErrInvalid))
 		}
-		target := url.PathEscape(t.binding.entry.activation.id) + "/" + url.PathEscape(plan.Start.Target)
-		plan.Permissions = append(plan.Permissions, harness.PermissionRequest{Permission: harness.PermissionSessionOwn, Target: target})
 		start = &nativeSessionStart{extensionID: t.binding.entry.activation.id, plan: *plan.Owned().Start}
 	}
-	prepared := harness.PreparedTool{
-		Permissions: slices.Clone(plan.Permissions), CanonicalWorkspace: plan.CanonicalWorkspace,
-		Immediate: plan.Immediate,
-	}
+	prepared := toolPlan{Immediate: plan.Immediate}
 	if plan.Immediate != nil {
 		return prepared
 	}
-	permissions := slices.Clone(plan.Permissions)
 	prepared.Execute = func(ctx context.Context) harness.ToolOutcome {
 		if err := t.check(); err != nil {
 			return harness.ToolOutcome{Result: bindingToolResult(call.ID, err, false), Evidence: harness.ExecutionNotStarted}
 		}
-		scope, author := t.authorScope(ctx, tc, workspace, false, callKindTool, permissions)
+		scope, author := t.authorScope(ctx, tc, workspace, false, callKindTool)
 		scope.start = start
 		defer scope.end()
 		return t.binding.entry.value.(nativeTool).tool.Execute(scope.ctx, author, plan)
@@ -98,17 +90,16 @@ func (t registeredExtensionTool) Prepare(ctx context.Context, tc ToolContext, ca
 	return prepared
 }
 
-func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]harness.SessionStateValue, settings json.RawMessage, host *composition, lease *artifactCallLease, secrets map[string]map[string]string) []harness.AuthorizationHook {
-	var hooks []harness.AuthorizationHook
-	for _, registration := range s.hooks["authorization"] {
+func (s *nativeSnapshot) checkHooks(tc ToolContext, states map[string]harness.SessionStateValue, host *composition, lease *artifactCallLease, secrets map[string]map[string]string) []harness.ToolCheckHook {
+	var hooks []harness.ToolCheckHook
+	for _, registration := range s.hooks["check"] {
 		entry := registration
-		hooks = append(hooks, harness.AuthorizationHook{Run: func(ctx context.Context, action harness.PreparedAction, bind func(string) (string, error)) (*string, error) {
+		hooks = append(hooks, harness.ToolCheckHook{ID: entry.id, ExtensionID: entry.activation.id, Run: func(ctx context.Context, input model.ToolCall) (*string, error) {
 			activation := entry.activation
 			if err := activation.unavailable(); err != nil {
 				return nil, err
 			}
 			workspace := newNativeWorkspace(tc.Workspace, "", harness.EntryRef{}, nil)
-			workspace.restrictionBind = bind
 			child, cancel := context.WithCancel(ctx)
 			scope := callbackScope(&nativeCallScope{
 				nativeCallLifetime: nativeCallLifetime{ctx: child, cancel: cancel},
@@ -117,8 +108,7 @@ func (s *nativeSnapshot) authorizationHooks(tc ToolContext, states map[string]ha
 			})
 			defer scope.end()
 			call := extension.AuthorContext{ExtensionID: activation.id, Settings: bytes.Clone(activation.section), Session: tc.Session, State: bytes.Clone(states[activation.id]), Call: scope.call}
-			input := extension.AuthorizationInput{ToolName: action.ToolName, Arguments: bytes.Clone(action.Arguments), CanonicalWorkspace: action.CanonicalWorkspace, ToolSettings: bytes.Clone(settings), Permissions: slices.Clone(action.Permissions)}
-			return entry.value.(nativeHook).handler.(extension.AuthorizationHook)(scope.ctx, call, input)
+			return entry.value.(nativeHook).handler.(extension.ToolCheckHook)(scope.ctx, call, input)
 		}})
 	}
 	return hooks

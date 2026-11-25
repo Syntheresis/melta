@@ -325,8 +325,8 @@ func seedRunningOperationCounted(t *testing.T, store harness.Storage, workspace 
 					return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 						return harness.InvocationExecution{
 							Model: modelFn,
-							LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) harness.PreparedTool {
-								return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "seeded"}}}
+							LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) toolPlan {
+								return toolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "seeded"}}}
 							}, func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 								var obj map[string]json.RawMessage
 								if err := json.Unmarshal(call.Arguments, &obj); err != nil || obj == nil {

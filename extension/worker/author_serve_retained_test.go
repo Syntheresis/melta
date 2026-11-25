@@ -154,6 +154,38 @@ func manifest() extension.Manifest {
 	return extension.Manifest{ID: "author", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
 }
 
+func TestAuthorServeToolCheck(t *testing.T) {
+	var seen model.ToolCall
+	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (*string, error) {
+			seen = call
+			reason := "restricted"
+			return &reason, nil
+		}, nil)
+		return nil, err
+	}})
+	if reply := p.hello(extension.APIVersion); reply.Error != nil {
+		t.Fatalf("hello = %+v", reply)
+	}
+	registered := p.activate()
+	if len(registered) != 1 || registered[0].Kind != "check" {
+		t.Fatalf("registrations = %+v", registered)
+	}
+	input := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{"x":1}`)}
+	raw, err := worker.EncodeBeforeToolHookParams(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := p.call("check", registered[0].Handle, "check", raw, worker.AuthorCallContext{Token: "t"})
+	if reply.Error != nil {
+		t.Fatalf("check = %+v", reply)
+	}
+	reason, err := worker.DecodeAuthorRefusal(reply.Result)
+	if err != nil || reason == nil || *reason != "restricted" || seen.ID != input.ID || seen.Name != input.Name || !bytes.Equal(seen.Arguments, input.Arguments) {
+		t.Fatalf("reason = %v, call = %+v, err = %v", reason, seen, err)
+	}
+}
+
 func callParams(t *testing.T, handle, method string) json.RawMessage {
 	t.Helper()
 	params, err := json.Marshal(worker.AuthorCallParams{Handle: handle, Method: method, Context: worker.AuthorCallContext{Token: "t"}, Arguments: worker.JSONBytes(json.RawMessage(`{}`))})

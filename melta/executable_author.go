@@ -205,13 +205,13 @@ func (a *executableActivation) authorRegistration(frame worker.Frame) error {
 			}
 			return value.(extension.AdmissionResult), nil
 		}, replacement)
-	case "authorization":
-		handle, err = a.author.api.AttachAuthorization(func(ctx context.Context, call extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
-			args, err := worker.EncodeAuthorAuthorization(input)
+	case "check":
+		handle, err = a.author.api.AttachToolCheck(func(ctx context.Context, call extension.AuthorContext, input model.ToolCall) (*string, error) {
+			args, err := worker.EncodeBeforeToolHookParams(input)
 			if err != nil {
 				return nil, err
 			}
-			value, err := a.authorCall(ctx, params.Handle, "authorization", call, args, typed(worker.DecodeAuthorRefusal))
+			value, err := a.authorCall(ctx, params.Handle, "check", call, args, typed(worker.DecodeAuthorRefusal))
 			if err != nil {
 				return nil, err
 			}

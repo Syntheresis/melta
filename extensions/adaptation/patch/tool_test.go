@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
@@ -32,14 +31,13 @@ func TestNormalizePatchArgsStrictInputType(t *testing.T) {
 		_, ok := args["_melta_receipt"]
 		testassert.Require(t, !ok, "normalized args retained a private field")
 	}
-	// Missing input stays a later patch-syntax failure, which is the fixed
-	// denial for a failed canonical preparation.
+	// Missing input stays a later patch-syntax failure.
 	root := t.TempDir()
 	ws := newTestWorkspace(t, root)
 	missing, err := (Tool{}).Normalize(extension.AuthorContext{}, model.ToolCall{Arguments: []byte(`{}`)})
 	testassert.NoError(t, err)
 	plan := (Tool{}).Prepare(context.Background(), extension.AuthorContext{Call: ws.call}, model.ToolCall{ID: "call-1", Name: ToolName, Arguments: missing})
-	testassert.Require(t, plan.Immediate != nil && plan.Immediate.Result.Status == model.ResultDenied && plan.Immediate.Result.Content == harness.PermissionDeniedContent, "plan = %+v, want the fixed denial for missing input", plan.Immediate)
+	testassert.Require(t, plan.Immediate != nil && plan.Immediate.Result.Status == model.ResultError && plan.Immediate.Result.Content != "", "plan = %+v, want the syntax diagnostic", plan.Immediate)
 }
 
 func TestPreparePatchExecutesParsedPatchWithoutReparse(t *testing.T) {
@@ -66,7 +64,7 @@ func TestPreparePatchExecutesParsedPatchWithoutReparse(t *testing.T) {
 	assertFileContent(t, filepath.Join(root, "a.txt"), "bye")
 }
 
-func TestPreparePatchFailuresAreFixedDenials(t *testing.T) {
+func TestPreparePatchFailuresReturnDiagnostics(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		input string
@@ -86,7 +84,7 @@ func TestPreparePatchFailuresAreFixedDenials(t *testing.T) {
 				tc.setup(t, root)
 			}
 			plan := preparePatch(t, newTestWorkspace(t, root), tc.input)
-			testassert.Require(t, plan.Immediate != nil && plan.Immediate.Result.Status == model.ResultDenied && plan.Immediate.Result.Content == harness.PermissionDeniedContent, "immediate = %+v, want the fixed denial", plan.Immediate)
+			testassert.Require(t, plan.Immediate != nil && plan.Immediate.Result.Status == model.ResultError && plan.Immediate.Result.Content != "", "immediate = %+v, want a diagnostic", plan.Immediate)
 		})
 	}
 }

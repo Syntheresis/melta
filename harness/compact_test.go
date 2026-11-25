@@ -42,7 +42,7 @@ func summaryStream(text string, usage model.Usage) *scriptStream {
 // the forbidden-model tripwire — compaction never wires a conversation
 // invocation.
 func compactionExecution(t *testing.T, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), retry RetryPolicy) Execution {
-	noop := func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
+	noop := func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }
 	return Execution{
 		Retry: retry,
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {

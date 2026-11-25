@@ -236,7 +236,7 @@ func (t independentCommandTool) Prepare(ctx context.Context, call extension.Auth
 		"id":        json.RawMessage(`"` + input.ID + `"`),
 		"arguments": append(json.RawMessage(nil), input.Arguments...),
 	})
-	return extension.ToolPlan{Data: payload, Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "fixture"}}}
+	return extension.ToolPlan{Data: payload}
 }
 
 func (t independentCommandTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {

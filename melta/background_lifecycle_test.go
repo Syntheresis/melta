@@ -381,7 +381,7 @@ func (t *lifecycleTools) Prepare(ctx context.Context, _ extension.AuthorContext,
 	if prepare != nil {
 		return prepare(ctx, call)
 	}
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
+	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
 }
 
 func (t *lifecycleTools) Execute(ctx context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {

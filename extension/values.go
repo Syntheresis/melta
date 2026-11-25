@@ -19,17 +19,14 @@ var ErrDenied = errors.New("extension: denied")
 // ToolPlan is one prepared tool call. Data is opaque bytes owned by the tool
 // and returned to Execute unchanged; the host never interprets it.
 type ToolPlan struct {
-	Permissions        []harness.PermissionRequest
-	CanonicalWorkspace string
-	Immediate          *harness.ToolOutcome
-	Data               []byte
-	Start              *SessionStart
+	Immediate *harness.ToolOutcome
+	Data      []byte
+	Start     *SessionStart
 }
 
 // Owned returns an independent copy of the plan and its byte fields.
 func (p ToolPlan) Owned() ToolPlan {
 	out := p
-	out.Permissions = append([]harness.PermissionRequest(nil), p.Permissions...)
 	if p.Immediate != nil {
 		immediate := *p.Immediate
 		immediate.Metadata = append(json.RawMessage(nil), p.Immediate.Metadata...)

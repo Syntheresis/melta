@@ -14,14 +14,14 @@ import (
 
 type authorAPI struct {
 	extension.API
-	operations    map[string]extension.Operation
-	admission     extension.AdmissionHook
-	request       extension.AuthorRequestHook
-	arguments     extension.ArgumentsHook
-	authorization extension.AuthorizationHook
-	settings      json.RawMessage
-	service       extension.Service
-	tool          extension.RegisteredTool
+	operations map[string]extension.Operation
+	admission  extension.AdmissionHook
+	request    extension.AuthorRequestHook
+	arguments  extension.ArgumentsHook
+	check      extension.ToolCheckHook
+	settings   json.RawMessage
+	service    extension.Service
+	tool       extension.RegisteredTool
 }
 
 func (a *authorAPI) Settings() json.RawMessage {
@@ -91,7 +91,7 @@ func TestAuthorAdmissionUnavailableToolKeepsRestrictions(t *testing.T) {
 	if err != nil || result.Candidate == nil || len(result.Candidate.Tools) != 1 || result.Candidate.Tools[0].Name != "run_command" {
 		t.Fatalf("available tools: %#v %v", result, err)
 	}
-	refusal, err := api.authorization(context.Background(), call, extension.AuthorizationInput{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: "/file"}}})
+	refusal, err := api.check(context.Background(), call, model.ToolCall{Name: "write_file", Arguments: []byte(`{"path":"/file"}`)})
 	if err != nil || refusal == nil {
 		t.Fatalf("unavailable tool lifted write restriction: %v %v", refusal, err)
 	}
@@ -123,8 +123,8 @@ func TestAuthorTaskReadvertisement(t *testing.T) {
 		t.Fatal("Agents still rewrites the advertised tool list")
 	}
 }
-func (a *authorAPI) AttachAuthorization(h extension.AuthorizationHook, _ extension.Registration) (extension.Registration, error) {
-	a.authorization = h
+func (a *authorAPI) AttachToolCheck(h extension.ToolCheckHook, _ extension.Registration) (extension.Registration, error) {
+	a.check = h
 	return nil, nil
 }
 
@@ -142,22 +142,23 @@ func TestAuthorReadonlyFinalCommand(t *testing.T) {
 	if err := json.Unmarshal(result.Arguments, &args); err != nil {
 		t.Fatal(err)
 	}
-	args["timeout"], args["background"] = 120, false
+	args["background"] = false
 	normalized, _ := json.Marshal(args)
-	input := extension.AuthorizationInput{ToolName: "run_command", Arguments: normalized, ToolSettings: []byte(`{"command_timeout":120}`)}
-	refusal, err := api.authorization(context.Background(), call, input)
+	input := model.ToolCall{Name: "run_command", Arguments: normalized}
+	refusal, err := api.check(context.Background(), call, input)
 	if err != nil || refusal != nil {
 		t.Fatalf("safe command refused: %v %v", refusal, err)
 	}
 	args["timeout"] = 121
 	input.Arguments, _ = json.Marshal(args)
-	refusal, err = api.authorization(context.Background(), call, input)
+	refusal, err = api.check(context.Background(), call, input)
 	if err != nil || refusal == nil {
 		t.Fatalf("changed timeout accepted: %v %v", refusal, err)
 	}
-	args["timeout"], args["command"] = 120, "rm file"
+	delete(args, "timeout")
+	args["command"] = "rm file"
 	input.Arguments, _ = json.Marshal(args)
-	refusal, err = api.authorization(context.Background(), call, input)
+	refusal, err = api.check(context.Background(), call, input)
 	if err != nil || refusal == nil {
 		t.Fatalf("changed script accepted: %v %v", refusal, err)
 	}
@@ -166,7 +167,7 @@ func TestAuthorReadonlyFinalCommand(t *testing.T) {
 		t.Fatalf("background override lost: %#v %v", background, err)
 	}
 	input.Arguments = background.Arguments
-	refusal, err = api.authorization(context.Background(), call, input)
+	refusal, err = api.check(context.Background(), call, input)
 	if err != nil || refusal != nil {
 		t.Fatalf("background override refused: %v %v", refusal, err)
 	}
@@ -177,11 +178,20 @@ func TestAuthorWriteRoot(t *testing.T) {
 	if _, err := Author().Activate(context.Background(), api); err != nil {
 		t.Fatal(err)
 	}
-	call := extension.AuthorContext{State: []byte(`{"agent":"explore"}`)}
-	input := extension.AuthorizationInput{ToolName: "other", Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: "/workspace/file"}}}
-	refusal, err := api.authorization(context.Background(), call, input)
-	if err != nil || refusal == nil {
-		t.Fatalf("read-only write = %v, %v", refusal, err)
+	calls := 0
+	call := extension.AuthorContext{State: []byte(`{"agent":"explore"}`), Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+		calls++
+		return extension.Result{}, nil
+	}}
+	input := model.ToolCall{Name: "write_file", Arguments: []byte(`{"path":"/workspace/file"}`)}
+	refusal, err := api.check(context.Background(), call, input)
+	if err != nil || refusal == nil || *refusal != "read-only agent cannot write files" || calls != 0 {
+		t.Fatalf("read-only write = %v, %v; host calls = %d", refusal, err, calls)
+	}
+	call.State = []byte(`{"agent":"primary"}`)
+	refusal, err = api.check(context.Background(), call, input)
+	if err != nil || refusal != nil || calls != 0 {
+		t.Fatalf("unrestricted write = %v, %v; host calls = %d", refusal, err, calls)
 	}
 }
 
@@ -223,18 +233,28 @@ func TestAuthorPromptModesAndWriteRoot(t *testing.T) {
 		t.Fatalf("already-headed instructions: %#v %v reads=%d", result, err, reads)
 	}
 	call := extension.AuthorContext{State: []byte(`{"agent":"writer"}`), Call: func(_ context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
-		if service != "melta.workspace" || method != "bind" || string(args) != `{"path":"allowed"}` {
+		if service != "melta.workspace" || method != "bind" {
 			t.Fatalf("unexpected binding: %s.%s %s", service, method, args)
 		}
-		return extension.Result{Value: []byte(`{"canonical_path":"/workspace/allowed"}`)}, nil
+		var input struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Path == "allowed" {
+			input.Path = "/workspace/allowed"
+		}
+		value, _ := json.Marshal(map[string]string{"canonical_path": input.Path})
+		return extension.Result{Value: value}, nil
 	}}
-	action := extension.AuthorizationInput{ToolName: "other", Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: "/workspace/allowed/a"}}}
-	refusal, err := api.authorization(context.Background(), call, action)
+	action := model.ToolCall{Name: "write_file", Arguments: []byte(`{"path":"/workspace/allowed/a"}`)}
+	refusal, err := api.check(context.Background(), call, action)
 	if err != nil || refusal != nil {
 		t.Fatalf("inside root: %v %v", refusal, err)
 	}
-	action.Permissions[0].Target = "/workspace/allowed-sibling/a"
-	refusal, err = api.authorization(context.Background(), call, action)
+	action.Arguments = []byte(`{"path":"/workspace/allowed-sibling/a"}`)
+	refusal, err = api.check(context.Background(), call, action)
 	if err != nil || refusal == nil {
 		t.Fatalf("outside root: %v %v", refusal, err)
 	}

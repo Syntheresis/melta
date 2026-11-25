@@ -269,7 +269,7 @@ func (scope *nativeCallScope) workspaceService(ctx context.Context, method strin
 	if scope.kind != callKindTool || scope.workspaceBind {
 		return extension.Result{}, ErrDenied
 	}
-	return scope.workspace.execute(ctx, method, args, scope.permissions)
+	return scope.workspace.execute(ctx, method, args)
 }
 
 func (scope *nativeCallScope) settingsService(ctx context.Context, _ string, args json.RawMessage) (extension.Result, error) {

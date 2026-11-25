@@ -219,6 +219,7 @@ type registeredService struct {
 type nativeTool struct {
 	definition model.ToolDefinition
 	tool       extension.RegisteredTool
+	validate   func(json.RawMessage) error
 }
 
 type nativeHook struct {
@@ -711,15 +712,27 @@ func (api nativeAPI) registerWith(kind, name string, value any, replace extensio
 	return r, nil
 }
 
+func compileToolValidator(def model.ToolDefinition) (func(json.RawMessage) error, error) {
+	contract, err := extension.CompileMethod(extension.Method{Name: def.Name, Input: def.Parameters, Success: json.RawMessage(`{}`)})
+	if err != nil {
+		return nil, err
+	}
+	return contract.ValidateArguments, nil
+}
+
 func (api nativeAPI) RegisterTool(def model.ToolDefinition, tool extension.RegisteredTool, replace extension.Registration) (extension.Registration, error) {
 	def, err := model.NewToolDefinition(def)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("tool definition: %v: %w", err, harness.ErrInvalid)
 	}
 	if tool == nil {
 		return nil, errors.New("missing tool implementation")
 	}
-	return api.register("tool", def.Name, nativeTool{def, tool}, replace)
+	validate, err := compileToolValidator(def)
+	if err != nil {
+		return nil, fmt.Errorf("tool schema: %v: %w", err, harness.ErrInvalid)
+	}
+	return api.register("tool", def.Name, nativeTool{def, tool, validate}, replace)
 }
 
 func (api nativeAPI) RegisterStrategy(binding harness.StrategyBinding, replace extension.Registration) (extension.Registration, error) {
@@ -783,11 +796,11 @@ func (api nativeAPI) AttachArguments(h extension.ArgumentsHook, r extension.Regi
 	}
 	return api.register("arguments", "", nativeHook{h}, r)
 }
-func (api nativeAPI) AttachAuthorization(h extension.AuthorizationHook, r extension.Registration) (extension.Registration, error) {
+func (api nativeAPI) AttachToolCheck(h extension.ToolCheckHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {
 		return nil, errors.New("missing hook")
 	}
-	return api.register("authorization", "", nativeHook{h}, r)
+	return api.register("check", "", nativeHook{h}, r)
 }
 func (api nativeAPI) AttachResult(h extension.ResultHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {
@@ -924,7 +937,6 @@ type nativeCallScope struct {
 	kind             nativeCallKind
 	workspace        *nativeWorkspace
 	workspaceBind    bool
-	permissions      []harness.PermissionRequest
 	session          harness.SessionIdentity
 	requestID        string
 	states           map[string]harness.SessionStateValue
@@ -1010,7 +1022,7 @@ func (c *nativeCandidate) callServiceScoped(ctx context.Context, service, method
 		return extension.Result{}, err
 	}
 	childCtx, cancel := context.WithCancel(ctx)
-	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, kind: parent.kind, workspace: parent.workspace, workspaceBind: parent.workspaceBind, permissions: parent.permissions, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, start: parent.start, requestID: parent.requestID})
+	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: childCtx, cancel: cancel}, candidate: c, activation: target, kind: parent.kind, workspace: parent.workspace, workspaceBind: parent.workspaceBind, session: parent.session, states: parent.states, host: parent.host, lease: parent.lease, operationSecrets: parent.operationSecrets, commandScope: parent.commandScope, start: parent.start, requestID: parent.requestID})
 	return executeNativeProvider(scope.ctx, extension.AuthorContext{ExtensionID: target.id, Settings: bytes.Clone(target.section), Session: scope.session, State: bytes.Clone(scope.states[target.id]), Call: scope.call, RequestID: scope.requestID}, binding.contract, func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 		defer scope.end()
 		return binding.handler(ctx, call, args)

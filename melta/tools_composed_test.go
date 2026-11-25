@@ -17,7 +17,6 @@ import (
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/atomicfs"
 	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/jobs"
 	"github.com/Syntheresis/melta/internal/snapshot"
@@ -315,16 +314,16 @@ func toolsCapture(names []string) harness.ExecutionCapture {
 
 // toolsHarnessOpts varies one composed tools Harness: the jobs provider (a
 // fake or the real service), the advertised tool set, the background bridge,
-// the captured invocation, the authorization hooks, and the call-time
+// the captured invocation, the check hooks, and the call-time
 // subprocess environment producer.
 type toolsHarnessOpts struct {
-	jobsValue          jobs.Jobs // the tool-facing jobs provider; realJobs wins when set
-	realJobs           bool      // construct the real jobs service over the fixture data root
-	advertise          []string
-	background         BackgroundServices
-	invocation         Invocation
-	subprocessEnv      func(context.Context) ([]string, error)
-	authorizationHooks []harness.AuthorizationHook
+	jobsValue     jobs.Jobs // the tool-facing jobs provider; realJobs wins when set
+	realJobs      bool      // construct the real jobs service over the fixture data root
+	advertise     []string
+	background    BackgroundServices
+	invocation    Invocation
+	subprocessEnv func(context.Context) ([]string, error)
+	checkHooks    []harness.ToolCheckHook
 	// store, when non-nil, is the durable store behind the fixture's
 	// Harness; the zero value opens a temporary SQLite store.
 	store harness.Storage
@@ -406,10 +405,9 @@ func newToolsHarnessWith(t *testing.T, modelFn func(context.Context, model.Reque
 					return harness.Execution{
 						OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 							return harness.InvocationExecution{
-								Model:              modelFn,
-								AuthorizationHooks: opts.authorizationHooks,
-								BindLocation:       locationBinder(workspace),
-								LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) harness.PreparedTool {
+								Model:      modelFn,
+								CheckStage: func() harness.CheckStage { return harness.CheckStage{Hooks: opts.checkHooks} },
+								LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) toolPlan {
 									return byID[call.Name].Prepare(ctx, tc, call)
 								}, func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
 									tool, ok := byID[call.Name]
@@ -711,37 +709,15 @@ func TestRunCommandPrepareTargets(t *testing.T) {
 	byID := openTools(t, dataDir)
 	ws := t.TempDir()
 
-	t.Run("conclusive simple commands declare one target per segment", func(t *testing.T) {
+	t.Run("conclusive simple commands run each segment", func(t *testing.T) {
 		plan := prepare(t, byID["run_command"], envCallContext(t, ws), "run_command", `{"command":"echo one; echo two && echo three"}`)
-		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 3, "plan = %+v, want an executor plan; pairs = %+v, want one command.run pair per segment", plan, plan.Permissions)
-		want := []string{"echo one", "echo two", "echo three"}
-		for i, pair := range plan.Permissions {
-			if pair.Permission != "command.run" || pair.Target != want[i] {
-				t.Fatalf("pair %d = %+v, want command.run on %q", i, pair, want[i])
-			}
-		}
-	})
-
-	t.Run("everything else falls back to the one complete target", func(t *testing.T) {
-		for _, tc := range []struct{ args, want string }{
-			{`{"command":"printf ok # ; rm -rf scratch"}`, "printf ok # ; rm -rf scratch"},
-			{`{"command":"echo a > b"}`, "echo a > b"},
-			{`{"command":"cat <<EOF"}`, "cat <<EOF"},
-			{`{"command":"FOO=bar ls"}`, "FOO=bar ls"},
-			{`{"command":"echo a &&"}`, "echo a &&"},
-			// Leading ASCII blanks/newlines are trimmed and every remaining
-			// byte — the heredoc body and the trailing newline — preserved.
-			{"{\"command\":\"  \\ncat <<EOF\\nbody\\nEOF\\n\"}", "cat <<EOF\nbody\nEOF\n"},
-		} {
-			plan := prepare(t, byID["run_command"], envCallContext(t, ws), "run_command", tc.args)
-			testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "command.run", "%s: pairs = %+v, want the single complete-command target", tc.args, plan.Permissions)
-			testassert.Require(t, plan.Permissions[0].Target == tc.want, "%s: target = %q, want %q", tc.args, plan.Permissions[0].Target, tc.want)
-		}
+		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "plan = %+v, want an executor plan", plan)
+		outcome := plan.Execute(context.Background())
+		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.Contains(outcome.Result.Content, "one\ntwo\nthree"), "outcome = %+v", outcome)
 	})
 
 	t.Run("all-blank text takes the whole-command fallback with the original input", func(t *testing.T) {
 		plan := prepare(t, byID["run_command"], envCallContext(t, ws), "run_command", `{"command":"   "}`)
-		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Target == "   ", "pairs = %+v, want the unchanged original blank input as the one target", plan.Permissions)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "(No output)", "result = %+v, want the retained no-op run", outcome.Result)
 	})
@@ -843,34 +819,17 @@ func TestRunCommandExecuteOutcomes(t *testing.T) {
 func TestPrepareShapesAndCanonicals(t *testing.T) {
 	byID := openTools(t, t.TempDir())
 
-	t.Run("read_file binds canonical targets with file.read pairs", func(t *testing.T) {
+	t.Run("read_file prepares an executor", func(t *testing.T) {
 		ws := t.TempDir()
 		testassert.NoError(t, os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("hello\n"), 0o644))
 		plan := prepare(t, byID["read_file"], callToolContext(ws), "read_file", `{"path":"notes.txt"}`)
-		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "file.read", "plan = %+v, want one executor; permissions = %+v, want one file.read pair", plan, plan.Permissions)
-		testassert.Require(t, plan.Permissions[0].Target == filepath.Join(ws, "notes.txt") && plan.CanonicalWorkspace == ws, "target = %q, canonical workspace = %q, want the canonical file path in the workspace", plan.Permissions[0].Target, plan.CanonicalWorkspace)
+		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "plan = %+v, want one executor", plan)
 	})
-	t.Run("read_file of a missing leaf declares the parent directory too", func(t *testing.T) {
-		ws := t.TempDir()
-		plan := prepare(t, byID["read_file"], callToolContext(ws), "read_file", `{"path":"ghost.txt"}`)
-		testassert.Require(t, len(plan.Permissions) == 2, "permissions = %+v, want the file and parent-directory file.read pairs", plan.Permissions)
-		for _, pair := range plan.Permissions {
-			testassert.Require(t, pair.Permission == "file.read" && pair.Target != "", "pair = %+v, want a nonempty canonical file.read pair", pair)
-		}
-	})
-	t.Run("canonical workspace resolves symlinks and stays lexically fixed", func(t *testing.T) {
-		real := t.TempDir()
-		link := filepath.Join(t.TempDir(), "link")
-		testassert.NoError(t, os.Symlink(real, link))
-		plan := prepare(t, byID["read_file"], callToolContext(link), "read_file", `{"path":"a.txt"}`)
-		testassert.Equal(t, plan.CanonicalWorkspace, real)
-	})
-	t.Run("write_file declares file.write on the canonical target", func(t *testing.T) {
+	t.Run("write_file prepares an executor", func(t *testing.T) {
 		ws := t.TempDir()
 		testassert.NoError(t, os.MkdirAll(filepath.Join(ws, "wd"), 0o755))
 		plan := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"wd/out.txt","content":"x"}`)
-		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "file.write", "plan = %+v, want one executor; permissions = %+v, want one file.write pair", plan, plan.Permissions)
-		testassert.Require(t, plan.Permissions[0].Target == filepath.Join(ws, "wd", "out.txt") && plan.CanonicalWorkspace == ws, "target = %q, canonical workspace = %q, want the canonical file path in the workspace", plan.Permissions[0].Target, plan.CanonicalWorkspace)
+		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "plan = %+v, want one executor", plan)
 	})
 	t.Run("undecodable arguments in Prepare map to the immediate validation error", func(t *testing.T) {
 		ws := t.TempDir()
@@ -900,14 +859,14 @@ func TestPrepareShapesAndCanonicals(t *testing.T) {
 		plan = prepare(t, tool, callToolContext(ws), "read_file", `{"path":"f.txt","offset":2.5}`)
 		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "plan = %+v, want one executor: Prepare runs no second normalization", plan)
 	})
-	t.Run("failed canonical preparation maps to the immediate denial", func(t *testing.T) {
+	t.Run("failed canonical preparation returns the diagnostic", func(t *testing.T) {
 		ws := t.TempDir()
 		loop := filepath.Join(ws, "loop")
 		testassert.NoError(t, os.Symlink("loop", loop))
 		plan := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"loop/out.txt","content":"x"}`)
 		testassert.Require(t, plan.Execute == nil && plan.Immediate != nil, "plan = %+v, want one immediate outcome", plan)
 		outcome := *plan.Immediate
-		testassert.Require(t, outcome.Result.Status == model.ResultDenied && outcome.Result.Content == "Permission denied.", "immediate = %+v, want the fixed denial", outcome)
+		testassert.Require(t, outcome.Result.Status == model.ResultError && strings.Contains(outcome.Result.Content, "resolve path"), "immediate = %+v, want the path diagnostic", outcome)
 	})
 }
 
@@ -1083,7 +1042,7 @@ func TestExecutedPlanRejectsPostAuthorizationBindingChange(t *testing.T) {
 	link := filepath.Join(ws, "alias.txt")
 	testassert.NoError(t, os.Symlink(real, link))
 	plan := prepare(t, byID["write_file"], callToolContext(ws), "write_file", `{"path":"alias.txt","content":"after"}`)
-	// Repoint the alias at a different leaf after authorization.
+	// Repoint the alias at a different leaf after preparation.
 	other := filepath.Join(ws, "other.txt")
 	testassert.NoError(t, os.WriteFile(other, []byte("do not touch\n"), 0o644))
 	testassert.NoError(t, os.Remove(link))
@@ -1094,74 +1053,6 @@ func TestExecutedPlanRejectsPostAuthorizationBindingChange(t *testing.T) {
 	testassert.Require(t, err == nil && string(data) == "do not touch\n", "repointed leaf = (%q, %v), want it unmutated", data, err)
 	if _, err := os.Stat(filepath.Join(dataDir, "code")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed pre-mutation call left %s: %v", filepath.Join(dataDir, "code"), err)
-	}
-}
-
-func TestAuthorizationWitnessRecheckedAfterSnapshot(t *testing.T) {
-	for _, flip := range []bool{false, true} {
-		t.Run(fmt.Sprintf("flip=%v", flip), func(t *testing.T) {
-			var calls int
-			modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-				calls++
-				if calls == 1 {
-					return toolCallStream("call-write", "write_file", `{"path":"target.txt","content":"after"}`), nil
-				}
-				return stopStream("done"), nil
-			}
-			hook := harness.AuthorizationHook{Run: func(_ context.Context, _ harness.PreparedAction, bind func(string) (string, error)) (*string, error) {
-				_, err := bind("guard")
-				return nil, err
-			}}
-			th := newToolsHarnessWith(t, modelFn, toolsHarnessOpts{advertise: []string{"write_file"}, authorizationHooks: []harness.AuthorizationHook{hook}})
-			first, second := t.TempDir(), t.TempDir()
-			link := filepath.Join(th.workspace, "guard")
-			testassert.NoError(t, os.Symlink(first, link))
-			target := filepath.Join(th.workspace, "target.txt")
-			testassert.NoError(t, os.WriteFile(target, []byte("before"), 0o600))
-			session := th.createSession()
-			previous := atomicfs.SyncFileFunc
-			flipped := false
-			atomicfs.SyncFileFunc = func(f *os.File) error {
-				if flip && !flipped && strings.HasPrefix(filepath.Base(f.Name()), "meta.json.tmp-") {
-					flipped = true
-					if err := os.Remove(link); err != nil {
-						return err
-					}
-					if err := os.Symlink(second, link); err != nil {
-						return err
-					}
-				}
-				if previous != nil {
-					return previous(f)
-				}
-				return f.Sync()
-			}
-			t.Cleanup(func() { atomicfs.SyncFileFunc = previous })
-			th.submit(session, "op-1", "write")
-			th.awaitSettled(session, "op-1")
-			result := th.readToolResults(session)["call-write"]
-			data, err := os.ReadFile(target)
-			testassert.NoError(t, err)
-			th.mu.Lock()
-			admitted := th.admission
-			th.mu.Unlock()
-			codeStore, err := snapshot.OpenCodeStore(groupDir(th.dataDir, session, admitted.EntryID))
-			testassert.NoError(t, err)
-			entries, err := codeStore.ListEntries()
-			testassert.NoError(t, err)
-			if flip {
-				testassert.Require(t, flipped && result.Status == model.ResultError && string(data) == "before" && len(entries) == 0, "flipped=%v result=%+v target=%q snapshots=%+v", flipped, result, data, entries)
-			} else {
-				testassert.Require(t, result.Status == model.ResultSuccess && string(data) == "after" && len(entries) == 1 && entries[0].LastWrite != nil, "result=%+v target=%q snapshots=%+v", result, data, entries)
-			}
-			reverted, err := snapshot.RevertCodeGroups([]string{groupDir(th.dataDir, session, admitted.EntryID)})
-			testassert.NoError(t, err)
-			data, err = os.ReadFile(target)
-			testassert.NoError(t, err)
-			if string(data) != "before" || len(reverted.Skipped) != 0 || len(reverted.Restored) != len(entries) {
-				t.Fatalf("revert=%+v target=%q", reverted, data)
-			}
-		})
 	}
 }
 
@@ -1197,7 +1088,7 @@ func TestBackgroundStartFailuresRenderOneWrapperAndAbortReservation(t *testing.T
 		tc.SubprocessEnv = testSubprocessEnv(stubManagedEnv(t))
 		tc.Background = &scriptBackground{startErr: errors.New("background group is closed or stopping")}
 		plan := prepare(t, byID["run_command"], tc, "run_command", `{"command":"true","background":true}`)
-		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) != 0 && plan.Permissions[0].Permission == "command.run", "plan = %+v, want an executor plan; pairs = %+v, want command.run pairs on the background call", plan, plan.Permissions)
+		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "plan = %+v, want an executor plan", plan)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == "run_command: background start: background group is closed or stopping", "result = %+v, want the one wrapper over the handoff rejection", outcome.Result)
 		testassert.Require(t, len(fake.aborted) == 1 && fake.aborted[0] == "b0b0b0b0" && len(fake.started) == 0, "aborted = %v, want the reservation aborted once; got %v, want %v", fake.aborted, len(fake.started), 0)
@@ -1494,8 +1385,8 @@ func reserveAndStart(t *testing.T, jobsInst jobs.Jobs, workspace, command string
 }
 
 // TestProcessToolReturnsRetainedActionResults reproduces every legacy
-// process action's result text against a real jobs capability, including the
-// owner-scoped canonical targets and the capability's unknown-ID text for
+// process action's result text against a real jobs capability, including
+// session ownership and the capability's unknown-ID text for
 // well-shaped unknown and foreign identities.
 func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 	jobsDir := t.TempDir()
@@ -1505,9 +1396,9 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 	ws := t.TempDir()
 	tc := callToolContext(ws)
 
-	t.Run("empty list retains the empty text on the fixed target", func(t *testing.T) {
+	t.Run("empty list retains the empty text", func(t *testing.T) {
 		plan := prepare(t, process, tc, "process", `{"action":"list"}`)
-		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil && len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "process.own" && plan.Permissions[0].Target == "*", "plan = %+v, want an executor plan; pairs = %+v, want process.own on *", plan, plan.Permissions)
+		testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "plan = %+v, want an executor plan", plan)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "No background processes.", "result = %+v, want the retained empty list text", outcome.Result)
 	})
@@ -1521,9 +1412,8 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.Contains(outcome.Result.Content, runningID) && strings.Contains(outcome.Result.Content, "sleep 30") && strings.Contains(outcome.Result.Content, "(running for"), "result = %+v, want success; list = %q, want the retained running line for the seeded job", outcome.Result, outcome.Result.Content)
 	})
 
-	t.Run("read of a silent running job retains the placeholder on the owner-scoped target", func(t *testing.T) {
+	t.Run("read of a silent running job retains the placeholder", func(t *testing.T) {
 		plan := prepare(t, process, tc, "process", fmt.Sprintf(`{"action":"read","id":"%s"}`, runningID))
-		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "process.own" && plan.Permissions[0].Target == testSessionID+"/"+runningID, "pairs = %+v, want process.own on the owner-scoped canonical target", plan.Permissions)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "(No output yet)", "result = %+v, want the retained empty-output placeholder", outcome.Result)
 	})
@@ -1546,7 +1436,6 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 		tcForeign := callToolContext(ws)
 		tcForeign.AdmittedEntry.SessionID = "ffffffffffffffffffffffffffffffff"
 		plan := prepare(t, process, tcForeign, "process", fmt.Sprintf(`{"action":"kill","id":"%s"}`, runningID))
-		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Target == "ffffffffffffffffffffffffffffffff/"+runningID, "pairs = %+v, want the foreign owner-scoped target", plan.Permissions)
 		outcome := plan.Execute(context.Background())
 		want := fmt.Sprintf("process: no process with ID %q", runningID)
 		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == want, "result = %+v, want %q", outcome.Result, want)
@@ -1554,7 +1443,6 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 
 	t.Run("kill retains the terminated text", func(t *testing.T) {
 		plan := prepare(t, process, tc, "process", fmt.Sprintf(`{"action":"kill","id":"%s"}`, runningID))
-		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Permission == "process.own" && plan.Permissions[0].Target == testSessionID+"/"+runningID, "pairs = %+v, want process.own on the owner-scoped canonical target", plan.Permissions)
 		outcome := plan.Execute(context.Background())
 		want := fmt.Sprintf("Process %s terminated.", runningID)
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == want, "result = %+v, want %q", outcome.Result, want)
@@ -1566,7 +1454,6 @@ func TestProcessToolReturnsRetainedActionResults(t *testing.T) {
 
 	t.Run("a well-shaped unknown id reaches the capability and returns the retained text", func(t *testing.T) {
 		plan := prepare(t, process, tc, "process", `{"action":"read","id":"deadbeef"}`)
-		testassert.Require(t, len(plan.Permissions) == 1 && plan.Permissions[0].Target == testSessionID+"/deadbeef", "pairs = %+v, want the owner-scoped target for the well-shaped unknown id", plan.Permissions)
 		outcome := plan.Execute(context.Background())
 		testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == `process: no process with ID "deadbeef"`, "result = %+v, want the retained unknown-ID text", outcome.Result)
 	})
@@ -1598,23 +1485,19 @@ func TestProcessToolValidationIsImmediateError(t *testing.T) {
 	for _, tc := range cases {
 		plan := prepare(t, process, callToolContext(ws), "process", tc.args)
 		testassert.Require(t, plan.Execute == nil && plan.Immediate != nil, "%s: plan = %+v, want one immediate outcome", tc.args, plan)
-		testassert.Require(t, plan.Immediate.Result.Status == model.ResultError && plan.Immediate.Result.Content == tc.want && len(plan.Permissions) == 0, "%s: immediate = %+v, want error %q; %s: pairs = %+v, want no permission target", tc.args, plan.Immediate.Result, tc.want, tc.args, plan.Permissions)
+		testassert.Require(t, plan.Immediate.Result.Status == model.ResultError && plan.Immediate.Result.Content == tc.want, "%s: immediate = %+v, want error %q", tc.args, plan.Immediate.Result, tc.want)
 	}
 	testassert.Require(t, fake.reserves == 0 && fake.reads == 0 && fake.kills == 0 && fake.lists == 0, "capability calls = reserves %d reads %d kills %d lists %d, want none", fake.reserves, fake.reads, fake.kills, fake.lists)
 }
 
-// TestComposedPermissionDenialSettlesOnlyTheCall denies the background
-// command and the process permission from one authorization hook: both
-// declarations settle as denials without reaching the jobs capability, and
-// the later allowed write still runs — the denial settles only its call.
-func TestComposedPermissionDenialSettlesOnlyTheCall(t *testing.T) {
+// TestComposedCheckDenialSettlesOnlyTheCall refuses the background command and
+// process call without reaching jobs, while a later allowed write still runs.
+func TestComposedCheckDenialSettlesOnlyTheCall(t *testing.T) {
 	fake := &fakeJobs{}
-	hook := harness.AuthorizationHook{Run: func(_ context.Context, action harness.PreparedAction, _ func(string) (string, error)) (*string, error) {
-		for _, pair := range action.Permissions {
-			if pair.Permission == harness.PermissionCommandRun || pair.Permission == harness.PermissionProcessOwn {
-				reason := "restricted"
-				return &reason, nil
-			}
+	hook := harness.ToolCheckHook{ID: "restrict", ExtensionID: "test", Run: func(_ context.Context, call model.ToolCall) (*string, error) {
+		if call.Name == "run_command" || call.Name == "process" {
+			reason := "restricted"
+			return &reason, nil
 		}
 		return nil, nil
 	}}
@@ -1637,9 +1520,9 @@ func TestComposedPermissionDenialSettlesOnlyTheCall(t *testing.T) {
 		}
 	}
 	th := newToolsHarnessWith(t, modelFn, toolsHarnessOpts{
-		jobsValue:          fake,
-		advertise:          []string{"run_command", "process", "write_file"},
-		authorizationHooks: []harness.AuthorizationHook{hook},
+		jobsValue:  fake,
+		advertise:  []string{"run_command", "process", "write_file"},
+		checkHooks: []harness.ToolCheckHook{hook},
 	})
 	session := th.createSession()
 	th.submit(session, "op-1", "exercise the denied calls")

@@ -20,20 +20,20 @@ import (
 )
 
 // The call-kind columns this test drives: the entry point, an admission hook, a
-// request, arguments, authorization and result hook, the cleanup hook, a tool,
+// request, arguments, check and result hook, the cleanup hook, a tool,
 // and the three client-operation targets.
 const (
-	kindPhaseActivation    = "activation"
-	kindPhaseAdmission     = "admission"
-	kindPhaseRequest       = "request"
-	kindPhaseArguments     = "arguments"
-	kindPhaseAuthorization = "authorization"
-	kindPhaseResult        = "result"
-	kindPhaseCleanup       = "cleanup"
-	kindPhaseTool          = "tool"
-	kindPhaseOpSession     = "operation:session"
-	kindPhaseOpWorkspace   = "operation:workspace"
-	kindPhaseOpHarness     = "operation:harness"
+	kindPhaseActivation  = "activation"
+	kindPhaseAdmission   = "admission"
+	kindPhaseRequest     = "request"
+	kindPhaseArguments   = "arguments"
+	kindPhaseCheck       = "check"
+	kindPhaseResult      = "result"
+	kindPhaseCleanup     = "cleanup"
+	kindPhaseTool        = "tool"
+	kindPhaseOpSession   = "operation:session"
+	kindPhaseOpWorkspace = "operation:workspace"
+	kindPhaseOpHarness   = "operation:harness"
 )
 
 // kindPhase describes one column's authority: which service-call kind it
@@ -46,17 +46,17 @@ type kindPhase struct {
 }
 
 var kindPhases = map[string]kindPhase{
-	kindPhaseActivation:    {kind: kindPhaseActivation},
-	kindPhaseAdmission:     {kind: kindPhaseAdmission, hasSession: true},
-	kindPhaseRequest:       {kind: kindPhaseRequest, hasSession: true},
-	kindPhaseArguments:     {kind: kindPhaseArguments, hasSession: true},
-	kindPhaseAuthorization: {kind: kindPhaseAuthorization, hasSession: true},
-	kindPhaseResult:        {kind: kindPhaseResult, hasSession: true},
-	kindPhaseCleanup:       {kind: kindPhaseCleanup},
-	kindPhaseTool:          {kind: kindPhaseTool, hasSession: true},
-	kindPhaseOpSession:     {kind: "operation", hasSession: true, target: extension.ExposedTargetSession},
-	kindPhaseOpWorkspace:   {kind: "operation", target: extension.ExposedTargetWorkspace},
-	kindPhaseOpHarness:     {kind: "operation", target: extension.ExposedTargetHarness},
+	kindPhaseActivation:  {kind: kindPhaseActivation},
+	kindPhaseAdmission:   {kind: kindPhaseAdmission, hasSession: true},
+	kindPhaseRequest:     {kind: kindPhaseRequest, hasSession: true},
+	kindPhaseArguments:   {kind: kindPhaseArguments, hasSession: true},
+	kindPhaseCheck:       {kind: kindPhaseCheck, hasSession: true},
+	kindPhaseResult:      {kind: kindPhaseResult, hasSession: true},
+	kindPhaseCleanup:     {kind: kindPhaseCleanup},
+	kindPhaseTool:        {kind: kindPhaseTool, hasSession: true},
+	kindPhaseOpSession:   {kind: "operation", hasSession: true, target: extension.ExposedTargetSession},
+	kindPhaseOpWorkspace: {kind: "operation", target: extension.ExposedTargetWorkspace},
+	kindPhaseOpHarness:   {kind: "operation", target: extension.ExposedTargetHarness},
 }
 
 // kindRow is one landed service method and the columns that may reach it.
@@ -91,19 +91,19 @@ func (r kindRow) allows(phase kindPhase) bool {
 
 var kindRows = []kindRow{
 	{name: "credentials", service: extension.ContractCredentials, method: "get", args: json.RawMessage(`{"field":"/key"}`),
-		columns: []string{kindPhaseActivation, kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseAuthorization, kindPhaseResult, kindPhaseCleanup, kindPhaseTool, "operation"}},
+		columns: []string{kindPhaseActivation, kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseCleanup, kindPhaseTool, "operation"}},
 	{name: "cache", service: extension.ContractData, method: "cache_namespace", args: json.RawMessage(`{}`),
-		columns: []string{kindPhaseActivation, kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseAuthorization, kindPhaseResult, kindPhaseCleanup, kindPhaseTool, "operation"}},
+		columns: []string{kindPhaseActivation, kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseCleanup, kindPhaseTool, "operation"}},
 	{name: "warnings", service: extension.ContractWarnings, method: "report", args: json.RawMessage(`{"kind":"call-kind","message":"probe"}`),
-		columns: []string{kindPhaseActivation, kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseAuthorization, kindPhaseResult, kindPhaseCleanup, kindPhaseTool, "operation"}},
+		columns: []string{kindPhaseActivation, kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseCleanup, kindPhaseTool, "operation"}},
 	{name: "members", service: extension.ContractSession, method: "members", args: json.RawMessage(`{}`),
-		columns: []string{kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseAuthorization, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
+		columns: []string{kindPhaseAdmission, kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
 	{name: "state", service: extension.ContractState, method: "set", args: json.RawMessage(`{"value":{"call_kind":true}}`),
-		columns: []string{kindPhaseRequest, kindPhaseArguments, kindPhaseAuthorization, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
+		columns: []string{kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
 	{name: "session-namespace", service: extension.ContractData, method: "session_namespace", args: json.RawMessage(`{}`),
-		columns: []string{kindPhaseRequest, kindPhaseArguments, kindPhaseAuthorization, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
+		columns: []string{kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
 	{name: "claim", service: extension.ContractData, method: "claim_external_data", args: json.RawMessage(`{}`),
-		columns: []string{kindPhaseRequest, kindPhaseArguments, kindPhaseAuthorization, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
+		columns: []string{kindPhaseRequest, kindPhaseArguments, kindPhaseCheck, kindPhaseResult, kindPhaseTool, "operation"}, needsSess: true},
 	{name: "settings", service: extension.ContractSettings, method: "replace",
 		columns: []string{"operation"}, harnessTarget: true},
 	{name: "commands", service: extension.ContractCommands,
@@ -279,8 +279,8 @@ func (p *callKindProbe) extension() extension.Extension {
 		}, nil); err != nil {
 			return nil, err
 		}
-		if _, err := api.AttachAuthorization(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorizationInput) (*string, error) {
-			p.observe(call, kindPhaseAuthorization, "interrupt", json.RawMessage(`{}`))
+		if _, err := api.AttachToolCheck(func(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) (*string, error) {
+			p.observe(call, kindPhaseCheck, "interrupt", json.RawMessage(`{}`))
 			return nil, nil
 		}, nil); err != nil {
 			return nil, err
@@ -331,7 +331,7 @@ func (t kindProbeTool) Normalize(_ extension.AuthorContext, call model.ToolCall)
 }
 
 func (t kindProbeTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "kind-probe"}}}
+	return extension.ToolPlan{}
 }
 
 func (t kindProbeTool) Execute(ctx context.Context, call extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {

@@ -1054,7 +1054,7 @@ func TestPublicationHandoffRetainsCheckpointPublicationAcrossDoneContext(t *test
 			return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				t.Fatal("the conversation model must never run")
 				return nil, nil
-			}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+			}, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 		}}
 		exec.ResolveStrategy = fixedStrategyResolver(binding)
 		return exec, nil

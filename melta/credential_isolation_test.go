@@ -41,7 +41,7 @@ func (t *heldCredentialTool) Normalize(_ extension.AuthorContext, call model.Too
 }
 
 func (t *heldCredentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "held"}}, Data: []byte(call.ID)}
+	return extension.ToolPlan{Data: []byte(call.ID)}
 }
 
 func (t *heldCredentialTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {

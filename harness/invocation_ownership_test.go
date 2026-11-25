@@ -163,7 +163,7 @@ func TestMaintenanceOpenedInvocationDeclarationsArePreserved(t *testing.T) {
 		sharedOutput[0] = ToolOutputHook{}
 		return summaryStream("gap summary", model.Usage{InputTokens: 1}), nil
 	}
-	noopTool := func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
+	noopTool := func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }
 	exec := Execution{
 		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: gapStrategyID, Strategy: &gapStrategy{t: t}}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {

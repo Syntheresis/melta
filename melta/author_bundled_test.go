@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -149,8 +147,11 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 				if err != nil || denied.Refusal == nil {
 					t.Fatalf("missing tool command restriction: %#v %v", denied, err)
 				}
-				auth := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
-				refusal, err := auth(context.Background(), call, extension.AuthorizationInput{ToolName: "other", Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: "/workspace/file"}}})
+				auth := stage.hooks["check"][0].value.(nativeHook).handler.(extension.ToolCheckHook)
+				call.Call = func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+					return extension.Result{Value: []byte(`{"canonical_path":"/workspace/file"}`)}, nil
+				}
+				refusal, err := auth(context.Background(), call, model.ToolCall{Name: "write_file", Arguments: []byte(`{"path":"/workspace/file"}`)})
 				if err != nil || refusal == nil {
 					t.Fatalf("missing tool write restriction: %v %v", refusal, err)
 				}
@@ -163,10 +164,10 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 				if err := json.Unmarshal(rewrite.Arguments, &normalized); err != nil {
 					t.Fatal(err)
 				}
-				normalized["timeout"], normalized["background"] = 120, false
+				normalized["background"] = false
 				raw, _ := json.Marshal(normalized)
-				authorize := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
-				input := extension.AuthorizationInput{ToolName: "run_command", Arguments: raw, ToolSettings: []byte(`{"command_timeout":120}`)}
+				authorize := stage.hooks["check"][0].value.(nativeHook).handler.(extension.ToolCheckHook)
+				input := model.ToolCall{Name: "run_command", Arguments: raw}
 				reason, err := authorize(context.Background(), call, input)
 				if err != nil || reason != nil {
 					t.Fatalf("authorization: %v %v", reason, err)
@@ -221,36 +222,5 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestAgentsRegisteredWriteWitness(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "allowed"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	owner := &configurationService{}
-	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: agents.Author(), section: []byte(`{"enabled":true,"definitions":{"writer":{"write_dir":"allowed"}}}`)}})
-	if err != nil || candidate.inactive["agents"] != nil {
-		t.Fatalf("activation: %v %v", err, candidate.inactive)
-	}
-	defer candidate.release()
-	stage := candidate.snapshotForTest()
-	defer stage.release()
-	hooks := stage.authorizationHooks(ToolContext{Workspace: root}, map[string]harness.SessionStateValue{"agents": []byte(`{"agent":"writer"}`)}, nil, nil, nil, nil)
-	binds := 0
-	bind := func(path string) (string, error) {
-		binds++
-		return filepath.Join(root, path), nil
-	}
-	action := harness.PreparedAction{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: filepath.Join(root, "allowed", "file")}}}
-	refusal, err := hooks[0].Run(context.Background(), action, bind)
-	if err != nil || refusal != nil || binds != 1 {
-		t.Fatalf("inside: %v %v binds=%d", refusal, err, binds)
-	}
-	action.Permissions[0].Target = filepath.Join(root, "elsewhere")
-	refusal, err = hooks[0].Run(context.Background(), action, bind)
-	if err != nil || refusal == nil {
-		t.Fatalf("outside: %v %v", refusal, err)
 	}
 }

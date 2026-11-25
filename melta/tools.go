@@ -29,8 +29,7 @@ type backgroundBridge struct {
 }
 
 // boundBackground is one tool call's background authority. The Melta owns
-// the calling Session, the plan's permission pairs frozen when Prepare
-// returns, the derived context, expiry and join; a plugin receives no
+// the calling Session, the derived context, expiry and join; a plugin receives no
 // authority outside the plan's Execute.
 type boundBackground struct {
 	bridge    *backgroundBridge
@@ -107,9 +106,9 @@ func (b *boundBackground) StartJob(jobID string, spawn func(ctx context.Context,
 
 // bindPlan binds this standard tool call's background authority to its
 // executor. A plan without an executor is returned unchanged and the object
-// never arms. Extension tools bind their own authorized call context in the
+// never arms. Extension tools bind their own call context in the
 // native adapter and never pass through this baseline path.
-func (b *boundBackground) bindPlan(plan harness.PreparedTool) harness.PreparedTool {
+func (b *boundBackground) bindPlan(plan toolPlan) toolPlan {
 	if plan.Execute == nil {
 		return plan
 	}
@@ -147,17 +146,43 @@ type ToolContext struct {
 	// current revision's provider names, together with the preparation-time
 	// captured names). It is that live exclusion service only, never a
 	// promise to reread the selected execution policy: the model, prompt,
-	// tools, permissions and configuration revision stay the admission's
+	// tools and configuration revision stay the admission's
 	// frozen capture. A nil callback or an error fails the cooperative
 	// command before any process starts; there is no ambient fallback.
 	SubprocessEnv func(context.Context) ([]string, error)
 }
 
 // Tool is one concrete tool capability: pure terminating argument
-// normalization plus preparation of one authorized call. Both members
+// normalization plus preparation of one checked call. Both members
 // receive the same ToolContext; normalization supplies the immutable call
 // facts preparation consumes.
 type Tool interface {
 	Normalize(context.Context, ToolContext, model.ToolCall) (json.RawMessage, error)
-	Prepare(context.Context, ToolContext, model.ToolCall) harness.PreparedTool
+	Prepare(context.Context, ToolContext, model.ToolCall) toolPlan
+}
+
+type toolPlan struct {
+	Immediate *harness.ToolOutcome
+	Execute   func(context.Context) harness.ToolOutcome
+}
+
+func runTool(ctx context.Context, call model.ToolCall, normalize func(context.Context, model.ToolCall) (json.RawMessage, error), prepare func(context.Context, model.ToolCall) toolPlan) harness.ToolOutcome {
+	args, err := normalize(ctx, call)
+	if err != nil {
+		return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: boundedDiagnostic(err)}, Evidence: harness.ExecutionNotStarted}
+	}
+	call.Arguments = args
+	plan := prepare(ctx, call)
+	if plan.Immediate != nil {
+		outcome := *plan.Immediate
+		if _, err := model.NewToolResult(outcome.Result); err != nil || outcome.Result.CallID != call.ID {
+			return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "Tool call failed internal validation."}, Evidence: harness.ExecutionNotStarted}
+		}
+		outcome.Evidence = harness.ExecutionNotStarted
+		if outcome.Result.Status == model.ResultSuccess {
+			outcome.Evidence = harness.ExecutionObserved
+		}
+		return outcome
+	}
+	return plan.Execute(ctx)
 }

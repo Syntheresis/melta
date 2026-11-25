@@ -53,7 +53,7 @@ func TestRequestHookPurePromptRemoval(t *testing.T) {
 	remover := RequestHook{ID: "req.prompt.remove", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Prompt: emptyText()}, nil
 	}}
-	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{remover}...)}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{remover}...)}
 	sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 	testassert.NoError(t, err)
 	testassert.Require(t, len(sent.Messages) > 0 && sent.Messages[0].Role != model.RoleSystem, "dispatch request = %+v, want no system prompt message after a present-empty prompt", sent.Messages)
@@ -76,7 +76,7 @@ func TestRequestHookPureToolView(t *testing.T) {
 		empty := RequestHook{ID: "req.tools.empty", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Tools: fixtureDefinitions()}, nil
 		}}
-		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{empty}...)}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{empty}...)}
 		sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 		testassert.NoError(t, err)
 		testassert.Require(t, len(sent.Tools) == 0, "dispatch tools = %+v, want the actual request narrowed to the empty advertised view", sent.Tools)
@@ -90,7 +90,7 @@ func TestRequestHookPureToolView(t *testing.T) {
 		bad := RequestHook{ID: "req.tools.bad", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Tools: fixtureDefinitions("not-captured")}, nil
 		}}
-		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{bad}...)}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{bad}...)}
 		inv.Model = func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			calls++
 			return completedTurnStream(), nil
@@ -107,7 +107,7 @@ func TestRequestHookPureToolView(t *testing.T) {
 		restore := RequestHook{ID: "req.tools.restore", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Tools: fixtureDefinitions("echo")}, nil // a selection covering the captured catalog restores the full view
 		}}
-		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{narrow, restore}...)}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{narrow, restore}...)}
 		sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 		testassert.NoError(t, err)
 		testassert.Require(t, len(sent.Tools) == 1 && sent.Tools[0].Name == "echo", "dispatch tools = %+v, want the restored full catalog", sent.Tools)
@@ -135,7 +135,7 @@ func TestRequestHookFrozenInputOwnership(t *testing.T) {
 		in.Prompt += " mutated"
 		return RequestConsequence{}, nil
 	}}
-	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{observer}...)}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{observer}...)}
 	sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 	testassert.NoError(t, err)
 	testassert.Require(t, saw.RequestID != "" && saw.BoundaryEntryID != "", "hook input = %+v, want the bound request identity and canonical boundary", saw)
@@ -167,7 +167,7 @@ func TestHookFamiliesDisjointForSameIdentity(t *testing.T) {
 				}
 				return completedTurnStream(), nil
 			},
-			LookupTool: fixtureToolLookup(spy.tool, objectNormalize),
+			LookupTool: fixtureToolLookup(spy.tool),
 			RequestStage: fixtureRequestStage([]RequestHook{{ID: sharedID, ExtensionID: sharedExt, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 				return RequestConsequence{Prompt: &prompt}, nil
 			}}}...),
@@ -203,7 +203,7 @@ func TestHookFamiliesDisjointForSameIdentity(t *testing.T) {
 func TestArgumentHookChainPureRestoreKeepsAcceptedIdentities(t *testing.T) {
 	original := json.RawMessage(`{"x":1}`)
 	spy := &hookToolSpy{}
-	exec := hookFixtureExecution(spy.tool, objectNormalize,
+	exec := hookFixtureExecution(spy.tool,
 		ToolArgumentsHook{ID: "cap.pure.one", ExtensionID: "cap-a", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 			return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":9}`)}, nil
 		}},
@@ -328,9 +328,9 @@ func TestMaintenanceFactsSettleOnce(t *testing.T) {
 				return inv, err
 			}
 			if request.Purpose == InvocationPurposeConversation {
-				inv.LookupTool = fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
-					return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
-				}, objectNormalize)
+				inv.LookupTool = fixtureToolLookup(func(ctx context.Context, call model.ToolCall) ToolOutcome {
+					return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
+				})
 			}
 			return inv, nil
 		}
@@ -408,7 +408,7 @@ func TestRunningRequestSuspendAndClear(t *testing.T) {
 				}
 				return completedTurnStream(), nil
 			},
-			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) ToolOutcome {
 				saw := observe()
 				toolSaw = append(toolSaw, saw)
 				testassert.Require(t, saw.requestID != "", "tool prepare observed no producing request")
@@ -431,8 +431,8 @@ func TestRunningRequestSuspendAndClear(t *testing.T) {
 					}
 				}
 				testassert.Require(t, found, "no committed assistant carries the preparing call %q", call.ID)
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
-			}, objectNormalize),
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
+			}),
 			RequestStage: fixtureRequestStage([]RequestHook{{ID: "req.observe", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 				hookSaw = append(hookSaw, observe())
 				return RequestConsequence{}, nil
@@ -486,7 +486,7 @@ func TestModelAttemptDeepOwnedRequestCopies(t *testing.T) {
 		return completedTurnStream(), nil
 	}
 	h, store, c, sessionID := newEffectHarness(t, nil)
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{{ID: "req.copy", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{{ID: "req.copy", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Edits: appendRequestFixture(in, model.Message{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "extra", Extra: model.Extra{"raw": json.RawMessage(` { "x" : "<" } `)}}}})}, nil
 	}}}...)})
 	exec.Retry = (&retrySpy{limit: 1}).retry
@@ -525,7 +525,7 @@ func TestPhysicalDispatchMatchesSourceRequest(t *testing.T) {
 		c.mu.Unlock()
 		return completedTurnStream(), nil
 	}
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{hook}...)})
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{hook}...)})
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	})))
@@ -547,7 +547,7 @@ func TestPhysicalDispatchMatchesSourceRequest(t *testing.T) {
 
 func TestUnadvertisedCallSettlesUnavailable(t *testing.T) {
 	h, store, c, sessionID := newEffectHarness(t, nil)
-	modelCalls, normalizeCalls, prepareCalls := 0, 0, 0
+	modelCalls, prepareCalls := 0, 0
 	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		modelCalls++
 		if modelCalls == 1 {
@@ -555,18 +555,14 @@ func TestUnadvertisedCallSettlesUnavailable(t *testing.T) {
 		}
 		return completedTurnStream(), nil
 	}
-	normalize := func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-		normalizeCalls++
-		return objectNormalize(ctx, call)
-	}
-	prepare := func(context.Context, model.ToolCall) PreparedTool { prepareCalls++; return PreparedTool{} }
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(prepare, normalize)})
+	prepare := func(context.Context, model.ToolCall) ToolOutcome { prepareCalls++; return ToolOutcome{} }
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(prepare)})
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	})))
 	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
 	testassert.NoError(t, err)
-	testassert.Require(t, rec.State.Status == OperationSuccess && modelCalls == 2 && normalizeCalls == 0 && prepareCalls == 0, "state=%+v model=%d normalize=%d prepare=%d", rec.State, modelCalls, normalizeCalls, prepareCalls)
+	testassert.Require(t, rec.State.Status == OperationSuccess && modelCalls == 2 && prepareCalls == 0, "state=%+v model=%d run=%d", rec.State, modelCalls, prepareCalls)
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
 	var call *toolCallRecord
@@ -591,7 +587,7 @@ func TestRequestHookConsequenceToolMembersRejectBeforeDispatch(t *testing.T) {
 	hook := RequestHook{ID: "req.bad", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Edits: appendRequestFixture(in, model.Message{Role: model.RoleAssistant, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}, ToolCalls: []model.ToolCall{sneaky}})}, nil
 	}}
-	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{hook}...)}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{hook}...)}
 	calls := 0
 	inv.Model = func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		calls++
@@ -655,19 +651,13 @@ func TestAcceptedPureRequestIdentitiesRecordInOrder(t *testing.T) {
 
 func TestArgumentRefusalDoesNotAcceptInvalidOriginal(t *testing.T) {
 	spy := &hookToolSpy{}
-	normalize := func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-		if string(call.Arguments) == "not json" {
-			return nil, errors.New("invalid original")
-		}
-		return objectNormalize(ctx, call)
-	}
 	hook := ToolArgumentsHook{ID: "pure.refuse", ExtensionID: "ext.test", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		if call.ID == "call-1" {
 			return ToolArgumentsResult{}, errors.New("refused")
 		}
 		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
-	exec := hookFixtureExecution(spy.tool, normalize, hook)
+	exec := hookFixtureExecution(spy.tool, hook)
 	first, second := testToolCall("call-1"), testToolCall("call-2")
 	first.Arguments = json.RawMessage("not json")
 	_, store, _, sessionID, results, err := freshExecutionToolCalls(t, testCapture(), exec, first, second)
@@ -692,7 +682,7 @@ func TestFinalArgumentHookCancellationPreventsPreparation(t *testing.T) {
 		cancel()
 		return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":9}`)}, nil
 	}}
-	exec := hookFixtureExecution(spy.tool, objectNormalize, hook)
+	exec := hookFixtureExecution(spy.tool, hook)
 	call := testToolCall("call-1")
 	_, store, _, sessionID, results, err := freshExecutionToolCallsCtx(t, ctx, testCapture(), exec, call)
 	testassert.NoError(t, err)
@@ -715,7 +705,7 @@ func TestArgumentHookNoopKeepsSurvivingPureArgumentIdentity(t *testing.T) {
 	noop := ToolArgumentsHook{ID: "noop", ExtensionID: "ext.test", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
-	exec := hookFixtureExecution(spy.tool, objectNormalize, pure, noop)
+	exec := hookFixtureExecution(spy.tool, pure, noop)
 	call := testToolCall("call-1")
 	_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, call)
 	testassert.NoError(t, err)
@@ -788,9 +778,9 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 	roundA := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
 			Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) { return pairStream, nil },
-			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "tool done"}}}
-			}, objectNormalize),
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) ToolOutcome {
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "tool done"}}
+			}),
 		}, nil
 	}}
 
@@ -822,7 +812,7 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 				dispatchView = historicalProbe(r.Messages)
 				return streamOf(turnDelta("stop", "mid"), usageDelta(model.Usage{InputTokens: 13})), nil
 			},
-			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 			RequestStage: fixtureRequestStage([]RequestHook{mutator, checker}...),
 		}, nil
 	}}
@@ -988,7 +978,7 @@ func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 		}
 		return InvocationExecution{
 			Model:        modelFn,
-			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 			RequestStage: fixtureRequestStage([]RequestHook{pure, noop}...),
 		}, nil
 	}}
@@ -1076,7 +1066,7 @@ func maintenanceHookedRound(t *testing.T, summaryErr, openerErr error) (*Harness
 		}
 		return InvocationExecution{
 			Model:        modelFn,
-			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 			RequestStage: fixtureRequestStage([]RequestHook{e1, e2}...),
 		}, nil
 	}}

@@ -169,8 +169,8 @@ func TestReviewNoneAfterModelWork(t *testing.T) {
 				return streamOf(turnDelta("stop", "quiet")), nil
 			}
 		}()
-		tool := func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+		tool := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+			return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 		}
 		exec := purposeExecution(conversation, onePass)
 		opened := exec.OpenInvocation
@@ -180,7 +180,7 @@ func TestReviewNoneAfterModelWork(t *testing.T) {
 				return inv, err
 			}
 			if request.Purpose == InvocationPurposeConversation {
-				inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
+				inv.LookupTool = fixtureToolLookup(tool)
 			}
 			return inv, nil
 		}

@@ -189,9 +189,9 @@ func nativeAuthorFixture() extension.Extension {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachAuthorization(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
+			_, err = api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, input model.ToolCall) (*string, error) {
 				if string(input.Arguments) != string([]byte{0xff, '{'}) {
-					return nil, errors.New("authorization arguments changed")
+					return nil, errors.New("check arguments changed")
 				}
 				refusal := "denied by worker"
 				return &refusal, nil
@@ -352,13 +352,13 @@ func TestAuthorTransportBoundaryParity(t *testing.T) {
 		content, err := resultHook(ctx, extension.AuthorContext{}, harness.ToolOutputInput{Content: "output"})
 		testassert.NoError(t, err)
 		observation.set("hook-result", content)
-		authorizationHook := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
-		refusal, err := authorizationHook(ctx, extension.AuthorContext{}, extension.AuthorizationInput{Arguments: json.RawMessage{0xff, '{'}})
+		checkHook := stage.hooks["check"][0].value.(nativeHook).handler.(extension.ToolCheckHook)
+		refusal, err := checkHook(ctx, extension.AuthorContext{}, model.ToolCall{Arguments: json.RawMessage{0xff, '{'}})
 		testassert.NoError(t, err)
-		testassert.Require(t, refusal != nil && *refusal == "denied by worker", "authorization = %v", refusal)
-		kept, err := authorizationHook(ctx, extension.AuthorContext{}, extension.AuthorizationInput{Arguments: json.RawMessage(`{}`)})
-		testassert.Require(t, err != nil && kept == nil, "authorization with changed arguments = (%v, %v), want the refusal error", kept, err)
-		observation.set("hook-authorization", *refusal+":refused")
+		testassert.Require(t, refusal != nil && *refusal == "denied by worker", "check = %v", refusal)
+		kept, err := checkHook(ctx, extension.AuthorContext{}, model.ToolCall{Arguments: json.RawMessage(`{}`)})
+		testassert.Require(t, err != nil && kept == nil, "check with changed arguments = (%v, %v), want the refusal error", kept, err)
+		observation.set("hook-check", *refusal+":refused")
 
 		admissionHook := stage.hooks["admission"][0].value.(nativeHook).handler.(extension.AdmissionHook)
 		promptReads := 0

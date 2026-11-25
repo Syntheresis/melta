@@ -162,7 +162,7 @@ func TestPrepareRejectsMissingAndUnknown(t *testing.T) {
 		t.Helper()
 		plan := tool.Prepare(context.Background(), tc, taskCall(t, args))
 		testassert.Require(t, plan.Immediate != nil, "Prepare(%s) = %+v, want an immediate validation error", args, plan)
-		testassert.Check(t, plan.Permissions == nil && plan.Data == nil && plan.Start == nil, "Prepare(%s) declared execution behind a validation error", args)
+		testassert.Check(t, plan.Data == nil && plan.Start == nil, "Prepare(%s) declared execution behind a validation error", args)
 		testassert.Check(t, plan.Immediate.Result.Status == model.ResultError, "Prepare(%s) status = %q, want %q", args, plan.Immediate.Result.Status, model.ResultError)
 		return plan
 	}

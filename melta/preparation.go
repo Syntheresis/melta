@@ -15,7 +15,6 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
-	"github.com/Syntheresis/melta/internal/pathutil"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/prompt"
 	"github.com/Syntheresis/melta/protocol"
@@ -27,25 +26,6 @@ import (
 // there is no intermediate execution-plan type and no independently
 // configured opener.
 type openInvocation func(context.Context, harness.OperationAdmission, selection, harness.InvocationRequest) (harness.InvocationExecution, error)
-
-func locationBinder(workspace string) func(string) (string, func() error, error) {
-	return func(path string) (string, func() error, error) {
-		resolved, err := pathutil.ResolveFilePathFrom(workspace, path)
-		if err != nil {
-			return "", nil, err
-		}
-		return resolved.CanonicalPath, func() error {
-			current, err := pathutil.ResolveFilePathFrom(workspace, path)
-			if err != nil {
-				return err
-			}
-			if current.CanonicalPath != resolved.CanonicalPath {
-				return fmt.Errorf("approved canonical location changed: %s to %s", resolved.CanonicalPath, current.CanonicalPath)
-			}
-			return nil
-		}, nil
-	}
-}
 
 // selection is one immutable preparation or execution input set: the composed
 // candidate, the retained activation capture and Session state, the prompt
@@ -791,8 +771,7 @@ func wireDebugDir(location string) string {
 // conversation request and the effective compact transport for a maintenance
 // request, the same construction over the one shared transport when the
 // compact model is the conversation model. Each tool dispatch copies that
-// context with a fresh background object, prepares, freezes the plan's
-// permissions and wraps its executor, so the plugin holds no background
+// context with a fresh background object and wraps its executor, so the plugin holds no background
 // authority outside Execute. The ToolContext's environment callback is the
 // preparation's fixed wrapper over the Melta's live producer: it filters the
 // captured provider and declared credential names from every snapshot it
@@ -819,16 +798,7 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 		if request.Purpose == harness.InvocationPurposeMaintenance {
 			attemptTransport = compactTransport
 		}
-		toolSettings, err := decodeToolSettings(sel.invocation.snapshot.tools)
-		if err != nil {
-			return harness.InvocationExecution{}, err
-		}
-		settings, err := json.Marshal(toolSettings)
-		if err != nil {
-			return harness.InvocationExecution{}, err
-		}
 		return harness.InvocationExecution{
-			BindLocation:    locationBinder(workspace),
 			ModelParameters: attemptTransport.parameters.Clone(),
 			RequestStage: func() harness.RequestStage {
 				current, err := sel.native.stage()
@@ -878,42 +848,48 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 				p.passive.replaceProtocolWarnings(admission.SessionID, protocolWarnings(admission.SessionID, warnings))
 				return stream, err
 			},
-			LookupTool: func(name string) (harness.ToolBinding, bool) {
+			LookupTool: func(name string) (harness.ToolBinding, bool, error) {
 				current, err := sel.native.stage()
 				if err != nil {
-					return harness.ToolBinding{Identity: harness.ToolImplementation{ID: name}, Normalize: func(context.Context, model.ToolCall) (json.RawMessage, error) { return nil, err }, Prepare: func(context.Context, model.ToolCall) harness.PreparedTool { return harness.PreparedTool{} }}, true
+					return harness.ToolBinding{}, false, err
 				}
-				if tool := sel.invocation.snapshot.composition.standardValues[name]; tool != nil {
+				if standard, ok := sel.invocation.snapshot.composition.standardValues[name]; ok {
 					_ = current.release()
 					return harness.ToolBinding{
 						Identity: harness.ToolImplementation{ID: name},
-						Normalize: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-							return tool.Normalize(ctx, tc, call)
-						},
-						Prepare: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+						Validate: standard.validate,
+						Run: func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
 							callTC := tc
 							background := &boundBackground{bridge: p.background, sessionID: sessionID}
 							callTC.Background = background
-							return background.bindPlan(tool.Prepare(ctx, callTC, call))
+							return runTool(ctx, call,
+								func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+									return standard.tool.Normalize(ctx, tc, call)
+								},
+								func(ctx context.Context, call model.ToolCall) toolPlan {
+									return background.bindPlan(standard.tool.Prepare(ctx, callTC, call))
+								})
 						},
-					}, true
+					}, true, nil
 				}
 				binding := current.bindTool(name)
 				_ = current.release()
 				if binding == nil {
-					return harness.ToolBinding{}, false
+					return harness.ToolBinding{}, false, nil
 				}
 				tool := registeredExtensionTool{binding: binding, dataDir: p.config.dataDir, lease: sel.lease, states: sel.states, host: sel.invocation.snapshot.composition, operationSecrets: sel.operationSecrets}
 				return harness.ToolBinding{
 					Identity: harness.ToolImplementation{ID: binding.entry.id, ExtensionID: binding.entry.activation.id},
-					Normalize: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-						return tool.Normalize(ctx, tc, call)
-					},
-					Prepare: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-						return tool.Prepare(ctx, tc, call)
+					Validate: binding.entry.value.(nativeTool).validate,
+					Run: func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+						return runTool(ctx, call,
+							func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
+								return tool.Normalize(ctx, tc, call)
+							},
+							func(ctx context.Context, call model.ToolCall) toolPlan { return tool.Prepare(ctx, tc, call) })
 					},
 					Release: func() { _ = binding.release() },
-				}, true
+				}, true, nil
 			},
 			ArgumentStage: func() harness.ArgumentStage {
 				current, err := sel.native.stage()
@@ -922,12 +898,12 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 				}
 				return harness.ArgumentStage{Hooks: registeredArgumentHooks(current, sel, session), Release: func() { _ = current.release() }}
 			},
-			AuthorizationStage: func() harness.AuthorizationStage {
+			CheckStage: func() harness.CheckStage {
 				current, err := sel.native.stage()
 				if err != nil {
-					return harness.AuthorizationStage{Error: err}
+					return harness.CheckStage{Error: err}
 				}
-				return harness.AuthorizationStage{Hooks: current.authorizationHooks(tc, sel.states, settings, sel.invocation.snapshot.composition, sel.lease, sel.operationSecrets), Release: func() { _ = current.release() }}
+				return harness.CheckStage{Hooks: current.checkHooks(tc, sel.states, sel.invocation.snapshot.composition, sel.lease, sel.operationSecrets), Release: func() { _ = current.release() }}
 			},
 			ResultStage: func() harness.ResultStage {
 				current, err := sel.native.stage()

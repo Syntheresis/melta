@@ -231,12 +231,12 @@ func (s *server) admitAuthorRequest(frame Frame, ctx context.Context, cancel con
 					return nil, err
 				}
 				return EncodeAuthorAdmissionResult(result)
-			case "authorization":
-				handler := registration.value.(extension.AuthorizationHook)
-				if params.Method != "authorization" {
-					return nil, badRoute("worker: invalid authorization hook method")
+			case "check":
+				handler := registration.value.(extension.ToolCheckHook)
+				if params.Method != "check" {
+					return nil, badRoute("worker: invalid check hook method")
 				}
-				input, err := DecodeAuthorAuthorization(json.RawMessage(params.Arguments))
+				input, err := DecodeBeforeToolHookParams(json.RawMessage(params.Arguments))
 				if err != nil {
 					return nil, err
 				}
@@ -557,11 +557,11 @@ func (a *authorAPI) AttachArguments(h extension.ArgumentsHook, r extension.Regis
 	}
 	return a.register("arguments", struct{}{}, h, r)
 }
-func (a *authorAPI) AttachAuthorization(h extension.AuthorizationHook, r extension.Registration) (extension.Registration, error) {
+func (a *authorAPI) AttachToolCheck(h extension.ToolCheckHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {
 		return nil, errors.New("missing hook")
 	}
-	return a.register("authorization", struct{}{}, h, r)
+	return a.register("check", struct{}{}, h, r)
 }
 func (a *authorAPI) AttachResult(h extension.ResultHook, r extension.Registration) (extension.Registration, error) {
 	if h == nil {

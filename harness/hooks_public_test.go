@@ -14,26 +14,10 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// hookNormalize is the public hook rows' byte-preserving normalizer: it
-// accepts exactly one non-null JSON object and returns the caller's exact
-// argument bytes, so every difference between consumed and committed bytes is
-// attributable to the durable codec.
-func hookNormalize(_ context.Context, call model.ToolCall) (json.RawMessage, error) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(call.Arguments, &obj); err != nil || obj == nil {
-		return nil, errors.New("arguments must be one non-null JSON object")
-	}
-	return model.CloneRaw(call.Arguments), nil
-}
-
 // TestPublicToolArgumentHookTurn proves the complete hook path through the
-// public Harness without the Runtime: selected argument hooks settle as their
-// own durable effects before concrete preparation, the first hook receives the
-// original raw call arguments and every later one the preceding committed
-// replacement bytes, the final committed value reaches the concrete tool
-// byte-identically, the hook evidence never projects as conversation, a
-// restart revalidates the Session without any plugin, and a Fork copies no
-// hook effect or hook Operation state.
+// public Harness without the Runtime: argument hooks receive the preceding
+// bytes, the validated final value reaches Run unchanged, and hook provenance
+// remains outside the conversation. Recovery and Fork preserve the Session.
 func TestPublicToolArgumentHookTurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
@@ -70,14 +54,14 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 						return harness.InvocationExecution{
 							Model:     script.effect,
 							ToolHooks: hooks,
-							LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+							LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
 								mu.Lock()
 								prepared = append(prepared, string(call.Arguments))
 								mu.Unlock()
-								return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+								return harness.ToolOutcome{
 									Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"},
-								}}
-							}, hookNormalize),
+								}
+							}),
 						}, nil
 					}}, nil
 				},
@@ -213,7 +197,7 @@ func TestPublicForkRemapsRequestEvidence(t *testing.T) {
 						return harness.InvocationExecution{
 							Model:        script.effect,
 							RequestStage: func() harness.RequestStage { return harness.RequestStage{Catalog: publicCapture().Tools, Hooks: hooks} },
-							LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) harness.PreparedTool { return harness.PreparedTool{} }, hookNormalize),
+							LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) harness.ToolOutcome { return harness.ToolOutcome{} }),
 						}, nil
 					}}, nil
 				},

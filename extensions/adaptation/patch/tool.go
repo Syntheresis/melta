@@ -52,16 +52,16 @@ func (Tool) Prepare(ctx context.Context, author extension.AuthorContext, call mo
 		return invalid(call.ID, err)
 	}
 	input, _ := args["input"].(string)
-	plan, root, permissions, err := preparePlan(ctx, author.Call, input)
+	plan, err := preparePlan(ctx, author.Call, input)
 	if err != nil {
-		return denied(call.ID)
+		return invalid(call.ID, err)
 	}
 	plan.CallID = call.ID
 	data, err := json.Marshal(plan)
 	if err != nil {
-		return denied(call.ID)
+		return invalid(call.ID, err)
 	}
-	return extension.ToolPlan{Permissions: permissions, CanonicalWorkspace: root, Data: data}
+	return extension.ToolPlan{Data: data}
 }
 
 func (Tool) Execute(ctx context.Context, author extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
@@ -90,11 +90,6 @@ func (Tool) Execute(ctx context.Context, author extension.AuthorContext, plan ex
 // validation error.
 func invalid(callID string, cause error) extension.ToolPlan {
 	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: cause.Error()}}}
-}
-
-// denied settles a failed preparation as the fixed permission denial.
-func denied(callID string) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultDenied, Content: harness.PermissionDeniedContent}}}
 }
 
 // decodeArguments strictly decodes one call's JSON arguments into an owned

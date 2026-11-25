@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
@@ -185,7 +184,7 @@ func TestApplyPatchCanonicalCollisionRejectedBeforeApply(t *testing.T) {
 	ws := newTestWorkspace(t, root)
 	input := applyPatchInput(t, "*** Update File: a.txt\n@@\n-hi\n+bye\n*** Update File: ./a.txt\n@@\n-hi\n+there")
 	outcome := runPatch(t, ws, input)
-	testassert.Require(t, outcome.Result.Status == model.ResultDenied && outcome.Result.Content == harness.PermissionDeniedContent, "outcome = %+v, want the fixed denial", outcome.Result)
+	testassert.Require(t, outcome.Result.Status == model.ResultError && strings.Contains(outcome.Result.Content, "multiple patch entries resolve to the same file"), "outcome = %+v", outcome.Result)
 	assertFileContent(t, filepath.Join(root, "a.txt"), "hi")
 	testassert.Require(t, len(ws.writes) == 0, "writes = %v, want none", ws.writes)
 }
@@ -199,7 +198,7 @@ func TestApplyPatchCanonicalCollisionSymlinkRejected(t *testing.T) {
 	ws := newTestWorkspace(t, root)
 	input := applyPatchInput(t, "*** Update File: real.txt\n@@\n content\n+changed\n*** Delete File: link.txt")
 	outcome := runPatch(t, ws, input)
-	testassert.Require(t, outcome.Result.Status == model.ResultDenied && outcome.Result.Content == harness.PermissionDeniedContent, "outcome = %+v, want the fixed denial", outcome.Result)
+	testassert.Require(t, outcome.Result.Status == model.ResultError && strings.Contains(outcome.Result.Content, "multiple patch entries resolve to the same file"), "outcome = %+v", outcome.Result)
 	assertFileContent(t, real, "content")
 	testassert.Require(t, len(ws.writes) == 0, "writes = %v, want none", ws.writes)
 }

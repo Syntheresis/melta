@@ -95,7 +95,7 @@ type API interface {
 	AttachAdmission(AdmissionHook, Registration) (Registration, error)
 	AttachRequest(AuthorRequestHook, Registration) (Registration, error)
 	AttachArguments(ArgumentsHook, Registration) (Registration, error)
-	AttachAuthorization(AuthorizationHook, Registration) (Registration, error)
+	AttachToolCheck(ToolCheckHook, Registration) (Registration, error)
 	AttachResult(ResultHook, Registration) (Registration, error)
 	RegisterCleanup(CleanupHook, Registration) (Registration, error)
 	AttachObserver(Observer, Registration) (Registration, error)
@@ -223,17 +223,7 @@ type ArgumentsResult struct {
 
 type ArgumentsHook func(context.Context, AuthorContext, model.ToolCall) (ArgumentsResult, error)
 
-// AuthorizationInput carries the policy root and prepared call; location
-// binding remains a separate scoped operation.
-type AuthorizationInput struct {
-	ToolName           string
-	Arguments          json.RawMessage
-	CanonicalWorkspace string
-	ToolSettings       json.RawMessage // effective captured baseline settings, including defaults
-	Permissions        []harness.PermissionRequest
-}
-
-type AuthorizationHook func(context.Context, AuthorContext, AuthorizationInput) (*string, error)
+type ToolCheckHook func(context.Context, AuthorContext, model.ToolCall) (*string, error)
 type ResultHook func(context.Context, AuthorContext, harness.ToolOutputInput) (string, error)
 type CleanupHook func(context.Context, AuthorContext, harness.SessionIdentity) error
 

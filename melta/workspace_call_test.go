@@ -58,7 +58,7 @@ func (t *workspaceTestTool) Prepare(ctx context.Context, call extension.AuthorCo
 		return extension.ToolPlan{Immediate: &harness.ToolOutcome{}}
 	}
 	data, _ := json.Marshal(map[string]string{"binding": binding.Binding})
-	return extension.ToolPlan{Data: data, Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: t.path}}}
+	return extension.ToolPlan{Data: data}
 }
 
 func (t *workspaceTestTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
@@ -138,9 +138,8 @@ func TestWorkspaceRestrictionWitnessCannotRead(t *testing.T) {
 	}
 	manifest := registrarManifest("restriction")
 	manifest.Services = []string{"melta.workspace"}
-	called := false
 	e := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachAuthorization(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorizationInput) (*string, error) {
+		_, err := api.AttachToolCheck(func(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) (*string, error) {
 			result, err := call.Call(ctx, "melta.workspace", "bind", []byte(`{"path":"file"}`))
 			if err != nil {
 				return nil, err
@@ -167,13 +166,10 @@ func TestWorkspaceRestrictionWitnessCannotRead(t *testing.T) {
 	defer candidate.release()
 	stage := candidate.snapshotForTest()
 	defer stage.release()
-	hooks := stage.authorizationHooks(ToolContext{Workspace: root}, nil, nil, nil, nil, nil)
-	_, err = hooks[0].Run(context.Background(), harness.PreparedAction{}, func(path string) (string, error) {
-		called = true
-		return filepath.Join(root, path), nil
-	})
-	if err != nil || !called {
-		t.Fatalf("restriction witness: called=%v err=%v", called, err)
+	hooks := stage.checkHooks(ToolContext{Workspace: root}, nil, nil, nil, nil)
+	_, err = hooks[0].Run(context.Background(), model.ToolCall{})
+	if err != nil {
+		t.Fatalf("restriction witness: %v", err)
 	}
 }
 
@@ -229,17 +225,13 @@ func TestWorkspaceRegisteredWorkerTool(t *testing.T) {
 	if prepared.Immediate != nil {
 		t.Fatalf("prepare: %+v", prepared.Immediate)
 	}
-	hooks := stage.authorizationHooks(tc, nil, nil, nil, nil, nil)
-	bound := false
+	hooks := stage.checkHooks(tc, nil, nil, nil, nil)
 	if len(hooks) != 1 {
 		t.Fatalf("worker restrictions: %d", len(hooks))
 	}
-	reason, err := hooks[0].Run(context.Background(), harness.PreparedAction{}, func(path string) (string, error) {
-		bound = true
-		return filepath.Join(root, path), nil
-	})
-	if err != nil || reason != nil || !bound {
-		t.Fatalf("worker witness restriction: %v %v %v", reason, bound, err)
+	reason, err := hooks[0].Run(context.Background(), model.ToolCall{})
+	if err != nil || reason != nil {
+		t.Fatalf("worker check: %v %v", reason, err)
 	}
 	outcome := prepared.Execute(context.Background())
 	if outcome.Result.Status != model.ResultSuccess {
@@ -251,11 +243,11 @@ func TestWorkspaceRegisteredWorkerTool(t *testing.T) {
 	}
 	release()
 	groups, err := runtime.ListSessionCodeSnapshots(context.Background(), testCaller(runtime), session.SessionID)
-	if err != nil || len(groups) != 1 || groups[0].OperationId != "worker-write" || len(groups[0].Files) != 1 {
+	if err != nil || len(groups) != 1 || groups[0].OperationId != "worker-write" || len(groups[0].Files) != 2 {
 		t.Fatalf("worker snapshot groups: %+v %v", groups, err)
 	}
 	reverted, err := runtime.RevertSessionCode(context.Background(), testCaller(runtime), session.SessionID, "worker-write")
-	if err != nil || len(reverted.Restored) != 1 {
+	if err != nil || len(reverted.Restored) != 2 {
 		t.Fatalf("worker revert: %+v %v", reverted, err)
 	}
 	data, err = os.ReadFile(filepath.Join(root, "file"))
@@ -330,29 +322,25 @@ func TestWorkspacePlanBoundAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(map[string]any{"binding": binding.Binding})
-	grant := []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: path}}
-	result, err = plan.execute(context.Background(), "read", args, grant)
+	result, err = plan.execute(context.Background(), "read", args)
 	if err != nil || string(result.Value) != `{"bytes":"YmVmb3Jl"}` {
 		t.Fatalf("write grant precondition read: %s %v", result.Value, err)
 	}
 	other := newNativeWorkspace(root, t.TempDir(), harness.EntryRef{SessionID: "session", EntryID: "entry"}, &artifactCallLease{borrowed: true})
-	if _, err := other.execute(context.Background(), "read", args, grant); !errors.Is(err, ErrDenied) {
+	if _, err := other.execute(context.Background(), "read", args); !errors.Is(err, ErrDenied) {
 		t.Fatalf("borrowed handle: %v", err)
-	}
-	if _, err := plan.execute(context.Background(), "read", args, nil); !errors.Is(err, ErrDenied) {
-		t.Fatalf("ungranted read: %v", err)
 	}
 	write, _ := json.Marshal(map[string]any{"binding": binding.Binding, "bytes": "YWZ0ZXI=", "create_only": false})
 	invalid, _ := json.Marshal(map[string]any{"binding": binding.Binding, "bytes": "eA", "create_only": false})
-	if _, err := plan.execute(context.Background(), "write", invalid, grant); !errors.Is(err, harness.ErrInvalid) {
+	if _, err := plan.execute(context.Background(), "write", invalid); !errors.Is(err, harness.ErrInvalid) {
 		t.Fatalf("noncanonical base64: %v", err)
 	}
-	result, err = plan.execute(context.Background(), "write", write, grant)
+	result, err = plan.execute(context.Background(), "write", write)
 	if err != nil || string(result.Value) != `{"outcome":"completed"}` {
 		t.Fatalf("write: %s %v", result.Value, err)
 	}
 	create, _ := json.Marshal(map[string]any{"binding": binding.Binding, "bytes": "eA==", "create_only": true})
-	_, err = plan.execute(context.Background(), "write", create, grant)
+	_, err = plan.execute(context.Background(), "write", create)
 	var callErr *extension.CallError
 	if err == nil || errors.As(err, &callErr) && len(callErr.Partial) != 0 {
 		t.Fatalf("untouched refusal: %v", err)
@@ -377,7 +365,7 @@ func TestWorkspaceRejectsWrongArtifactLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(map[string]string{"binding": target.Binding})
-	_, err = plan.execute(context.Background(), "read", args, []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: filepath.Join(root, "file")}})
+	_, err = plan.execute(context.Background(), "read", args)
 	if !errors.Is(err, extension.ErrClosed) {
 		t.Fatalf("wrong artifact lease accepted: %v", err)
 	}
@@ -412,7 +400,7 @@ func TestWorkspaceReportsCompletedMutationOnRecordFailure(t *testing.T) {
 		return f.Sync()
 	}
 	defer func() { atomicfs.SyncFileFunc = previous }()
-	_, err = plan.execute(context.Background(), "write", args, []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: filepath.Join(root, "file")}})
+	_, err = plan.execute(context.Background(), "write", args)
 	var failure *extension.CallError
 	if !errors.As(err, &failure) || string(failure.Partial) != `{"outcome":"completed"}` {
 		t.Fatalf("completed partial: %v", err)

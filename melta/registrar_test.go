@@ -245,6 +245,34 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 	}
 }
 
+func TestRegistrarRejectsInvalidToolSchemaWithoutReplacement(t *testing.T) {
+	owner := &configurationService{}
+	var api extension.API
+	var original extension.Registration
+	guest := extension.Extension{Manifest: registrarManifest("schema"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
+		api = a
+		var err error
+		original, err = a.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":"object"}`)}, registrarTestTool{}, nil)
+		return nil, err
+	}}
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: guest, section: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.release()
+	for _, replacement := range []extension.Registration{nil, original} {
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":7}`)}, registrarTestTool{}, replacement)
+		if !errors.Is(err, harness.ErrInvalid) {
+			t.Fatalf("invalid schema = %v", err)
+		}
+	}
+	stage := candidate.snapshotForTest()
+	defer stage.release()
+	if stage.tools["probe"] == nil || stage.tools["probe"] != original {
+		t.Fatal("invalid replacement removed the original registration")
+	}
+}
+
 func TestRegistrarRegistrationReleaseAfterStageAndPlan(t *testing.T) {
 	owner := &configurationService{}
 	var api extension.API
@@ -1133,7 +1161,7 @@ func TestRegistrationAllContributions(t *testing.T) {
 			}, nil); err != nil {
 				return nil, err
 			}
-			if _, err := api.AttachAuthorization(func(context.Context, extension.AuthorContext, extension.AuthorizationInput) (*string, error) {
+			if _, err := api.AttachToolCheck(func(context.Context, extension.AuthorContext, model.ToolCall) (*string, error) {
 				return nil, nil
 			}, nil); err != nil {
 				return nil, err
@@ -1162,7 +1190,7 @@ func TestRegistrationAllContributions(t *testing.T) {
 	if len(stage.tools) != 1 || len(stage.strategies) != 1 || len(stage.services) != 1 || len(stage.operations) != 1 {
 		t.Fatal(stage)
 	}
-	for _, kind := range []string{"admission", "request", "arguments", "authorization", "result", "cleanup"} {
+	for _, kind := range []string{"admission", "request", "arguments", "check", "result", "cleanup"} {
 		if len(stage.hooks[kind]) != 1 {
 			t.Fatalf("%s: %v", kind, stage.hooks[kind])
 		}

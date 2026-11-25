@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
@@ -72,8 +71,7 @@ func TestRegisteredStartOwnsFrozenPlan(t *testing.T) {
 	host := &composition{hosts: &hostServices{background: &backgroundBridge{h: h}}}
 	tool := registeredExtensionTool{binding: binding, host: host}
 	prepared := tool.Prepare(ctx, ToolContext{Session: parent.Identity, Workspace: parent.Identity.Workspace}, model.ToolCall{ID: "call", Name: "start"})
-	want := []harness.PermissionRequest{{Permission: harness.PermissionSessionOwn, Target: "ext%2Fname/child%2Fname"}}
-	if !reflect.DeepEqual(prepared.Permissions, want) || prepared.Execute == nil {
+	if prepared.Execute == nil {
 		t.Fatalf("prepared plan = %+v", prepared)
 	}
 	if outcome := prepared.Execute(ctx); outcome.Result.Status != model.ResultSuccess {

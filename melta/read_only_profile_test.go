@@ -238,8 +238,8 @@ func TestReadOnlyProfileGitRewriteUsesExactInjectedOptions(t *testing.T) {
 			var mu sync.Mutex
 			authorized := ""
 			gate := testNative("gate", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-				_, err := api.AttachAuthorization(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
-					if input.ToolName == "run_command" {
+				_, err := api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, input model.ToolCall) (*string, error) {
+					if input.Name == "run_command" {
 						var args struct {
 							Command string `json:"command"`
 						}

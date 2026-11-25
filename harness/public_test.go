@@ -67,19 +67,9 @@ func publicCapture() harness.ExecutionCapture {
 	}
 }
 
-// publicNormalize is the suite's required pure normalizer: it accepts exactly
-// one non-null JSON object and returns its compact encoding.
-func publicNormalize(_ context.Context, call model.ToolCall) (json.RawMessage, error) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(call.Arguments, &obj); err != nil || obj == nil {
-		return nil, errors.New("arguments must be one non-null JSON object")
-	}
-	return json.Marshal(obj)
-}
-
 // publicExecution is the suite's ordinary opened execution: an opener whose
-// invocations carry the two actual model callbacks selected by purpose, the
-// suite's required normalizer, and the immediate "no tools" result plan.
+// invocations carry the model callback selected by purpose and a Run callback
+// returning "no tools".
 func publicExecution(conversation, compact func(context.Context, model.Request, model.Extra) (model.Stream, error)) harness.Execution {
 	return harness.Execution{OpenInvocation: func(_ context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 		modelFn := conversation
@@ -88,29 +78,25 @@ func publicExecution(conversation, compact func(context.Context, model.Request, 
 		}
 		return harness.InvocationExecution{
 			Model: modelFn,
-			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-			}, publicNormalize),
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+				return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}
+			}),
 		}, nil
 	}}
 }
 
 // publicExecutionOver is the suite's opened execution shape over a caller's
-// tool-plan function: its invocations carry the purpose-selected model
-// callbacks, the suite's required normalizer, and the given plan.
-func publicExecutionOver(conversation, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), tool func(context.Context, model.ToolCall) harness.PreparedTool) harness.Execution {
+// tool function: its invocations carry the purpose-selected model
+// callbacks and the given Run callback.
+func publicExecutionOver(conversation, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), tool func(context.Context, model.ToolCall) harness.ToolOutcome) harness.Execution {
 	return harness.Execution{OpenInvocation: func(_ context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
 		modelFn := conversation
 		if request.Purpose == harness.InvocationPurposeMaintenance {
 			modelFn = compact
 		}
-		return harness.InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(tool, publicNormalize)}, nil
+		return harness.InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(tool)}, nil
 	}}
 }
-
-// publicPermission is one built-in-allowed declaration for the suite's
-// effect-producing fixture plans: command.run allows any target.
-var publicPermission = []harness.PermissionRequest{{Permission: "command.run", Target: "fixture"}}
 
 // publicTurnStream is one fake accepted model stream assembling to the
 // fixture completed turn: text "done", the given ordered calls, and the
@@ -1396,9 +1382,9 @@ func TestPublicOpenerInputMutationKeepsAdmittedExecution(t *testing.T) {
 								OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 									return harness.InvocationExecution{
 										Model: script.effect,
-										LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-											return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-										}, publicNormalize),
+										LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+											return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}
+										}),
 									}, nil
 								},
 								Close: func() error { // runs after the terminal settlement commits
@@ -1742,27 +1728,25 @@ func TestPublicOrderedToolCallsSettle(t *testing.T) {
 		prepared := harness.PreparedExecution{
 			Capture: publicCapture(),
 			Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-				return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+				return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
 					toolMu.Lock()
 					toolOrder = append(toolOrder, call.ID)
 					toolMu.Unlock()
-					if call.ID == "call-1" { // executor-backed: intent before execution, one result after
-						return harness.PreparedTool{Permissions: publicPermission, Execute: func(context.Context) harness.ToolOutcome {
-							reg, err := store.ReadRegister(context.Background(), harness.RegisterKey{SessionID: session, Kind: harness.RegisterOperation, OperationID: "op-1"})
-							if err != nil {
-								t.Errorf("read operation register during execution: %v", err)
-								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
-							}
-							var wire opRegisterWire
-							if err := json.Unmarshal(reg.Payload, &wire); err != nil {
-								t.Errorf("decode operation register during execution: %v", err)
-								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
-							}
-							testassert.Check(t, wire.State.ActiveEffect != nil && wire.State.ActiveEffect.Kind == "tool" && wire.State.ActiveEffect.ToolCallID == "call-1" && wire.State.ActiveEffect.ResultEntryID != "", "tool intent during execution = %+v, want the committed call-1 intent with a reserved result", wire.State.ActiveEffect)
+					if call.ID == "call-1" {
+						reg, err := store.ReadRegister(context.Background(), harness.RegisterKey{SessionID: session, Kind: harness.RegisterOperation, OperationID: "op-1"})
+						if err != nil {
+							t.Errorf("read operation register during execution: %v", err)
 							return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
-						}}
+						}
+						var wire opRegisterWire
+						if err := json.Unmarshal(reg.Payload, &wire); err != nil {
+							t.Errorf("decode operation register during execution: %v", err)
+							return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
+						}
+						testassert.Check(t, wire.State.ActiveEffect != nil && wire.State.ActiveEffect.Kind == "tool" && wire.State.ActiveEffect.ToolCallID == "call-1" && wire.State.ActiveEffect.ResultEntryID != "", "tool intent during execution = %+v, want the committed call-1 intent with a reserved result", wire.State.ActiveEffect)
+						return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
 					}
-					return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "immediate call-2"}}} // no effect intent
+					return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "immediate call-2"}}
 				}), nil
 			},
 		}
@@ -1825,27 +1809,25 @@ func TestPublicToolMetadataPersistsOpaqueAcrossStores(t *testing.T) {
 			return harness.PreparedExecution{
 				Capture: publicCapture(),
 				Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-					return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+					return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
 						switch call.ID {
 						case "call-2": // malformed metadata: dropped, the result still commits
-							return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+							return harness.ToolOutcome{
 								Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "no preview"},
 								Metadata: json.RawMessage(`{broken`),
-							}}
+							}
 						case "call-3": // exactly at the raw byte bound
-							return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+							return harness.ToolOutcome{
 								Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "expanded metadata"},
 								Metadata: expanded,
-							}}
-						case "call-4":
-							return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "oversized metadata"}, Metadata: rawOverBound}}
-						}
-						return harness.PreparedTool{Permissions: publicPermission, Execute: func(context.Context) harness.ToolOutcome {
-							return harness.ToolOutcome{Evidence: harness.ExecutionObserved,
-								Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"},
-								Metadata: json.RawMessage(formatted),
 							}
-						}}
+						case "call-4":
+							return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "oversized metadata"}, Metadata: rawOverBound}
+						}
+						return harness.ToolOutcome{Evidence: harness.ExecutionObserved,
+							Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"},
+							Metadata: json.RawMessage(formatted),
+						}
 					}), nil
 				},
 			}, nil
@@ -1916,14 +1898,10 @@ func TestPublicToolMetadataPersistsOpaqueAcrossStores(t *testing.T) {
 	})
 }
 
-// TestPublicPreparedPermissionBoundarySurvivesRestart proves the prepared
-// authorization boundary through the public surface on both stores: the
-// advertised call is normalized at dispatch and the allowed executor consumes
-// the intent's committed bytes; an immediate-success plan that
-// omits its declarations is denied by an authorization hook through the
-// public path with the hook's bounded content and no metadata; and recovery
-// revalidates the whole result with the capture and normalization unchanged.
-func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
+// TestPublicCheckRefusalSurvivesRestart proves that an allowed call runs with
+// validated arguments, a check refuses its sibling without metadata, and
+// recovery revalidates the recorded results on both stores.
+func TestPublicCheckRefusalSurvivesRestart(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		capture := publicCapture()
 		script := newScriptModel(
@@ -1940,33 +1918,29 @@ func TestPublicPreparedPermissionBoundarySurvivesRestart(t *testing.T) {
 				Open: func(ctx context.Context, admission harness.OperationAdmission) (harness.Execution, error) {
 					return harness.Execution{
 						OpenInvocation: func(ctx context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
-							inv, err := publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-								if call.ID == "call-2" { // the undeclared success through the public path
-									return harness.PreparedTool{Immediate: &harness.ToolOutcome{
+							inv, err := publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+								if call.ID == "call-2" { // the check prevents this outcome from running
+									return harness.ToolOutcome{
 										Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "undeclared success"},
 										Metadata: json.RawMessage(`{"would":"leak"}`),
-									}}
+									}
 								}
-								return harness.PreparedTool{
-									Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "fixture"}},
-									Execute: func(context.Context) harness.ToolOutcome {
-										executions++
-										consumed = call.Arguments
-										return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
-									},
-								}
+								executions++
+								consumed = call.Arguments
+								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"}}
 							}).OpenInvocation(ctx, request)
 							if err != nil {
 								return inv, err
 							}
-							inv.BindLocation = func(string) (string, func() error, error) { return "/w", func() error { return nil }, nil }
-							inv.AuthorizationHooks = []harness.AuthorizationHook{{Run: func(_ context.Context, action harness.PreparedAction, _ func(string) (string, error)) (*string, error) {
-								if len(action.Permissions) == 0 { // call-2 declares nothing; the hook supplies its denial
-									reason := "restricted"
-									return &reason, nil
-								}
-								return nil, nil
-							}}}
+							inv.CheckStage = func() harness.CheckStage {
+								return harness.CheckStage{Hooks: []harness.ToolCheckHook{{ID: "check", ExtensionID: "ext", Run: func(_ context.Context, call model.ToolCall) (*string, error) {
+									if call.ID == "call-2" {
+										reason := "restricted"
+										return &reason, nil
+									}
+									return nil, nil
+								}}}}
+							}
 							return inv, nil
 						},
 					}, nil
@@ -3712,9 +3686,9 @@ func assertNextRequestAfterColdRecovery(t *testing.T, store harness.Storage, ses
 	f.defaultPrep = harness.PreparedExecution{
 		Capture: publicCapture(),
 		Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-			return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+			return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
 				executed++
-				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}}
+				return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
 			}), nil
 		},
 	}
@@ -5127,11 +5101,11 @@ func TestPublicForkCopiesPrefixAndAdmits(t *testing.T) {
 		}
 		f := newPublicFixture(t, store, script, nil)
 		f.prepareHook = func(_ int, _ harness.PreparationRequest) (harness.PreparedExecution, error) {
-			exec := publicExecutionOver(conversation, conversation, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+			exec := publicExecutionOver(conversation, conversation, func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+				return harness.ToolOutcome{
 					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran " + call.ID},
 					Metadata: json.RawMessage(`{ "n" : [1, 1.0, 1e0, 9007199254740993], "s" : "<>&" }`),
-				}}
+				}
 			})
 			exec.Retry = func(_ error, failed int) (time.Duration, bool) { return 0, failed == 1 }
 			return harness.PreparedExecution{
@@ -5994,9 +5968,9 @@ func TestPublicExecutionResourceLifetime(t *testing.T) {
 							events <- fmt.Sprintf("invocation:%s:%s", adm.OperationID, request.Purpose)
 							return harness.InvocationExecution{
 								Model: script.effect,
-								LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-									return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}}
-								}, publicNormalize),
+								LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+									return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "no tools"}}
+								}),
 								Close: func() error {
 									events <- fmt.Sprintf("invocation-close:%s:%s", adm.OperationID, request.Purpose)
 									return nil

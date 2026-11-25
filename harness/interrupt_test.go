@@ -74,20 +74,16 @@ func TestInterruptBlockedForegroundToolSettlesRealResult(t *testing.T) {
 		}
 		return completedTurnStream(), nil // the steering admission's own turn
 	}
-	toolFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
+	toolFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
 		if call.ID == "call-1" {
-			return PreparedTool{Permissions: fixturePermission, Execute: func(ctx context.Context) ToolOutcome {
-				started <- struct{}{}
-				<-ctx.Done() // the foreground tool parks until the interrupt cancels its context
-				return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: "tool canceled"}}
-			}}
+			started <- struct{}{}
+			<-ctx.Done() // the foreground tool parks until the interrupt cancels its context
+			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: "tool canceled"}}
 		}
-		return PreparedTool{Permissions: fixturePermission, Execute: func(ctx context.Context) ToolOutcome {
-			mu.Lock()
-			call2Ran = true
-			mu.Unlock()
-			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "must not run"}}
-		}}
+		mu.Lock()
+		call2Ran = true
+		mu.Unlock()
+		return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "must not run"}}
 	}
 	prepared := preparedExecuting(effectExecution(modelFn, toolFn))
 	h, cancel := newCancelableHarness(t, store, prepared, nil)
@@ -162,7 +158,7 @@ func TestInterruptSettlesUnstartedExecutionAtEntry(t *testing.T) {
 			*runs++
 			return effectExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				return completedTurnStream(), nil
-			}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+			}, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 		}
 	}
 
@@ -280,20 +276,20 @@ func TestInterruptSteeringPreservesBufferOrder(t *testing.T) {
 		}
 		return completedTurnStream(), nil
 	}
-	toolFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
+	toolFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
 		mu.Lock()
 		toolCalls++
 		first := toolCalls == 1
 		mu.Unlock()
 		if !first {
-			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
+			return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}
 		}
 		toolArrived <- struct{}{} // the first batch parks mid-execution: the pre-boundary window
 		select {
 		case <-toolGate:
-			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
+			return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}
 		case <-ctx.Done(): // the interrupt cancels the execution context inside the batch
-			return PreparedTool{Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: interruptedToolResultContent}}}
+			return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: interruptedToolResultContent}}
 		}
 	}
 	prepared := preparedExecuting(effectExecution(modelFn, toolFn))

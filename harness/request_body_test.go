@@ -109,8 +109,8 @@ func TestRequestHookStageChangesBetweenRequests(t *testing.T) {
 						return completedTurnStream(testToolCall("call-1")), nil
 					}
 					return completedTurnStream(), nil
-				}, func(_ context.Context, call model.ToolCall) PreparedTool {
-					return PreparedTool{Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
+				}, func(_ context.Context, call model.ToolCall) ToolOutcome {
+					return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}
 				})
 				inv.RequestStage = func() RequestStage {
 					stages++

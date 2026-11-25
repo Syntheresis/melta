@@ -266,26 +266,14 @@ func toolOutcomeValue(v toolOutcomeJSON) harness.ToolOutcome {
 	}
 }
 
-type permissionJSON struct {
-	Permission string `json:"permission"`
-	Target     string `json:"target"`
-}
-
 type toolPlanJSON struct {
-	Permissions        []permissionJSON `json:"permissions"`
-	CanonicalWorkspace string           `json:"canonical_workspace,omitempty"`
-	Immediate          *toolOutcomeJSON `json:"immediate,omitempty"`
-	Data               JSONBytes        `json:"data,omitempty"`
+	Immediate *toolOutcomeJSON `json:"immediate,omitempty"`
+	Data      JSONBytes        `json:"data,omitempty"`
 }
 
 func toolPlanFrom(v extension.ToolPlan) toolPlanJSON {
 	out := toolPlanJSON{
-		Permissions:        make([]permissionJSON, len(v.Permissions)),
-		CanonicalWorkspace: v.CanonicalWorkspace,
-		Data:               JSONBytes(v.Data),
-	}
-	for i, permission := range v.Permissions {
-		out.Permissions[i] = permissionJSON{Permission: permission.Permission, Target: permission.Target}
+		Data: JSONBytes(v.Data),
 	}
 	if v.Immediate != nil {
 		immediate := toolOutcomeFrom(*v.Immediate)
@@ -296,12 +284,7 @@ func toolPlanFrom(v extension.ToolPlan) toolPlanJSON {
 
 func toolPlanValue(v toolPlanJSON) extension.ToolPlan {
 	out := extension.ToolPlan{
-		Permissions:        make([]harness.PermissionRequest, len(v.Permissions)),
-		CanonicalWorkspace: v.CanonicalWorkspace,
-		Data:               append([]byte(nil), v.Data...),
-	}
-	for i, permission := range v.Permissions {
-		out.Permissions[i] = harness.PermissionRequest{Permission: permission.Permission, Target: permission.Target}
+		Data: append([]byte(nil), v.Data...),
 	}
 	if v.Immediate != nil {
 		immediate := toolOutcomeValue(*v.Immediate)

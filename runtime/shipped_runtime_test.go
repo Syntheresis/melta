@@ -327,8 +327,7 @@ func shippedExternalExtension() extension.Extension {
 
 // shippedExternalTarget is one Workspace binding the external tool received.
 type shippedExternalTarget struct {
-	binding   string
-	canonical string
+	binding string
 }
 
 func shippedExternalBind(ctx context.Context, author extension.AuthorContext, path string) (shippedExternalTarget, error) {
@@ -350,7 +349,7 @@ func shippedExternalBind(ctx context.Context, author extension.AuthorContext, pa
 	if err := json.Unmarshal(result.Value, &bound); err != nil || bound.Binding == "" || bound.CanonicalPath == "" {
 		return shippedExternalTarget{}, fmt.Errorf("external_read: bind %s: %v", path, err)
 	}
-	return shippedExternalTarget{binding: bound.Binding, canonical: bound.CanonicalPath}, nil
+	return shippedExternalTarget{binding: bound.Binding}, nil
 }
 
 func shippedExternalFailure(callID, content string) extension.ToolPlan {
@@ -376,10 +375,6 @@ func (shippedExternalTool) Prepare(ctx context.Context, author extension.AuthorC
 	if err := json.Unmarshal(call.Arguments, &input); err != nil || input.Path == "" {
 		return shippedExternalFailure(call.ID, "external_read: path is required")
 	}
-	root, err := shippedExternalBind(ctx, author, ".")
-	if err != nil {
-		return shippedExternalFailure(call.ID, err.Error())
-	}
 	target, err := shippedExternalBind(ctx, author, input.Path)
 	if err != nil {
 		return shippedExternalFailure(call.ID, err.Error())
@@ -391,11 +386,7 @@ func (shippedExternalTool) Prepare(ctx context.Context, author extension.AuthorC
 	if err != nil {
 		return shippedExternalFailure(call.ID, err.Error())
 	}
-	return extension.ToolPlan{
-		Permissions:        []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: target.canonical}},
-		CanonicalWorkspace: root.canonical,
-		Data:               data,
-	}
+	return extension.ToolPlan{Data: data}
 }
 
 func (shippedExternalTool) Execute(ctx context.Context, author extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {

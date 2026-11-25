@@ -277,9 +277,9 @@ func TestStrategyReplacementBeforeProcedure(t *testing.T) {
 					modelCalls++
 					return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return summaryStream("summary", model.Usage{InputTokens: 1}), nil
-					}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+					}, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 				}
-				return invocationExecution(quietConversation(), func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+				return invocationExecution(quietConversation(), func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 			}}
 			binding := &StrategyBinding{ID: capture.Strategy.ID, RequiresContextWindow: tc.requires, Strategy: strategy}
 			if tc.absent {
@@ -537,7 +537,7 @@ func TestStrategyLookupResolvedForEachMaintenanceProcedure(t *testing.T) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return summaryStream("summary", model.Usage{InputTokens: 1}), nil
-				}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+				}, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 			}
 			opens++
 			round := 0
@@ -547,8 +547,8 @@ func TestStrategyLookupResolvedForEachMaintenanceProcedure(t *testing.T) {
 					return completedTurnStream(testToolCall("call-1")), nil
 				}
 				return completedTurnStream(), nil
-			}, func(_ context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+			}, func(_ context.Context, call model.ToolCall) ToolOutcome {
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 			}), nil
 		},
 	}
@@ -712,7 +712,7 @@ func TestCarriedFactsModelFreeTerminalSettlesOnce(t *testing.T) {
 			if request.Purpose == InvocationPurposeMaintenance {
 				return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return summaryStream("summary", model.Usage{InputTokens: 5}), nil
-				}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+				}, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 			}
 			round := 0
 			return invocationExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
@@ -721,8 +721,8 @@ func TestCarriedFactsModelFreeTerminalSettlesOnce(t *testing.T) {
 					return completedTurnStream(testToolCall("call-1")), nil
 				}
 				return completedTurnStream(), nil
-			}, func(_ context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+			}, func(_ context.Context, call model.ToolCall) ToolOutcome {
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 			}), nil
 		},
 	}

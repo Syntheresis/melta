@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"sync"
 
 	"github.com/Syntheresis/melta/extension"
@@ -15,22 +14,16 @@ import (
 )
 
 type nativeWorkspace struct {
-	root            string
-	dataDir         string
-	entry           harness.EntryRef
-	lease           *artifactCallLease
-	restrictionBind func(string) (string, error)
-	mu              sync.Mutex
-	bindings        map[string]nativeWorkspaceTarget
-}
-
-type nativeWorkspaceTarget struct {
-	bound     tool.WorkspaceBinding
-	canonical string
+	root     string
+	dataDir  string
+	entry    harness.EntryRef
+	lease    *artifactCallLease
+	mu       sync.Mutex
+	bindings map[string]tool.WorkspaceBinding
 }
 
 func newNativeWorkspace(root, dataDir string, entry harness.EntryRef, lease *artifactCallLease) *nativeWorkspace {
-	return &nativeWorkspace{root: root, dataDir: dataDir, entry: entry, lease: lease, bindings: make(map[string]nativeWorkspaceTarget)}
+	return &nativeWorkspace{root: root, dataDir: dataDir, entry: entry, lease: lease, bindings: make(map[string]tool.WorkspaceBinding)}
 }
 
 func scopedArguments(args json.RawMessage, value any) error {
@@ -51,21 +44,12 @@ func (w *nativeWorkspace) bind(args json.RawMessage) (extension.Result, error) {
 	if err != nil {
 		return extension.Result{}, err
 	}
-	if w.restrictionBind != nil {
-		witness, err := w.restrictionBind(input.Path)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		if witness != canonical {
-			return extension.Result{}, fmt.Errorf("workspace witness changed: %w", ErrDenied)
-		}
-	}
 	handle, err := newInstanceID()
 	if err != nil {
 		return extension.Result{}, err
 	}
 	w.mu.Lock()
-	w.bindings[handle] = nativeWorkspaceTarget{bound: bound, canonical: canonical}
+	w.bindings[handle] = bound
 	w.mu.Unlock()
 	value, err := json.Marshal(struct {
 		Binding       string `json:"binding"`
@@ -75,7 +59,7 @@ func (w *nativeWorkspace) bind(args json.RawMessage) (extension.Result, error) {
 	return extension.Result{Value: value}, err
 }
 
-func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.RawMessage, permissions []harness.PermissionRequest) (extension.Result, error) {
+func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.RawMessage) (extension.Result, error) {
 	var input struct {
 		Binding    string            `json:"binding"`
 		Bytes      *worker.JSONBytes `json:"bytes"`
@@ -90,11 +74,6 @@ func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.
 	if !ok {
 		return extension.Result{}, ErrDenied
 	}
-	write := slices.Contains(permissions, harness.PermissionRequest{Permission: harness.PermissionFileWrite, Target: target.canonical})
-	read := slices.Contains(permissions, harness.PermissionRequest{Permission: harness.PermissionFileRead, Target: target.canonical})
-	if !write && (method != "read" || !read) {
-		return extension.Result{}, ErrDenied
-	}
 	if w.lease == nil || w.dataDir == "" || w.entry.SessionID == "" || w.entry.EntryID == "" {
 		return extension.Result{}, extension.ErrClosed
 	}
@@ -107,9 +86,8 @@ func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.
 	if err := ctx.Err(); err != nil {
 		return extension.Result{}, err
 	}
-	recheck := harness.LocationRecheckFromContext(ctx)
 	if method == "read" {
-		content, err := target.bound.Read(recheck)
+		content, err := target.Read(nil)
 		if err != nil {
 			return extension.Result{}, err
 		}
@@ -124,9 +102,9 @@ func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.
 	}
 	var outcome tool.MutationOutcome
 	if method == "write" {
-		outcome, err = target.bound.Write(store, *input.Bytes, *input.CreateOnly, recheck)
+		outcome, err = target.Write(store, *input.Bytes, *input.CreateOnly, nil)
 	} else {
-		outcome, err = target.bound.Delete(store, recheck)
+		outcome, err = target.Delete(store, nil)
 	}
 	var value json.RawMessage
 	switch outcome {

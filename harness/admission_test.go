@@ -196,7 +196,7 @@ func validExecution() Execution {
 			Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				select {} // the fixture owns the admitted Operation's state assertions
 			},
-			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 		}, nil
 	}}
 }
@@ -217,7 +217,7 @@ func modelPrepared(modelFn func(context.Context, model.Request, model.Extra) (mo
 	exec := validExecution()
 	if modelFn != nil {
 		exec = Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-			return invocationExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+			return invocationExecution(modelFn, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 		}}
 	}
 	return preparedExecuting(exec)

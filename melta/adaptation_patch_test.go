@@ -186,7 +186,6 @@ func TestAdaptationPatchBindsBeforeEffects(t *testing.T) {
 		call.Arguments = normalized
 		prepared := tool.Prepare(ctx, tc, call)
 		testassert.Require(t, prepared.Immediate == nil, "prepare = %+v", prepared.Immediate)
-		testassert.Require(t, len(prepared.Permissions) == 1 && prepared.Permissions[0].Permission == harness.PermissionFileWrite && prepared.Permissions[0].Target == real1, "permissions = %+v, want only the target's file.write grant", prepared.Permissions)
 		testassert.NoError(t, os.Remove(link))
 		testassert.NoError(t, os.Symlink(real2, link))
 		outcome := prepared.Execute(ctx)

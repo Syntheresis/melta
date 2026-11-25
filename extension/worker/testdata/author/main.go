@@ -143,9 +143,9 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachAuthorization(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
+			_, err = api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, input model.ToolCall) (*string, error) {
 				if string(input.Arguments) != string([]byte{0xff, '{'}) {
-					return nil, errors.New("authorization arguments changed")
+					return nil, errors.New("check arguments changed")
 				}
 				refusal := "denied by worker"
 				return &refusal, nil

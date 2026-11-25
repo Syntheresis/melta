@@ -123,7 +123,7 @@ func TestNativeToolPlanOwnershipAndDeclaredFailureDispatch(t *testing.T) {
 	tc := ToolContext{Session: harness.SessionIdentity{SessionID: testSessionID}}
 	call := model.ToolCall{ID: "call-1", Name: "tool", Arguments: json.RawMessage(`{"fail":true}`)}
 	prepared := adapter.Prepare(context.Background(), tc, call)
-	testassert.Require(t, prepared.Execute != nil && len(prepared.Permissions) == 1, "plan = %+v, want the executable plan", prepared)
+	testassert.Require(t, prepared.Execute != nil, "plan = %+v, want the executable plan", prepared)
 	outcome := prepared.Execute(context.Background())
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "declared:provider refused", "outcome = %+v, want the declared failure mapped through dispatch", outcome.Result)
 	testassert.Require(t, tool.failure != nil && string(tool.failure.Data) == `{"reason":"because"}` && string(tool.failure.Partial) == `"partial"`, "dispatch lost the declared failure payload: %+v", tool.failure)
@@ -142,7 +142,7 @@ func (t *planTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (js
 
 func (t *planTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	t.callID = call.ID
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "test.call", Target: "*"}}, Data: append([]byte("opaque:"), call.Arguments...)}
+	return extension.ToolPlan{Data: append([]byte("opaque:"), call.Arguments...)}
 }
 
 func (t *planTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
@@ -256,7 +256,7 @@ func (t *harnessOriginTool) Normalize(_ extension.AuthorContext, call model.Tool
 }
 func (t *harnessOriginTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	t.callID = call.ID
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}}
+	return extension.ToolPlan{}
 }
 func (t *harnessOriginTool) Execute(_ context.Context, call extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
 	go func() {
@@ -277,7 +277,7 @@ func (p *ownershipProbe) Normalize(_ extension.AuthorContext, call model.ToolCal
 }
 func (p *ownershipProbe) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
 	p.callID = call.ID
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}}
+	return extension.ToolPlan{}
 }
 func (p *ownershipProbe) Execute(ctx context.Context, call extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
 	arguments := []byte(`{}`)
@@ -424,7 +424,7 @@ func (normalizeWaitTool) Normalize(tc extension.AuthorContext, _ model.ToolCall)
 }
 
 func (normalizeWaitTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "test"}}}
+	return extension.ToolPlan{}
 }
 
 func (normalizeWaitTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
@@ -655,7 +655,7 @@ func (t registrationTool) Normalize(_ extension.AuthorContext, call model.ToolCa
 	return call.Arguments, nil
 }
 func (registrationTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "test"}}}
+	return extension.ToolPlan{}
 }
 func (t registrationTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
 	t.executes.Add(1)
@@ -705,7 +705,7 @@ func (invalidImmediateTool) Normalize(_ extension.AuthorContext, call model.Tool
 	return call.Arguments, nil
 }
 func (invalidImmediateTool) Prepare(_ context.Context, _ extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "test"}}, Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "immediate without identity"}}}
+	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "immediate without identity"}}}
 }
 func (invalidImmediateTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
 	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "must not run"}}
@@ -717,7 +717,7 @@ func (invalidResultTool) Normalize(_ extension.AuthorContext, call model.ToolCal
 	return call.Arguments, nil
 }
 func (invalidResultTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "test"}}}
+	return extension.ToolPlan{}
 }
 func (invalidResultTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
 	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "result without identity"}}
@@ -730,12 +730,13 @@ func (invalidResultTool) Execute(context.Context, extension.AuthorContext, exten
 // success without identity settles as unknown rather than being stamped.
 func TestNativeInvalidPreparedAndReturnedResultsAreSettledByHarness(t *testing.T) {
 	for _, row := range []struct {
-		name string
-		tool extension.RegisteredTool
-		want string
+		name     string
+		tool     extension.RegisteredTool
+		want     string
+		evidence harness.ExecutionEvidence
 	}{
-		{name: "invalid immediate", tool: invalidImmediateTool{}, want: "Tool call failed internal validation."},
-		{name: "invalid executor result", tool: invalidResultTool{}, want: "Execution outcome unknown"},
+		{name: "invalid immediate", tool: invalidImmediateTool{}, want: "Tool call failed internal validation.", evidence: harness.ExecutionNotStarted},
+		{name: "invalid executor result", tool: invalidResultTool{}, want: "Execution outcome unknown", evidence: harness.ExecutionUnknown},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			e := newOwnerEnv(t)
@@ -759,6 +760,8 @@ func TestNativeInvalidPreparedAndReturnedResultsAreSettledByHarness(t *testing.T
 			testassert.NoError(t, err)
 			submitThroughRuntime(t, r, session.Identity.SessionID, "op-invalid", "run")
 			awaitOperation(t, r, session.Identity.SessionID, "op-invalid", harness.OperationSuccess)
+			result := toolResultFact(t, r, session.Identity.SessionID, "op-invalid")
+			testassert.Require(t, result.Status == model.ResultError && result.Evidence == row.evidence && strings.Contains(result.Content, row.want), "result = %+v, want %s and %q", result, row.evidence, row.want)
 			testassert.Require(t, e.server.requests() >= 2, "model requests = %d, want the call and follow-up", e.server.requests())
 			testassert.Require(t, strings.Contains(e.server.bodyAt(1), row.want), "follow-up request = %s, want %q", e.server.bodyAt(1), row.want)
 			testassert.NoError(t, r.Close(ctx))
@@ -799,7 +802,7 @@ func (t intentFailureTool) Normalize(_ extension.AuthorContext, call model.ToolC
 	return call.Arguments, nil
 }
 func (intentFailureTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "test"}}}
+	return extension.ToolPlan{}
 }
 func (t intentFailureTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
 	t.executes.Add(1)
@@ -927,7 +930,7 @@ func (t normalizeIdentityTool) Normalize(tc extension.AuthorContext, call model.
 	return call.Arguments, nil
 }
 func (t normalizeIdentityTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "test"}}}
+	return extension.ToolPlan{}
 }
 func (t normalizeIdentityTool) Execute(_ context.Context, _ extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
 	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: "call-ident", Status: model.ResultSuccess, Content: "ok"}}

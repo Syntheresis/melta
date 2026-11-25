@@ -706,6 +706,89 @@ func TestAdmissionToolOverrideSurvivesReplacement(t *testing.T) {
 	}
 }
 
+func TestAdmissionOverrideUsesRegisteredToolSchema(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if wireLastRole(string(body)) == "tool" {
+			writeTextTurn(w, "done")
+			return
+		}
+		args := `{"registered":"yes"}`
+		if calls.Add(1) == 2 {
+			args = `{"advertised":true}`
+		}
+		writeToolTurn(w, "probe-call", "probe", args)
+	}))
+	defer server.Close()
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(configurationDocument(server.URL), &config); err != nil {
+		t.Fatal(err)
+	}
+	config["extensions"] = json.RawMessage(`{"fixture":{"enabled":true}}`)
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := extension.Extension{
+		Manifest: extension.Manifest{ID: "fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)},
+		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			if _, err := api.AttachAdmission(func(_ context.Context, _ extension.AuthorContext, input extension.AdmissionInput) (extension.AdmissionResult, error) {
+				candidate := input.Candidate
+				for i := range candidate.Tools {
+					if candidate.Tools[i].Name == "probe" {
+						candidate.Tools[i].Parameters = json.RawMessage(`{"type":"object","properties":{"advertised":{"type":"boolean"}},"required":["advertised"]}`)
+					}
+				}
+				return extension.AdmissionResult{Candidate: &candidate}, nil
+			}, nil); err != nil {
+				return nil, err
+			}
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: json.RawMessage(`{"type":"object","properties":{"registered":{"type":"string"}},"required":["registered"]}`)}, replacementTool{output: "ran"}, nil)
+			return nil, err
+		},
+	}
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	ref := model.ModelRef{Provider: "prov", Model: "m"}
+	owner := openOwner(t, melta.Options{DataDir: dataDir, Configuration: melta.NewValueConfigurationSource(raw), Credentials: &memoryCredentials{values: map[string]melta.CredentialValue{externalKeyEnv: {Value: externalKey, Defined: true}}}, Defaults: harness.SessionInputs{Model: &ref}, Extensions: []extension.Extension{guest}})
+	bound := caller(t, owner)
+	session, err := owner.CreateSession(ctx, bound, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit(t, owner, bound, session.SessionId, "registered", "registered")
+	submit(t, owner, bound, session.SessionId, "advertised", "advertised")
+	if err := owner.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite3", filepath.Join(dataDir, "melta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, row := range []struct {
+		op, status, evidence string
+	}{{"registered", "success", "observed"}, {"advertised", "error", "not_started"}} {
+		var payload []byte
+		if err := db.QueryRow(`SELECT payload FROM entries WHERE operation_id = ? AND kind = 'tool_result'`, row.op).Scan(&payload); err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			Status   string `json:"status"`
+			Evidence string `json:"evidence"`
+			Content  string `json:"content"`
+		}
+		if err := json.Unmarshal(payload, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Status != row.status || result.Evidence != row.evidence || (row.op == "registered" && result.Content != "ran") {
+			t.Fatalf("%s result = %+v, want status %s evidence %s", row.op, result, row.status, row.evidence)
+		}
+	}
+}
+
 func TestRequestHookReplacementKeepsRecordedRegistration(t *testing.T) {
 	ctx := context.Background()
 	server := newScriptedModel(t)

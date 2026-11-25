@@ -58,9 +58,14 @@ type ScopeInfo struct {
 // The data handler reads the owner Harness and Session artifact registry from
 // the same shared value.
 type composition struct {
-	standardValues map[string]Tool
+	standardValues map[string]standardTool
 	reportWarning  func(pluginID, kind, message string)
 	hosts          *hostServices
+}
+
+type standardTool struct {
+	tool     Tool
+	validate func(json.RawMessage) error
 }
 
 type hostServices struct {
@@ -74,7 +79,7 @@ type hostServices struct {
 // newComposition builds the one owner-wide composition.
 func newComposition() *composition {
 	return &composition{
-		standardValues: make(map[string]Tool),
+		standardValues: make(map[string]standardTool),
 		hosts:          &hostServices{},
 	}
 }

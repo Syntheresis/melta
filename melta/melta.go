@@ -367,11 +367,18 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	jobsService := newJobs(dataDir)
 	acquired = append(acquired, jobsService.Close)
 	toolOutput := newLiveToolOutput(obs)
-	c.standardValues = newStandardTools(dataDir, jobsService, toolOutput)
 	background := &backgroundBridge{}
 	c.hosts.background = background
 	resources := initial.resources
 	acquired = append(acquired, resources.release)
+	tools := newStandardTools(dataDir, jobsService, toolOutput)
+	for _, declaration := range standardToolDeclarations() {
+		validate, err := compileToolValidator(declaration.definition)
+		if err != nil {
+			return unwind(err)
+		}
+		c.standardValues[declaration.id] = standardTool{tool: tools[declaration.id], validate: validate}
+	}
 	if err := configService.canceled(work); err != nil {
 		return unwind(err)
 	}

@@ -862,10 +862,7 @@ func (t *operationDataTool) Normalize(_ extension.AuthorContext, call model.Tool
 }
 
 func (t *operationDataTool) Prepare(_ context.Context, tool extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{
-		Permissions:        []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: filepath.Join(tool.Session.Workspace, "probe.txt")}},
-		CanonicalWorkspace: tool.Session.Workspace,
-	}
+	return extension.ToolPlan{}
 }
 
 func (t *operationDataTool) Execute(ctx context.Context, tool extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
@@ -1497,10 +1494,7 @@ func (t *nestedClaimCaller) Normalize(_ extension.AuthorContext, call model.Tool
 	return runtimeNormalize(call)
 }
 func (t *nestedClaimCaller) Prepare(_ context.Context, tool extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{
-		Permissions:        []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: filepath.Join(tool.Session.Workspace, "nested.txt")}},
-		CanonicalWorkspace: tool.Session.Workspace,
-	}
+	return extension.ToolPlan{}
 }
 func (t *nestedClaimCaller) Execute(ctx context.Context, tool extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
 	result, err := tool.Call(ctx, "nested.provider", "run", json.RawMessage(`{}`))

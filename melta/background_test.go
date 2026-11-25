@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
@@ -90,48 +88,4 @@ func TestBackgroundBridgeArmingAcrossPublication(t *testing.T) {
 	}
 
 	testassert.NoError(t, r.Close(ctx))
-}
-
-// TestNativeToolPlansDoNotExecuteBeforeAuthorization proves the native plan
-// boundary on an extension's three prepared calls: an immediate-error plan
-// never reaches Execute; an empty plan and a plan with declared pairs are both
-// valid executor plans and each runs once, because no pair is evaluated.
-func TestNativeToolPlansDoNotExecuteBeforeAuthorization(t *testing.T) {
-	eachPrepStore(t, func(t *testing.T, store harness.Storage) {
-		stopper := newLifecycleStopper()
-		bg := openBackgroundRuntime(t, store, stopper)
-		defer closeProjectionRuntime(bg.r)
-		session := bg.session("plan-gate")
-		bg.e.server.setScript(func(_ context.Context, body string) []string {
-			if lastMessageRole(body) == "tool" {
-				return nil
-			}
-			calls := []string{`{"index":0,"id":"call-invalid","type":"function","function":{"name":"bg_read","arguments":"{}"}}`,
-				`{"index":1,"id":"call-immediate","type":"function","function":{"name":"bg_read","arguments":"{}"}}`,
-				`{"index":2,"id":"call-valid","type":"function","function":{"name":"bg_read","arguments":"{}"}}`}
-			return []string{
-				`{"choices":[{"delta":{"role":"assistant","tool_calls":[` + strings.Join(calls, ",") + `]},"finish_reason":null}]}`,
-				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
-			}
-		})
-		var executes atomic.Int64
-		bg.tools.setPrepare(func(_ context.Context, call model.ToolCall) extension.ToolPlan {
-			permissions := []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}
-			switch call.ID {
-			case "call-invalid":
-				return extension.ToolPlan{}
-			case "call-immediate":
-				return extension.ToolPlan{Permissions: permissions, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "immediate"}}}
-			default:
-				return extension.ToolPlan{Permissions: permissions}
-			}
-		})
-		bg.tools.setExecute(func(context.Context, extension.ToolPlan) harness.ToolOutcome {
-			executes.Add(1)
-			return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "valid"}}
-		})
-		submitThroughRuntime(t, bg.r, session, "op-gate", "run")
-		awaitOperation(t, bg.r, session, "op-gate", harness.OperationSuccess)
-		testassert.Equal(t, executes.Load(), int64(2))
-	})
 }

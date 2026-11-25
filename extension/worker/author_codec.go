@@ -232,26 +232,6 @@ type authorArgumentsResultJSON struct {
 	Refusal   *string    `json:"refusal,omitempty"`
 }
 
-type authorAuthorizationJSON struct {
-	ToolName           string                      `json:"tool_name"`
-	Arguments          JSONBytes                   `json:"arguments"`
-	CanonicalWorkspace string                      `json:"canonical_workspace"`
-	ToolSettings       JSONBytes                   `json:"tool_settings"`
-	Permissions        []harness.PermissionRequest `json:"permissions,omitempty"`
-}
-
-func EncodeAuthorAuthorization(v extension.AuthorizationInput) (json.RawMessage, error) {
-	return json.Marshal(authorAuthorizationJSON{v.ToolName, JSONBytes(v.Arguments), v.CanonicalWorkspace, JSONBytes(v.ToolSettings), v.Permissions})
-}
-
-func DecodeAuthorAuthorization(raw json.RawMessage) (extension.AuthorizationInput, error) {
-	var v authorAuthorizationJSON
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return extension.AuthorizationInput{}, err
-	}
-	return extension.AuthorizationInput{ToolName: v.ToolName, Arguments: append(json.RawMessage(nil), v.Arguments...), CanonicalWorkspace: v.CanonicalWorkspace, ToolSettings: append(json.RawMessage(nil), v.ToolSettings...), Permissions: v.Permissions}, nil
-}
-
 func EncodeAuthorRefusal(refusal *string) (json.RawMessage, error) {
 	return json.Marshal(struct {
 		Refusal *string `json:"refusal,omitempty"`

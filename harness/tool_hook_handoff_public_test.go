@@ -54,12 +54,10 @@ func TestPublicExecutionCancellationAtToolIntentHandoff(t *testing.T) {
 				return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 					return harness.InvocationExecution{
 						Model: script.effect,
-						LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-							return harness.PreparedTool{Permissions: publicPermission, Execute: func(context.Context) harness.ToolOutcome {
-								executed++
-								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
-							}}
-						}, publicNormalize),
+						LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+							executed++
+							return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
+						}),
 					}, nil
 				}}, nil
 			}

@@ -580,7 +580,7 @@ func TestSubmitRejectsClosedActiveChild(t *testing.T) {
 func TestStopGatedLaunchWaitsForMaterialization(t *testing.T) {
 	store := freshSessionStore(t)
 	gate := newLaunchGate(store, "read")
-	exec := effectExecution(quickModel(), func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} })
+	exec := effectExecution(quickModel(), func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} })
 	stub := newPrepareStub(PreparedExecution{
 		Capture: testCapture(),
 		Open: func(_ context.Context, _ OperationAdmission) (Execution, error) {
@@ -653,7 +653,7 @@ func TestStopRacingStartSettlesWithoutStarting(t *testing.T) {
 		mu    sync.Mutex
 		opens []string
 	)
-	exec := effectExecution(quickModel(), func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} })
+	exec := effectExecution(quickModel(), func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} })
 	stub := newPrepareStub(PreparedExecution{
 		Capture: testCapture(),
 		Open: func(_ context.Context, admission OperationAdmission) (Execution, error) {

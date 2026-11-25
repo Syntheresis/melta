@@ -19,15 +19,16 @@ func fixedStrategyResolver(binding *StrategyBinding) func(context.Context, strin
 	}
 }
 
-func fixtureToolLookup(prepare func(context.Context, model.ToolCall) PreparedTool, normalize func(context.Context, model.ToolCall) (json.RawMessage, error)) func(string) (ToolBinding, bool) {
-	if prepare == nil {
-		prepare = func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
+func fixtureToolLookup(run func(context.Context, model.ToolCall) ToolOutcome) func(string) (ToolBinding, bool, error) {
+	if run == nil {
+		run = func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }
 	}
-	if normalize == nil {
-		normalize = objectNormalize
-	}
-	return func(name string) (ToolBinding, bool) {
-		return ToolBinding{Identity: ToolImplementation{ID: name}, Normalize: normalize, Prepare: prepare}, true
+	return func(name string) (ToolBinding, bool, error) {
+		return ToolBinding{
+			Identity: ToolImplementation{ID: name},
+			Validate: func(json.RawMessage) error { return nil },
+			Run:      run,
+		}, true, nil
 	}
 }
 
@@ -51,8 +52,8 @@ func preparedExecutionFor(capture ExecutionCapture, open func(context.Context, O
 }
 
 // defaultInvocation fills the fixtures' ordinary opened-invocation defaults: a
-// model that completes without calls, an empty tool plan and the pure
-// normalizer. Deliberately malformed opener values are never defaulted.
+// model that completes without calls and a fixture tool binding. Deliberately
+// malformed opener values are never defaulted.
 func defaultInvocation(inv InvocationExecution) InvocationExecution {
 	if inv.Model == nil {
 		inv.Model = func(context.Context, model.Request, model.Extra) (model.Stream, error) {
@@ -60,7 +61,7 @@ func defaultInvocation(inv InvocationExecution) InvocationExecution {
 		}
 	}
 	if inv.LookupTool == nil {
-		inv.LookupTool = fixtureToolLookup(nil, nil)
+		inv.LookupTool = fixtureToolLookup(nil)
 	}
 	return inv
 }
