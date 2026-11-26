@@ -14,30 +14,6 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// CallbackIdentity is the minimal immutable carrier the Harness binds to one
-// effect callback context: the already-reserved result entry identity of the
-// associated effect, or empty where no effect exists.
-type CallbackIdentity struct {
-	RequestID  string
-	ToolCallID string
-	EffectID   string
-}
-
-type callbackIdentityKey struct{}
-
-// WithCallbackIdentity binds one effect identity to a callback context. The
-// value is immutable and grants nothing by itself; the host reads it when it
-// constructs a native call view.
-func WithCallbackIdentity(ctx context.Context, identity CallbackIdentity) context.Context {
-	return context.WithValue(ctx, callbackIdentityKey{}, identity)
-}
-
-// CallbackIdentityFromContext returns the bound effect identity, if any.
-func CallbackIdentityFromContext(ctx context.Context) CallbackIdentity {
-	identity, _ := ctx.Value(callbackIdentityKey{}).(CallbackIdentity)
-	return identity
-}
-
 // JobStopper is the job-stop seam: the Harness cannot import plugin packages,
 // so the interface is declared at its consumer. Nil is legal; StartJob rejects
 // job admission without one (managed shutdown stops every Job).

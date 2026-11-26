@@ -1305,67 +1305,6 @@ func TestRequestHookInputFrozenDomainsCarryHiddenCatalogAndRestoresThroughCatalo
 
 }
 
-// TestCallbackIdentityCompleteAtEveryBoundary proves each real Harness
-// producer binds the actual request/call identity to its context: prepare and
-// pure preprocessing carry no effect identity, and the executed call and the
-// after-tool shaping carry its reserved result identity.
-func TestCallbackIdentityCompleteAtEveryBoundary(t *testing.T) {
-	var (
-		mu           sync.Mutex
-		pure, shaped []CallbackIdentity
-		executed     []CallbackIdentity
-	)
-	record := func(list *[]CallbackIdentity, ctx context.Context) {
-		mu.Lock()
-		*list = append(*list, CallbackIdentityFromContext(ctx))
-		mu.Unlock()
-	}
-	tool := func(ctx context.Context, call model.ToolCall) ToolOutcome {
-		record(&executed, ctx)
-		return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}
-	}
-	hooks := []ToolArgumentsHook{
-		{ID: "cap.hook.pure", ExtensionID: "cap-a", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
-			record(&pure, ctx)
-			return ToolArgumentsResult{Arguments: json.RawMessage(`{"repaired":true}`)}, nil
-		}},
-	}
-	outputs := []ToolOutputHook{{ID: "cap.hook.output", ExtensionID: "cap-a", Run: func(ctx context.Context, input ToolOutputInput) (string, error) {
-		record(&shaped, ctx)
-		return input.Content + "!", nil
-	}}}
-	exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-		return InvocationExecution{
-			Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-				return completedTurnStream(), nil
-			},
-			LookupTool: fixtureToolLookup(tool), ToolHooks: hooks, ToolOutputHooks: outputs,
-		}, nil
-	}}
-	_, store, _, sessionID, results, err := freshExecutionToolCalls(t, testCapture(), exec, testToolCall("call-1"))
-	testassert.NoError(t, err)
-
-	testassert.Require(t, len(executed) == 1 && len(pure) == 1 && len(shaped) == 1, "observed identities = execute %d pure %d shaped %d, want one each", len(executed), len(pure), len(shaped))
-	invocationID := executed[0].RequestID
-	testassert.Require(t, invocationID != "", "Run identity %+v, want the opened invocation request", executed[0])
-	for name, identity := range map[string]CallbackIdentity{
-		"execute": executed[0], "pure hook": pure[0], "shaped output": shaped[0],
-	} {
-		testassert.Require(t, identity.RequestID == invocationID && identity.ToolCallID == "call-1", "%s identity = %+v, want invocation %q and call call-1", name, identity, invocationID)
-	}
-	graph, err := validateFixture(t, store, sessionID)
-	testassert.NoError(t, err)
-	var callAssistant *assistantEntry
-	for i := range graph.Entries {
-		if entry := graph.Entries[i].Assistant; entry != nil && len(entry.ToolCalls) != 0 {
-			callAssistant = entry
-		}
-	}
-	testassert.Require(t, callAssistant != nil && callAssistant.RequestID != "", "no assistant entry published the tool call")
-	testassert.Require(t, pure[0].EffectID == "", "hook identity = %+v, want no effect identity", pure[0])
-	testassert.Require(t, executed[0].EffectID == results[0].EntryID && shaped[0].EffectID == results[0].EntryID, "executed/shaped effect identities = %q/%q, want the committed tool result entry %q", executed[0].EffectID, shaped[0].EffectID, results[0].EntryID)
-}
-
 // TestArgumentHookRefusalSettlesDenied proves a deliberate before-tool refusal
 // stops that call's chain and settles it denied, not started, with the refusal
 // text and the refusing hook's identity, while the batch's later call still

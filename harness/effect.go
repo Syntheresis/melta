@@ -1445,8 +1445,7 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 				if err != nil {
 					return notStarted(invalidToolResult(call.ID), selection)
 				}
-				hookCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: inv.request.ID, ToolCallID: call.ID})
-				reason, err := hook.Run(hookCtx, owned)
+				reason, err := hook.Run(ctx, owned)
 				if err != nil {
 					return notStarted(hookFailure(ctx, call.ID, err), selection)
 				}
@@ -1487,10 +1486,8 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 			return settle(ToolOutcome{Result: interruptedToolResult(call.ID), Evidence: ExecutionNotStarted}, nil, true, toolSelection{}, nil)
 		}
 		// Run receives the committed concrete-tool reservation's context; this
-		// is the only callback with action authority, and the reserved result
-		// identity is carried immutably for the native adapter.
-		runCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: inv.request.ID, ToolCallID: call.ID, EffectID: pending.ResultEntryID})
-		outcome := ownToolOutcome(binding.Run(runCtx, runCall))
+		// is the only callback with action authority.
+		outcome := ownToolOutcome(binding.Run(ctx, runCall))
 		if outcome.Evidence == "" { // a valid returned result is itself the observation
 			outcome.Evidence = ExecutionObserved
 		}
@@ -1504,7 +1501,7 @@ func (d *executionDriver) toolEffect() agent.ToolEffect {
 		}
 		// Pure output shaping over the tool-produced outcome (the
 		// invalid-replacement content included), before the final commit.
-		shaping := d.shapeToolOutput(ctx, inv, outcome, call.ID, pending.ResultEntryID)
+		shaping := d.shapeToolOutput(ctx, inv, outcome, call.ID)
 		// the real outcome wins a cancellation race: the settlement transaction
 		// runs without cancellation and publishes what the execution produced.
 		return settle(outcome, shaping, true, toolSelection{}, nil)
@@ -1633,7 +1630,7 @@ type toolShaping struct {
 // base becomes the original content, the real outcome preserved with partial
 // shaping abandoned, and one bounded processing failure names the cause.
 // Shaping is text only and never changes status, evidence, usage or metadata.
-func (d *executionDriver) shapeToolOutput(ctx context.Context, inv *openedInvocation, outcome ToolOutcome, callID, effectID string) *toolShaping {
+func (d *executionDriver) shapeToolOutput(ctx context.Context, inv *openedInvocation, outcome ToolOutcome, callID string) *toolShaping {
 	hooks := inv.callbacks.ToolOutputHooks
 	if inv.callbacks.ResultStage != nil {
 		stage := inv.callbacks.ResultStage()
@@ -1654,9 +1651,8 @@ func (d *executionDriver) shapeToolOutput(ctx context.Context, inv *openedInvoca
 		return nil
 	}
 	base := outcome.Result.Content
-	shapeCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: callID, EffectID: effectID})
 	for _, hook := range hooks {
-		shaped, err := hook.Run(shapeCtx, ToolOutputInput{
+		shaped, err := hook.Run(ctx, ToolOutputInput{
 			Outcome: ToolOutcome{Result: outcome.Result, Metadata: model.CloneRaw(outcome.Metadata), Evidence: outcome.Evidence},
 			Content: base,
 		})
@@ -1868,8 +1864,7 @@ func (d *executionDriver) runArgumentHooks(ctx, settleCtx context.Context, resol
 			}
 			return toolSelection{}, &settled, nil
 		}
-		hookCtx := WithCallbackIdentity(ctx, CallbackIdentity{RequestID: d.conversation.request.ID, ToolCallID: pending.CallID})
-		consequence, failure := d.evaluateArgumentHook(hookCtx, resolved, hook, current)
+		consequence, failure := d.evaluateArgumentHook(ctx, resolved, hook, current)
 		if failure != nil { // a callback cannot create external-effect uncertainty
 			settled, cerr := d.harness.commitToolResult(settleCtx, d.coordinator, d.operationID, pending, ToolOutcome{Result: *failure, Evidence: ExecutionNotStarted}, nil, false, toolSelection{}, nil)
 			if cerr != nil {
@@ -1963,7 +1958,7 @@ func (d *executionDriver) runRequestHooks(ctx context.Context, inv *openedInvoca
 // actual model, and the frozen canonical references with deep-owned views.
 func (d *executionDriver) runOneRequestHookPure(ctx context.Context, inv *openedInvocation, requestID string, view *requestView, hook RequestHook) (RequestConsequence, error) {
 	input := view.hookInput(inv.request, requestID)
-	consequence, err := hook.Run(WithCallbackIdentity(ctx, CallbackIdentity{RequestID: requestID}), input)
+	consequence, err := hook.Run(ctx, input)
 	if err != nil {
 		if EffectInterrupted(err) {
 			return RequestConsequence{}, errExecutionInterrupted
