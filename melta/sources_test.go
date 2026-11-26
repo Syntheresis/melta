@@ -94,8 +94,8 @@ func (s *recordingConfigurationSource) Read(ctx context.Context) ([]byte, error)
 	return s.inner.Read(ctx)
 }
 
-func (s *recordingConfigurationSource) Write(ctx context.Context, data []byte) error {
-	if err := s.inner.Write(ctx, data); err != nil {
+func (s *recordingConfigurationSource) Write(ctx context.Context, previous, data []byte) error {
+	if err := s.inner.Write(ctx, previous, data); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -143,14 +143,15 @@ func TestRuntimeValueConfigurationAndUnusableHome(t *testing.T) {
 					testassert.NoError(t, err)
 				}
 			}()
+			var data []byte
 			{
-				data, err := value.Read(context.Background())
+				data, err = value.Read(context.Background())
 				testassert.NoError(t, err)
 				testassert.Equal(t, string(data), string(sourceConfigDocument(server.URL, keyEnv, "Before")))
 			}
 
 			updated := sourceConfigDocument(server.URL, keyEnv, "After")
-			testassert.NoError(t, value.Write(context.Background(), updated))
+			testassert.NoError(t, value.Write(context.Background(), data, updated))
 			{
 				_, err := r.Reload(context.Background(), testCaller(r))
 				testassert.NoError(t, err)
@@ -326,6 +327,26 @@ func TestFileConfigurationMissingReadReportsNotExist(t *testing.T) {
 	}
 }
 
+// TestValueConfigurationWriteRequiresPreviousBytes proves the value source's
+// compare-before-replace rule: a write whose previous bytes match the held
+// document replaces it, while a stale previous fails as a conflict and
+// leaves the document as it was.
+func TestValueConfigurationWriteRequiresPreviousBytes(t *testing.T) {
+	ctx := context.Background()
+	source := NewValueConfigurationSource([]byte("initial"))
+	testassert.NoError(t, source.Write(ctx, []byte("initial"), []byte("updated")))
+	{
+		data, err := source.Read(ctx)
+		testassert.Require(t, err == nil && string(data) == "updated", "value read after the matching write = (%q, %v), want updated", data, err)
+	}
+	err := source.Write(ctx, []byte("initial"), []byte("stale"))
+	testassert.Require(t, errors.Is(err, harness.ErrConflict), "stale value write = %v, want harness.ErrConflict", err)
+	{
+		data, rerr := source.Read(ctx)
+		testassert.Require(t, rerr == nil && string(data) == "updated", "a stale value write changed the document: (%q, %v), want updated", data, rerr)
+	}
+}
+
 // TestReservationLoadRetainUsesHeldMu proves a retaining published-pointer
 // load runs under heldMu, the same mutex the publication Store takes.
 func TestReservationLoadRetainUsesHeldMu(t *testing.T) {
@@ -375,7 +396,7 @@ func (s *contextRecordingConfiguration) Read(ctx context.Context) ([]byte, error
 	return s.inner.Read(ctx)
 }
 
-func (s *contextRecordingConfiguration) Write(ctx context.Context, data []byte) error {
+func (s *contextRecordingConfiguration) Write(ctx context.Context, previous, data []byte) error {
 	s.mu.Lock()
 	s.err = ctx.Err()
 	entered, release := s.writeEntered, s.writeRelease
@@ -393,7 +414,7 @@ func (s *contextRecordingConfiguration) Write(ctx context.Context, data []byte) 
 	if err != nil {
 		return err
 	}
-	return s.inner.Write(ctx, data)
+	return s.inner.Write(ctx, previous, data)
 }
 
 func (s *contextRecordingConfiguration) writeError() error {

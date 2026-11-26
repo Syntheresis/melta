@@ -8,7 +8,10 @@
 package atomicfs
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -31,6 +34,18 @@ var SyncDirFunc func(string) error
 // test-only.
 var ReleaseFunc func(*Lock) error
 
+// ErrChanged reports that WriteIfUnchanged found the file missing or holding other bytes.
+var ErrChanged = errors.New("atomicfs: file changed")
+
+// WriteIfUnchanged is Write, except that after its temp file is synced and
+// closed, immediately before the rename, it reads path: a missing file, or
+// bytes other than previous, remove the temp file and return an error
+// wrapping ErrChanged. A missing directory is a missing file. A change that
+// lands between that read and the rename is replaced.
+func WriteIfUnchanged(path string, previous, data []byte, perm os.FileMode) error {
+	return write(path, data, perm, previous, true)
+}
+
 // Write atomically replaces path with data. It writes a temp file in the
 // destination directory, sets its mode, and renames it over path. The
 // temp lives in the same directory so the rename is a same-filesystem
@@ -43,9 +58,21 @@ var ReleaseFunc func(*Lock) error
 // Callers that create a record use CreateExclusive or create the directory
 // explicitly first.
 func Write(path string, data []byte, perm os.FileMode) error {
+	return write(path, data, perm, nil, false)
+}
+
+// write is the shared body of Write and WriteIfUnchanged. With compare set,
+// a temp file it cannot create because the destination directory does not
+// exist is a changed destination, and after the temp is closed it reads path
+// immediately before the rename: a missing file or bytes other than previous
+// remove the temp file and are reported as ErrChanged.
+func write(path string, data []byte, perm os.FileMode, previous []byte, compare bool) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
+		if compare && errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("atomicfs: %s: %w", path, ErrChanged)
+		}
 		return fmt.Errorf("atomicfs: create temp for %s: %w", path, err)
 	}
 	tmpName := tmp.Name()
@@ -67,6 +94,16 @@ func Write(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("atomicfs: close temp for %s: %w", path, err)
+	}
+	if compare {
+		current, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) || err == nil && !bytes.Equal(current, previous) {
+			err = ErrChanged
+		}
+		if err != nil {
+			_ = os.Remove(tmpName)
+			return fmt.Errorf("atomicfs: compare %s: %w", path, err)
+		}
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)

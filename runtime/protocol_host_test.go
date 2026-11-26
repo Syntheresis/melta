@@ -193,8 +193,6 @@ func TestProtocolMountedEvents(t *testing.T) {
 	// One reload publishes a configuration_changed event after the stream
 	// attached.
 	{
-		source := options.Configuration
-		testassert.NoError(t, source.Write(ctx, []byte(`{"sessions":{"archive_after_days":7}}`)))
 		_, err := owner.Reload(ctx, testCaller(t, owner))
 		testassert.NoError(t, err)
 	}
