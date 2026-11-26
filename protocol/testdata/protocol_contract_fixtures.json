@@ -684,7 +684,7 @@
     },
     {
      "name": "ScopeEvent",
-     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"runtime\"}}"
+     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}}"
     },
     {
      "name": "SessionChangedEvent",
@@ -724,7 +724,7 @@
     },
     {
      "name": "scope-closed",
-     "json": "{\"kind\":\"scope_closed\",\"scope\":{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"}}"
+     "json": "{\"kind\":\"scope_closed\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}}"
     }
    ],
    "reject": [
@@ -1529,13 +1529,13 @@
     {
      "name": "job-identity",
      "json": "{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"}"
-    },
-    {
-     "name": "agent-identity",
-     "json": "{\"kind\":\"invocation\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}"
     }
    ],
    "reject": [
+    {
+     "name": "invocation-kind",
+     "json": "{\"kind\":\"invocation\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}"
+    },
     {
      "name": "unknown-kind",
      "json": "{\"kind\":\"galaxy\"}"
@@ -1659,11 +1659,11 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"runtime\"}}"
+     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}}"
     },
     {
-     "name": "scope-closed-job",
-     "json": "{\"kind\":\"scope_closed\",\"scope\":{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"}}"
+     "name": "scope-closed",
+     "json": "{\"kind\":\"scope_closed\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}}"
     }
    ],
    "reject": [
@@ -1673,7 +1673,7 @@
     },
     {
      "name": "unknown-member",
-     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"runtime\"},\"extra\":1}"
+     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"},\"extra\":1}"
     },
     {
      "name": "scope-missing-kind",

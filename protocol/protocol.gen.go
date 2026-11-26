@@ -1096,7 +1096,7 @@ type ConfigurationChangedEvent struct {
 	ConfigurationRevision ConfigurationRevision         `json:"configuration_revision"`
 	Kind                  ConfigurationChangedEventKind `json:"kind"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope Scope `json:"scope"`
 }
 
@@ -1706,7 +1706,7 @@ type ReasoningDeltaEvent struct {
 	Content string                  `json:"content"`
 	Kind    ReasoningDeltaEventKind `json:"kind"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope Scope `json:"scope"`
 }
 
@@ -1718,7 +1718,7 @@ type RefusalDeltaEvent struct {
 	Content string                `json:"content"`
 	Kind    RefusalDeltaEventKind `json:"kind"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope Scope `json:"scope"`
 }
 
@@ -1752,7 +1752,7 @@ type RegisteredExtensionOperationTarget string
 type ResponseRestartedEvent struct {
 	Kind ResponseRestartedEventKind `json:"kind"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope Scope `json:"scope"`
 }
 
@@ -1781,17 +1781,15 @@ type RuntimeScope struct {
 // RuntimeScopeKind defines model for RuntimeScope.Kind.
 type RuntimeScopeKind string
 
-// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 type Scope struct {
 	union json.RawMessage
 }
 
 // ScopeEvent defines model for ScopeEvent.
 type ScopeEvent struct {
-	Kind ScopeEventKind `json:"kind"`
-
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
-	Scope Scope `json:"scope"`
+	Kind  ScopeEventKind  `json:"kind"`
+	Scope InvocationScope `json:"scope"`
 }
 
 // ScopeEventKind defines model for ScopeEvent.Kind.
@@ -1816,7 +1814,7 @@ type Session struct {
 type SessionChangedEvent struct {
 	Kind SessionChangedEventKind `json:"kind"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope           Scope           `json:"scope"`
 	SessionRevision SessionRevision `json:"session_revision"`
 }
@@ -1969,7 +1967,7 @@ type TextDeltaEvent struct {
 	Kind     TextDeltaEventKind `json:"kind"`
 	Position int                `json:"position"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope Scope `json:"scope"`
 }
 
@@ -2025,7 +2023,7 @@ type ToolFinishedEvent struct {
 	Evidence *ExecutionEvidence    `json:"evidence,omitempty"`
 	Kind     ToolFinishedEventKind `json:"kind"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope  Scope          `json:"scope"`
 	Status ToolCallStatus `json:"status"`
 }
@@ -2041,7 +2039,7 @@ type ToolOutputChangedEvent struct {
 	CallId string                     `json:"call_id"`
 	Kind   ToolOutputChangedEventKind `json:"kind"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope Scope `json:"scope"`
 }
 
@@ -2055,7 +2053,7 @@ type ToolStartedEvent struct {
 	Name    string               `json:"name"`
 	Ordinal int                  `json:"ordinal"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope Scope `json:"scope"`
 }
 
@@ -2119,7 +2117,7 @@ type Warning struct {
 type WarningChangedEvent struct {
 	Kind WarningChangedEventKind `json:"kind"`
 
-	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+	// Scope One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
 	Scope            Scope            `json:"scope"`
 	WarningsRevision WarningsRevision `json:"warnings_revision"`
 }
@@ -3206,40 +3204,6 @@ func (t *Scope) MergeOperationScope(v OperationScope) error {
 	return err
 }
 
-// AsInvocationScope returns the union data inside the Scope as a InvocationScope
-func (t Scope) AsInvocationScope() (InvocationScope, error) {
-	var body InvocationScope
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromInvocationScope overwrites any union data inside the Scope as the provided InvocationScope
-func (t *Scope) FromInvocationScope(v InvocationScope) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	b, err = runtime.JSONMerge(b, []byte(`{"kind":"invocation"}`))
-	t.union = b
-	return err
-}
-
-// MergeInvocationScope performs a merge with any union data inside the Scope, using the provided InvocationScope
-func (t *Scope) MergeInvocationScope(v InvocationScope) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	b, err = runtime.JSONMerge(b, []byte(`{"kind":"invocation"}`))
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsJobScope returns the union data inside the Scope as a JobScope
 func (t Scope) AsJobScope() (JobScope, error) {
 	var body JobScope
@@ -3288,8 +3252,6 @@ func (t Scope) ValueByDiscriminator() (interface{}, error) {
 		return nil, err
 	}
 	switch discriminator {
-	case "invocation":
-		return t.AsInvocationScope()
 	case "job":
 		return t.AsJobScope()
 	case "operation":

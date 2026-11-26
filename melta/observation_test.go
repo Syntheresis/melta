@@ -62,10 +62,6 @@ func scopeSessionIdentity(t *testing.T, scope protocol.Scope) (string, bool) {
 		body, err := scope.AsOperationScope()
 		testassert.NoError(t, err)
 		sessionID = body.SessionId
-	case "invocation":
-		body, err := scope.AsInvocationScope()
-		testassert.NoError(t, err)
-		sessionID = body.SessionId
 	case "job":
 		body, err := scope.AsJobScope()
 		testassert.NoError(t, err)
@@ -92,10 +88,6 @@ func scopeWorkspaceAttribution(t *testing.T, scope protocol.Scope) (string, bool
 		workspace = body.Workspace
 	case "operation":
 		body, err := scope.AsOperationScope()
-		testassert.NoError(t, err)
-		workspace = body.Workspace
-	case "invocation":
-		body, err := scope.AsInvocationScope()
 		testassert.NoError(t, err)
 		workspace = body.Workspace
 	case "job":
@@ -602,8 +594,7 @@ func TestObservationSubscriberLossDoesNotAffectExecution(t *testing.T) {
 		{
 			body, err := committed[2].AsScopeEvent()
 			testassert.NoError(t, err)
-			invocation, err := body.Scope.AsInvocationScope()
-			testassert.NoError(t, err)
+			invocation := body.Scope
 			testassert.Require(t, invocation.InvocationId != "" && invocation.Purpose == protocol.Conversation, "invocation scope = %+v, want the actual ID and conversation purpose", invocation)
 			want[2] = committed[2]
 		}

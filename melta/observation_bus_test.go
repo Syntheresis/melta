@@ -177,8 +177,7 @@ func TestObservationRootChildScopeTagging(t *testing.T) {
 				case "scope_opened", "scope_closed":
 					body, err := event.AsScopeEvent()
 					testassert.NoError(t, err)
-					testassert.Require(t, scopeKind(t, body.Scope) == "invocation", "scope event = %+v, want an invocation scope", body.Scope)
-					shortSession, _ := scopeSessionIdentity(t, body.Scope)
+					shortSession := body.Scope.SessionId
 					testassert.Require(t, shortSession == root || shortSession == child, "invocation scope event for a foreign session: %+v", body.Scope)
 				default:
 					// configuration and warning events carry no session attribution.

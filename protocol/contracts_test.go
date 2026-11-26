@@ -95,10 +95,11 @@ func TestPluginsSettingsDocumentsStayNamedOpaqueStrings(t *testing.T) {
 // kinds and unrelated fields stay rejected.
 func TestScopeEventSharedPayload(t *testing.T) {
 	event := componentSchema(t, "Event")
-	acceptJSON(t, event, `{"kind": "scope_opened", "scope": {"kind": "runtime"}}`)
-	acceptJSON(t, event, `{"kind": "scope_closed", "scope": {"kind": "job", "session_id": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f", "job_id": "j1"}}`)
+	acceptJSON(t, event, `{"kind": "scope_opened", "scope": {"kind": "invocation", "session_id": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f", "operation_id": "op-1", "invocation_id": "inv-1", "purpose": "conversation"}}`)
+	acceptJSON(t, event, `{"kind": "scope_closed", "scope": {"kind": "invocation", "session_id": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f", "operation_id": "op-1", "invocation_id": "inv-1", "purpose": "conversation"}}`)
+	rejectJSON(t, event, `{"kind": "scope_opened", "scope": {"kind": "runtime"}}`)
 	rejectJSON(t, event, `{"kind": "scope_unknown", "scope": {"kind": "runtime"}}`)
-	rejectJSON(t, event, `{"kind": "scope_opened", "scope": {"kind": "runtime"}, "extra": 1}`)
+	rejectJSON(t, event, `{"kind": "scope_opened", "scope": {"kind": "invocation", "session_id": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f", "operation_id": "op-1", "invocation_id": "inv-1", "purpose": "conversation"}, "extra": 1}`)
 
 	discriminator := event.Discriminator
 	testassert.Require(t, discriminator != nil && discriminator.PropertyName == "kind", "Event discriminator is missing")
@@ -127,7 +128,7 @@ func TestGeneratedScopeEventRoundTripsBothKinds(t *testing.T) {
 	} {
 		var event protocol.ScopeEvent
 		{
-			err := json.Unmarshal([]byte(`{"kind": "`+tc.wire+`", "scope": {"kind": "runtime"}}`), &event)
+			err := json.Unmarshal([]byte(`{"kind": "`+tc.wire+`", "scope": {"kind": "invocation", "session_id": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f", "operation_id": "op-1", "invocation_id": "inv-1", "purpose": "conversation"}}`), &event)
 			testassert.Require(t, err == nil, "decoding generated ScopeEvent %s: %v", tc.wire, err)
 		}
 		testassert.Require(t, event.Kind == tc.kind, "decoded ScopeEvent kind = %q, want %q", event.Kind, tc.wire)

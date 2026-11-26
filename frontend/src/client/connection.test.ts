@@ -14,7 +14,7 @@ import type { desktopclient } from '../../client-bindings/wailsjs/go/models';
 import { RuntimeConnection } from './connection';
 import { invokeNative } from './results';
 
-const eventDocument = '{"kind":"scope_opened","scope":{"kind":"runtime"}}';
+const eventDocument = '{"kind":"scope_opened","scope":{"kind":"invocation","session_id":"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f","operation_id":"op-1","invocation_id":"inv-1","purpose":"conversation"}}';
 
 const connectionInfo = (generation: string): desktopclient.ConnectionInfo => ({
   instance_id: '0123456789abcdef0123456789abcdef',

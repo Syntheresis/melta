@@ -193,8 +193,7 @@ func TestCompactLifecycleNativeCompactionObservation(t *testing.T) {
 			case "scope_opened", "scope_closed":
 				body, err := event.AsScopeEvent()
 				testassert.NoError(t, err)
-				invocation, err := body.Scope.AsInvocationScope()
-				testassert.NoError(t, err)
+				invocation := body.Scope
 				testassert.Equal(t, invocation.SessionId, sessionID)
 				testassert.Require(t, invocation.InvocationId != "", "scope event = %+v, want an invocation identity", invocation)
 				pair := pairs[invocation.InvocationId]

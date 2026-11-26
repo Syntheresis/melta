@@ -11,7 +11,7 @@ import { createClient } from './src/generated/protocol/client';
 
 const credential = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f';
 const instanceID = '1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f';
-const sseFrame = 'event: notification\ndata: {"kind":"scope_opened","scope":{"kind":"runtime"}}\n\n';
+const sseFrame = 'event: notification\ndata: {"kind":"scope_opened","scope":{"kind":"invocation","session_id":"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f","operation_id":"op-1","invocation_id":"inv-1","purpose":"conversation"}}\n\n';
 
 test('configured bearer credential reaches health and events', async () => {
   const fetchFn = vi.fn(async (input) => {
@@ -38,7 +38,7 @@ test('configured bearer credential reaches health and events', async () => {
   for await (const event of events.stream) {
     received.push(event);
   }
-  expect(received).toEqual([{ kind: 'scope_opened', scope: { kind: 'runtime' } }]);
+  expect(received).toEqual([{ kind: 'scope_opened', scope: { kind: 'invocation', session_id: '9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f', operation_id: 'op-1', invocation_id: 'inv-1', purpose: 'conversation' } }]);
 
   expect(fetchFn).toHaveBeenCalledTimes(2);
   const urls = fetchFn.mock.calls.map(([request]) => String(request.url));

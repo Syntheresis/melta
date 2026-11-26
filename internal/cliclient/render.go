@@ -580,25 +580,5 @@ func (c *CLI) acceptEvent(delivery eventDelivery) {
 				c.kickReaderLocked(r)
 			}
 		}
-	default:
-		e, err := event.AsScopeEvent()
-		if err != nil {
-			c.repairLocked(delivery.conn)
-			return
-		}
-		scope, err := e.Scope.AsRuntimeScope()
-		if err != nil {
-			c.repairLocked(delivery.conn)
-			return
-		}
-		if scope.Workspace != nil && *scope.Workspace != c.workspace {
-			return
-		}
-		for _, r := range []*sessionReader{c.root, c.child} {
-			if r != nil && (scope.SessionId == nil || *scope.SessionId == r.id) {
-				r.dirty = true
-				c.kickReaderLocked(r)
-			}
-		}
 	}
 }

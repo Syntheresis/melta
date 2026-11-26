@@ -361,19 +361,17 @@ func operationEventScope(workspace, sessionID, operationID string) protocol.Scop
 // invocation kind with the Workspace/Session/Operation identity, the
 // invocation identity and its purpose.
 func scopeEvent(kind protocol.ScopeEventKind, workspace, sessionID, operationID, invocationID, purpose string) Event {
-	var scope protocol.Scope
-	_ = scope.FromInvocationScope(protocol.InvocationScope{ // plain members; the marshal cannot fail
-		Kind:         protocol.Invocation,
-		Workspace:    eventString(workspace),
-		SessionId:    sessionID,
-		OperationId:  operationID,
-		InvocationId: invocationID,
-		Purpose:      protocol.InvocationScopePurpose(purpose),
-	})
 	var event Event
 	_ = event.FromScopeEvent(protocol.ScopeEvent{ // plain string members; the marshal cannot fail
-		Kind:  kind,
-		Scope: scope,
+		Kind: kind,
+		Scope: protocol.InvocationScope{
+			Kind:         protocol.Invocation,
+			Workspace:    eventString(workspace),
+			SessionId:    sessionID,
+			OperationId:  operationID,
+			InvocationId: invocationID,
+			Purpose:      protocol.InvocationScopePurpose(purpose),
+		},
 	})
 	return event
 }

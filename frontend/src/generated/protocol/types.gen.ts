@@ -182,7 +182,7 @@ export type Health = {
 };
 
 /**
- * One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+ * One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
  *
  */
 export type Scope = ({
@@ -192,8 +192,6 @@ export type Scope = ({
 } & SessionScope) | ({
     kind: 'operation';
 } & OperationScope) | ({
-    kind: 'invocation';
-} & InvocationScope) | ({
     kind: 'job';
 } & JobScope);
 
@@ -879,7 +877,7 @@ export type ConfigurationChangedEvent = {
 
 export type ScopeEvent = {
     kind: 'scope_opened' | 'scope_closed';
-    scope: Scope;
+    scope: InvocationScope;
 };
 
 export type SessionChangedEvent = {

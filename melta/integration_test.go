@@ -523,11 +523,8 @@ type shInvocationPair struct {
 	opened, closed int
 }
 
-func shScopeMarkOf(t *testing.T, kind protocol.ScopeEventKind, scope protocol.Scope) shScopeMark {
+func shScopeMarkOf(t *testing.T, kind protocol.ScopeEventKind, body protocol.InvocationScope) shScopeMark {
 	t.Helper()
-	testassert.Require(t, scopeKind(t, scope) == "invocation", "committed scope = %+v, want an invocation scope", scope)
-	body, err := scope.AsInvocationScope()
-	testassert.NoError(t, err)
 	testassert.Require(t, body.InvocationId != "", "committed scope = %+v, want an invocation identity", body)
 	return shScopeMark{kind: kind, invocationID: body.InvocationId, purpose: body.Purpose, workspace: deref(body.Workspace), operationID: body.OperationId}
 }

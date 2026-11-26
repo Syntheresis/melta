@@ -1816,8 +1816,7 @@ func TestPreparationInvocationOpeningFailurePublishesItsClosure(t *testing.T) {
 			body, err := event.AsScopeEvent()
 			testassert.NoError(t, err)
 			testassert.Equal(t, body.Kind, protocol.ScopeOpened)
-			invocation, err := body.Scope.AsInvocationScope()
-			testassert.NoError(t, err)
+			invocation := body.Scope
 			testassert.Require(t, invocation.InvocationId == "inv-opening-failure" && invocation.Purpose == protocol.Conversation, "opening scope = %+v, want the invocation's own identity and purpose", invocation)
 			openedBeforeOpener = true
 		default:
@@ -1841,7 +1840,6 @@ func TestPreparationInvocationOpeningFailurePublishesItsClosure(t *testing.T) {
 	body, err := closed.AsScopeEvent()
 	testassert.NoError(t, err)
 	testassert.Equal(t, body.Kind, protocol.ScopeClosed)
-	invocation, err := body.Scope.AsInvocationScope()
-	testassert.NoError(t, err)
+	invocation := body.Scope
 	testassert.Require(t, invocation.InvocationId == "inv-opening-failure" && invocation.Purpose == protocol.Conversation, "closure scope = %+v, want the invocation's own identity and purpose", invocation)
 }
