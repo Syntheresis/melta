@@ -17,7 +17,11 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
-type registrarTestTool struct{ name string }
+func registrarTestTool(name string) extension.ToolFunc {
+	return func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+		return extension.ToolResult{Content: name + ":" + name}, nil
+	}
+}
 
 type registrarContext struct {
 	context.Context
@@ -140,7 +144,7 @@ func TestScopedServicePreservesIssuingContextValues(t *testing.T) {
 func TestScopedServiceNestedProviderIdentityAndState(t *testing.T) {
 	owner := &configurationService{}
 	method := func(name string) extension.Method {
-		return extension.Method{Name: name, Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)}
+		return extension.Method{Name: name, Input: []byte(`{}`), Success: []byte(`{}`)}
 	}
 	provider := extension.Extension{Manifest: registrarManifest("provider"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "inner/opaque", Methods: []extension.RegisteredMethod{{
@@ -181,7 +185,7 @@ func TestScopedServiceNestedProviderIdentityAndState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	scope := &nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
-		candidate:          candidate, activation: candidate.activations[2], pure: true,
+		candidate:          candidate, activation: candidate.activations[2], kind: callKindHook,
 		session: harness.SessionIdentity{SessionID: "session"},
 		states:  map[string]harness.SessionStateValue{"outer": []byte(`{"state":"outer"}`), "provider": []byte(`{"state":"provider"}`)},
 	}
@@ -200,9 +204,9 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error
-			old, err = a.RegisterTool(model.ToolDefinition{Name: "old", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+			old, err = a.RegisterTool(model.ToolDefinition{Name: "old", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 			if err == nil {
-				_, err = a.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+				_, err = a.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 			}
 			return nil, err
 		}}
@@ -211,7 +215,7 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.release()
-	if _, err := api.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool{}, old); err == nil {
+	if _, err := api.RegisterTool(model.ToolDefinition{Name: "occupied", Parameters: []byte(`{}`)}, registrarTestTool(""), old); err == nil {
 		t.Fatal("conflicting replacement accepted")
 	}
 	current := c.snapshotForTest()
@@ -219,7 +223,7 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 		t.Fatal("failed replacement removed old registration")
 	}
 	current.release()
-	replacement, err := api.RegisterTool(model.ToolDefinition{Name: "new", Parameters: []byte(`{}`)}, registrarTestTool{}, old)
+	replacement, err := api.RegisterTool(model.ToolDefinition{Name: "new", Parameters: []byte(`{}`)}, registrarTestTool(""), old)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +249,34 @@ func TestRegistrarReplaceRenamesAndPreservesConflict(t *testing.T) {
 	}
 }
 
+func TestRegistrarRejectsInvalidToolSchemaWithoutReplacement(t *testing.T) {
+	owner := &configurationService{}
+	var api extension.API
+	var original extension.Registration
+	guest := extension.Extension{Manifest: registrarManifest("schema"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
+		api = a
+		var err error
+		original, err = a.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":"object"}`)}, registrarTestTool(""), nil)
+		return nil, err
+	}}
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: guest, section: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.release()
+	for _, replacement := range []extension.Registration{nil, original} {
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":7}`)}, registrarTestTool(""), replacement)
+		if !errors.Is(err, harness.ErrInvalid) {
+			t.Fatalf("invalid schema = %v", err)
+		}
+	}
+	stage := candidate.snapshotForTest()
+	defer stage.release()
+	if stage.tools["probe"] == nil || stage.tools["probe"] != original {
+		t.Fatal("invalid replacement removed the original registration")
+	}
+}
+
 func TestRegistrarRegistrationReleaseAfterStageAndPlan(t *testing.T) {
 	owner := &configurationService{}
 	var api extension.API
@@ -252,7 +284,7 @@ func TestRegistrarRegistrationReleaseAfterStageAndPlan(t *testing.T) {
 	e := extension.Extension{Manifest: registrarManifest("release"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 		api = a
 		var err error
-		original, err = a.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		original, err = a.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: e, section: []byte(`{}`)}})
@@ -264,7 +296,7 @@ func TestRegistrarRegistrationReleaseAfterStageAndPlan(t *testing.T) {
 	original.(*nativeRegistration).release = func() { released++ }
 	stage := candidate.snapshotForTest()
 	binding := stage.bindTool("tool")
-	if _, err := api.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool{}, original); err != nil {
+	if _, err := api.RegisterTool(model.ToolDefinition{Name: "tool", Parameters: []byte(`{}`)}, registrarTestTool(""), original); err != nil {
 		t.Fatal(err)
 	}
 	if released != 0 {
@@ -315,7 +347,7 @@ func TestRegistrarOperationTupleAndCleanupAttachments(t *testing.T) {
 			Manifest: registrarManifest(id),
 			Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 				for _, name := range names {
-					op := extension.Operation{Target: extension.ExposedTargetSession, Method: extension.Method{Name: name, Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)}, Handler: handler}
+					op := extension.Operation{Target: extension.ExposedTargetSession, Method: extension.Method{Name: name, Input: []byte(`{}`), Success: []byte(`{}`)}, Handler: handler}
 					if _, err := api.RegisterOperation(op, nil); err != nil {
 						return nil, err
 					}
@@ -421,10 +453,6 @@ func TestRegistrarAmbiguousIdentityInactive(t *testing.T) {
 	}
 }
 
-func (t registrarTestTool) Normalize(extension.AuthorContext, model.ToolCall) (json.RawMessage, error) {
-	return json.RawMessage(t.name), nil
-}
-
 func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 	owner := &configurationService{}
 	manifest := registrarManifest
@@ -437,7 +465,7 @@ func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 	}}
 	b := extension.Extension{Manifest: manifest("b"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		starts["b"]++
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	first, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{
@@ -452,7 +480,7 @@ func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 	}
 	a.Activate = func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		starts["a"]++
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}
 	second, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{
@@ -468,7 +496,7 @@ func TestRegistrarReuseReconcilesHeldClaims(t *testing.T) {
 	if !reflect.DeepEqual(starts, map[string]int{"a": 2, "b": 1}) {
 		t.Fatalf("unrelated activation restarted: %v", starts)
 	}
-	if _, err := aAPI.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err == nil {
+	if _, err := aAPI.RegisterTool(model.ToolDefinition{Name: "held", Parameters: []byte(`{}`)}, registrarTestTool(""), nil); err == nil {
 		t.Fatal("shared configuration collision accepted")
 	}
 }
@@ -517,7 +545,7 @@ func TestRegistrarSharedActivationChecksEveryHeldConfiguration(t *testing.T) {
 		if string(value.Settings()) == `{"v":2}` {
 			name = "new"
 		}
-		_, err := value.RegisterTool(model.ToolDefinition{Name: name, Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+		_, err := value.RegisterTool(model.ToolDefinition{Name: name, Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	first, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: a, section: []byte(`{}`)}, {extension: b, section: []byte(`{"v":1}`)}})
@@ -537,7 +565,7 @@ func TestRegistrarSharedActivationChecksEveryHeldConfiguration(t *testing.T) {
 		t.Fatal(second.inactive)
 	}
 	for _, name := range []string{"old", "new"} {
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: name, Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: name, Parameters: []byte(`{}`)}, registrarTestTool(""), nil); err == nil {
 			t.Fatalf("shared activation displaced %q", name)
 		}
 	}
@@ -549,7 +577,7 @@ func TestRegistrarReusedConflictsRemainPrivate(t *testing.T) {
 		return nativeActivationSpec{extension: extension.Extension{
 			Manifest: extension.Manifest{ID: id, Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 			Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-				_, err := api.RegisterTool(model.ToolDefinition{Name: "same", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+				_, err := api.RegisterTool(model.ToolDefinition{Name: "same", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 				return nil, err
 			},
 		}, section: []byte(`{}`)}
@@ -590,7 +618,7 @@ func TestRegistrarSuccessiveActivationsCanShareNames(t *testing.T) {
 		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			starts++
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "shared", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "shared", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 			return nil, err
 		},
 	}
@@ -655,7 +683,7 @@ func TestRegisterServiceRejectsMeltaServiceNames(t *testing.T) {
 	var duplicateErr, hostErr, promptErr error
 	e := extension.Extension{Manifest: registrarManifest("service-names"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		service := extension.Service{Name: "duplicate", Methods: []extension.RegisteredMethod{{
-			Method: extension.PureMethod("ping", `{"type":"object"}`, `{"type":"null"}`),
+			Method: extension.ServiceMethod("ping", `{"type":"object"}`, `{"type":"null"}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage("null")}, nil
 			},
@@ -683,18 +711,18 @@ func TestRegistrarEntryServiceVisibility(t *testing.T) {
 	getCalls := 0
 	service := func(name string) extension.Service {
 		return extension.Service{Name: name, Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "get", Mode: extension.ModePure, Input: []byte(`{"type":"object"}`), Success: []byte(`{"type":"string"}`)},
+			Method: extension.Method{Name: "get", Input: []byte(`{"type":"object"}`), Success: []byte(`{"type":"string"}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				getCalls++
 				return extension.Result{Value: []byte(`"ok"`)}, nil
 			},
 		}, {
-			Method: extension.Method{Name: "bad_result", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{"type":"string"}`)},
+			Method: extension.Method{Name: "bad_result", Input: []byte(`{}`), Success: []byte(`{"type":"string"}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: []byte(`42`)}, nil
 			},
 		}, {
-			Method: extension.Method{Name: "bad_partial", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "bad_partial", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{}, &extension.CallError{Err: harness.ErrStorage, Partial: []byte(`{`)}
 			},
@@ -781,7 +809,7 @@ func TestRegistrarEntryCallExpiresAndJoins(t *testing.T) {
 	manifest := registrarManifest
 	provider := extension.Extension{Manifest: manifest("provider"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "svc", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "call", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "call", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				close(entered)
 				<-ctx.Done()
@@ -816,7 +844,7 @@ func TestRegistrarCanceledEntryJoinsBeforeClosingAndReportsErrors(t *testing.T) 
 	callerClose, providerClose := errors.New("caller close"), errors.New("provider close")
 	provider := extension.Extension{Manifest: registrarManifest("provider"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "svc", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "call", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)},
+			Method: extension.Method{Name: "call", Input: []byte(`{}`), Success: []byte(`{}`)},
 			Handler: func(ctx context.Context, _ extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				close(entered)
 				<-ctx.Done()
@@ -864,29 +892,23 @@ func TestRegistrarCanceledEntryJoinsBeforeClosingAndReportsErrors(t *testing.T) 
 func TestRegistrarNestedServiceScope(t *testing.T) {
 	owner := &configurationService{}
 	var borrowed func(context.Context, string, string, json.RawMessage) (extension.Result, error)
-	method := func(name string, mode extension.Mode) extension.Method {
-		return extension.Method{Name: name, Mode: mode, Input: []byte(`{}`), Success: []byte(`{}`)}
+	method := func(name string) extension.Method {
+		return extension.Method{Name: name, Input: []byte(`{}`), Success: []byte(`{}`)}
 	}
 	e := extension.Extension{
 		Manifest: extension.Manifest{ID: "provider", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "service", Methods: []extension.RegisteredMethod{
-				{Method: method("nested", extension.ModePure), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+				{Method: method("nested"), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 					return extension.Result{Value: []byte(`null`)}, nil
 				}},
-				{Method: method("effect", extension.ModeServiceIO), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
-					return extension.Result{Value: []byte(`null`)}, nil
-				}},
-				{Method: method("outer", extension.ModePure), Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
+				{Method: method("outer"), Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 					if call.Call == nil {
 						return extension.Result{}, errors.New("missing scoped call")
 					}
 					borrowed = call.Call
 					if _, err := call.Call(ctx, "service", "nested", []byte(`{}`)); err != nil {
 						return extension.Result{}, err
-					}
-					if _, err := call.Call(ctx, "service", "effect", []byte(`{}`)); !errors.Is(err, ErrDenied) {
-						return extension.Result{}, errors.New("pure call invoked effectful method")
 					}
 					return extension.Result{Value: []byte(`null`)}, nil
 				}},
@@ -923,10 +945,10 @@ func TestRegistrarReentrantReplacementDoesNotWait(t *testing.T) {
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error
-			handle, err = a.AttachArguments(extension.HookModePure, func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
+			handle, err = a.AttachArguments(func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
 				close(entered)
 				<-proceed
-				_, err := api.AttachArguments(extension.HookModePure, func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
+				_, err := api.AttachArguments(func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
 					return extension.ArgumentsResult{}, nil
 				}, handle)
 				return extension.ArgumentsResult{}, err
@@ -1003,7 +1025,7 @@ func TestRegistrarCloseMayReenter(t *testing.T) {
 	e := extension.Extension{Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			return func(context.Context) error {
-				_, err := api.RegisterTool(model.ToolDefinition{Name: "late", Parameters: []byte(`{}`)}, registrarTestTool{}, nil)
+				_, err := api.RegisterTool(model.ToolDefinition{Name: "late", Parameters: []byte(`{}`)}, registrarTestTool(""), nil)
 				closed <- err
 				return nil
 			}, nil
@@ -1038,15 +1060,15 @@ func TestRegistrarParkedStageReplacementAndRelease(t *testing.T) {
 	first := extension.Extension{Manifest: manifest("first"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 		api = a
 		var err error
-		old, err = api.AttachArguments(extension.HookModePure, hook("old"), nil)
+		old, err = api.AttachArguments(hook("old"), nil)
 		if err != nil {
 			return nil, err
 		}
-		_, err = api.AttachArguments(extension.HookModePure, hook("second"), nil)
+		_, err = api.AttachArguments(hook("second"), nil)
 		return func(context.Context) error { closed = append(closed, "first"); return nil }, err
 	}}
 	second := extension.Extension{Manifest: manifest("second"), Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
-		_, err := a.AttachArguments(extension.HookModePure, hook("other"), nil)
+		_, err := a.AttachArguments(hook("other"), nil)
 		return func(context.Context) error { closed = append(closed, "second"); return nil }, err
 	}}
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: first, section: []byte(`{}`)}, {extension: second, section: []byte(`{}`)}})
@@ -1054,14 +1076,14 @@ func TestRegistrarParkedStageReplacementAndRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	parked := candidate.snapshotForTest()
-	replacement, err := api.AttachArguments(extension.HookModePure, hook("new"), old)
+	replacement, err := api.AttachArguments(hook("new"), old)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := api.Remove(old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := api.AttachArguments(extension.HookModePure, hook("bad"), old); err == nil {
+	if _, err := api.AttachArguments(hook("bad"), old); err == nil {
 		t.Fatal("stale replacement accepted")
 	}
 	current := candidate.snapshotForTest()
@@ -1096,23 +1118,16 @@ func TestRegistrarParkedStageReplacementAndRelease(t *testing.T) {
 		t.Fatalf("close order: %v", closed)
 	}
 }
-func (t registrarTestTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Data: []byte(t.name)}
-}
-func (t registrarTestTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{Content: t.name + ":" + string(plan.Data)}}
-}
-
 func TestRegistrationAllContributions(t *testing.T) {
 	owner := &configurationService{}
 	handler := func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 		return extension.Result{Value: []byte(`null`)}, nil
 	}
-	method := extension.Method{Name: "run", Mode: extension.ModePure, Input: []byte(`{}`), Success: []byte(`{}`)}
+	method := extension.Method{Name: "run", Input: []byte(`{}`), Success: []byte(`{}`)}
 	e := extension.Extension{
 		Manifest: extension.Manifest{ID: "entry", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: []byte(`{}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			if _, err := api.RegisterTool(model.ToolDefinition{Name: "custom", Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err != nil {
+			if _, err := api.RegisterTool(model.ToolDefinition{Name: "custom", Parameters: []byte(`{}`)}, registrarTestTool(""), nil); err != nil {
 				return nil, err
 			}
 			if _, err := api.RegisterStrategy(*harness.IncludedStrategyBinding(), nil); err != nil {
@@ -1129,17 +1144,17 @@ func TestRegistrationAllContributions(t *testing.T) {
 			}, nil); err != nil {
 				return nil, err
 			}
-			if _, err := api.AttachRequest(extension.HookModeEffectful, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			if _, err := api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				return harness.RequestConsequence{}, nil
 			}, nil); err != nil {
 				return nil, err
 			}
-			if _, err := api.AttachArguments(extension.HookModePure, func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
+			if _, err := api.AttachArguments(func(context.Context, extension.AuthorContext, model.ToolCall) (extension.ArgumentsResult, error) {
 				return extension.ArgumentsResult{}, nil
 			}, nil); err != nil {
 				return nil, err
 			}
-			if _, err := api.AttachAuthorization(func(context.Context, extension.AuthorContext, extension.AuthorizationInput) (*string, error) {
+			if _, err := api.AttachToolCheck(func(context.Context, extension.AuthorContext, model.ToolCall) (*string, error) {
 				return nil, nil
 			}, nil); err != nil {
 				return nil, err
@@ -1165,10 +1180,10 @@ func TestRegistrationAllContributions(t *testing.T) {
 	}
 	stage := c.snapshotForTest()
 	defer stage.release()
-	if len(stage.tools) != 1 || len(stage.strategies) != 1 || len(stage.services) != 1 || len(stage.operations) != 1 {
+	if len(stage.tools) != 1 || len(stage.strategies) != 1 || stagedService(stage, "svc") == nil || len(stage.operations) != 1 {
 		t.Fatal(stage)
 	}
-	for _, kind := range []string{"admission", "request", "arguments", "authorization", "result", "cleanup"} {
+	for _, kind := range []string{"admission", "request", "arguments", "check", "result", "cleanup"} {
 		if len(stage.hooks[kind]) != 1 {
 			t.Fatalf("%s: %v", kind, stage.hooks[kind])
 		}
@@ -1182,28 +1197,23 @@ func TestRegistrationRejectsInvalidAndForeignHandles(t *testing.T) {
 	def := model.ToolDefinition{Name: "custom", Parameters: []byte(`{}`)}
 	a := extension.Extension{Manifest: manifest("a"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		var err error
-		first, err = api.RegisterTool(def, registrarTestTool{}, nil)
+		first, err = api.RegisterTool(def, registrarTestTool(""), nil)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := api.RegisterTool(def, registrarTestTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(def, registrarTestTool(""), nil); err == nil {
 			t.Fatal("duplicate accepted")
 		}
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: []byte(`{}`)}, registrarTestTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: []byte(`{}`)}, registrarTestTool(""), nil); err == nil {
 			t.Fatal("standard tool replaced")
 		}
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: "bad", Parameters: []byte(`[]`)}, registrarTestTool{}, nil); err == nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "bad", Parameters: []byte(`[]`)}, registrarTestTool(""), nil); err == nil {
 			t.Fatal("invalid tool accepted")
-		}
-		if _, err := api.AttachRequest(extension.HookMode("invalid"), func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
-			return harness.RequestConsequence{}, nil
-		}, nil); err == nil {
-			t.Fatal("invalid hook mode accepted")
 		}
 		return nil, nil
 	}}
 	b := extension.Extension{Manifest: manifest("b"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(def, registrarTestTool{}, first); err == nil {
+		if _, err := api.RegisterTool(def, registrarTestTool(""), first); err == nil {
 			t.Fatal("foreign replacement accepted")
 		}
 		if err := api.Remove(first); err == nil {
@@ -1237,7 +1247,7 @@ func TestRegistrarPreparedToolRetainsIdentity(t *testing.T) {
 		Activate: func(_ context.Context, a extension.API) (func(context.Context) error, error) {
 			api = a
 			var err error
-			original, err = a.RegisterTool(definition, registrarTestTool{name: `"old"`}, nil)
+			original, err = a.RegisterTool(definition, registrarTestTool(`"old"`), nil)
 			return func(context.Context) error { closed = true; return nil }, err
 		},
 	}
@@ -1250,8 +1260,7 @@ func TestRegistrarPreparedToolRetainsIdentity(t *testing.T) {
 	if binding == nil {
 		t.Fatal("missing binding")
 	}
-	prepared := binding.entry.value.(nativeTool).tool.Prepare(context.Background(), extension.AuthorContext{}, model.ToolCall{})
-	if _, err := api.RegisterTool(definition, registrarTestTool{name: `"new"`}, original); err != nil {
+	if _, err := api.RegisterTool(definition, registrarTestTool(`"new"`), original); err != nil {
 		t.Fatal(err)
 	}
 	stage.release()
@@ -1263,7 +1272,7 @@ func TestRegistrarPreparedToolRetainsIdentity(t *testing.T) {
 	if closed {
 		t.Fatal("closed while prepared binding held")
 	}
-	result := binding.entry.value.(nativeTool).tool.Execute(context.Background(), extension.AuthorContext{}, prepared)
+	result := binding.entry.value.(nativeTool).tool(context.Background(), extension.AuthorContext{}, model.ToolCall{ID: "call"})
 	if result.Result.Content != `"old":"old"` {
 		t.Fatalf("bound implementation: %s", result.Result.Content)
 	}
@@ -1280,13 +1289,13 @@ func TestRegistrarCandidateIsolation(t *testing.T) {
 	manifest := registrarManifest
 	owner := &configurationService{}
 	first := extension.Extension{Manifest: manifest("first"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(definition, registrarTestTool{}, nil); err != nil {
+		if _, err := api.RegisterTool(definition, registrarTestTool(""), nil); err != nil {
 			return nil, err
 		}
 		return nil, fail
 	}}
 	second := extension.Extension{Manifest: manifest("second"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(definition, registrarTestTool{}, nil)
+		_, err := api.RegisterTool(definition, registrarTestTool(""), nil)
 		return nil, err
 	}}
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{
@@ -1324,7 +1333,7 @@ func TestScopedStateAndSessionArgumentsValidateByContract(t *testing.T) {
 			row := row
 			if _, err := api.RegisterOperation(extension.Operation{
 				Target: extension.ExposedTargetSession,
-				Method: extension.Method{Name: row.method, Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Method: extension.Method{Name: row.method, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 				Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 					return call.Call(ctx, row.service, row.serviceMethod, json.RawMessage(row.arguments))
 				},

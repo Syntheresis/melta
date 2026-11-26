@@ -52,7 +52,8 @@ func TestObservationPausedFactEmitsCurrentRevision(t *testing.T) {
 			t.Fatalf("creation event = %s (ok=%v), want the session's first invalidation", eventJSON(t, creation), ok)
 		}
 
-		_, release := pauseObservation(t, r.obs, scopeEvent(protocol.ScopeOpened, ScopeInfo{Kind: ScopeWorkspace, Workspace: "/ws-paused-synthetic"}))
+		pausedPublish := configurationChangedEvent(r.instance, 1)
+		_, release := pauseObservation(t, r.obs, pausedPublish)
 		archiveDone := make(chan error, 1)
 		go func() {
 			archiveDone <- r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
@@ -84,7 +85,7 @@ func TestObservationPausedFactEmitsCurrentRevision(t *testing.T) {
 		testassert.NoError(t, <-reopenDone)
 
 		pausedEvent, ok := nextEvent(t, sub)
-		if !ok || !equalEvent(pausedEvent, scopeEvent(protocol.ScopeOpened, ScopeInfo{Kind: ScopeWorkspace, Workspace: "/ws-paused-synthetic"})) {
+		if !ok || !equalEvent(pausedEvent, pausedPublish) {
 			t.Fatalf("first event after release = %s (ok=%v), want the paused publication's own event", eventJSON(t, pausedEvent), ok)
 		}
 		// Both queued invalidations — the archive's own committed pair was
@@ -176,10 +177,8 @@ func TestObservationRootChildScopeTagging(t *testing.T) {
 				case "scope_opened", "scope_closed":
 					body, err := event.AsScopeEvent()
 					testassert.NoError(t, err)
-					if kind := scopeKind(t, body.Scope); kind == "operation" || kind == "agent" {
-						shortSession, _ := scopeSessionIdentity(t, body.Scope)
-						testassert.Require(t, shortSession == root || shortSession == child, "short scope event for a foreign session: %+v", body.Scope)
-					}
+					shortSession := body.Scope.SessionId
+					testassert.Require(t, shortSession == root || shortSession == child, "invocation scope event for a foreign session: %+v", body.Scope)
 				default:
 					// configuration and warning events carry no session attribution.
 				}
@@ -427,7 +426,7 @@ func TestObservationPluginReportsLandWithRealAttribution(t *testing.T) {
 			return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 				_, err := api.RegisterOperation(extension.Operation{
 					Target: extension.ExposedTargetHarness,
-					Method: extension.Method{Name: "report", Mode: extension.ModeServiceIO, Input: []byte(`{}`), Success: []byte(`{}`)},
+					Method: extension.Method{Name: "report", Input: []byte(`{}`), Success: []byte(`{}`)},
 					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						return call.Call(ctx, "melta.warnings", "report", args)
 					},

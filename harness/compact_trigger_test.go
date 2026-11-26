@@ -627,8 +627,8 @@ func TestModelEffectCompactTriggerSecondOverflowSameOperation(t *testing.T) {
 	compactCalls := 0
 	var sentTexts [][]string
 	rounds := 0
-	tool := func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+	tool := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+		return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 	}
 	exec := purposeExecution(
 		func(ctx context.Context, r model.Request, _ model.Extra) (model.Stream, error) {
@@ -658,7 +658,7 @@ func TestModelEffectCompactTriggerSecondOverflowSameOperation(t *testing.T) {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeConversation {
-			inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
+			inv.LookupTool = fixtureToolLookup(tool)
 		}
 		return inv, nil
 	}
@@ -698,8 +698,8 @@ func TestModelEffectCompactTriggerSummaryUsageStaysTotalsOnly(t *testing.T) {
 	compactCalls := 0
 	conversationCalls := 0
 	rounds := 0
-	tool := func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+	tool := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+		return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 	}
 	exec := purposeExecution(
 		func(context.Context, model.Request, model.Extra) (model.Stream, error) {
@@ -722,7 +722,7 @@ func TestModelEffectCompactTriggerSummaryUsageStaysTotalsOnly(t *testing.T) {
 			return inv, err
 		}
 		if request.Purpose == InvocationPurposeConversation {
-			inv.LookupTool = fixtureToolLookup(tool, objectNormalize)
+			inv.LookupTool = fixtureToolLookup(tool)
 		}
 		return inv, nil
 	}
@@ -1055,9 +1055,9 @@ func TestModelEffectCompactTriggerFullInputCommitAttributesUsage(t *testing.T) {
 				refusal.RefusalFragment = "cannot do that"
 				return streamOf(refusal), nil
 			},
-			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
-			}, objectNormalize),
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) ToolOutcome {
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}
+			}),
 		}, nil
 	}}
 	compactRef := testCompactCapture().Model

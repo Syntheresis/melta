@@ -35,19 +35,7 @@ func TestConfiguredToolsSettingsTakeEffect(t *testing.T) {
 
 	configured, err := ConfiguredInvocationForTest(`{"read_max_lines":77}`, "", "", nil)
 	testassert.NoError(t, err)
-	raw, err := readTool.Normalize(context.Background(), ToolContext{Invocation: configured}, call(t, `{"path":"a.txt"}`))
-	testassert.NoError(t, err)
-	testassert.Require(t, string(raw) == `{"limit":77,"offset":1,"path":"a.txt"}`, "configured normalization = %s, want the configured default limit 77", raw)
 
-	// The zero Invocation keeps the shipped default: the channel, not the
-	// decoder, carries the configured value.
-	raw, err = readTool.Normalize(context.Background(), ToolContext{}, call(t, `{"path":"a.txt"}`))
-	testassert.NoError(t, err)
-	testassert.Require(t, string(raw) == `{"limit":500,"offset":1,"path":"a.txt"}`, "zero-Invocation normalization = %s, want the shipped default limit 500", raw)
-
-	// End to end through the real pipeline: Normalize commits the
-	// configured default limit, and Prepare consumes those committed bytes —
-	// the configured limit bounds the executed read window.
 	ws := t.TempDir()
 	lines := make([]string, 100)
 	for i := range lines {
@@ -59,10 +47,11 @@ func TestConfiguredToolsSettingsTakeEffect(t *testing.T) {
 		AdmittedEntry: harness.EntryRef{SessionID: "0123456789abcdef0123456789abcdef", EntryID: "fedcba9876543210fedcba9876543210"},
 		Invocation:    configured,
 	}
-	committed, err := readTool.Normalize(context.Background(), tc, call(t, `{"path":"big.txt"}`))
-	testassert.NoError(t, err)
-	plan := readTool.Prepare(ctx, tc, call(t, string(committed)))
-	testassert.Require(t, plan.Immediate == nil && plan.Execute != nil, "plan = %+v, want one executor", plan)
-	outcome := plan.Execute(ctx)
+	outcome := readTool(ctx, tc, call(t, `{"path":"big.txt"}`))
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.HasPrefix(outcome.Result.Content, "1\txxxxxxxxxx\n") && strings.Contains(outcome.Result.Content, "\n77\txxxxxxxxxx\n") && strings.HasSuffix(outcome.Result.Content, "(Showing lines 1-77 of 100. Use offset=78 to continue.)"), "result = %+v, want success; content = %q, want the configured 77-line window; content = %q, want the configured-limit pagination footer", outcome.Result, outcome.Result.Content, outcome.Result.Content)
+
+	testassert.NoError(t, os.WriteFile(filepath.Join(ws, "default.txt"), []byte(strings.Repeat("x\n", 500)+"x"), 0o644))
+	tc.Invocation = Invocation{}
+	outcome = readTool(ctx, tc, call(t, `{"path":"default.txt"}`))
+	testassert.Require(t, outcome.Result.Status == model.ResultSuccess && strings.Contains(outcome.Result.Content, "(Showing lines 1-500 of 501."), "default result = %+v", outcome.Result)
 }

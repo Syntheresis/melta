@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -265,101 +264,34 @@ func TestRunForegroundCommandCancellationOutput(t *testing.T) {
 	})
 }
 
-func TestNormalizeRunCommandArgs(t *testing.T) {
-	decode := func(t *testing.T, raw string) map[string]any {
-		t.Helper()
-		decoder := json.NewDecoder(strings.NewReader(raw))
-		decoder.UseNumber()
+func TestRunCommandArgs(t *testing.T) {
+	cases := []struct {
+		raw        string
+		timeout    int
+		background bool
+	}{
+		{`{"command":"ls"}`, 120, false}, {`{"command":"ls","timeout":5}`, 5, false},
+		{`{"command":"ls","timeout":0}`, 120, false}, {`{"command":"ls","timeout":-3}`, 120, false},
+		{`{"command":"ls","timeout":1.0}`, 1, false}, {`{"command":"ls","timeout":9223372036}`, 9223372036, false},
+		{`{"command":"ls","background":false}`, 120, false}, {`{"command":"ls","background":false,"timeout":5}`, 5, false},
+		{`{"command":"ls","background":true}`, 0, true}, {`{"command":"ls","background":true,"timeout":0}`, 0, true},
+		{`{"command":"ls","background":true,"timeout":-3}`, 0, true}, {`{"command":"ls","background":true,"timeout":5}`, 5, true},
+		{`{"command":"ls","background":true,"timeout":7}`, 7, true},
+	}
+	decode := func(raw string) map[string]any {
 		var args map[string]any
-		{
-			err := decoder.Decode(&args)
-			testassert.Require(t, err == nil, "decode %s: %v", raw, err)
-		}
+		d := json.NewDecoder(strings.NewReader(raw))
+		d.UseNumber()
+		testassert.NoError(t, d.Decode(&args))
 		return args
 	}
-	assertNormalized := func(t *testing.T, raw string, wantTimeout int) {
-		t.Helper()
-		normalized, err := NormalizeRunCommandArgs(decode(t, raw), 120)
-		testassert.Require(t, err == nil, "NormalizeRunCommandArgs(%s) = %v, want accepted", raw, err)
-		testassert.Equal(t, normalized["command"], "ls")
-		{
-			got, ok := normalized["timeout"].(json.Number)
-			testassert.Require(t, ok && got.String() == strconv.Itoa(wantTimeout), "timeout = %v, want the canonical lexeme %d", normalized["timeout"], wantTimeout)
-		}
+	for _, tc := range cases {
+		command, timeout, background, err := RunCommandArgs(decode(tc.raw), 120)
+		testassert.NoError(t, err)
+		testassert.Require(t, command == "ls" && timeout == tc.timeout && background == tc.background, "%s: %q %d %t", tc.raw, command, timeout, background)
 	}
-
-	assertNormalized(t, `{"command":"ls"}`, 120)
-	assertNormalized(t, `{"command":"ls","timeout":5}`, 5)
-	assertNormalized(t, `{"command":"ls","timeout":0}`, 120)
-	assertNormalized(t, `{"command":"ls","timeout":-3}`, 120)
-	assertNormalized(t, `{"command":"ls","timeout":1.0}`, 1)
-	// The exact positive seconds-to-duration bound is accepted, one over is not.
-	assertNormalized(t, `{"command":"ls","timeout":9223372036}`, 9223372036)
-
-	for _, raw := range []string{
-		`{}`,
-		`{"command":""}`,
-		`{"command":null}`,
-		`{"command":5}`,
-		`{"command":"ls","timeout":1.5}`,
-		`{"command":"ls","timeout":"5"}`,
-		`{"command":"ls","timeout":true}`,
-		`{"command":"ls","timeout":null}`,
-		`{"command":"ls","timeout":9223372036854775808}`,
-		`{"command":"ls","timeout":9223372037}`,
-	} {
-		{
-			_, err := NormalizeRunCommandArgs(decode(t, raw), 120)
-			testassert.Check(t, err != nil, "NormalizeRunCommandArgs(%s) accepted, want rejection", raw)
-		}
-	}
-	for _, raw := range []string{
-		`{"command":"ls","background":null}`,
-		`{"command":"ls","background":0}`,
-		`{"command":"ls","background":"later"}`,
-	} {
-		{
-			_, err := NormalizeRunCommandArgs(decode(t, raw), 120)
-			testassert.Check(t, err != nil && err.Error() == "run_command: background must be a boolean", "NormalizeRunCommandArgs(%s) = %v, want the boolean-consumption error", raw, err)
-		}
-	}
-
-	// Present background booleans are preserved, an absent one is written as
-	// false, and the background timeout rule (absent/sub-one -> 0) applies
-	// only when background is true.
-	backgroundCases := []struct {
-		raw            string
-		wantBackground bool
-		wantTimeout    int
-	}{
-		{`{"command":"ls"}`, false, 120},
-		{`{"command":"ls","background":false}`, false, 120},
-		{`{"command":"ls","background":false,"timeout":5}`, false, 5},
-		{`{"command":"ls","background":true}`, true, 0},
-		{`{"command":"ls","background":true,"timeout":0}`, true, 0},
-		{`{"command":"ls","background":true,"timeout":-3}`, true, 0},
-		{`{"command":"ls","background":true,"timeout":5}`, true, 5},
-	}
-	for _, tc := range backgroundCases {
-		normalized, err := NormalizeRunCommandArgs(decode(t, tc.raw), 120)
-		if err != nil {
-			t.Errorf("NormalizeRunCommandArgs(%s) = %v, want accepted", tc.raw, err)
-			continue
-		}
-		{
-			got, ok := normalized["background"].(bool)
-			testassert.Check(t, ok && got == tc.wantBackground, "NormalizeRunCommandArgs(%s) background = %v, want %v", tc.raw, normalized["background"], tc.wantBackground)
-		}
-		{
-			got, ok := normalized["timeout"].(json.Number)
-			testassert.Check(t, ok && got.String() == strconv.Itoa(tc.wantTimeout), "NormalizeRunCommandArgs(%s) timeout = %v, want the canonical lexeme %d", tc.raw, normalized["timeout"], tc.wantTimeout)
-		}
-	}
-
-	normalized, err := NormalizeRunCommandArgs(decode(t, `{"command":"ls","_melta_receipt":"x"}`), 120)
-	testassert.NoError(t, err)
-	{
-		_, ok := normalized["_melta_receipt"]
-		testassert.Require(t, !ok, "normalized arguments retained a private field")
+	for _, raw := range []string{`{"command":""}`, `{"command":"ls","timeout":9223372036854775808}`, `{"command":"ls","timeout":9223372037}`} {
+		_, _, _, err := RunCommandArgs(decode(raw), 120)
+		testassert.Require(t, err != nil, "accepted %s", raw)
 	}
 }

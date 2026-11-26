@@ -17,6 +17,7 @@ import (
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/extension/worker"
 	"github.com/Syntheresis/melta/harness"
+	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
@@ -361,9 +362,15 @@ func activationPending(activation *executableActivation) (sent int, total int) {
 	return sent, total
 }
 
-func runToolExecute(t *testing.T, tool extension.RegisteredTool, call extension.AuthorContext, plan extension.ToolPlan) chan harness.ToolOutcome {
+func peerTool(activation *executableActivation) func(context.Context, extension.AuthorContext, model.ToolCall) harness.ToolOutcome {
+	return func(ctx context.Context, author extension.AuthorContext, call model.ToolCall) harness.ToolOutcome {
+		return activation.authorToolRun(ctx, "peer", author, call)
+	}
+}
+
+func runToolExecute(t *testing.T, tool func(context.Context, extension.AuthorContext, model.ToolCall) harness.ToolOutcome, call extension.AuthorContext, input model.ToolCall) chan harness.ToolOutcome {
 	outcome := make(chan harness.ToolOutcome, 1)
-	go func() { outcome <- tool.Execute(context.Background(), call, plan) }()
+	go func() { outcome <- tool(context.Background(), call, input) }()
 	return outcome
 }
 
@@ -383,8 +390,8 @@ func TestExecutableCallEvidence(t *testing.T) {
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	tool := peerTool(activation)
+	plan := model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)}
 
 	// The writer is blocked on the first frame, the second frame never leaves
 	// the queue, and the activation then ends.
@@ -443,13 +450,123 @@ func TestExecutableLostResult(t *testing.T) {
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
+	tool := peerTool(activation)
 
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	peer.next() // the call left the queue
 	peer.exit()
 	got := <-outcome
 	testassert.Equal(t, got.Evidence, harness.ExecutionUnknown)
+}
+
+func TestExecutableLiteralToolResults(t *testing.T) {
+	for _, row := range []struct {
+		name, literal string
+		valid         bool
+	}{
+		{"success", `{"result":{"call_id":"call","status":"success","content":"literal"},"evidence":"observed"}`, true},
+		{"denied", `{"result":{"call_id":"call","status":"denied","content":"no"},"evidence":"observed"}`, false},
+		{"not started", `{"result":{"call_id":"call","status":"error","content":"no"},"evidence":"not_started"}`, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			peer := newTestExecutablePeer(t, false, nil)
+			spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
+			spawner.install()
+			activation := startPeerActivation(t, peer, executableTestManifest())
+			defer activation.stop()
+			outcome := runToolExecute(t, peerTool(activation), extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
+			frame := peer.next()
+			var params worker.AuthorCallParams
+			testassert.NoError(t, json.Unmarshal(frame.Params, &params))
+			testassert.Equal(t, params.Method, "run")
+			peer.sendValue(frame.ID, json.RawMessage(row.literal))
+			got := <-outcome
+			if row.valid {
+				testassert.Require(t, got.Result.Status == model.ResultSuccess && got.Result.Content == "literal" && got.Evidence == harness.ExecutionObserved, "literal result: %+v", got)
+			} else {
+				testassert.Require(t, got.Result.Status == model.ResultError && got.Evidence == harness.ExecutionUnknown, "invalid result: %+v", got)
+			}
+		})
+	}
+}
+
+func TestExecutableLiteralCheckRefusal(t *testing.T) {
+	peer := newTestExecutablePeer(t, false, nil)
+	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
+	spawner.install()
+	activation := startPeerActivation(t, peer, executableTestManifest())
+	defer activation.stop()
+	result := make(chan *string, 1)
+	go func() {
+		args := json.RawMessage(`{"id":"call","name":"peer","arguments":"e30="}`)
+		value, err := activation.authorCall(context.Background(), "peer", "check", extension.AuthorContext{}, args, typed(worker.DecodeAuthorRefusal))
+		if err != nil {
+			result <- nil
+			return
+		}
+		result <- value.(*string)
+	}()
+	frame := peer.next()
+	var params worker.AuthorCallParams
+	testassert.NoError(t, json.Unmarshal(frame.Params, &params))
+	testassert.Equal(t, params.Method, "check")
+	peer.sendValue(frame.ID, json.RawMessage(`{"refusal":"literal refusal"}`))
+	if refusal := <-result; refusal == nil || *refusal != "literal refusal" {
+		t.Fatalf("refusal = %v", refusal)
+	}
+}
+
+func TestExecutableLiteralSessionStart(t *testing.T) {
+	e := newOwnerEnv(t)
+	e.fixtureStore(storage.NewMemory())
+	e.server.setScript(func(context.Context, string) []string { return textTurnEvents("done") })
+	ctx := context.Background()
+	r, err := e.open(ctx)
+	testassert.NoError(t, err)
+	defer closeProjectionRuntime(r)
+	session, err := r.createSession(ctx, e.dataDir, "")
+	testassert.NoError(t, err)
+
+	manifest := registrarManifest("literalstarter")
+	manifest.Services = []string{extension.ContractSession}
+	author := extension.Extension{Manifest: manifest, Activate: func(context.Context, extension.API) (func(context.Context) error, error) { return nil, nil }}
+	candidate, err := r.config.prepareNativeCandidate(ctx, []nativeActivationSpec{{extension: author, section: json.RawMessage(`{}`)}})
+	testassert.NoError(t, err)
+	defer candidate.release()
+	callCtx, cancel := context.WithCancel(ctx)
+	scope := callbackScope(&nativeCallScope{nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel}, candidate: candidate,
+		activation: candidate.activations[0], kind: callKindTool, session: session.Identity, host: r.config.composition})
+	defer scope.end()
+
+	peer := newTestExecutablePeer(t, false, nil)
+	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
+	spawner.install()
+	activation := startPeerActivation(t, peer, executableTestManifest())
+	defer activation.stop()
+	outcome := runToolExecute(t, peerTool(activation), extension.AuthorContext{Call: scope.call}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
+	frame := peer.next()
+	var params worker.AuthorCallParams
+	testassert.NoError(t, json.Unmarshal(frame.Params, &params))
+	start := json.RawMessage(`{"inputs":{},"initial_state":{"token":1},"input":[{"kind":"text","text":"literal child"}],"report":false,"output_limit":0}`)
+	hostcall, err := json.Marshal(worker.AuthorHostcallParams{Token: params.Context.Token, Service: extension.ContractSession, Method: "start", Arguments: worker.JSONBytes(start)})
+	testassert.NoError(t, err)
+	peer.send(worker.Frame{Kind: worker.KindRequest, ID: "start", Method: worker.MethodHostcall, Params: hostcall})
+	reply := peer.next()
+	testassert.Require(t, reply.Error == nil, "start reply: %+v", reply.Error)
+	result, err := worker.DecodeServiceResult(reply.Result)
+	testassert.NoError(t, err)
+	var started struct {
+		SessionID string `json:"session_id"`
+	}
+	testassert.NoError(t, json.Unmarshal(result.Value, &started))
+	header, err := r.harness.ReadSessionHeader(ctx, started.SessionID)
+	testassert.NoError(t, err)
+	testassert.Equal(t, header.Identity.OwnerSessionID, session.Identity.SessionID)
+	states, err := r.harness.SessionExtensionStates(ctx, started.SessionID)
+	testassert.NoError(t, err)
+	testassert.Equal(t, string(states["literalstarter"]), `{"token":1}`)
+	peer.sendValue(frame.ID, json.RawMessage(`{"result":{"call_id":"call","status":"success","content":"ok"},"evidence":"observed"}`))
+	testassert.Equal(t, (<-outcome).Result.Status, model.ResultSuccess)
 }
 
 func TestExecutableMalformedTerminalFailsActivationWithoutRestart(t *testing.T) {
@@ -484,7 +601,7 @@ func TestExecutableMalformedTerminalFailsActivationWithoutRestart(t *testing.T) 
 		t.Fatal("peer.tool is not registered")
 	}
 	tool := binding.entry.value.(nativeTool).tool
-	outcome := tool.Execute(context.Background(), extension.AuthorContext{}, extension.ToolPlan{})
+	outcome := tool(context.Background(), extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	testassert.Equal(t, outcome.Evidence, harness.ExecutionUnknown)
 	binding.release()
 	stage.release()
@@ -526,7 +643,7 @@ func TestExecutableMalformedTerminalFailsActivationWithoutRestart(t *testing.T) 
 
 func TestExecutableNestedCallLimits(t *testing.T) {
 	manifest := executableTestManifest()
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	plan := model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)}
 
 	// The live-call cap refuses one more call without terminating the
 	// activation, and every call already admitted settles as unknown.
@@ -534,16 +651,16 @@ func TestExecutableNestedCallLimits(t *testing.T) {
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
+	tool := peerTool(activation)
 	admitted := make(chan harness.ToolOutcome, executableLiveCalls)
 	for range executableLiveCalls {
-		go func() { admitted <- tool.Execute(context.Background(), extension.AuthorContext{}, plan) }()
+		go func() { admitted <- tool(context.Background(), extension.AuthorContext{}, plan) }()
 	}
 	eventually(t, "live calls to fill the cap", func() bool {
 		_, total := activationPending(activation)
 		return total == executableLiveCalls
 	})
-	over := tool.Execute(context.Background(), extension.AuthorContext{}, plan)
+	over := tool(context.Background(), extension.AuthorContext{}, plan)
 	testassert.Equal(t, over.Evidence, harness.ExecutionNotStarted)
 	testassert.Require(t, strings.Contains(over.Result.Content, "too many live calls"), "refused call = %q", over.Result.Content)
 	activation.mu.Lock()
@@ -569,7 +686,7 @@ func TestExecutableNestedCallLimits(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	outcome := make(chan harness.ToolOutcome, 1)
 	go func() {
-		outcome <- (&executableAuthorTool{activation: blockedActivation, handle: "peer"}).Execute(context.Background(), extension.AuthorContext{
+		outcome <- peerTool(blockedActivation)(context.Background(), extension.AuthorContext{
 			Call: func(ctx context.Context, _, _ string, _ json.RawMessage) (extension.Result, error) {
 				select {
 				case entered <- struct{}{}:
@@ -633,12 +750,48 @@ func TestExecutableEnvironmentUsesSecretExcludedProducer(t *testing.T) {
 	testassert.Require(t, slices.Contains(environment, "EXEC_UNRELATED=kept"), "worker environment dropped an ordinary entry")
 }
 
+func TestExecutableRejectsInvalidToolSchemaWithoutReplacement(t *testing.T) {
+	manifest := executableTestManifest()
+	rejected := make(chan [2]error, 1)
+	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			definition := model.ToolDefinition{Name: "probe", Parameters: []byte(`{"type":"object"}`)}
+			old, err := api.RegisterTool(definition, registrarTestTool(""), nil)
+			if err != nil {
+				return nil, err
+			}
+			definition.Parameters = []byte(`{"type":7}`)
+			_, first := api.RegisterTool(definition, registrarTestTool(""), nil)
+			_, replacement := api.RegisterTool(definition, registrarTestTool(""), old)
+			rejected <- [2]error{first, replacement}
+			return nil, nil
+		}), nil
+	}}
+	spawner.install()
+	owner := &configurationService{}
+	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: executableAuthorExtension(manifest, "peer", func(context.Context, []string) ([]string, error) { return []string{}, nil }), section: []byte(`{}`), installed: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.release()
+	for _, err := range <-rejected {
+		if !errors.Is(err, harness.ErrInvalid) {
+			t.Fatalf("invalid schema = %v", err)
+		}
+	}
+	stage := candidate.snapshotForTest()
+	defer stage.release()
+	if stage.tools["probe"] == nil {
+		t.Fatal("invalid replacement removed the original registration")
+	}
+}
+
 func TestExecutableDisableKeepsParkedCall(t *testing.T) {
 	manifest := executableTestManifest()
 	blocking := newAdapterBlockingTool()
 	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
 		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(testDescribeTool(executableTestToolName), blocking, nil)
+			_, err := api.RegisterTool(testDescribeTool(executableTestToolName), blocking.run, nil)
 			return nil, err
 		}), blocking.close
 	}}
@@ -665,7 +818,7 @@ func TestExecutableDisableKeepsParkedCall(t *testing.T) {
 		t.Fatal("peer.tool is not registered")
 	}
 	tool := binding.entry.value.(nativeTool).tool
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: executableTestToolName, Arguments: []byte(`{}`)})
 	select {
 	case <-blocking.entered:
 	case got := <-outcome:
@@ -715,7 +868,7 @@ func TestExecutableWorkerCredentialHostService(t *testing.T) {
 	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
 		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "peer.service", Methods: []extension.RegisteredMethod{{
-				Method: extension.ServiceMethod("echo", extension.ModeServiceIO, `{"type":"object"}`, `{}`, "", ""),
+				Method: extension.ServiceMethod("echo", `{"type":"object"}`, `{}`, "", ""),
 				Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 					return call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/token"}`))
 				},
@@ -733,7 +886,7 @@ func TestExecutableWorkerCredentialHostService(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 	defer service.current().resources.release()
-	result, err := service.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{"query":1}`), &nativeCallScope{host: service.current().composition})
+	result, err := service.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{"query":1}`), &nativeCallScope{kind: callKindHook, host: service.current().composition})
 	if err != nil {
 		t.Fatalf("service: %v", err)
 	}
@@ -784,7 +937,9 @@ func TestExecutableOwnerCloseBoundedUnresponsiveCall(t *testing.T) {
 	stage.release()
 	captured.release()
 	outcome := make(chan harness.ToolOutcome, 1)
-	go func() { outcome <- tool.Execute(context.Background(), extension.AuthorContext{}, extension.ToolPlan{}) }()
+	go func() {
+		outcome <- tool(context.Background(), extension.AuthorContext{}, model.ToolCall{ID: "call", Name: executableTestToolName, Arguments: []byte(`{}`)})
+	}()
 	select {
 	case <-called:
 	case <-time.After(2 * time.Second):
@@ -920,18 +1075,10 @@ func newAdapterBlockingTool() *adapterBlockingTool {
 	return &adapterBlockingTool{entered: make(chan struct{}), release: make(chan struct{})}
 }
 
-func (t *adapterBlockingTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *adapterBlockingTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
-}
-
-func (t *adapterBlockingTool) Execute(_ context.Context, _ extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (t *adapterBlockingTool) run(_ context.Context, _ extension.ToolCall) (extension.ToolResult, error) {
 	t.once.Do(func() { close(t.entered) })
 	<-t.release
-	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "released"}, Evidence: harness.ExecutionObserved}
+	return extension.ToolResult{Content: "released"}, nil
 }
 
 func (t *adapterBlockingTool) close() {
@@ -948,7 +1095,7 @@ func TestExecutableInvalidServiceResultFailsActivation(t *testing.T) {
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
+	tool := peerTool(activation)
 	type callResult struct {
 		value extension.Result
 		err   error
@@ -968,7 +1115,7 @@ func TestExecutableInvalidServiceResultFailsActivation(t *testing.T) {
 	if failed == nil {
 		t.Fatal("invalid service terminal did not fail the activation")
 	}
-	testassert.Equal(t, tool.Execute(context.Background(), extension.AuthorContext{}, extension.ToolPlan{}).Evidence, harness.ExecutionNotStarted)
+	testassert.Equal(t, tool(context.Background(), extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)}).Evidence, harness.ExecutionNotStarted)
 }
 
 func TestExecutableTerminalBeforeFailureKeepsOutcome(t *testing.T) {
@@ -977,8 +1124,8 @@ func TestExecutableTerminalBeforeFailureKeepsOutcome(t *testing.T) {
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	tool := peerTool(activation)
+	plan := model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)}
 	first := runToolExecute(t, tool, extension.AuthorContext{RequestID: "first"}, plan)
 	second := runToolExecute(t, tool, extension.AuthorContext{RequestID: "second"}, plan)
 	frames := make(map[string]worker.Frame, 2)
@@ -1029,8 +1176,8 @@ func TestExecutableLeaderExitWithDescendantHoldingStdout(t *testing.T) {
 	t.Cleanup(func() { spawnExecutable = old })
 
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	tool := peerTool(activation)
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	peer.next() // the call was written
 	eventually(t, "call write acknowledgement", func() bool {
 		sent, _ := activationPending(activation)
@@ -1077,8 +1224,8 @@ func TestExecutableFailureReleasesAfterProcessGone(t *testing.T) {
 	t.Cleanup(func() { spawnExecutable = old })
 
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	tool := peerTool(activation)
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	call := peer.next()
 	peer.send(worker.Frame{Kind: worker.KindResponse, ID: call.ID, Result: json.RawMessage(`[]`)})
 	select {
@@ -1168,7 +1315,7 @@ func publishAdapterWorker(t *testing.T, activate func(context.Context, extension
 }
 
 // stagedExecutableTool binds one published snapshot's executable tool.
-func stagedExecutableTool(t *testing.T, stage *nativeSnapshot) extension.RegisteredTool {
+func stagedExecutableTool(t *testing.T, stage *nativeSnapshot) func(context.Context, extension.AuthorContext, model.ToolCall) harness.ToolOutcome {
 	t.Helper()
 	binding := stage.bindTool(executableTestToolName)
 	if binding == nil {
@@ -1184,11 +1331,11 @@ func TestExecutableCancelledCallUnresponsiveWorker(t *testing.T) {
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
+	tool := peerTool(activation)
 	ctx, cancel := context.WithCancel(context.Background())
 	outcome := make(chan harness.ToolOutcome, 1)
 	go func() {
-		outcome <- tool.Execute(ctx, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+		outcome <- tool(ctx, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	}()
 	peer.next() // the call was delivered; the worker never answers
 	cancel()
@@ -1214,31 +1361,25 @@ type adapterCancelTool struct {
 	once    sync.Once
 }
 
-func (t *adapterCancelTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (t *adapterCancelTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
-}
-func (t *adapterCancelTool) Execute(ctx context.Context, _ extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (t *adapterCancelTool) run(ctx context.Context, _ extension.ToolCall) (extension.ToolResult, error) {
 	if t.block {
 		t.once.Do(func() { close(t.entered) })
 		<-ctx.Done()
 	}
-	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "done"}, Evidence: harness.ExecutionObserved}
+	return extension.ToolResult{Content: "done"}, nil
 }
 
 func TestExecutableCooperativeAndLateCancellation(t *testing.T) {
 	tool := &adapterCancelTool{block: true, entered: make(chan struct{})}
 	_, stage := publishAdapterWorker(t, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(testDescribeTool(executableTestToolName), tool, nil)
+		_, err := api.RegisterTool(testDescribeTool(executableTestToolName), tool.run, nil)
 		return nil, err
 	}, nil)
 	executableTool := stagedExecutableTool(t, stage)
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	plan := model.ToolCall{ID: "call", Name: executableTestToolName, Arguments: []byte(`{}`)}
 	ctx, cancel := context.WithCancel(context.Background())
 	outcome := make(chan harness.ToolOutcome, 1)
-	go func() { outcome <- executableTool.Execute(ctx, extension.AuthorContext{}, plan) }()
+	go func() { outcome <- executableTool(ctx, extension.AuthorContext{}, plan) }()
 	select {
 	case <-tool.entered:
 	case <-time.After(2 * time.Second):
@@ -1257,7 +1398,7 @@ func TestExecutableCooperativeAndLateCancellation(t *testing.T) {
 	tool.block = false
 	lateCtx, lateCancel := context.WithCancel(context.Background())
 	late := make(chan harness.ToolOutcome, 1)
-	go func() { late <- executableTool.Execute(lateCtx, extension.AuthorContext{}, plan) }()
+	go func() { late <- executableTool(lateCtx, extension.AuthorContext{}, plan) }()
 	var lateOutcome harness.ToolOutcome
 	select {
 	case lateOutcome = <-late:
@@ -1276,18 +1417,15 @@ func TestExecutableOversizeCallFailsItselfOnly(t *testing.T) {
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
+	tool := peerTool(activation)
 	defer activation.stop()
 
-	oversize := extension.ToolPlan{
-		Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}},
-		Data:        make([]byte, worker.FrameLimit),
-	}
-	outcome := tool.Execute(context.Background(), extension.AuthorContext{}, oversize)
+	oversize := model.ToolCall{ID: "call", Name: "peer", Arguments: make([]byte, worker.FrameLimit)}
+	outcome := tool(context.Background(), extension.AuthorContext{}, oversize)
 	testassert.Equal(t, outcome.Evidence, harness.ExecutionNotStarted)
 	testassert.Equal(t, outcome.Result.Status, model.ResultError)
 
-	follow := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{})
+	follow := runToolExecute(t, tool, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	call := peer.next()
 	peer.sendValue(call.ID, encodeValue(t, worker.EncodeExecuteResult, harness.ToolOutcome{
 		Result:   model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ok"},
@@ -1308,8 +1446,8 @@ func TestExecutableTerminalRacingActivationFailure(t *testing.T) {
 	t.Cleanup(func() { spawnExecutable = old })
 
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	tool := peerTool(activation)
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	call := peer.next()
 	peer.sendValue(call.ID, encodeValue(t, worker.EncodeExecuteResult, harness.ToolOutcome{
 		Result:   model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "accepted"},
@@ -1366,9 +1504,9 @@ func TestExecutableWriteFailureTerminatesWithoutEarlySettlement(t *testing.T) {
 	t.Cleanup(func() { spawnExecutable = old })
 
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
+	tool := peerTool(activation)
 	process.writer.fail.Store(true)
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	select {
 	case got := <-outcome:
 		testassert.Equal(t, got.Evidence, harness.ExecutionUnknown)
@@ -1394,8 +1532,8 @@ func TestExecutableUnsentCancelSettlesNotStarted(t *testing.T) {
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
-	plan := extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}}
+	tool := peerTool(activation)
+	plan := model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)}
 	first := runToolExecute(t, tool, extension.AuthorContext{}, plan)
 	eventually(t, "first call to block the writer", func() bool {
 		sent, _ := activationPending(activation)
@@ -1403,7 +1541,7 @@ func TestExecutableUnsentCancelSettlesNotStarted(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	second := make(chan harness.ToolOutcome, 1)
-	go func() { second <- tool.Execute(ctx, extension.AuthorContext{}, plan) }()
+	go func() { second <- tool(ctx, extension.AuthorContext{}, plan) }()
 	eventually(t, "second call to queue unclaimed", func() bool {
 		_, total := activationPending(activation)
 		return total == 2
@@ -1437,9 +1575,9 @@ func TestExecutableCancelledClassTerminalWithoutHostCancellationIsAuthorError(t 
 	spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer { return peer }}
 	spawner.install()
 	activation := startPeerActivation(t, peer, manifest)
-	tool := &executableAuthorTool{activation: activation, handle: "peer"}
+	tool := peerTool(activation)
 	defer activation.stop()
-	outcome := runToolExecute(t, tool, extension.AuthorContext{}, extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: "*"}}})
+	outcome := runToolExecute(t, tool, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "peer", Arguments: []byte(`{}`)})
 	call := peer.next()
 	peer.send(worker.Frame{Kind: worker.KindResponse, ID: call.ID, Error: &worker.Error{Class: worker.ClassCancelled, Message: "cancelled"}})
 	got := <-outcome
@@ -1496,7 +1634,7 @@ func TestExecutableOwnerCloseRunsWorkerClose(t *testing.T) {
 	closed := make(chan struct{})
 	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
 		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			if _, err := api.RegisterTool(testDescribeTool(executableTestToolName), testRegisteredTool{}, nil); err != nil {
+			if _, err := api.RegisterTool(testDescribeTool(executableTestToolName), testRegisteredTool, nil); err != nil {
 				return nil, err
 			}
 			return func(context.Context) error {
@@ -1532,16 +1670,16 @@ func TestExecutableOwnerCloseRunsWorkerClose(t *testing.T) {
 	}
 }
 
-func TestExecutableEffectfulHookCancelledAuthorEvidence(t *testing.T) {
+func TestExecutableHookCancelledAuthorEvidence(t *testing.T) {
 	entered := make(chan struct{})
 	var once sync.Once
 	callback := func(ctx context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 		once.Do(func() { close(entered) })
 		<-ctx.Done()
-		return harness.RequestConsequence{}, &harness.EffectError{Interrupted: true, Evidence: harness.ExecutionObserved, Err: context.Canceled}
+		return harness.RequestConsequence{}, &harness.EffectError{Interrupted: true, Err: context.Canceled}
 	}
 	_, stage := publishAdapterWorker(t, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachRequest(extension.HookModeEffectful, callback, nil)
+		_, err := api.AttachRequest(callback, nil)
 		return nil, err
 	}, nil)
 	if len(stage.hooks["request"]) != 1 {
@@ -1558,31 +1696,30 @@ func TestExecutableEffectfulHookCancelledAuthorEvidence(t *testing.T) {
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("worker effectful hook never started")
+		t.Fatal("worker hook never started")
 	}
 	cancel()
 	var got error
 	select {
 	case got = <-result:
 	case <-time.After(5 * time.Second):
-		t.Fatal("worker effectful hook did not settle after cancellation")
+		t.Fatal("worker hook did not settle after cancellation")
 	}
 	testassert.Equal(t, harness.EffectInterrupted(got), true)
-	testassert.Equal(t, harness.DeclaredExecutionKnowledge(got), harness.ExecutionObserved)
 	testassert.Require(t, errors.Is(got, context.Canceled), "worker hook error = %v, want the author's cancellation cause", got)
 }
 
 func TestWorkerServiceErrorClassReachesClassifier(t *testing.T) {
 	service, _ := publishAdapterWorker(t, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "peer.service", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "echo", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "echo", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{}, &worker.Error{Class: worker.ClassDenied, Message: "denied by worker"}
 			},
 		}}}, nil)
 		return nil, err
 	}, nil)
-	_, err := service.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{}`), &nativeCallScope{host: service.current().composition})
+	_, err := service.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{}`), &nativeCallScope{kind: callKindHook, host: service.current().composition})
 	if err == nil {
 		t.Fatal("worker service denial returned no error")
 	}
@@ -1605,7 +1742,7 @@ func TestExecutableCredentialRotationRetiresWorkerKeepsCapture(t *testing.T) {
 	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
 		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "peer.service", Methods: []extension.RegisteredMethod{{
-				Method: extension.ServiceMethod("echo", extension.ModeServiceIO, `{}`, `{}`, "", ""),
+				Method: extension.ServiceMethod("echo", `{}`, `{}`, "", ""),
 				Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					if string(args) == `{"park":true}` {
 						enteredOnce.Do(func() { close(entered) })
@@ -1624,7 +1761,7 @@ func TestExecutableCredentialRotationRetiresWorkerKeepsCapture(t *testing.T) {
 		return settings + `,"extensions":{"peer":{"enabled":true,"token":"` + name + `"}}}`
 	}
 	writeServiceFile(t, configPath, config(`{"providers":{}`))
-	installExecutablePackage(t, dataDir, manifest, buildAuthorWorker(t))
+	installExecutablePackage(t, dataDir, manifest, "author-worker")
 	owner, err := Open(context.Background(), Options{
 		DataDir:       dataDir,
 		Configuration: NewFileConfigurationSource(configPath),
@@ -1664,7 +1801,7 @@ func TestExecutableCredentialRotationRetiresWorkerKeepsCapture(t *testing.T) {
 	}
 	parked := make(chan serviceOutcome, 1)
 	go func() {
-		value, err := first.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{"park":true}`), &nativeCallScope{host: host})
+		value, err := first.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{"park":true}`), &nativeCallScope{kind: callKindHook, host: host})
 		parked <- serviceOutcome{value: value, err: err}
 	}()
 	select {
@@ -1698,7 +1835,7 @@ func TestExecutableCredentialRotationRetiresWorkerKeepsCapture(t *testing.T) {
 	}
 
 	// New work is admitted on the new activation with the rotated value.
-	result, err := owner.config.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{}`), &nativeCallScope{host: host})
+	result, err := owner.config.current().native.callServiceScoped(context.Background(), "peer.service", "echo", json.RawMessage(`{}`), &nativeCallScope{kind: callKindHook, host: host})
 	if err != nil {
 		t.Fatalf("rotated service call: %v", err)
 	}

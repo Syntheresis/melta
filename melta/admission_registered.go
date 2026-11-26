@@ -13,7 +13,7 @@ import (
 )
 
 // runRegisteredAdmission runs the captured admission stage in attachment order.
-func runRegisteredAdmission(ctx context.Context, stage *nativeSnapshot, input extension.AdmissionInput, states map[string]harness.SessionStateValue, host *composition, known map[string]bool, defaultStrategy string) (extension.AdmissionCandidate, error) {
+func runRegisteredAdmission(ctx context.Context, stage *nativeSnapshot, input extension.AdmissionInput, states map[string]harness.SessionStateValue, host *composition, operationSecrets map[string]map[string]string, known map[string]bool, defaultStrategy string) (extension.AdmissionCandidate, error) {
 	candidate := ownAdmissionCandidate(input.Candidate)
 	for _, entry := range stage.hooks["admission"] {
 		if err := entry.activation.unavailable(); err != nil {
@@ -22,8 +22,8 @@ func runRegisteredAdmission(ctx context.Context, stage *nativeSnapshot, input ex
 		callCtx, cancel := context.WithCancel(ctx)
 		scope := callbackScope(&nativeCallScope{
 			nativeCallLifetime: nativeCallLifetime{ctx: callCtx, cancel: cancel},
-			candidate:          stage.candidate, activation: entry.activation, pure: true,
-			session: input.Session, states: states, host: host,
+			candidate:          stage.candidate, activation: entry.activation, kind: callKindAdmission,
+			session: input.Session, states: states, host: host, operationSecrets: operationSecrets,
 		})
 		call := extension.AuthorContext{
 			ExtensionID: entry.activation.id, Settings: bytes.Clone(entry.activation.section),

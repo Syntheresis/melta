@@ -74,10 +74,10 @@ type hookAPI struct {
 }
 
 func (a *hookAPI) Settings() json.RawMessage { return a.settings }
-func (a *hookAPI) RegisterTool(_ model.ToolDefinition, _ extension.RegisteredTool, _ extension.Registration) (extension.Registration, error) {
+func (a *hookAPI) RegisterTool(_ model.ToolDefinition, _ extension.ToolFunc, _ extension.Registration) (extension.Registration, error) {
 	return nil, nil
 }
-func (a *hookAPI) AttachRequest(_ extension.HookMode, h extension.AuthorRequestHook, _ extension.Registration) (extension.Registration, error) {
+func (a *hookAPI) AttachRequest(h extension.AuthorRequestHook, _ extension.Registration) (extension.Registration, error) {
 	a.hook = h
 	return nil, nil
 }

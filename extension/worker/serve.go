@@ -345,9 +345,6 @@ func (s *server) routeResponse(frame Frame) error {
 	if err != nil {
 		return fmt.Errorf("worker: response %q: %w", frame.ID, err)
 	}
-	if err := extension.ValidateResultEnvelope(result); err != nil {
-		return fmt.Errorf("worker: response %q: %w", frame.ID, err)
-	}
 	if result.Failure != nil {
 		if !validPresentJSON(result.Failure.Data) || !validPresentJSON(result.Failure.Partial) {
 			return fmt.Errorf("worker: response %q carries invalid failure payload", frame.ID)

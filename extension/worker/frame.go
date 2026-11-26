@@ -44,12 +44,10 @@ var ErrFrameTooLarge = errors.New("worker: frame exceeds the size limit")
 // preserved unchanged and may be any bytes, not only JSON.
 type JSONBytes []byte
 
-// MarshalJSON encodes the bytes as one base64 string.
 func (b JSONBytes) MarshalJSON() ([]byte, error) {
 	return json.Marshal(base64.StdEncoding.EncodeToString(b))
 }
 
-// UnmarshalJSON decodes one canonical base64 string.
 func (b *JSONBytes) UnmarshalJSON(data []byte) error {
 	var encoded *string
 	if err := json.Unmarshal(data, &encoded); err != nil || encoded == nil {

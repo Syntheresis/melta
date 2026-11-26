@@ -23,7 +23,7 @@ func TestOwnedSessionExtensionPoliciesBeforeAndAfterHandoff(t *testing.T) {
 	writeAgentDefinitions(t, e.configPath, `{"lead":{"model":"prov/m","system_prompt":"simple","tools":["task","alpha_start"]},"helper":{"model":"prov/m","system_prompt":"simple","tools":["alpha_start","task"],"subagent":true},"nested":{"model":"prov/m","system_prompt":"simple","tools":[]}}`)
 	enableFixturePlugin(t, e.configPath, "alpha")
 	e.fixtureStore(storage.NewMemory())
-	probe := &ownedStartProbe{target: "nested", content: "nested work"}
+	probe := &ownedStartProbe{content: "nested work"}
 	e.server.setScript(func(_ context.Context, body string) []string {
 		switch lastUserText(body) {
 		case "lead work":
@@ -51,7 +51,7 @@ func TestOwnedSessionExtensionPoliciesBeforeAndAfterHandoff(t *testing.T) {
 		return textTurnEvents("seen")
 	})
 	ctx := context.Background()
-	r, err := e.open(ctx, agents.Author(), ownedStartNative("alpha", "alpha_start", probe))
+	r, err := e.open(ctx, agents.Author(), ownedStartNative("alpha", "alpha_start", probe.run))
 	testassert.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(context.Background()) })
 	lead, err := r.createSession(ctx, e.dataDir, "lead")

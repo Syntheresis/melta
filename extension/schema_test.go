@@ -26,7 +26,7 @@ func TestSectionAndMethodValidatorsKeepExactValues(t *testing.T) {
 	if err := ValidateManifestSection(exact, json.RawMessage(`9007199254740992`)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("section error = %v", err)
 	}
-	method := compiled(t, PureMethod("read", `{"type":"integer"}`, `{"type":"string"}`))
+	method := compiled(t, ServiceMethod("read", `{"type":"integer"}`, `{"type":"string"}`, "", ""))
 	if err := method.ValidateArguments(json.RawMessage(`12`)); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestSectionAndMethodValidatorsKeepExactValues(t *testing.T) {
 }
 
 func TestValidateResultDeclaredFailureUnion(t *testing.T) {
-	method := compiled(t, ServiceMethod("call", ModeServiceIO, `{}`, `{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`, `{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]}`, `{"type":"string"}`))
+	method := compiled(t, ServiceMethod("call", `{}`, `{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`, `{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]}`, `{"type":"string"}`))
 	if err := method.ValidateResult(Result{Value: json.RawMessage(`{"ok":true}`)}); err != nil {
 		t.Fatalf("valid success: %v", err)
 	}
@@ -76,9 +76,9 @@ func TestValidateResultDeclaredFailureUnion(t *testing.T) {
 }
 
 func TestFailurePayloadPresenceSemantics(t *testing.T) {
-	bare := compiled(t, ServiceMethod("bare", ModeServiceIO, `{}`, `{}`, "", ""))
-	data := compiled(t, ServiceMethod("data", ModeServiceIO, `{}`, `{}`, `{"type":"object","required":["reason"],"properties":{"reason":{"type":"string"}},"additionalProperties":false}`, ""))
-	partial := compiled(t, ServiceMethod("partial", ModeServiceIO, `{}`, `{}`, "", `{"type":"string"}`))
+	bare := compiled(t, ServiceMethod("bare", `{}`, `{}`, "", ""))
+	data := compiled(t, ServiceMethod("data", `{}`, `{}`, `{"type":"object","required":["reason"],"properties":{"reason":{"type":"string"}},"additionalProperties":false}`, ""))
+	partial := compiled(t, ServiceMethod("partial", `{}`, `{}`, "", `{"type":"string"}`))
 	accepted := []struct {
 		name   string
 		method *CompiledMethod
@@ -122,19 +122,19 @@ func TestFailurePayloadPresenceSemantics(t *testing.T) {
 // TestWhitespaceOptionalSchemaDocumentsAreMalformed proves zero raw length is
 // absence while nonempty whitespace is a present, malformed schema document.
 func TestWhitespaceOptionalSchemaDocumentsAreMalformed(t *testing.T) {
-	if _, err := CompileMethod(ServiceMethod("call", ModeServiceIO, `{}`, `{}`, "  ", "")); err == nil {
+	if _, err := CompileMethod(ServiceMethod("call", `{}`, `{}`, "  ", "")); err == nil {
 		t.Fatal("CompileMethod accepted a whitespace error schema document")
 	}
-	if _, err := CompileMethod(ServiceMethod("call", ModeServiceIO, `{}`, `{}`, "", "  ")); err == nil {
+	if _, err := CompileMethod(ServiceMethod("call", `{}`, `{}`, "", "  ")); err == nil {
 		t.Fatal("CompileMethod accepted a whitespace partial schema document")
 	}
-	if _, err := CompileMethod(ServiceMethod("call", ModeServiceIO, `{}`, `{}`, "", `{"type":"string"}`)); err != nil {
+	if _, err := CompileMethod(ServiceMethod("call", `{}`, `{}`, "", `{"type":"string"}`)); err != nil {
 		t.Fatalf("CompileMethod refused partial without an error schema: %v", err)
 	}
 }
 
 func TestJSONAcceptanceRequiresSingleValueEOF(t *testing.T) {
-	method := compiled(t, ServiceMethod("call", ModeServiceIO, `{"type":"object"}`, `{"type":"object"}`, `{"type":"object"}`, `{"type":"object"}`))
+	method := compiled(t, ServiceMethod("call", `{"type":"object"}`, `{"type":"object"}`, `{"type":"object"}`, `{"type":"object"}`))
 	for _, tail := range []string{" {}", " null", ` 1`, " ]", `{"x":`} {
 		if err := ValidateManifestSection(sectionManifest, json.RawMessage(`{"enabled":true}`+tail)); err == nil {
 			t.Fatalf("section accepted %q after the first value", tail)
@@ -163,16 +163,16 @@ func TestJSONAcceptanceRequiresSingleValueEOF(t *testing.T) {
 
 func TestCompiledSchemasAreReusedOnlyForIdenticalBytes(t *testing.T) {
 	input := `{"type":"object","required":["name"],"properties":{"name":{"type":"string"}},"additionalProperties":false}`
-	first := compiled(t, ServiceIOMethod("call", input, `{"type":"object"}`))
-	second := compiled(t, ServiceIOMethod("call", input, `{"type":"object"}`))
-	other := compiled(t, ServiceIOMethod("other", input, `{"type":"object"}`))
+	first := compiled(t, ServiceMethod("call", input, `{"type":"object"}`, "", ""))
+	second := compiled(t, ServiceMethod("call", input, `{"type":"object"}`, "", ""))
+	other := compiled(t, ServiceMethod("other", input, `{"type":"object"}`, "", ""))
 	if first.input != second.input {
 		t.Fatal("identical method recompiled its input schema")
 	}
 	if first.input == other.input {
 		t.Fatal("identical bytes under another method label served the first label's schema")
 	}
-	stringInput := compiled(t, ServiceIOMethod("call", `{"type":"string"}`, `{"type":"object"}`))
+	stringInput := compiled(t, ServiceMethod("call", `{"type":"string"}`, `{"type":"object"}`, "", ""))
 	if stringInput.input == first.input {
 		t.Fatal("same label with different bytes served the first compilation's schema")
 	}

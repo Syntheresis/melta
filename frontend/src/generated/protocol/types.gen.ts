@@ -76,7 +76,6 @@ export type RegisteredExtensionOperation = {
 
 export type ExtensionMethod = {
     name: string;
-    mode: 'pure' | 'service_io';
     input: ExtensionConfigDocument;
     success: ExtensionConfigDocument;
     error?: ExtensionConfigDocument;
@@ -179,38 +178,26 @@ export type WarningsRevision = {
 
 export type Health = {
     instance_id: string;
-    protocol_version: '24';
+    protocol_version: '25';
 };
 
 /**
- * One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: workspace carries workspace, session carries session_id, operation and invocation carry session_id and operation_id, invocation additionally carries invocation_id and purpose, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
+ * One SSE event's applicable scope, discriminated by kind. Every non-global kind must address its subject: session carries session_id, operation carries session_id and operation_id, and job carries session_id and job_id. Each branch keeps the same closed member vocabulary, so attribution members beyond the required identities are allowed; every supplied member is nonempty and session_id always matches its pattern.
  *
  */
 export type Scope = ({
     kind: 'runtime';
 } & RuntimeScope) | ({
-    kind: 'workspace';
-} & WorkspaceScope) | ({
     kind: 'session';
 } & SessionScope) | ({
     kind: 'operation';
 } & OperationScope) | ({
-    kind: 'invocation';
-} & InvocationScope) | ({
     kind: 'job';
 } & JobScope);
 
 export type RuntimeScope = {
     kind: 'runtime';
     workspace?: string;
-    session_id?: string;
-    operation_id?: string;
-    job_id?: string;
-};
-
-export type WorkspaceScope = {
-    kind: 'workspace';
-    workspace: string;
     session_id?: string;
     operation_id?: string;
     job_id?: string;
@@ -890,7 +877,7 @@ export type ConfigurationChangedEvent = {
 
 export type ScopeEvent = {
     kind: 'scope_opened' | 'scope_closed';
-    scope: Scope;
+    scope: InvocationScope;
 };
 
 export type SessionChangedEvent = {

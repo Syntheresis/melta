@@ -3,6 +3,7 @@ package melta
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -104,33 +105,25 @@ type probeTool struct {
 	events *traceLog
 }
 
-func (probeTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-
-func (t probeTool) Prepare(ctx context.Context, tc extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+func (t probeTool) run(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	result, err := tc.Call(ctx, "dep", "call", json.RawMessage(`{}`))
 	if err != nil {
-		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: err.Error()}}}
+		return extension.ToolResult{}, err
 	}
 	var value struct {
 		Result string `json:"result"`
 	}
 	if result.Failure != nil || json.Unmarshal(result.Value, &value) != nil {
-		return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "undecodable dependency result"}}}
+		return extension.ToolResult{}, errors.New("undecodable dependency result")
 	}
 	t.events.add("work:" + value.Result)
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "probed"}}}
-}
-
-func (probeTool) Execute(_ context.Context, _ extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "probed"}}
+	return extension.ToolResult{}, errors.New("probed")
 }
 
 // shPureService is one pure "call" service named name, answered by handler.
 func shPureService(name string, handler extension.AuthorHandler) extension.Service {
 	return extension.Service{Name: name, Methods: []extension.RegisteredMethod{{
-		Method:  extension.Method{Name: "call", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{"type":"object"}`)},
+		Method:  extension.Method{Name: "call", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{"type":"object"}`)},
 		Handler: handler,
 	}}}
 }
@@ -191,7 +184,7 @@ func assembledPlugins(e *ownerEnv, store harness.Storage, hook *recordHook, ws *
 		}, err
 	})
 	probe := testNative("probe", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Description: "records one dependency invocation", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, probeTool{events: e.events}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Description: "records one dependency invocation", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, (probeTool{events: e.events}).run, nil)
 		return nil, err
 	})
 	return []extension.Extension{agentsTestNative(), hookPlugin(hook), base, depper, probe}
@@ -378,20 +371,11 @@ func TestAssembledPhaseIntegration(t *testing.T) {
 		}
 		testassert.Equal(t, server.authAt(0), "Bearer assembled-key-1")
 
-		// The cleanup of the turn precedes the asynchronous Operation-close
-		// publication: consume the healthy subscription until that exact
-		// closure is observed, retaining every event for the final
-		// complete-sequence oracle.
+		// The cleanup of the turn is asynchronous: consume it until the
+		// Session's execution has disposed, retaining every committed event
+		// for the final complete-sequence oracle.
 		var observed []Event
-		for {
-			event, ok := nextEvent(t, healthy)
-			testassert.Require(t, ok, "the healthy subscription closed before op-b1's Operation-close publication")
-			if body, closed := scopeClosedEvent(t, event); closed && operationScopeWorkspace(t, body.Scope) == wsB {
-				recordCommittedEvent(t, &observed, event, sessionA.Identity.SessionID, sessionB.Identity.SessionID)
-				break
-			}
-			recordCommittedEvent(t, &observed, event, sessionA.Identity.SessionID, sessionB.Identity.SessionID)
-		}
+		shConsumeUntilDisposed(t, r, healthy, &observed, sessionB.Identity.SessionID, sessionA.Identity.SessionID, sessionB.Identity.SessionID)
 
 		// Park the actual dependency call, not its model request.
 		ws.mu.Lock()
@@ -434,14 +418,7 @@ func TestAssembledPhaseIntegration(t *testing.T) {
 		freshRec := awaitOperation(t, r, fresh.Identity.SessionID, "op-fresh", harness.OperationSuccess)
 		testassert.Equal(t, freshRec.Admission.Execution.ConfigurationRevision, "2")
 		testassert.Require(t, countEvents(e.events.all(), "work:L2:base") == 1 && countEvents(e.events.all(), "close:depper") == 0, "new work did not coexist with parked old work: %v", e.events.all())
-		for {
-			event, ok := nextEvent(t, healthy)
-			testassert.Require(t, ok, "subscription closed before fresh execution cleanup")
-			recordCommittedEvent(t, &observed, event, sessionA.Identity.SessionID, sessionB.Identity.SessionID, fresh.Identity.SessionID)
-			if body, closed := scopeClosedEvent(t, event); closed && operationScopeWorkspace(t, body.Scope) == wsA {
-				break
-			}
-		}
+		shConsumeUntilDisposed(t, r, healthy, &observed, fresh.Identity.SessionID, sessionA.Identity.SessionID, sessionB.Identity.SessionID, fresh.Identity.SessionID)
 
 		// Release: the blocked Operation completes on its captured revision 1.
 		close(gate)
@@ -465,17 +442,9 @@ func TestAssembledPhaseIntegration(t *testing.T) {
 		if n := countEvents(e.events.all(), "work:L2:base"); n != 2 {
 			t.Fatalf("dependency invocations reading revision-2 settings = %d, want 2: %v", n, e.events.all())
 		}
-		// Consume the healthy subscription through op-a2's Operation-close
-		// publication so the remaining sequence is deterministic.
-		closedOps := 0
-		for closedOps < 2 {
-			event, ok := nextEvent(t, healthy)
-			testassert.Require(t, ok, "the healthy subscription closed before the queued delivery settled")
-			if body, closed := scopeClosedEvent(t, event); closed && operationScopeWorkspace(t, body.Scope) == wsA {
-				closedOps++
-			}
-			recordCommittedEvent(t, &observed, event, sessionA.Identity.SessionID, sessionB.Identity.SessionID, fresh.Identity.SessionID)
-		}
+		// The queued delivery's execution disposes before the shutdown phase:
+		// consume its events so the remaining sequence stays in one order.
+		shConsumeUntilDisposed(t, r, healthy, &observed, sessionA.Identity.SessionID, sessionA.Identity.SessionID, sessionB.Identity.SessionID, fresh.Identity.SessionID)
 
 		// Shutdown joins the parked execution: the third admission's model
 		// request parks at the server, Close cancels it, the server observes
@@ -510,14 +479,14 @@ func TestAssembledPhaseIntegration(t *testing.T) {
 		testassert.Require(t, countEvents(e.events.all(), "close:depper") == 2 && countEvents(e.events.all(), "close:base") == 1 && orderedSubset(e.events.all(), "close:depper", "close:base"), "owner shutdown closures = %v", e.events.all())
 
 		// The healthy observer saw every committed transition in publication
-		// order — scope identities exact, payloads stripped — with the runtime
-		// closure last. The prefix consumed up to op-a2's Operation-close
-		// publication precedes the remaining drain.
+		// order — invocation identities exact — and each Operation's own
+		// opening and closure appear in it. The prefix consumed through the
+		// executions' disposal precedes the remaining drain.
 		sessionBID, sessionAID := sessionB.Identity.SessionID, sessionA.Identity.SessionID
-		got := normalizeInvocationScopes(t, append(observed, committedTail(t, healthy, sessionAID, sessionBID, fresh.Identity.SessionID)...))
+		got := append(observed, committedTail(t, healthy, sessionAID, sessionBID, fresh.Identity.SessionID)...)
 		shAssertCommittedOrder(t, got, r.instance, map[string]string{
 			"op-b1": wsB, "op-a1": wsA, "op-fresh": wsA, "op-a2": wsA, "op-a3": wsA,
-		}, []string{wsB, wsA})
+		})
 
 		// Restart repair on the same store: recovery settles the abandoned
 		// running state before any execution callback, then ordinary
@@ -537,43 +506,34 @@ func TestAssembledPhaseIntegration(t *testing.T) {
 	})
 }
 
-// shScopeMark is one committed scope event reduced to its tier and identity.
+// shScopeMark is one committed invocation scope event reduced to its identity.
 type shScopeMark struct {
-	kind        protocol.ScopeEventKind
-	scope       ScopeKind
-	workspace   string
-	operationID string
+	kind         protocol.ScopeEventKind
+	invocationID string
+	purpose      protocol.InvocationScopePurpose
+	workspace    string
+	operationID  string
 }
 
-func shScopeMarkOf(t *testing.T, kind protocol.ScopeEventKind, scope protocol.Scope) shScopeMark {
+// shInvocationPair collects one invocation's opening and closure marks by
+// event position.
+type shInvocationPair struct {
+	purpose        protocol.InvocationScopePurpose
+	opens, closes  int
+	opened, closed int
+}
+
+func shScopeMarkOf(t *testing.T, kind protocol.ScopeEventKind, body protocol.InvocationScope) shScopeMark {
 	t.Helper()
-	switch scopeKind(t, scope) {
-	case "runtime":
-		if _, err := scope.AsRuntimeScope(); err != nil {
-			t.Fatal(err)
-		}
-		return shScopeMark{kind: kind, scope: ScopeRuntime}
-	case "workspace":
-		body, err := scope.AsWorkspaceScope()
-		testassert.NoError(t, err)
-		return shScopeMark{kind: kind, scope: ScopeWorkspace, workspace: body.Workspace}
-	case "operation":
-		body, err := scope.AsOperationScope()
-		testassert.NoError(t, err)
-		return shScopeMark{kind: kind, scope: ScopeOperation, workspace: deref(body.Workspace), operationID: body.OperationId}
-	default:
-		body, err := scope.AsInvocationScope()
-		testassert.NoError(t, err)
-		return shScopeMark{kind: kind, scope: ScopeAgent, workspace: deref(body.Workspace), operationID: body.OperationId}
-	}
+	testassert.Require(t, body.InvocationId != "", "committed scope = %+v, want an invocation identity", body)
+	return shScopeMark{kind: kind, invocationID: body.InvocationId, purpose: body.Purpose, workspace: deref(body.Workspace), operationID: body.OperationId}
 }
 
 // shAssertCommittedOrder proves the committed scope sequence structurally:
-// exactly one configuration event for the reload's revision, every Operation's
-// agent scope opened immediately after its own Operation scope and closed
-// immediately before it, each Workspace its own scope identity in its own
-// lexical directory, and the runtime closure last of all.
-func shAssertCommittedOrder(t *testing.T, events []Event, instance string, operations map[string]string, workspaces []string) {
+// exactly one configuration event for the reload's revision, and every
+// Operation's one invocation opened and closed under its own identity and
+// Workspace, the opening before the closure.
+func shAssertCommittedOrder(t *testing.T, events []Event, instance string, operations map[string]string) {
 	t.Helper()
 	var marks []shScopeMark
 	configs := 0
@@ -593,39 +553,33 @@ func shAssertCommittedOrder(t *testing.T, events []Event, instance string, opera
 		}
 	}
 	testassert.Equal(t, configs, 1)
-	last := marks[len(marks)-1]
-	testassert.Require(t, last.scope == ScopeRuntime && last.kind == protocol.ScopeClosed, "last committed scope event = %+v, want the runtime closure", last)
 	for _, operation := range []string{"op-b1", "op-a1", "op-fresh", "op-a2", "op-a3"} {
 		workspace := operations[operation]
-		opened, closed := -1, -1
+		pairs := make(map[string]*shInvocationPair)
+		var ids []string
 		for i, mark := range marks {
-			if mark.operationID != operation || mark.scope != ScopeOperation {
+			if mark.operationID != operation {
 				continue
-			}
-			if mark.kind == protocol.ScopeOpened {
-				opened = i
-			} else {
-				closed = i
 			}
 			testassert.Equal(t, mark.workspace, workspace)
-		}
-		testassert.Require(t, opened >= 0 && closed > opened, "operation %q opening/closure marks = %d/%d, want both in order: %v", operation, opened, closed, marks)
-		testassert.Require(t, marks[opened+1].scope == ScopeAgent && marks[opened+1].kind == protocol.ScopeOpened && marks[opened+1].operationID == operation, "scope after %q's opening = %+v, want its agent opening", operation, marks[opened+1])
-		testassert.Require(t, marks[closed-1].scope == ScopeAgent && marks[closed-1].kind == protocol.ScopeClosed && marks[closed-1].operationID == operation, "scope before %q's closure = %+v, want its agent closure", operation, marks[closed-1])
-	}
-	for _, workspace := range workspaces {
-		opens, closes := 0, 0
-		for _, mark := range marks {
-			if mark.scope != ScopeWorkspace || mark.workspace != workspace {
-				continue
+			testassert.Equal(t, mark.purpose, protocol.Conversation)
+			pair := pairs[mark.invocationID]
+			if pair == nil {
+				pair = &shInvocationPair{purpose: mark.purpose, opened: -1, closed: -1}
+				pairs[mark.invocationID] = pair
+				ids = append(ids, mark.invocationID)
 			}
 			if mark.kind == protocol.ScopeOpened {
-				opens++
+				pair.opens++
+				pair.opened = i
 			} else {
-				closes++
+				pair.closes++
+				pair.closed = i
 			}
 		}
-		testassert.Require(t, opens > 0 && closes > 0, "workspace %q = %d openings %d closures, want its own scope opened and closed", workspace, opens, closes)
+		testassert.Require(t, len(ids) == 1, "operation %q invocations = %v, want its one invocation: %v", operation, ids, marks)
+		pair := pairs[ids[0]]
+		testassert.Require(t, pair.opens == 1 && pair.closes == 1 && pair.opened < pair.closed, "invocation %q marks = %+v, want its one opening before its closure", ids[0], pair)
 	}
 }
 
@@ -675,18 +629,6 @@ func recordCommittedEvent(t *testing.T, observed *[]Event, event Event, sessionI
 	}
 }
 
-// scopeClosedEvent decodes one scope event, reporting whether it is a
-// closure.
-func scopeClosedEvent(t *testing.T, event Event) (protocol.ScopeEvent, bool) {
-	t.Helper()
-	if eventKind(t, event) != "scope_closed" {
-		return protocol.ScopeEvent{}, false
-	}
-	body, err := event.AsScopeEvent()
-	testassert.NoError(t, err)
-	return body, true
-}
-
 // committedTail drains the remaining closed subscription, keeping the
 // committed order exact while accounting the passive facts of the real
 // Sessions — a foreign identity fatals inside the recorder.
@@ -697,6 +639,34 @@ func committedTail(t *testing.T, sub *Subscription, sessionIDs ...string) []Even
 		recordCommittedEvent(t, &out, event, sessionIDs...)
 	}
 	return out
+}
+
+// shConsumeUntilDisposed consumes the subscription into the committed-order
+// oracle through one Session's execution disposal, then drains what is still
+// queued: an Engine invocation publishes no closure event, so the phase
+// boundary is the Session view's idle execution.
+func shConsumeUntilDisposed(t *testing.T, r *Melta, sub *Subscription, observed *[]Event, sessionID string, sessionIDs ...string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for sessionViewThroughRuntime(t, r, sessionID).History.ExecutionBusy {
+		select {
+		case event, ok := <-sub.Events():
+			testassert.Require(t, ok, "the healthy subscription closed before session %q disposed its execution", sessionID)
+			recordCommittedEvent(t, observed, event, sessionIDs...)
+		case <-time.After(10 * time.Millisecond):
+			testassert.Require(t, !time.Now().After(deadline), "session %q never disposed its execution", sessionID)
+		}
+	}
+	for {
+		select {
+		case event, ok := <-sub.Events():
+			testassert.Require(t, ok, "the healthy subscription closed before session %q disposed its execution", sessionID)
+			recordCommittedEvent(t, observed, event, sessionIDs...)
+			continue
+		default:
+		}
+		break
+	}
 }
 
 // scopeNamesRealSession reports whether one event scope names one of the
@@ -715,40 +685,9 @@ func scopeNamesRealSession(t *testing.T, scope protocol.Scope, sessionIDs ...str
 	return false
 }
 
-// operationScopeWorkspace reads the lexical Workspace of one Operation scope;
-// any other scope kind reads as the empty root.
-func operationScopeWorkspace(t *testing.T, scope protocol.Scope) string {
-	t.Helper()
-	if scopeKind(t, scope) != "operation" {
-		return ""
-	}
-	body, err := scope.AsOperationScope()
-	testassert.NoError(t, err)
-	return deref(body.Workspace)
-}
-
 func deref(value *string) string {
 	if value == nil {
 		return ""
 	}
 	return *value
-}
-
-func normalizeInvocationScopes(t *testing.T, events []Event) []Event {
-	t.Helper()
-	out := make([]Event, len(events))
-	for i, event := range events {
-		out[i] = event
-		body, err := event.AsScopeEvent()
-		if err != nil {
-			continue
-		}
-		invocation, err := body.Scope.AsInvocationScope()
-		if err != nil || invocation.Kind != protocol.Invocation {
-			continue
-		}
-		testassert.Require(t, invocation.InvocationId != "" && invocation.Purpose == protocol.Conversation, "invocation scope = %+v, want the actual ID and conversation purpose", invocation)
-		out[i] = scopeEvent(body.Kind, ScopeInfo{Kind: ScopeAgent, Workspace: *invocation.Workspace, SessionID: invocation.SessionId, OperationID: invocation.OperationId})
-	}
-	return out
 }

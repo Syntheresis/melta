@@ -4,84 +4,110 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
+	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
 )
 
-type frozenStartProbe struct {
-	refusal error
-}
-
-func (f frozenStartProbe) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (f frozenStartProbe) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Start: &extension.SessionStart{
-		Target: "child/name", InitialState: []byte(` {"private":1} `),
-		Input: []model.ContentPart{{Kind: model.PartText, Text: "original"}},
-	}}
-}
-
-func (f frozenStartProbe) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	plan.Start.Target = "substituted"
-	plan.Start.Input[0].Text = "substituted"
-	plan.Start.InitialState[0] = 'x'
-	if _, err := call.Call(ctx, "melta.session", "start", []byte(`{"target":"forged"}`)); err == nil {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "accepted forged arguments"}}
+func TestServedStartUsesServingExtension(t *testing.T) {
+	e := newOwnerEnv(t)
+	for _, id := range []string{"startcaller", "startserver", "startplain"} {
+		enableFixturePlugin(t, e.configPath, id)
 	}
-	_, err := call.Call(ctx, "melta.session", "start", []byte(`{}`))
-	if !errors.Is(err, f.refusal) {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "unexpected first result"}}
-	}
-	_, err = call.Call(ctx, "melta.session", "start", []byte(`{}`))
-	if !errors.Is(err, harness.ErrConflict) {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "start reused"}}
-	}
-	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess}}
-}
-
-func TestRegisteredStartOwnsFrozenPlan(t *testing.T) {
-	ctx := context.Background()
-	refusal := errors.New("prepare refused")
-	var observed harness.PreparationRequest
-	h, err := harness.New(ctx, harness.Dependencies{
-		Storage: storage.NewMemory(),
-		Prepare: func(_ context.Context, req harness.PreparationRequest) (harness.PreparedExecution, error) {
-			observed = req
-			return harness.PreparedExecution{}, refusal
-		},
+	writeAgentDefinitions(t, e.configPath, `{"start_agent":{"model":"prov/m","system_prompt":"simple","tools":["start_tool"]}}`)
+	e.fixtureStore(storage.NewMemory())
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	defer releaseOnce()
+	entered := make(chan struct{}, 1)
+	e.server.setScript(func(_ context.Context, body string) []string {
+		if lastUserText(body) == "served child" {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			return textTurnEvents("child done")
+		}
+		if lastMessageRole(body) == "tool" {
+			return textTurnEvents("done")
+		}
+		return toolCallTurnEvents("call-start", "start_tool", `{}`)
 	})
-	if err != nil {
-		t.Fatal(err)
+	server := func(id, service string, grant bool) extension.Extension {
+		manifest := registrarManifest(id)
+		if grant {
+			manifest.Services = []string{extension.ContractSession}
+		}
+		return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			_, err := api.RegisterService(extension.Service{Name: service, Methods: []extension.RegisteredMethod{{
+				Method: extension.ServiceMethod("start", `{}`, `{}`, "", ""),
+				Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
+					ref := model.ModelRef{Provider: "prov", Model: "m"}
+					id, err := call.StartSession(ctx, extension.SessionStart{
+						Inputs: harness.SessionInputs{Model: &ref}, InitialState: harness.SessionStateValue(`{"owner":"server"}`),
+						Input: []model.ContentPart{{Kind: model.PartText, Text: "served child"}},
+					})
+					if err != nil {
+						return extension.Result{}, err
+					}
+					value, err := json.Marshal(map[string]string{"session_id": id})
+					return extension.Result{Value: value}, err
+				},
+			}}}, nil)
+			return nil, err
+		}}
 	}
-	parent, err := h.CreateSession(ctx, harness.CreateSessionRequest{Workspace: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
+	ids := make(chan string, 1)
+	caller := testNative("startcaller", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.RegisterTool(testDescribeTool("start_tool"), func(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+			if _, err := call.Call(ctx, "start.plain", "start", json.RawMessage(`{}`)); !errors.Is(err, extension.ErrDenied) {
+				return extension.ToolResult{}, errors.New("ungranted server started a session")
+			}
+			result, err := call.Call(ctx, "start.server", "start", json.RawMessage(`{}`))
+			if err != nil {
+				return extension.ToolResult{}, err
+			}
+			var body struct {
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(result.Value, &body); err != nil {
+				return extension.ToolResult{}, err
+			}
+			ids <- body.SessionID
+			return extension.ToolResult{Content: "started"}, nil
+		}, nil)
+		return nil, err
+	})
+	caller.Manifest.Services = []string{extension.ContractSession}
+	ctx := context.Background()
+	r, err := e.open(ctx, caller, server("startserver", "start.server", true), server("startplain", "start.plain", false))
+	testassert.NoError(t, err)
+	defer closeProjectionRuntime(r)
+	session, err := r.createSession(ctx, e.dataDir, "start_agent")
+	testassert.NoError(t, err)
+	submitThroughRuntime(t, r, session.Identity.SessionID, "served-start", "run")
+	child := <-ids
+	<-entered
+	members, err := r.harness.SessionMembers(ctx, session.Identity.SessionID)
+	testassert.NoError(t, err)
+	found := false
+	for _, member := range members {
+		if member.ID == child && member.Kind == "session" && member.Starter == "startserver" {
+			found = true
+		}
 	}
-	owner := &configurationService{}
-	candidate := &nativeCandidate{owner: owner}
-	activation := &nativeActivation{owner: owner, id: "ext/name", services: map[string]bool{"melta.session": true}}
-	entry := &nativeRegistration{activation: activation, value: nativeTool{tool: frozenStartProbe{refusal: refusal}}}
-	binding := &nativeToolBinding{nativeCaptureHold: nativeCaptureHold{candidate: candidate}, entry: entry}
-	host := &composition{hosts: &hostServices{background: &backgroundBridge{h: h}}}
-	tool := registeredExtensionTool{binding: binding, host: host}
-	prepared := tool.Prepare(ctx, ToolContext{Session: parent.Identity, Workspace: parent.Identity.Workspace}, model.ToolCall{ID: "call", Name: "start"})
-	want := []harness.PermissionRequest{{Permission: harness.PermissionSessionOwn, Target: "ext%2Fname/child%2Fname"}}
-	if !reflect.DeepEqual(prepared.Permissions, want) || prepared.Execute == nil {
-		t.Fatalf("prepared plan = %+v", prepared)
-	}
-	if outcome := prepared.Execute(ctx); outcome.Result.Status != model.ResultSuccess {
-		t.Fatalf("execute = %+v", outcome)
-	}
-	if observed.Session.Identity.OwnerSessionID != parent.Identity.SessionID ||
-		string(observed.Session.ExtensionState["ext/name"]) != ` {"private":1} ` ||
-		len(observed.Content) != 1 || observed.Content[0].Text != "original" {
-		t.Fatalf("preparation received substituted values: %+v", observed)
-	}
+	testassert.Require(t, found, "members = %+v, want serving extension as starter", members)
+	states, err := r.harness.SessionExtensionStates(ctx, child)
+	testassert.NoError(t, err)
+	testassert.Equal(t, string(states["startserver"]), `{"owner":"server"}`)
+	_, wrong := states["startcaller"]
+	testassert.Require(t, !wrong, "caller owns initial state: %+v", states)
+	releaseOnce()
+	awaitOperation(t, r, session.Identity.SessionID, "served-start", harness.OperationSuccess)
 }

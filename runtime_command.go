@@ -38,9 +38,8 @@ func runRuntime(ctx context.Context, dataDir, configPath string) (err error) {
 	}
 	dataRoot := filepath.Join(home, ".melta")
 	locations := melta.Locations{
-		GlobalRulesDir:     dataRoot,
-		DiscoveryCacheDir:  filepath.Join(dataRoot, "cache", "discovery"),
-		WorkspacePolicyDir: filepath.Join(dataRoot, "projects"),
+		GlobalRulesDir:    dataRoot,
+		DiscoveryCacheDir: filepath.Join(dataRoot, "cache", "discovery"),
 	}
 	if os.Getenv("MELTA_DEBUG_WIRE") == "1" {
 		locations.WireDebugDir = filepath.Join(dataRoot, "debug", "wire")

@@ -28,53 +28,33 @@ func (fixtureStrategy) Consume(harness.ConsumeInput) (harness.PlanOutput, error)
 	return harness.PlanOutput{Kind: harness.PlanNone}, nil
 }
 
-func (t *fixtureTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *fixtureTool) Prepare(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
+func (t *fixtureTool) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	if !t.fresh {
 		if _, err := call.Call(ctx, "gate", "park", json.RawMessage(`{}`)); err != nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+			return extension.ToolResult{}, err
 		}
 		if t.remove {
 			if err := t.api.Remove(*t.handle); err != nil {
-				return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+				return extension.ToolResult{}, err
 			}
-			return extension.ToolPlan{Data: []byte("old-plan"), Start: &extension.SessionStart{Target: "raw/name", InitialState: []byte(`{"large":9007199254740993}`), Report: true}}
+			return extension.ToolResult{Content: "old handler"}, nil
 		}
-		if _, err := t.api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, &fixtureTool{fresh: true}, *t.handle); err == nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "reserved replacement accepted"}}}
+		if _, err := t.api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, (&fixtureTool{fresh: true}).run, *t.handle); err == nil {
+			return extension.ToolResult{}, errors.New("reserved replacement accepted")
 		}
-		replacement, err := t.api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, &fixtureTool{fresh: true}, *t.handle)
+		replacement, err := t.api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, (&fixtureTool{fresh: true}).run, *t.handle)
 		if err != nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+			return extension.ToolResult{}, err
 		}
 		*t.handle = replacement
+		return extension.ToolResult{Content: "old handler"}, nil
 	}
-	return extension.ToolPlan{Data: []byte("old-plan"), Start: &extension.SessionStart{Target: "raw/name", InitialState: []byte(`{"large":9007199254740993}`), Report: true}}
-}
-
-func (t *fixtureTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	if t.fresh || string(plan.Data) != "old-plan" || plan.Start == nil || plan.Start.Target != "raw/name" || string(plan.Start.InitialState) != `{"large":9007199254740993}` || !plan.Start.Report {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "incorrect handler or plan"}}
-	}
-	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "old handler"}, Evidence: harness.ExecutionObserved}
+	return extension.ToolResult{}, errors.New("incorrect handler")
 }
 
 func main() {
-	if mode := os.Getenv("AUTHOR_FIXTURE_MODE"); mode == "workspace" || mode == "settings" {
-		e := workspaceFixture()
-		if mode == "settings" {
-			e = settingsFixture()
-		}
-		if err := worker.Serve(context.Background(), e, os.Stdin, os.Stdout); err != nil {
-			os.Exit(1)
-		}
-		return
-	}
-	if os.Getenv("AUTHOR_FIXTURE_MODE") == "independent" {
-		if err := worker.Serve(context.Background(), independentFixture(), os.Stdin, os.Stdout); err != nil {
+	if mode := os.Getenv("AUTHOR_FIXTURE_MODE"); mode == "workspace" {
+		if err := worker.Serve(context.Background(), workspaceFixture(), os.Stdin, os.Stdout); err != nil {
 			os.Exit(1)
 		}
 		return
@@ -102,13 +82,13 @@ func main() {
 			}
 			_, err = api.RegisterService(extension.Service{Name: "worker-service", Methods: []extension.RegisteredMethod{
 				{
-					Method: extension.Method{Name: "relay", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "relay", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						return call.Call(ctx, "host-service", "echo", args)
 					},
 				},
 				{
-					Method: extension.Method{Name: "crash", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "crash", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 						os.Exit(17)
 						return extension.Result{}, nil
@@ -120,13 +100,13 @@ func main() {
 			}
 			var handle extension.Registration
 			tool := &fixtureTool{api: api, handle: &handle}
-			handle, err = api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, tool, nil)
+			handle, err = api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, tool.run, nil)
 			if err != nil {
 				return nil, err
 			}
 			var removable extension.Registration
 			remover := &fixtureTool{api: api, handle: &removable, remove: true}
-			removable, err = api.RegisterTool(model.ToolDefinition{Name: "removable-tool", Parameters: json.RawMessage(`{}`)}, remover, nil)
+			removable, err = api.RegisterTool(model.ToolDefinition{Name: "removable-tool", Parameters: json.RawMessage(`{}`)}, remover.run, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -134,13 +114,13 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachArguments(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
+			_, err = api.AttachArguments(func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
 				return extension.ArgumentsResult{Arguments: append(json.RawMessage(nil), call.Arguments...)}, nil
 			}, nil)
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			_, err = api.AttachRequest(func(_ context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				prompt := "worker prompt"
 				return harness.RequestConsequence{Prompt: &prompt}, nil
 			}, nil)
@@ -153,9 +133,9 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachAuthorization(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
+			_, err = api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, input model.ToolCall) (*string, error) {
 				if string(input.Arguments) != string([]byte{0xff, '{'}) {
-					return nil, errors.New("authorization arguments changed")
+					return nil, errors.New("check arguments changed")
 				}
 				refusal := "denied by worker"
 				return &refusal, nil
@@ -165,7 +145,7 @@ func main() {
 			}
 			_, err = api.RegisterOperation(extension.Operation{
 				Target: extension.ExposedTargetHarness,
-				Method: extension.Method{Name: "operation", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Method: extension.Method{Name: "operation", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 				Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return extension.Result{Value: args}, nil
 				},

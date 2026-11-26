@@ -96,7 +96,7 @@ func compactPrepWith(t *testing.T, agentsDoc, configDoc, endpoint string) (confi
 	svc := sh.preparedService(owner, compactToolsPlugin(), fixtureAgentPlugin())
 	captured, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	return captured, newPreparation(svc, sh.locations(), "", nil, nil, newArtifactIntervals(), nil, nil)
+	return captured, newPreparation(svc, sh.locations(), "", nil, nil, newArtifactIntervals(), nil)
 }
 
 // compactToolsPlugin registers the fixture's noop tools through the
@@ -104,7 +104,7 @@ func compactPrepWith(t *testing.T, agentsDoc, configDoc, endpoint string) (confi
 func compactToolsPlugin() extension.Extension {
 	return testNative("compacttools", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		for _, id := range []string{"echo", "read"} {
-			if _, err := api.RegisterTool(testDescribeTool(id), testRegisteredTool{}, nil); err != nil {
+			if _, err := api.RegisterTool(testDescribeTool(id), testRegisteredTool, nil); err != nil {
 				return nil, err
 			}
 		}
@@ -373,12 +373,11 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 				Execution:     capture,
 				AdmittedAt:    time.Now(),
 			}
-			inv, err := opener(context.Background(), admission, sel, harness.InvocationRequest{
+			inv := opener(context.Background(), admission, sel, harness.InvocationRequest{
 				ID:      "inv-maintenance",
 				Purpose: harness.InvocationPurposeMaintenance,
 				Model:   capture.Compact.Model,
 			})
-			testassert.NoError(t, err)
 			testassert.Require(t, inv.Model != nil, "opened maintenance invocation carries no Model callback")
 			wantDefault := `"conversation"`
 			if tc.wantCompactOn == "m2" {
@@ -399,12 +398,11 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 			// when the compact model is the conversation model the two closures
 			// are built identically over the one shared transport, so both hit
 			// the same wire model and credential.
-			conv, err := opener(context.Background(), admission, sel, harness.InvocationRequest{
+			conv := opener(context.Background(), admission, sel, harness.InvocationRequest{
 				ID:      "inv-conversation",
 				Purpose: harness.InvocationPurposeConversation,
 				Model:   capture.Model,
 			})
-			testassert.NoError(t, err)
 			testassert.Equal(t, string(conv.ModelParameters["bound_default"]), `"conversation"`)
 			stream, err = conv.Model(context.Background(), req, nil)
 			testassert.NoError(t, err)

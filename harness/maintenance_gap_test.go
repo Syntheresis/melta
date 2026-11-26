@@ -113,8 +113,8 @@ func newGapHarness(t *testing.T) (*Harness, *graphStorage, *coordinator, string)
 
 // gapExecution opens the conversation and maintenance invocations the gap
 // fixtures drive, under the given strategy binding.
-func gapExecution(t *testing.T, strategy ContextStrategy, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), conversation func(context.Context, model.Request, model.Extra) (model.Stream, error), tool func(context.Context, model.ToolCall) PreparedTool) Execution {
-	noop := func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }
+func gapExecution(t *testing.T, strategy ContextStrategy, compact func(context.Context, model.Request, model.Extra) (model.Stream, error), conversation func(context.Context, model.Request, model.Extra) (model.Stream, error), tool func(context.Context, model.ToolCall) ToolOutcome) Execution {
+	noop := func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }
 	return Execution{
 		ResolveStrategy: fixedStrategyResolver(&StrategyBinding{ID: gapStrategyID, Strategy: strategy}),
 		OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
@@ -248,15 +248,13 @@ func TestMaintenanceGapAcrossTransitionsAndRecovery(t *testing.T) {
 			}
 			return streamOf(turnDelta("stop", "quiet"), usageDelta(model.Usage{})), nil
 		}
-		tool := func(ctx context.Context, call model.ToolCall) PreparedTool {
+		tool := func(ctx context.Context, call model.ToolCall) ToolOutcome {
 			// The ordinary model transition has already committed the call.
 			rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
 			testassert.NoError(t, err)
 			testassert.Require(t, rec.State.UnreportedMaintenance && len(rec.State.PendingToolCalls) == 1,
 				"operation state after the model transition = %+v, want the marker preserved with the published call", rec.State)
-			return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-				return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
-			}}
+			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 		}
 		exec := gapExecution(t, strategy, gapCompactFn(&passes, &model.Usage{InputTokens: 1000000}), conversation, tool)
 		testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))

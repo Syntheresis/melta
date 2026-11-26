@@ -38,7 +38,6 @@ type packageManager struct {
 	mu             sync.Mutex
 	loaded         map[string]string
 	selected       map[string]string
-	unusable       map[string]error
 	authorFailures map[string]error
 }
 
@@ -67,14 +66,12 @@ func (m *packageManager) loadAuthors(environment func(context.Context, []string)
 		}
 		selected, ok, err := readSelection(filepath.Join(root, hash))
 		if err != nil {
-			m.unusable[hash] = err
 			continue
 		}
 		if !ok {
 			continue
 		}
 		if extensionDataHash(selected.ID) != hash {
-			m.unusable[hash] = fmt.Errorf("selected package identity %q does not match its directory", selected.ID)
 			continue
 		}
 		m.selected[selected.ID] = selected.Version
@@ -91,13 +88,12 @@ func (m *packageManager) loadAuthors(environment func(context.Context, []string)
 }
 
 // newPackageManager constructs the manager before the first load. The loaded
-// and unusable maps are populated by load from the selected records.
+// map is populated by load from the selected records.
 func newPackageManager(dataDir string) *packageManager {
 	return &packageManager{
 		dataDir:  dataDir,
 		loaded:   make(map[string]string),
 		selected: make(map[string]string),
-		unusable: make(map[string]error),
 	}
 }
 

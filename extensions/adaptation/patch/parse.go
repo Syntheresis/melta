@@ -56,12 +56,14 @@ type hunk struct {
 }
 
 type fileOp struct {
-	kind        opKind
-	path        string
-	movePath    string
-	hunks       []hunk
-	source      boundTarget
-	destination *boundTarget
+	kind     opKind
+	path     string
+	movePath string
+	hunks    []hunk
+	// sourceExists and destinationExists are the existence facts observed
+	// before validation; destinationExists applies only to a move.
+	sourceExists      bool
+	destinationExists bool
 }
 
 type patch struct {

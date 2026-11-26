@@ -115,8 +115,8 @@ func TestObserveFactKinds(t *testing.T) {
 		}
 		return completedTurnStream(), nil
 	}
-	plan := func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+	plan := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+		return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 	}
 	h, _, c, sessionID := newEffectHarness(t, nil)
 	col := observeHarness(h)
@@ -764,12 +764,10 @@ func TestObserveIntentOnly(t *testing.T) {
 		}
 		executeStarted := make(chan struct{})
 		release := make(chan struct{})
-		plan := func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-				close(executeStarted)
-				<-release
-				return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-			}}
+		plan := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+			close(executeStarted)
+			<-release
+			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
 		}
 		h, _, c, _ := newEffectHarness(t, nil)
 		col := observeHarness(h)
@@ -1365,12 +1363,12 @@ func TestObserveRefusalFacts(t *testing.T) {
 }
 
 // TestObserveToolLifecycle proves the tool lifecycle: one started fact at the
-// live dispatcher entry before validation/hooks/permission/execution, one
+// live dispatcher entry before binding, hooks, validation, checks and Run; one
 // finished fact after the shared commit for all four statuses, and a finished
 // fact without a started one for a terminal settlement's synthetic unstarted
 // result. Hooks have no progress kind.
 func TestObserveToolLifecycle(t *testing.T) {
-	run := func(t *testing.T, rounds int, plan func(context.Context, model.ToolCall) PreparedTool, cancelOnClose bool) (*factCollector, error) {
+	run := func(t *testing.T, rounds int, plan func(context.Context, model.ToolCall) ToolOutcome, cancelOnClose bool, hooks ...ToolCheckHook) (*factCollector, error) {
 		t.Helper()
 		h, _, c, _ := newEffectHarness(t, nil)
 		col := observeHarness(h)
@@ -1388,44 +1386,51 @@ func TestObserveToolLifecycle(t *testing.T) {
 			}
 			return stream, nil
 		}
+		inv := invocationExecution(modelFn, plan)
+		if len(hooks) > 0 {
+			inv.CheckStage = func() CheckStage { return CheckStage{Hooks: hooks} }
+		}
 		err := executeDirect(h, c, ctx, testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return effectExecution(modelFn, plan), nil
+			return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
+				return inv, nil
+			}}, nil
 		}))
 		return col, err
 	}
-	successPlan := func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+	successPlan := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+		return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 	}
-	errorPlan := func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return PreparedTool{Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "boom"}}}
+	errorPlan := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+		return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "boom"}}
 	}
-	deniedPlan := func(ctx context.Context, call model.ToolCall) PreparedTool {
-		return PreparedTool{Execute: func(context.Context) ToolOutcome {
-			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-		}}
+	deniedPlan := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+		return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
 	}
+	denyAll := ToolCheckHook{ID: "check", ExtensionID: "ext", Run: func(context.Context, model.ToolCall) (*string, error) {
+		reason := "restricted"
+		return &reason, nil
+	}}
 
 	t.Run("statuses share one lifecycle", func(t *testing.T) {
 		cases := []struct {
 			name          string
-			plan          func(context.Context, model.ToolCall) PreparedTool
+			plan          func(context.Context, model.ToolCall) ToolOutcome
 			status        model.ToolResultStatus
 			cancelOnClose bool
 			synthetic     bool
+			hooks         []ToolCheckHook
 		}{
 			{name: "success", plan: successPlan, status: model.ResultSuccess},
 			{name: "error", plan: errorPlan, status: model.ResultError},
-			{name: "denied", plan: deniedPlan, status: model.ResultDenied},
-			{name: "executor interrupted", plan: func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-					return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: interruptedToolResultContent}}
-				}}
+			{name: "denied", plan: deniedPlan, status: model.ResultDenied, hooks: []ToolCheckHook{denyAll}},
+			{name: "executor interrupted", plan: func(ctx context.Context, call model.ToolCall) ToolOutcome {
+				return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: interruptedToolResultContent}}
 			}, status: model.ResultInterrupted},
 			{name: "synthetic unstarted interruption", plan: successPlan, status: model.ResultInterrupted, cancelOnClose: true, synthetic: true},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				col, err := run(t, 1, tc.plan, tc.cancelOnClose)
+				col, err := run(t, 1, tc.plan, tc.cancelOnClose, tc.hooks...)
 				testassert.NoError(t, err)
 				facts := col.snapshot()
 				var startedAt, finishedAt = -1, -1
@@ -1531,10 +1536,10 @@ func TestObserveToolLifecycle(t *testing.T) {
 	t.Run("hooks have no progress kind", func(t *testing.T) {
 		h, _, c, _ := newEffectHarness(t, nil)
 		rounds := 0
-		toolFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+		toolFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+			return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 		}
-		hooks := []ToolArgumentsHook{{ID: "h1", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+		hooks := []ToolArgumentsHook{{ID: "h1", ExtensionID: "cap-a", Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
 			return ToolArgumentsResult{}, errors.New("hook boom")
 		}}}
 		exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
@@ -1544,7 +1549,7 @@ func TestObserveToolLifecycle(t *testing.T) {
 					return completedTurnStream(testToolCall("call-1")), nil
 				}
 				return completedTurnStream(), nil
-			}, LookupTool: fixtureToolLookup(toolFn, objectNormalize), ToolHooks: hooks}, nil
+			}, LookupTool: fixtureToolLookup(toolFn), ToolHooks: hooks}, nil
 		}}
 		col := observeHarness(h)
 		testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {

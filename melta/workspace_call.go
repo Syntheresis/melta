@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
-	"sync"
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/extension/worker"
@@ -14,25 +12,6 @@ import (
 	"github.com/Syntheresis/melta/protocol"
 )
 
-type nativeWorkspace struct {
-	root            string
-	dataDir         string
-	entry           harness.EntryRef
-	lease           *artifactCallLease
-	restrictionBind func(string) (string, error)
-	mu              sync.Mutex
-	bindings        map[string]nativeWorkspaceTarget
-}
-
-type nativeWorkspaceTarget struct {
-	bound     tool.WorkspaceBinding
-	canonical string
-}
-
-func newNativeWorkspace(root, dataDir string, entry harness.EntryRef, lease *artifactCallLease) *nativeWorkspace {
-	return &nativeWorkspace{root: root, dataDir: dataDir, entry: entry, lease: lease, bindings: make(map[string]nativeWorkspaceTarget)}
-}
-
 func scopedArguments(args json.RawMessage, value any) error {
 	if err := protocol.DecodeDocument(args, value); err != nil {
 		return fmt.Errorf("service arguments: %v: %w", err, harness.ErrInvalid)
@@ -40,76 +19,31 @@ func scopedArguments(args json.RawMessage, value any) error {
 	return nil
 }
 
-func (w *nativeWorkspace) bind(args json.RawMessage) (extension.Result, error) {
+func (scope *nativeCallScope) workspaceCall(ctx context.Context, method string, args json.RawMessage) (extension.Result, error) {
 	var input struct {
-		Path string `json:"path"`
-	}
-	if err := scopedArguments(args, &input); err != nil {
-		return extension.Result{}, err
-	}
-	bound, canonical, exists, err := tool.BindWorkspace(w.root, input.Path)
-	if err != nil {
-		return extension.Result{}, err
-	}
-	if w.restrictionBind != nil {
-		witness, err := w.restrictionBind(input.Path)
-		if err != nil {
-			return extension.Result{}, err
-		}
-		if witness != canonical {
-			return extension.Result{}, fmt.Errorf("workspace witness changed: %w", ErrDenied)
-		}
-	}
-	handle, err := newInstanceID()
-	if err != nil {
-		return extension.Result{}, err
-	}
-	w.mu.Lock()
-	w.bindings[handle] = nativeWorkspaceTarget{bound: bound, canonical: canonical}
-	w.mu.Unlock()
-	value, err := json.Marshal(struct {
-		Binding       string `json:"binding"`
-		CanonicalPath string `json:"canonical_path"`
-		Exists        bool   `json:"exists"`
-	}{handle, canonical, exists})
-	return extension.Result{Value: value}, err
-}
-
-func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.RawMessage, permissions []harness.PermissionRequest) (extension.Result, error) {
-	var input struct {
-		Binding    string            `json:"binding"`
+		Path       string            `json:"path"`
 		Bytes      *worker.JSONBytes `json:"bytes"`
 		CreateOnly *bool             `json:"create_only"`
 	}
 	if err := scopedArguments(args, &input); err != nil {
 		return extension.Result{}, err
 	}
-	w.mu.Lock()
-	target, ok := w.bindings[input.Binding]
-	w.mu.Unlock()
-	if !ok {
-		return extension.Result{}, ErrDenied
-	}
-	write := slices.Contains(permissions, harness.PermissionRequest{Permission: harness.PermissionFileWrite, Target: target.canonical})
-	read := slices.Contains(permissions, harness.PermissionRequest{Permission: harness.PermissionFileRead, Target: target.canonical})
-	if !write && (method != "read" || !read) {
-		return extension.Result{}, ErrDenied
-	}
-	if w.lease == nil || w.dataDir == "" || w.entry.SessionID == "" || w.entry.EntryID == "" {
-		return extension.Result{}, extension.ErrClosed
-	}
-	w.lease.mu.Lock()
-	validLease := w.lease.borrowed && !w.lease.closed && w.lease.release != nil && w.lease.key == sessionArtifactDir(w.dataDir, w.entry.SessionID)
-	w.lease.mu.Unlock()
-	if !validLease {
-		return extension.Result{}, extension.ErrClosed
-	}
 	if err := ctx.Err(); err != nil {
 		return extension.Result{}, err
 	}
-	recheck := harness.LocationRecheckFromContext(ctx)
+	if method == "stat" {
+		canonical, exists, err := tool.WorkspaceStat(scope.session.Workspace, input.Path)
+		if err != nil {
+			return extension.Result{}, err
+		}
+		value, err := json.Marshal(struct {
+			CanonicalPath string `json:"canonical_path"`
+			Exists        bool   `json:"exists"`
+		}{canonical, exists})
+		return extension.Result{Value: value}, err
+	}
 	if method == "read" {
-		content, err := target.bound.Read(recheck)
+		content, err := tool.WorkspaceRead(scope.session.Workspace, input.Path)
 		if err != nil {
 			return extension.Result{}, err
 		}
@@ -118,15 +52,24 @@ func (w *nativeWorkspace) execute(ctx context.Context, method string, args json.
 		}{content})
 		return extension.Result{Value: value}, err
 	}
-	store, err := (&standardTools{dataDir: w.dataDir}).openCodeGroup(ToolContext{AdmittedEntry: w.entry})
+	if scope.lease == nil || scope.dataDir == "" || scope.admittedEntry.SessionID == "" || scope.admittedEntry.EntryID == "" {
+		return extension.Result{}, extension.ErrClosed
+	}
+	scope.lease.mu.Lock()
+	validLease := scope.lease.borrowed && !scope.lease.closed && scope.lease.release != nil && scope.lease.key == sessionArtifactDir(scope.dataDir, scope.admittedEntry.SessionID)
+	scope.lease.mu.Unlock()
+	if !validLease {
+		return extension.Result{}, extension.ErrClosed
+	}
+	store, err := (&standardTools{dataDir: scope.dataDir}).openCodeGroup(ToolContext{AdmittedEntry: scope.admittedEntry})
 	if err != nil {
 		return extension.Result{}, err
 	}
 	var outcome tool.MutationOutcome
 	if method == "write" {
-		outcome, err = target.bound.Write(store, *input.Bytes, *input.CreateOnly, recheck)
+		outcome, err = tool.WorkspaceWrite(scope.session.Workspace, input.Path, store, *input.Bytes, *input.CreateOnly)
 	} else {
-		outcome, err = target.bound.Delete(store, recheck)
+		outcome, err = tool.WorkspaceDelete(scope.session.Workspace, input.Path, store)
 	}
 	var value json.RawMessage
 	switch outcome {

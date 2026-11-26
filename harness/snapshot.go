@@ -28,8 +28,7 @@ type BackgroundMemberView = RelatedMember
 // HistoryFact is one validated committed history entry of a Session: the
 // immutable envelope identity plus exactly one typed payload member selected
 // by Kind. Every payload is the owned validated value decoded from the
-// Session's graph; a hook_result entry is execution evidence and never a
-// client fact.
+// Session's graph.
 type HistoryFact struct {
 	EntryID     string
 	OperationID string
@@ -311,8 +310,7 @@ func (h *Harness) ReadSessionView(ctx context.Context, sessionID string) (Sessio
 }
 
 // HistoryHeaders returns the sequence-ordered value metadata of every
-// committed history entry that contributes a fact; hook evidence contributes
-// none.
+// committed history entry that contributes a fact.
 func (v HistoryReadView) HistoryHeaders() []HistoryEntryHeader {
 	headers := make([]HistoryEntryHeader, 0, len(v.prefix))
 	for _, entry := range v.prefix {
@@ -510,8 +508,7 @@ func entryPayloadKind(entry graphEntry) (EntryKind, bool) {
 	}
 }
 
-// ownHistoryFact maps one validated graph entry to its owned public fact. A
-// hook_result entry contributes no fact.
+// ownHistoryFact maps one validated graph entry to its owned public fact.
 func ownHistoryFact(entry graphEntry) (HistoryFact, bool) {
 	kind, ok := entryPayloadKind(entry)
 	if !ok {
@@ -596,6 +593,10 @@ func ownToolResultPayload(v toolResultEntry) *toolResultEntry {
 	}
 	if v.HookIDs != nil {
 		out.HookIDs = append([]HookIdentity(nil), v.HookIDs...)
+	}
+	if v.RefusedBy != nil {
+		identity := *v.RefusedBy
+		out.RefusedBy = &identity
 	}
 	return &out
 }

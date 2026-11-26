@@ -93,7 +93,7 @@ func TestReadOnlyProfileForegroundTimeoutIgnoresModelOverride(t *testing.T) {
 // captured authorization refuses it and the command result never appears.
 func TestReadOnlyProfileLaterArgumentHookTimeoutRefused(t *testing.T) {
 	gate := testNative("gate", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachArguments(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
+		_, err := api.AttachArguments(func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
 			if call.Name != "run_command" {
 				return extension.ArgumentsResult{}, nil
 			}
@@ -238,8 +238,8 @@ func TestReadOnlyProfileGitRewriteUsesExactInjectedOptions(t *testing.T) {
 			var mu sync.Mutex
 			authorized := ""
 			gate := testNative("gate", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-				_, err := api.AttachAuthorization(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
-					if input.ToolName == "run_command" {
+				_, err := api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, input model.ToolCall) (*string, error) {
+					if input.Name == "run_command" {
 						var args struct {
 							Command string `json:"command"`
 						}

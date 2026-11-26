@@ -14,26 +14,10 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// hookNormalize is the public hook rows' byte-preserving normalizer: it
-// accepts exactly one non-null JSON object and returns the caller's exact
-// argument bytes, so every difference between consumed and committed bytes is
-// attributable to the durable codec.
-func hookNormalize(_ context.Context, call model.ToolCall) (json.RawMessage, error) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(call.Arguments, &obj); err != nil || obj == nil {
-		return nil, errors.New("arguments must be one non-null JSON object")
-	}
-	return model.CloneRaw(call.Arguments), nil
-}
-
 // TestPublicToolArgumentHookTurn proves the complete hook path through the
-// public Harness without the Runtime: selected argument hooks settle as their
-// own durable effects before concrete preparation, the first hook receives the
-// original raw call arguments and every later one the preceding committed
-// replacement bytes, the final committed value reaches the concrete tool
-// byte-identically, the hook evidence never projects as conversation, a
-// restart revalidates the Session without any plugin, and a Fork copies no
-// hook effect or hook Operation state.
+// public Harness without the Runtime: argument hooks receive the preceding
+// bytes, the validated final value reaches Run unchanged, and hook provenance
+// remains outside the conversation. Recovery and Fork preserve the Session.
 func TestPublicToolArgumentHookTurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
@@ -43,13 +27,13 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 			prepared []string // argument bytes the concrete tool received
 		)
 		hooks := []harness.ToolArgumentsHook{
-			{ID: "cap.hook.one", ExtensionID: "cap-a", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (harness.ToolArgumentsResult, error) {
+			{ID: "cap.hook.one", ExtensionID: "cap-a", Run: func(ctx context.Context, call model.ToolCall) (harness.ToolArgumentsResult, error) {
 				mu.Lock()
 				hookSeen = append(hookSeen, string(call.Arguments))
 				mu.Unlock()
 				return harness.ToolArgumentsResult{Arguments: json.RawMessage(`{ "x": "<" }`)}, nil
 			}},
-			{ID: "cap.hook.two", ExtensionID: "cap-a", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (harness.ToolArgumentsResult, error) {
+			{ID: "cap.hook.two", ExtensionID: "cap-a", Run: func(ctx context.Context, call model.ToolCall) (harness.ToolArgumentsResult, error) {
 				mu.Lock()
 				hookSeen = append(hookSeen, string(call.Arguments))
 				mu.Unlock()
@@ -70,14 +54,14 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 						return harness.InvocationExecution{
 							Model:     script.effect,
 							ToolHooks: hooks,
-							LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
+							LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
 								mu.Lock()
 								prepared = append(prepared, string(call.Arguments))
 								mu.Unlock()
-								return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+								return harness.ToolOutcome{
 									Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call-1"},
-								}}
-							}, hookNormalize),
+								}
+							}),
 						}, nil
 					}}, nil
 				},
@@ -113,31 +97,6 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 		rec, err := f.h.ReadOperation(ctx, session, "op-1")
 		testassert.Require(t, err == nil && rec.State.Status == harness.OperationSuccess && rec.State.ActiveEffect == nil && len(rec.State.PendingToolCalls) == 0, "hook turn = %+v err %v, want terminal success with every effect settled", rec, err)
 
-		// The committed evidence: one success hook_result per hook, in
-		// configured order, carrying the durable replacement bytes.
-		entries, err := store.ReadEntries(ctx, session, 0)
-		testassert.NoError(t, err)
-		type hookWire struct {
-			HookID     string `json:"hook_id"`
-			ToolCallID string `json:"tool_call_id"`
-			Status     string `json:"status"`
-			Arguments  []byte `json:"arguments_base64"`
-			Error      string `json:"error"`
-		}
-		var hookResults []hookWire
-		for _, entry := range entries {
-			if entry.Kind != harness.EntryHookResult {
-				continue
-			}
-			var wire hookWire
-			{
-				err := json.Unmarshal(entry.Payload, &wire)
-				testassert.NoError(t, err)
-			}
-			hookResults = append(hookResults, wire)
-		}
-		testassert.Require(t, len(hookResults) == 2 && hookResults[0].HookID == "cap.hook.one" && hookResults[0].Status == "success" && string(hookResults[0].Arguments) == `{ "x": "<" }` && hookResults[1].HookID == "cap.hook.two" && hookResults[1].Status == "success" && string(hookResults[1].Arguments) == `{"y":"&>"}`, "committed hook results = %+v, want one success per hook with the durable bytes", hookResults)
-
 		// The evidence never projects as conversation: the completing turn's
 		// projection carries the call result, not the hook replacements.
 		projection := texts(script.seen()[1])
@@ -162,9 +121,8 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 		rec, err = restarted.ReadOperation(ctx, session, "op-1")
 		testassert.Require(t, err == nil && rec.State.Status == harness.OperationSuccess, "restarted ReadOperation = %+v err %v, want the revalidated settled Operation", rec, err)
 
-		// A Fork copies no hook effect: the fork boundary is op-2's input, so
-		// the copied prefix actually contains op-1's committed hook evidence —
-		// asserted present in the source prefix and absent from the fork.
+		// A Fork carries the tool result's recorded provenance across the
+		// boundary without a hook entry.
 		boundary := forkEntryOf(t, store, session, harness.EntryInput, "op-2")
 		before := snapshotSession(t, store, session)
 		forkScript := newScriptModel(publicFail("fork turn settled"))
@@ -179,21 +137,9 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 			testassert.NoError(t, err)
 		}
 		assertForkSourceUnchanged(t, store, session, before)
-		var sourceHooks int
-		for _, entry := range entries {
-			if entry.Kind == harness.EntryHookResult && entry.Sequence < boundary.Sequence {
-				sourceHooks++
-			}
-		}
-		testassert.Equal(t, sourceHooks, 2)
 		copied, err := store.ReadEntries(ctx, res.Session.Identity.SessionID, 0)
 		testassert.NoError(t, err)
-		hookEffects, acceptedSelections := 0, 0
 		for _, entry := range copied {
-			if entry.Kind == harness.EntryHookResult {
-				hookEffects++
-				continue
-			}
 			if entry.Kind != harness.EntryToolResult {
 				continue
 			}
@@ -208,26 +154,22 @@ func TestPublicToolArgumentHookTurn(t *testing.T) {
 			testassert.Require(t, string(wire.NormalizedArguments) == `{"y":"&>"}` && len(wire.HookIDs) == 2 &&
 				wire.HookIDs[0].HookID == "cap.hook.one" && wire.HookIDs[1].HookID == "cap.hook.two",
 				"copied tool result %s lost its accepted selection: %s", entry.ID, entry.Payload)
-			acceptedSelections++
 		}
-		testassert.Require(t, hookEffects == 0, "the fork copied %d hook effects, want none", hookEffects)
 		// The copied accepted selection is operationless provenance: it stays
-		// valid without its excluded hook effect entries and revalidates cold.
-		testassert.Require(t, acceptedSelections == 1, "copied accepted tool selections = %d, want the settled call carried whole", acceptedSelections)
+		// valid without hook entries and revalidates cold.
 		{
 			_, err := f2.h.ReadHistoryView(ctx, res.Session.Identity.SessionID)
-			testassert.Require(t, err == nil, "destination history view: %v, want the copied accepted selection to revalidate with hook effects excluded", err)
+			testassert.Require(t, err == nil, "destination history view: %v, want the copied accepted selection to revalidate", err)
 		}
 	})
 }
 
-// TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects proves the fork
-// rows for request evidence: the copied assistant's consumed evidence survives
-// as the same closed delta with its canonical boundary rewritten to the copied
-// entry identity, the hook provenance stays recorded unchanged, no hook effect
-// or hook Operation state crosses the boundary, and the destination graph
-// revalidates through a cold read.
-func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
+// TestPublicForkRemapsRequestEvidence proves the fork rows for request
+// evidence: the copied assistant's consumed evidence survives as the same
+// closed delta with its canonical boundary rewritten to the copied entry
+// identity, the hook provenance stays recorded unchanged, and the destination
+// graph revalidates through a cold read.
+func TestPublicForkRemapsRequestEvidence(t *testing.T) {
 	eachStore(t, func(t *testing.T, store harness.Storage) {
 		ctx := context.Background()
 		netPrompt := "fork-test net prompt"
@@ -235,11 +177,11 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 		addition, aerr := model.NewMessage(model.Message{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "contributed"}}})
 		testassert.NoError(t, aerr)
 		hooks := []harness.RequestHook{
-			{ID: "req.pure", ExtensionID: "req-ext", Mode: harness.HookModePure, Run: func(context.Context, harness.RequestHookInput) (harness.RequestConsequence, error) {
+			{ID: "req.pure", ExtensionID: "req-ext", Run: func(context.Context, harness.RequestHookInput) (harness.RequestConsequence, error) {
 				p := purePrompt
 				return harness.RequestConsequence{Prompt: &p}, nil
 			}},
-			{ID: "req.effectful", ExtensionID: "req-ext", Mode: harness.HookModeEffectful, Run: func(context.Context, harness.RequestHookInput) (harness.RequestConsequence, error) {
+			{ID: "req.setter", ExtensionID: "req-ext", Run: func(context.Context, harness.RequestHookInput) (harness.RequestConsequence, error) {
 				p := netPrompt
 				position := 0
 				return harness.RequestConsequence{Prompt: &p, Edits: []harness.RequestMessageEdit{{Position: &position}, {Message: &addition}}}, nil
@@ -255,7 +197,7 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 						return harness.InvocationExecution{
 							Model:        script.effect,
 							RequestStage: func() harness.RequestStage { return harness.RequestStage{Catalog: publicCapture().Tools, Hooks: hooks} },
-							LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) harness.PreparedTool { return harness.PreparedTool{} }, hookNormalize),
+							LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) harness.ToolOutcome { return harness.ToolOutcome{} }),
 						}, nil
 					}}, nil
 				},
@@ -303,22 +245,18 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 			Evidence  *evidenceWire `json:"evidence"`
 		}
 		var sourceAssistant *assistantWire
-		var sourceHookResults int
 		for _, entry := range entries {
-			switch entry.Kind {
-			case harness.EntryAssistant:
-				var wire assistantWire
-				testassert.NoError(t, json.Unmarshal(entry.Payload, &wire))
-				sourceAssistant = &wire // op-3's assistant is the last committed
-			case harness.EntryHookResult:
-				sourceHookResults++
+			if entry.Kind != harness.EntryAssistant {
+				continue
 			}
+			var wire assistantWire
+			testassert.NoError(t, json.Unmarshal(entry.Payload, &wire))
+			sourceAssistant = &wire // op-3's assistant is the last committed
 		}
 		testassert.Require(t, sourceAssistant != nil && sourceAssistant.Evidence != nil, "source assistant carries no request evidence")
-		testassert.Require(t, sourceHookResults == 3, "source hook results = %d, want one effectful request hook per dispatched request", sourceHookResults)
 		testassert.Require(t, len(sourceAssistant.Evidence.HookIDs) == 2 && sourceAssistant.Evidence.HookIDs[0].HookID == "req.pure" &&
-			sourceAssistant.Evidence.HookIDs[1].HookID == "req.effectful",
-			"source assistant provenance = %+v, want the changed pure contributor and the effectful setter in hook order", sourceAssistant.Evidence.HookIDs)
+			sourceAssistant.Evidence.HookIDs[1].HookID == "req.setter",
+			"source assistant provenance = %+v, want both accepted contributors in hook order", sourceAssistant.Evidence.HookIDs)
 
 		boundary := forkEntryOf(t, store, session, harness.EntryInput, "op-2")
 		before := snapshotSession(t, store, session)
@@ -346,19 +284,15 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 		testassert.NoError(t, err)
 		destIDs := map[string]bool{}
 		var copiedAssistants []*assistantWire
-		copiedHooks := 0
 		for _, entry := range copied {
 			destIDs[entry.ID] = true
-			switch entry.Kind {
-			case harness.EntryAssistant:
-				var wire assistantWire
-				testassert.NoError(t, json.Unmarshal(entry.Payload, &wire))
-				copiedAssistants = append(copiedAssistants, &wire)
-			case harness.EntryHookResult:
-				copiedHooks++
+			if entry.Kind != harness.EntryAssistant {
+				continue
 			}
+			var wire assistantWire
+			testassert.NoError(t, json.Unmarshal(entry.Payload, &wire))
+			copiedAssistants = append(copiedAssistants, &wire)
 		}
-		testassert.Require(t, copiedHooks == 0, "the fork copied %d hook effects, want none", copiedHooks)
 		// The copied prefix carries op-1's evidence-bearing assistant (op-3's
 		// assistant sits past the boundary and is not copied).
 		testassert.Equal(t, len(copiedAssistants), 1)
@@ -369,7 +303,7 @@ func TestPublicForkRemapsRequestEvidenceAndExcludesHookEffects(t *testing.T) {
 			"copied evidence prompt = %v, want the net contribution the assistant consumed", copiedEvidence.Prompt)
 		testassert.Require(t, len(copiedEvidence.Edits) == 2 && copiedEvidence.Edits[0].Position != nil &&
 			*copiedEvidence.Edits[0].Position == 0 && len(copiedEvidence.Edits[1].Message) > 0 && len(copiedEvidence.HookIDs) == 2 &&
-			copiedEvidence.HookIDs[0].HookID == "req.pure" && copiedEvidence.HookIDs[1].HookID == "req.effectful",
+			copiedEvidence.HookIDs[0].HookID == "req.pure" && copiedEvidence.HookIDs[1].HookID == "req.setter",
 			"copied evidence = %+v, want the retained delta and recorded provenance unchanged", copiedEvidence)
 		{
 			_, err := f2.h.ReadHistoryView(ctx, dest)

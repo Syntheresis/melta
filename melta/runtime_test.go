@@ -118,9 +118,8 @@ func testOptions(dataDir, configPath, home string, plugins ...extension.Extensio
 		Configuration: NewFileConfigurationSource(configPath),
 		Credentials:   NewEnvironmentCredentialSource(filepath.Join(dataRoot, ".env")),
 		Locations: Locations{
-			GlobalRulesDir:     dataRoot,
-			DiscoveryCacheDir:  filepath.Join(dataRoot, "cache", "discovery"),
-			WorkspacePolicyDir: filepath.Join(dataRoot, "projects"),
+			GlobalRulesDir:    dataRoot,
+			DiscoveryCacheDir: filepath.Join(dataRoot, "cache", "discovery"),
 		},
 		Extensions: plugins,
 	}
@@ -188,9 +187,8 @@ func (e *ownerEnv) options(natives ...extension.Extension) options {
 		Configuration: NewFileConfigurationSource(e.configPath),
 		Credentials:   NewEnvironmentCredentialSource(e.envPath),
 		Locations: Locations{
-			GlobalRulesDir:     filepath.Join(e.home, ".melta"),
-			DiscoveryCacheDir:  filepath.Join(e.home, ".melta", "cache", "discovery"),
-			WorkspacePolicyDir: filepath.Join(e.home, ".melta", "projects"),
+			GlobalRulesDir:    filepath.Join(e.home, ".melta"),
+			DiscoveryCacheDir: filepath.Join(e.home, ".melta", "cache", "discovery"),
 		},
 		Extensions: natives,
 	}
@@ -221,7 +219,7 @@ func (e *ownerEnv) corePlugin(id, exportID string, _ any, closeFn func() error) 
 	return extension.Extension{Manifest: registrarManifest(id), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		e.events.add("open:" + id)
 		_, err := api.RegisterService(extension.Service{Name: exportID, Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{}`, "", ""),
+			Method: extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			},
@@ -245,7 +243,7 @@ func (e *ownerEnv) ordinaryPlugin(id, providesID string) extension.Extension {
 	return extension.Extension{Manifest: registrarManifest(id), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		e.events.add("open:" + id)
 		_, err := api.RegisterService(extension.Service{Name: providesID, Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{}`, "", ""),
+			Method: extension.ServiceMethod("call", `{}`, `{}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			},
@@ -504,9 +502,9 @@ func seedRunningOperation(t *testing.T, store harness.Storage, workspace string)
 					return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 						return harness.InvocationExecution{
 							Model: modelFn,
-							LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) harness.PreparedTool {
-								return harness.PreparedTool{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "seeded"}}}
-							}, runtimeNormalizeContext),
+							LookupTool: fixtureToolLookup(func(_ context.Context, call model.ToolCall) harness.ToolOutcome {
+								return harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "seeded"}}
+							}),
 						}, nil
 					}}, nil
 				},
@@ -1568,7 +1566,7 @@ func TestRuntimeBaselineServicesAreDirectlyConstructed(t *testing.T) {
 		e := newOwnerEnv(t)
 		enableFixturePlugin(t, e.configPath, "shadow")
 		shadow := extension.Extension{Manifest: registrarManifest("shadow"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "write_file", Parameters: json.RawMessage(`{"type":"object"}`)}, registrarTestTool{}, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "write_file", Parameters: json.RawMessage(`{"type":"object"}`)}, registrarTestTool(""), nil)
 			return nil, err
 		}}
 		r, err := e.open(context.Background(), shadow)
@@ -1631,7 +1629,7 @@ func TestRuntimeSettingsSectionsHaveOneOwner(t *testing.T) {
 // execution callbacks before a subsequent explicit admission.
 func shortScopeProbe(id string, calls *atomic.Int64) extension.Extension {
 	return extension.Extension{Manifest: registrarManifest(id), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+		_, err := api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 			calls.Add(1)
 			return harness.RequestConsequence{}, nil
 		}, nil)

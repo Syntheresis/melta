@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/extension/worker"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/plugins/builtin"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/melta"
@@ -319,113 +317,24 @@ func shippedExternalExtension() extension.Extension {
 				Name:        "external_read",
 				Description: "Read one Workspace file and return its text.",
 				Parameters:  json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"}},"additionalProperties":false}`),
-			}, shippedExternalTool{}, nil)
+			}, shippedExternalTool, nil)
 			return nil, err
 		},
 	}
 }
 
-// shippedExternalTarget is one Workspace binding the external tool received.
-type shippedExternalTarget struct {
-	binding   string
-	canonical string
-}
-
-func shippedExternalBind(ctx context.Context, author extension.AuthorContext, path string) (shippedExternalTarget, error) {
-	arguments, err := json.Marshal(map[string]string{"path": path})
-	if err != nil {
-		return shippedExternalTarget{}, err
-	}
-	result, err := author.Call(ctx, "melta.workspace", "bind", arguments)
-	if err != nil {
-		return shippedExternalTarget{}, err
-	}
-	if result.Failure != nil {
-		return shippedExternalTarget{}, fmt.Errorf("external_read: bind %s: %s", path, result.Failure.Message)
-	}
-	var bound struct {
-		Binding       string `json:"binding"`
-		CanonicalPath string `json:"canonical_path"`
-	}
-	if err := json.Unmarshal(result.Value, &bound); err != nil || bound.Binding == "" || bound.CanonicalPath == "" {
-		return shippedExternalTarget{}, fmt.Errorf("external_read: bind %s: %v", path, err)
-	}
-	return shippedExternalTarget{binding: bound.Binding, canonical: bound.CanonicalPath}, nil
-}
-
-func shippedExternalFailure(callID, content string) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: content}}}
-}
-
-type shippedExternalTool struct{}
-
-func (shippedExternalTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
+func shippedExternalTool(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	var input struct {
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal(call.Arguments, &input); err != nil || input.Path == "" {
-		return nil, fmt.Errorf("external_read: path is required")
+	if err := call.Decode(&input); err != nil || input.Path == "" {
+		return extension.ToolResult{}, fmt.Errorf("external_read: path is required")
 	}
-	return call.Arguments, nil
-}
-
-func (shippedExternalTool) Prepare(ctx context.Context, author extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	var input struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(call.Arguments, &input); err != nil || input.Path == "" {
-		return shippedExternalFailure(call.ID, "external_read: path is required")
-	}
-	root, err := shippedExternalBind(ctx, author, ".")
+	content, err := call.ReadFile(ctx, input.Path)
 	if err != nil {
-		return shippedExternalFailure(call.ID, err.Error())
+		return extension.ToolResult{}, err
 	}
-	target, err := shippedExternalBind(ctx, author, input.Path)
-	if err != nil {
-		return shippedExternalFailure(call.ID, err.Error())
-	}
-	data, err := json.Marshal(struct {
-		CallID  string `json:"call_id"`
-		Binding string `json:"binding"`
-	}{CallID: call.ID, Binding: target.binding})
-	if err != nil {
-		return shippedExternalFailure(call.ID, err.Error())
-	}
-	return extension.ToolPlan{
-		Permissions:        []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: target.canonical}},
-		CanonicalWorkspace: root.canonical,
-		Data:               data,
-	}
-}
-
-func (shippedExternalTool) Execute(ctx context.Context, author extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	var data struct {
-		CallID  string `json:"call_id"`
-		Binding string `json:"binding"`
-	}
-	if err := json.Unmarshal(plan.Data, &data); err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}
-	}
-	arguments, err := json.Marshal(map[string]string{"binding": data.Binding})
-	if err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: data.CallID, Status: model.ResultError, Content: err.Error()}}
-	}
-	result, err := author.Call(ctx, "melta.workspace", "read", arguments)
-	if err == nil && result.Failure != nil {
-		err = fmt.Errorf("%s", result.Failure.Message)
-	}
-	if err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: data.CallID, Status: model.ResultError, Content: err.Error()}}
-	}
-	var read struct {
-		Bytes worker.JSONBytes `json:"bytes"`
-	}
-	if err := json.Unmarshal(result.Value, &read); err != nil {
-		return harness.ToolOutcome{Result: model.ToolResult{CallID: data.CallID, Status: model.ResultError, Content: err.Error()}}
-	}
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{
-		CallID: data.CallID, Status: model.ResultSuccess, Content: "external result: " + string(read.Bytes),
-	}}
+	return extension.ToolResult{Content: "external result: " + string(content)}, nil
 }
 
 // TestShippedRuntimeNeitherExtension proves the baseline distribution alone:

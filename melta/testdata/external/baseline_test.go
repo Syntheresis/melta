@@ -106,33 +106,6 @@ func (externalSummaryStrategy) Consume(in harness.ConsumeInput) (harness.PlanOut
 	}}, nil
 }
 
-// recordingEvaluator is the custom permission factory's evaluator: it allows
-// the two declared baseline permissions and records every evaluated pair.
-type recordingEvaluator struct {
-	mu   sync.Mutex
-	seen []harness.PermissionRequest
-}
-
-func (e *recordingEvaluator) Evaluate(_ context.Context, action harness.PreparedAction) (harness.PermissionDecision, error) {
-	e.mu.Lock()
-	e.seen = append(e.seen, action.Permissions...)
-	e.mu.Unlock()
-	for _, request := range action.Permissions {
-		switch request.Permission {
-		case harness.PermissionFileWrite, harness.PermissionCommandRun:
-		default:
-			return harness.PermissionDeny, nil
-		}
-	}
-	return harness.PermissionAllow, nil
-}
-
-func (e *recordingEvaluator) recorded() []harness.PermissionRequest {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return append([]harness.PermissionRequest(nil), e.seen...)
-}
-
 // scriptedModel is the OpenAI-compatible SSE endpoint the included transport
 // reaches: the last user text selects the scripted turn, and a tool result
 // always closes with plain text.
@@ -363,9 +336,8 @@ func TestPublicBaselineEndToEnd(t *testing.T) {
 	dataDir := t.TempDir()
 	workspace := t.TempDir()
 	locations := melta.Locations{
-		GlobalRulesDir:     filepath.Join(t.TempDir(), "rules"),
-		DiscoveryCacheDir:  filepath.Join(t.TempDir(), "discovery"),
-		WorkspacePolicyDir: filepath.Join(t.TempDir(), "projects"),
+		GlobalRulesDir:    filepath.Join(t.TempDir(), "rules"),
+		DiscoveryCacheDir: filepath.Join(t.TempDir(), "discovery"),
 	}
 	credentials := &memoryCredentials{values: map[string]melta.CredentialValue{
 		externalKeyEnv: {Value: externalKey, Defined: true, Managed: true},
@@ -373,7 +345,6 @@ func TestPublicBaselineEndToEnd(t *testing.T) {
 	ref := model.ModelRef{Provider: "prov", Model: "m"}
 	instructions := "The external baseline module."
 	inputs := harness.SessionInputs{Model: &ref, Instructions: &instructions}
-	evaluator := &recordingEvaluator{}
 	options := melta.Options{
 		DataDir:       dataDir,
 		Configuration: melta.NewValueConfigurationSource(configurationDocument(server.URL)),
@@ -385,9 +356,6 @@ func TestPublicBaselineEndToEnd(t *testing.T) {
 			ID:                    externalStrategy,
 			RequiresContextWindow: false,
 			Strategy:              externalSummaryStrategy{},
-		},
-		NewEvaluator: func(melta.PolicyInputs) (harness.PermissionEvaluator, error) {
-			return evaluator, nil
 		},
 	}
 	owner := openOwner(t, options)
@@ -492,15 +460,6 @@ func TestPublicBaselineEndToEnd(t *testing.T) {
 		t.Fatalf("checkpoint items = %d, want exactly one", checkpoints)
 	}
 
-	permissions := evaluator.recorded()
-	var wrote, commanded bool
-	for _, permission := range permissions {
-		wrote = wrote || permission.Permission == harness.PermissionFileWrite
-		commanded = commanded || permission.Permission == harness.PermissionCommandRun
-	}
-	if !wrote || !commanded {
-		t.Fatalf("evaluated permissions = %+v, want the custom evaluator authorizing the file and command mutations", permissions)
-	}
 	{
 		_, auth := server.requests()
 		if len(auth) == 0 || auth[0] != "Bearer "+externalKey {

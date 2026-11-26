@@ -11,7 +11,7 @@ import (
 )
 
 // APIVersion is the exact activation authoring contract version.
-const APIVersion = "9"
+const APIVersion = "10"
 
 // Manifest is the metadata available before an extension is activated.
 type Manifest struct {
@@ -71,8 +71,8 @@ func compileManifest(m Manifest) (*jsonschema.Schema, error) {
 
 // CompileMethod compiles one independently registered method.
 func CompileMethod(m Method) (*CompiledMethod, error) {
-	if m.Name == "" || !m.Mode.valid() {
-		return nil, invalid("invalid method name or mode")
+	if m.Name == "" {
+		return nil, invalid("invalid method name")
 	}
 	m.Input = append(json.RawMessage(nil), m.Input...)
 	m.Success = append(json.RawMessage(nil), m.Success...)
@@ -88,14 +88,14 @@ type Registration interface{}
 type API interface {
 	Settings() json.RawMessage
 	Remove(Registration) error
-	RegisterTool(model.ToolDefinition, RegisteredTool, Registration) (Registration, error)
+	RegisterTool(model.ToolDefinition, ToolFunc, Registration) (Registration, error)
 	RegisterStrategy(harness.StrategyBinding, Registration) (Registration, error)
 	RegisterService(Service, Registration) (Registration, error)
 	RegisterOperation(Operation, Registration) (Registration, error)
 	AttachAdmission(AdmissionHook, Registration) (Registration, error)
-	AttachRequest(HookMode, AuthorRequestHook, Registration) (Registration, error)
-	AttachArguments(HookMode, ArgumentsHook, Registration) (Registration, error)
-	AttachAuthorization(AuthorizationHook, Registration) (Registration, error)
+	AttachRequest(AuthorRequestHook, Registration) (Registration, error)
+	AttachArguments(ArgumentsHook, Registration) (Registration, error)
+	AttachToolCheck(ToolCheckHook, Registration) (Registration, error)
 	AttachResult(ResultHook, Registration) (Registration, error)
 	RegisterCleanup(CleanupHook, Registration) (Registration, error)
 	AttachObserver(Observer, Registration) (Registration, error)
@@ -143,13 +143,6 @@ type AuthorContext struct {
 	Session     harness.SessionIdentity
 	State       harness.SessionStateValue
 	Call        func(context.Context, string, string, json.RawMessage) (Result, error)
-}
-
-// RegisteredTool is the typed implementation paired with a tool definition.
-type RegisteredTool interface {
-	Normalize(AuthorContext, model.ToolCall) (json.RawMessage, error)
-	Prepare(context.Context, AuthorContext, model.ToolCall) ToolPlan
-	Execute(context.Context, AuthorContext, ToolPlan) harness.ToolOutcome
 }
 
 // RegisteredMethod pairs a method definition with its implementation.
@@ -223,23 +216,12 @@ type ArgumentsResult struct {
 
 type ArgumentsHook func(context.Context, AuthorContext, model.ToolCall) (ArgumentsResult, error)
 
-// AuthorizationInput carries the policy root and prepared call; location
-// binding remains a separate scoped operation.
-type AuthorizationInput struct {
-	ToolName           string
-	Arguments          json.RawMessage
-	CanonicalWorkspace string
-	ToolSettings       json.RawMessage // effective captured baseline settings, including defaults
-	Permissions        []harness.PermissionRequest
-}
-
-type AuthorizationHook func(context.Context, AuthorContext, AuthorizationInput) (*string, error)
+type ToolCheckHook func(context.Context, AuthorContext, model.ToolCall) (*string, error)
 type ResultHook func(context.Context, AuthorContext, harness.ToolOutputInput) (string, error)
 type CleanupHook func(context.Context, AuthorContext, harness.SessionIdentity) error
 
-// SessionStart is data in a tool plan, not authority to start a Session.
+// SessionStart describes a new owned Session.
 type SessionStart struct {
-	Target       string
 	Inputs       harness.SessionInputs
 	InitialState harness.SessionStateValue
 	Input        []model.ContentPart

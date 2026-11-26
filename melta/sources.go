@@ -2,7 +2,6 @@ package melta
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"sync"
 
@@ -38,19 +37,9 @@ type CredentialValue = config.CredentialValue
 // Locations are the independently optional Melta locations. An omitted
 // location performs no lookup there.
 type Locations struct {
-	GlobalRulesDir     string
-	DiscoveryCacheDir  string
-	WorkspacePolicyDir string
-	WireDebugDir       string
-}
-
-// PolicyInputs are the captured permission inputs one evaluator factory
-// receives: the Workspace and its captured global and Workspace-policy raw
-// values.
-type PolicyInputs struct {
-	Workspace       string
-	Global          json.RawMessage
-	WorkspacePolicy json.RawMessage
+	GlobalRulesDir    string
+	DiscoveryCacheDir string
+	WireDebugDir      string
 }
 
 // fileConfiguration is one explicit-path configuration source.

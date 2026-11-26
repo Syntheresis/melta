@@ -27,7 +27,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 				return nonRegularDirectoryTarget(t), func() {}
 			},
 			run: func(path string) error {
-				_, err := execRead(t, filepath.Dir(path), "", config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
+				_, err := execRead(t, filepath.Dir(path), config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
 				return err
 			},
 		},
@@ -39,7 +39,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 			},
 			run: func(path string) error {
 				return runNonRegularTargetWithTimeout(func() error {
-					_, err := execRead(t, filepath.Dir(path), "", config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
+					_, err := execRead(t, filepath.Dir(path), config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
 					return err
 				})
 			},
@@ -50,7 +50,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 				return nonRegularUnixSocket(t), func() {}
 			},
 			run: func(path string) error {
-				_, err := execRead(t, filepath.Dir(path), "", config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
+				_, err := execRead(t, filepath.Dir(path), config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": path})
 				return err
 			},
 		},
@@ -60,7 +60,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 				return nonRegularDirectoryTarget(t), func() {}
 			},
 			run: func(path string) error {
-				_, err := execWrite(t, filepath.Dir(path), "", newTempCodeGroupStore(t), map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, filepath.Dir(path), newTempCodeGroupStore(t), map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
@@ -71,7 +71,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 			},
 			run: func(path string) error {
 				return runNonRegularTargetWithTimeout(func() error {
-					_, err := execWrite(t, filepath.Dir(path), "", newTempCodeGroupStore(t), map[string]any{"path": path, "content": "after"})
+					_, err := execWrite(t, filepath.Dir(path), newTempCodeGroupStore(t), map[string]any{"path": path, "content": "after"})
 					return err
 				})
 			},
@@ -82,7 +82,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 				return nonRegularUnixSocket(t), func() {}
 			},
 			run: func(path string) error {
-				_, err := execWrite(t, filepath.Dir(path), "", newTempCodeGroupStore(t), map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, filepath.Dir(path), newTempCodeGroupStore(t), map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
@@ -92,7 +92,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 				return nonRegularDirectoryTarget(t), func() {}
 			},
 			run: func(path string) error {
-				_, err := execEdit(t, filepath.Dir(path), "", newTempCodeGroupStore(t), map[string]any{
+				_, err := execEdit(t, filepath.Dir(path), newTempCodeGroupStore(t), map[string]any{
 					"path":       path,
 					"old_string": "before",
 					"new_string": "after",
@@ -108,7 +108,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 			},
 			run: func(path string) error {
 				return runNonRegularTargetWithTimeout(func() error {
-					_, err := execEdit(t, filepath.Dir(path), "", newTempCodeGroupStore(t), map[string]any{
+					_, err := execEdit(t, filepath.Dir(path), newTempCodeGroupStore(t), map[string]any{
 						"path":       path,
 						"old_string": "before",
 						"new_string": "after",
@@ -123,7 +123,7 @@ func TestFileToolsRejectNonRegularExistingTargets(t *testing.T) {
 				return nonRegularUnixSocket(t), func() {}
 			},
 			run: func(path string) error {
-				_, err := execEdit(t, filepath.Dir(path), "", newTempCodeGroupStore(t), map[string]any{
+				_, err := execEdit(t, filepath.Dir(path), newTempCodeGroupStore(t), map[string]any{
 					"path":       path,
 					"old_string": "before",
 					"new_string": "after",
@@ -153,7 +153,7 @@ func TestNonRegularFileToolsDoNotSnapshot(t *testing.T) {
 				return nonRegularDirectoryTarget(t), func() {}
 			},
 			run: func(store *recordingCodeGroupStore, path string) error {
-				_, err := execWrite(t, filepath.Dir(path), "", store, map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, filepath.Dir(path), store, map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
@@ -164,7 +164,7 @@ func TestNonRegularFileToolsDoNotSnapshot(t *testing.T) {
 			},
 			run: func(store *recordingCodeGroupStore, path string) error {
 				return runNonRegularTargetWithTimeout(func() error {
-					_, err := execWrite(t, filepath.Dir(path), "", store, map[string]any{"path": path, "content": "after"})
+					_, err := execWrite(t, filepath.Dir(path), store, map[string]any{"path": path, "content": "after"})
 					return err
 				})
 			},
@@ -175,7 +175,7 @@ func TestNonRegularFileToolsDoNotSnapshot(t *testing.T) {
 				return nonRegularDirectoryTarget(t), func() {}
 			},
 			run: func(store *recordingCodeGroupStore, path string) error {
-				_, err := execEdit(t, filepath.Dir(path), "", store, map[string]any{
+				_, err := execEdit(t, filepath.Dir(path), store, map[string]any{
 					"path":       path,
 					"old_string": "before",
 					"new_string": "after",
@@ -191,7 +191,7 @@ func TestNonRegularFileToolsDoNotSnapshot(t *testing.T) {
 			},
 			run: func(store *recordingCodeGroupStore, path string) error {
 				return runNonRegularTargetWithTimeout(func() error {
-					_, err := execEdit(t, filepath.Dir(path), "", store, map[string]any{
+					_, err := execEdit(t, filepath.Dir(path), store, map[string]any{
 						"path":       path,
 						"old_string": "before",
 						"new_string": "after",
@@ -206,7 +206,7 @@ func TestNonRegularFileToolsDoNotSnapshot(t *testing.T) {
 				return nonRegularUnixSocket(t), func() {}
 			},
 			run: func(store *recordingCodeGroupStore, path string) error {
-				_, err := execWrite(t, filepath.Dir(path), "", store, map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, filepath.Dir(path), store, map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
@@ -224,7 +224,7 @@ func TestNonRegularFileToolsDoNotSnapshot(t *testing.T) {
 
 func TestMissingWriteFileStillCreatesNewFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "new.txt")
-	result, err := execWrite(t, filepath.Dir(path), "", newTempCodeGroupStore(t), map[string]any{
+	result, err := execWrite(t, filepath.Dir(path), newTempCodeGroupStore(t), map[string]any{
 		"path":    path,
 		"content": "created",
 	})
@@ -347,20 +347,20 @@ func TestPR11Closure_HardlinkRefusedAcrossAllOperations(t *testing.T) {
 
 	t.Run("read_file", func(t *testing.T) {
 		hardlinked, _ := makeHardlink(t)
-		_, err := execRead(t, filepath.Dir(hardlinked), "", config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": hardlinked})
+		_, err := execRead(t, filepath.Dir(hardlinked), config.ToolsConfig{ReadMaxLines: 500}, map[string]any{"path": hardlinked})
 		assertHardlinkRefusal(t, err)
 	})
 
 	t.Run("write_file", func(t *testing.T) {
 		hardlinked, _ := makeHardlink(t)
-		_, err := execWrite(t, filepath.Dir(hardlinked), "", newTempCodeGroupStore(t),
+		_, err := execWrite(t, filepath.Dir(hardlinked), newTempCodeGroupStore(t),
 			map[string]any{"path": hardlinked, "content": "mutated"})
 		assertHardlinkRefusal(t, err)
 	})
 
 	t.Run("edit_file", func(t *testing.T) {
 		hardlinked, _ := makeHardlink(t)
-		_, err := execEdit(t, filepath.Dir(hardlinked), "", newTempCodeGroupStore(t),
+		_, err := execEdit(t, filepath.Dir(hardlinked), newTempCodeGroupStore(t),
 			map[string]any{
 				"path":       hardlinked,
 				"old_string": "outside-content",
@@ -372,7 +372,7 @@ func TestPR11Closure_HardlinkRefusedAcrossAllOperations(t *testing.T) {
 	t.Run("snapshot_capture", func(t *testing.T) {
 		hardlinked, _ := makeHardlink(t)
 		store := newCodeGroupStore(t, filepath.Join(t.TempDir(), "group"))
-		_, err := execWrite(t, filepath.Dir(hardlinked), "", store,
+		_, err := execWrite(t, filepath.Dir(hardlinked), store,
 			map[string]any{"path": hardlinked, "content": "mutated"})
 		assertHardlinkRefusal(t, err)
 	})

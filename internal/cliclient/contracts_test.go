@@ -344,7 +344,7 @@ func TestFutureAgentAndTypeWideModelUseGeneratedScope(t *testing.T) {
 	c.command("/model provider/next")
 	req = receive(t, transport.requests)
 	testassert.Equal(t, req.req.URL.Path, "/v1/extensions")
-	req.respond([]protocol.RegisteredExtension{{ExtensionId: "agents", Version: "1", ConfigurationSchema: pointer(protocol.ExtensionConfigDocument("{}")), Settings: "{}", Tools: []string{}, Operations: []protocol.RegisteredExtensionOperation{{Method: protocol.ExtensionMethod{Name: "current", Mode: protocol.Pure, Input: "{}", Success: "{}"}, Target: protocol.RegisteredExtensionOperationTargetSession}}}})
+	req.respond([]protocol.RegisteredExtension{{ExtensionId: "agents", Version: "1", ConfigurationSchema: pointer(protocol.ExtensionConfigDocument("{}")), Settings: "{}", Tools: []string{}, Operations: []protocol.RegisteredExtensionOperation{{Method: protocol.ExtensionMethod{Name: "current", Input: "{}", Success: "{}"}, Target: protocol.RegisteredExtensionOperationTargetSession}}}})
 	req = receive(t, transport.requests)
 	req.respond(json.RawMessage(`{"kind":"success","result":{"agent":"planner"}}`))
 	req = receive(t, transport.requests)
@@ -389,7 +389,7 @@ func TestResolvedSessionModelUsesSessionOwner(t *testing.T) {
 }
 
 func TestCreateRequiresValidDiscovery(t *testing.T) {
-	agentsCreate := `{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","mode":"service_io","input":"{}","success":"{}"},"target":"workspace"}]}`
+	agentsCreate := `{"extension_id":"agents","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[{"method":{"name":"create","input":"{}","success":"{}"},"target":"workspace"}]}`
 	foreign := `{"extension_id":"guest","version":"1","configuration_schema":"{}","settings":"{}","tools":[],"operations":[]}`
 	for _, row := range []struct {
 		name        string
@@ -817,7 +817,7 @@ func TestModelCurrentFailureDoesNotMutate(t *testing.T) {
 	settledReader(t, c, transport)
 	c.command("/model provider/next")
 	discovery := receive(t, transport.requests)
-	discovery.respond([]protocol.RegisteredExtension{{ExtensionId: "agents", Version: "1", ConfigurationSchema: pointer(protocol.ExtensionConfigDocument("{}")), Settings: "{}", Tools: []string{}, Operations: []protocol.RegisteredExtensionOperation{{Method: protocol.ExtensionMethod{Name: "current", Mode: protocol.Pure, Input: "{}", Success: "{}"}, Target: protocol.RegisteredExtensionOperationTargetSession}}}})
+	discovery.respond([]protocol.RegisteredExtension{{ExtensionId: "agents", Version: "1", ConfigurationSchema: pointer(protocol.ExtensionConfigDocument("{}")), Settings: "{}", Tools: []string{}, Operations: []protocol.RegisteredExtensionOperation{{Method: protocol.ExtensionMethod{Name: "current", Input: "{}", Success: "{}"}, Target: protocol.RegisteredExtensionOperationTargetSession}}}})
 	current := receive(t, transport.requests)
 	current.reject(400, protocol.Error{Code: "invalid", Message: "current failed"})
 	settleAnswering(t, c, transport)

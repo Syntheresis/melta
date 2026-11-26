@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -15,7 +13,6 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
-	"github.com/Syntheresis/melta/protocol"
 )
 
 // ErrConfiguration reports a complete candidate failure: nothing was
@@ -35,7 +32,7 @@ var ErrConfiguration = errors.New("melta: configuration failure")
 // readers Load once without a lock. A failed or canceled build publishes
 // nothing: initial publication uses generation 1, only a success increments
 // it, and the increment happens under the build mutex. Builds prepare the
-// candidate's long-lived plugin scope before publication. Each
+// candidate's long-lived resources before publication. Each
 // publication carries its passive configuration event inside the same
 // observation section as its atomic Store.
 type configurationService struct {
@@ -47,10 +44,6 @@ type configurationService struct {
 	credentials    CredentialSource
 	locations      Locations
 	strategy       *harness.StrategyBinding
-	// unusablePackages records selected packages that failed to load, keyed by
-	// their hash directory. An enabled section whose ID hashes to one of them
-	// rejects the candidate; a disabled section stays ignored.
-	unusablePackages map[string]error
 
 	owner       context.Context
 	obs         *observation
@@ -369,8 +362,8 @@ func capturedCredentialNames(cat *catalog.Catalog, secrets []declaredSecret) []s
 // captureDeclaredBindings derives the active declared field bindings from the
 // same build capture. A pending connection key action is applied to the
 // matching binding so a build that only later writes the managed key does not
-// publish a stale declared binding. The result is used for resource-set
-// adoption and every component activation value; it is never durable.
+// publish a stale declared binding. The result supplies the activation
+// bindings; it is never durable.
 func captureDeclaredBindings(secrets []declaredSecret, captured map[string]CredentialValue) map[declaredField]declaredBinding {
 	if len(secrets) == 0 {
 		return nil
@@ -454,10 +447,9 @@ func (s *configurationService) publish(ctx context.Context) (configurationCaptur
 	// checked once more under the Caller-first rule. A publication that wins
 	// this check may finish despite later cancellation; shutdown joins it.
 	if err := s.canceled(ctx); err != nil {
-		fresh := s.freshResources(candidate)
 		s.buildMu.Unlock()
-		if fresh != nil {
-			_ = fresh.release()
+		if candidate.resources != nil {
+			candidate.resources.release()
 		}
 		if candidate.native != nil {
 			_ = candidate.native.release()
@@ -508,11 +500,6 @@ func (s *configurationService) commit(candidate *configuration) configurationCap
 		if candidate.native != nil {
 			events = append(events, candidate.native.publishLocked()...)
 		}
-		if candidate.resources != nil && (previous == nil || previous.resources != candidate.resources) {
-			candidate.resources.runtime.obs = s.obs
-			warningChanged = candidate.resources.commitWarnings() || warningChanged
-			events = append(events, scopeEvent(protocol.ScopeOpened, candidate.resources.runtime.info))
-		}
 		revision := s.warnings.storeRevision()
 		s.heldMu.Lock()
 		s.published.Store(candidate)
@@ -525,23 +512,13 @@ func (s *configurationService) commit(candidate *configuration) configurationCap
 		return events
 	})
 	s.nativeMu.Unlock()
-	if previous != nil && previous.resources != nil && previous.resources != candidate.resources {
-		_ = previous.resources.release()
+	if previous != nil && previous.resources != nil {
+		previous.resources.release()
 	}
 	if previous != nil && previous.native != nil && previous.native != candidate.native {
 		_ = previous.native.release()
 	}
 	return captured
-}
-
-func (s *configurationService) freshResources(candidate *configuration) *resourceSet {
-	if candidate != nil && candidate.resources != nil {
-		previous := s.current()
-		if previous == nil || previous.resources != candidate.resources {
-			return candidate.resources
-		}
-	}
-	return nil
 }
 
 // canceled applies the Caller-first cancellation rule: a done Caller context
@@ -573,9 +550,8 @@ func (s *configurationService) build(ctx context.Context, generation uint64) (*c
 // capture and a mutation's edited bytes — runs: the captured document is
 // decoded once, the captured providers layer is delegated to the Loader so
 // provider assembly and every cost protection use that one read, session
-// settings are parsed, the Workspace permission inventory is enumerated once
-// into the candidate, and each enabled extension section is validated against
-// its activation's manifest before its resource set is prepared or reused.
+// settings are parsed, and each enabled extension section is validated against
+// its activation's manifest before its resource set is prepared.
 // Agent definitions are not parsed here; the Agents activation owns them.
 // Nothing is returned until the complete candidate survives all of it. conn is
 // the catalog-loader input: nil builds over the ordinary LoadCaptured inputs
@@ -624,7 +600,7 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 			return nil, configurationFailure(err)
 		}
 	}
-	snapshot, err := newConfiguration(generation, doc, built, captureWorkspacePermissions(s.locations.WorkspacePolicyDir))
+	snapshot, err := newConfiguration(generation, doc, built)
 	if err != nil {
 		return nil, configurationFailure(err)
 	}
@@ -640,9 +616,7 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 	snapshot.credentialNames = credentialNames
 	snapshot.secrets = secrets
 	snapshot.declaredBindings = captureDeclaredBindings(secrets, credentials)
-	if err := s.prepareResources(ctx, snapshot); err != nil {
-		return nil, err
-	}
+	s.prepareResources(snapshot)
 	var specs []nativeActivationSpec
 	for _, author := range s.authors {
 		id := author.extension.Manifest.ID
@@ -660,8 +634,8 @@ func (s *configurationService) buildCaptured(ctx context.Context, generation uin
 	}
 	snapshot.native, err = s.prepareNativeCandidate(ctx, specs)
 	if err != nil {
-		if fresh := s.freshResources(snapshot); fresh != nil {
-			_ = fresh.release()
+		if snapshot.resources != nil {
+			snapshot.resources.release()
 		}
 		return nil, err
 	}
@@ -679,38 +653,6 @@ var (
 	candidateBarrier  func()
 	prePublishBarrier func()
 )
-
-// captureWorkspacePermissions enumerates the selected per-Workspace
-// permission inventory during one configuration build and captures each
-// present readable permissions.json's raw bytes keyed by its directory ID. An
-// empty location is the absent Workspace policy level; a missing directory is
-// the fresh-install absent case and a failed enumeration leaves the whole
-// Workspace policy level absent for this revision; a missing or unreadable
-// file inside the inventory is absent policy for that Workspace alone. A
-// successfully read malformed file is captured unchanged — resolution
-// determines validity from the raw bytes. No enumeration failure fails
-// publication, and nothing here reads project records, meta.json, or locks.
-func captureWorkspacePermissions(root string) map[string]json.RawMessage {
-	if root == "" {
-		return nil
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil
-	}
-	captured := make(map[string]json.RawMessage, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(root, entry.Name(), "permissions.json"))
-		if err != nil {
-			continue
-		}
-		captured[entry.Name()] = data
-	}
-	return captured
-}
 
 // sectionEnabled recognizes the host-owned participation flag without
 // interpreting other members of an inactive document.

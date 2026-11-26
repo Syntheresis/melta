@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/Syntheresis/melta/harness"
-	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
@@ -262,7 +261,7 @@ func TestMutationCaptureRunsBeforeOwningWrites(t *testing.T) {
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	if resources := svc.current().resources; resources != nil {
-		defer func() { _ = resources.release() }()
+		defer resources.release()
 	}
 
 	key := "ordering-secret-2"
@@ -316,33 +315,6 @@ func TestRuntimeOpenValidatesConstructionSelection(t *testing.T) {
 	}
 }
 
-// TestNewEvaluatorReceivesCapturedPolicyAndFailsClosed proves preparation
-// calls the supplied factory with the captured policy inputs and rejects a nil
-// evaluator before admission.
-func TestNewEvaluatorReceivesCapturedPolicyAndFailsClosed(t *testing.T) {
-	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, captureConfigDoc())
-	svc := h.preparedService(context.Background())
-	_, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	defer svc.current().resources.release()
-
-	var got PolicyInputs
-	p := newPreparation(svc, h.locations(), "", nil, nil, newArtifactIntervals(), nil, func(inputs PolicyInputs) (harness.PermissionEvaluator, error) {
-		got = inputs
-		return nil, nil
-	})
-	_, err = p.bind()(context.Background(), harness.PreparationRequest{
-		Session: harness.PreparationSession{
-			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
-			Inputs:   harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}},
-		},
-		RequestKind: harness.RequestKindMessage,
-	})
-	testassert.Require(t, err != nil && errors.Is(err, harness.ErrInvalid), "nil evaluator preparation = %v, want harness.ErrInvalid", err)
-	testassert.Require(t, got.Workspace == h.dataDir && len(got.Global) != 0, "factory inputs = %+v, want the captured workspace and global policy", got)
-}
-
 // TestFileConfigurationMissingReadReportsNotExist proves the file adapter
 // never creates a missing document: the read error wraps fs.ErrNotExist.
 func TestFileConfigurationMissingReadReportsNotExist(t *testing.T) {
@@ -358,7 +330,7 @@ func TestFileConfigurationMissingReadReportsNotExist(t *testing.T) {
 // load runs under heldMu, the same mutex the publication Store takes.
 func TestReservationLoadRetainUsesHeldMu(t *testing.T) {
 	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, captureConfigDoc())
+	writeServiceFile(t, h.configPath, providerConfigFile("One"))
 	svc := h.preparedService(context.Background())
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
@@ -374,7 +346,7 @@ func TestReservationLoadRetainUsesHeldMu(t *testing.T) {
 	case captured := <-done:
 		svc.heldMu.Unlock()
 		if captured.snapshot != nil && captured.snapshot.resources != nil {
-			_ = captured.snapshot.resources.release()
+			captured.snapshot.resources.release()
 		}
 		t.Fatal("a retaining capture loaded and retained without heldMu")
 	case <-time.After(100 * time.Millisecond):
@@ -383,44 +355,9 @@ func TestReservationLoadRetainUsesHeldMu(t *testing.T) {
 	select {
 	case captured := <-done:
 		testassert.Require(t, captured.snapshot != nil, "reserving capture returned no snapshot")
-		_ = captured.snapshot.resources.release()
+		captured.snapshot.resources.release()
 	case <-time.After(10 * time.Second):
 		t.Fatal("reserving capture did not resume after heldMu released")
-	}
-}
-
-// TestNewEvaluatorFailurePublishesNoOperation proves an evaluator factory
-// error or nil evaluator rejects preparation before durable admission.
-func TestNewEvaluatorFailurePublishesNoOperation(t *testing.T) {
-	const factoryErr = "injected evaluator failure"
-	for _, tc := range []struct {
-		name      string
-		evaluator func(PolicyInputs) (harness.PermissionEvaluator, error)
-	}{
-		{"factory error", func(PolicyInputs) (harness.PermissionEvaluator, error) { return nil, errors.New(factoryErr) }},
-		{"nil evaluator", func(PolicyInputs) (harness.PermissionEvaluator, error) { return nil, nil }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			e := newOwnerEnv(t)
-			e.fixtureStore(storage.NewMemory())
-			opts := e.options()
-			opts.NewEvaluator = tc.evaluator
-			r, err := open(context.Background(), opts)
-			testassert.NoError(t, err)
-			defer func() { _ = r.Close(context.Background()) }()
-			var record harness.SessionRecord
-			testassert.NoError(t, r.withHarness(context.Background(), func(ctx context.Context, h *harness.Harness) error {
-				var createErr error
-				record, createErr = r.createSessionRecord(ctx, h, t.TempDir(), harness.SessionInputs{Model: &model.ModelRef{Provider: "prov", Model: "m"}}, nil)
-				return createErr
-			}))
-			err = submitExpectFailure(r, record.Identity.SessionID, "op-evaluator", "hello")
-			testassert.Require(t, err != nil, "evaluator failure submit succeeded")
-			{
-				readErr := readOperationError(context.Background(), r, record.Identity.SessionID, "op-evaluator")
-				testassert.Require(t, errors.Is(readErr, harness.ErrNotFound), "evaluator failure admitted an Operation: %v", readErr)
-			}
-		})
 	}
 }
 
@@ -535,7 +472,7 @@ func TestMutationWritesUseWithoutCancel(t *testing.T) {
 		_, err := svc.publish(context.Background())
 		testassert.NoError(t, err)
 		if resources := svc.current().resources; resources != nil {
-			defer func() { _ = resources.release() }()
+			defer resources.release()
 		}
 
 		key := "sk-without-cancel"
@@ -579,7 +516,7 @@ func TestMutationWritesUseWithoutCancel(t *testing.T) {
 		_, err := svc.publish(context.Background())
 		testassert.NoError(t, err)
 		if resources := svc.current().resources; resources != nil {
-			defer func() { _ = resources.release() }()
+			defer resources.release()
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -615,7 +552,7 @@ func TestDisconnectDecidesFromMutationCapture(t *testing.T) {
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
 	if resources := svc.current().resources; resources != nil {
-		defer func() { _ = resources.release() }()
+		defer resources.release()
 	}
 
 	memory.mu.Lock()
@@ -643,21 +580,6 @@ func TestProjectedShellUsesPreparationContext(t *testing.T) {
 		return []string{"SHELL=/bin/prepared"}, nil
 	})
 	testassert.Equal(t, got, "/bin/prepared")
-}
-
-// TestPolicyInputsOwnRevisionBytes proves evaluator inputs do not alias the
-// published revision's permission bytes.
-func TestPolicyInputsOwnRevisionBytes(t *testing.T) {
-	global := json.RawMessage(`{"rules":[]}`)
-	workspace := json.RawMessage(`{"default":"allow"}`)
-	c := &configuration{permissions: global}
-	id, err := config.WorkspacePermissionDirID("/workspace")
-	testassert.NoError(t, err)
-	c.workspacePermissions = map[string]json.RawMessage{id: workspace}
-	inputs := c.policyInputs("/workspace")
-	global[0] = 'x'
-	workspace[0] = 'x'
-	testassert.Require(t, inputs.Global[0] == '{' && inputs.WorkspacePolicy[0] == '{', "policy inputs alias revision bytes: %+v", inputs)
 }
 
 // TestStrategyBindingIsCopiedAtOpen proves the host strategy pointer is owned
@@ -735,7 +657,7 @@ func TestProviderCreateCredentialCaptureUsesRequestContext(t *testing.T) {
 			_, err := svc.publish(context.Background())
 			testassert.NoError(t, err)
 			if resources := svc.current().resources; resources != nil {
-				defer func() { _ = resources.release() }()
+				defer resources.release()
 			}
 			before, err := os.ReadFile(h.configPath)
 			testassert.NoError(t, err)

@@ -6,37 +6,20 @@ import (
 	"math"
 	"math/big"
 	"strconv"
-	"strings"
 	"time"
 )
 
-// normalizeIntArg validates one consumed integer argument from its exact
-// json.Number lexeme to a Go int. It accepts mathematically integral numbers
-// that fit the consuming Go integer — including 1.0/1e0 spellings and
-// integers beyond float64 precision — without float64 rounding, and rejects
-// fractions, wrong types and overflow before the value reaches duration or
-// index arithmetic. Absent and null arguments are handled by callers, which
-// apply the retained defaults.
-func normalizeIntArg(args map[string]any, tool, key string) (int, error) {
-	n, ok := args[key].(json.Number)
+const (
+	maxInt = int64(^uint(0) >> 1)
+	minInt = -maxInt - 1
+)
+
+func jsonNumberToInt(value any, tool, key string) (int, error) {
+	n, ok := value.(json.Number)
 	if !ok {
 		return 0, fmt.Errorf("%s: %s must be an integer", tool, key)
 	}
-	return jsonNumberToInt(string(n), tool, key)
-}
-
-// canonicalInt is the canonical-integer json.Number lexeme of one validated
-// integer: the one shared normalization representation for consumed
-// integers. Strict and lenient normalization both emit it, marshaling
-// preserves the exact lexeme, and preparation parses it back to int at its
-// point of use.
-func canonicalInt(i int) json.Number { return json.Number(strconv.Itoa(i)) }
-
-// jsonNumberToInt parses the exact JSON number lexeme without float64
-// rounding: plain integers via strconv, every other spelling via exact
-// rational arithmetic so no fraction — however deep — can round to an
-// integer.
-func jsonNumberToInt(s, tool, key string) (int, error) {
+	s := string(n)
 	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
 		if i > maxInt || i < minInt {
 			return 0, fmt.Errorf("%s: %s is too large", tool, key)
@@ -44,182 +27,103 @@ func jsonNumberToInt(s, tool, key string) (int, error) {
 		return int(i), nil
 	}
 	r, ok := new(big.Rat).SetString(s)
-	if !ok {
+	if !ok || !r.IsInt() {
 		return 0, fmt.Errorf("%s: %s must be an integer", tool, key)
 	}
-	if !r.IsInt() {
-		return 0, fmt.Errorf("%s: %s must be a whole number", tool, key)
-	}
-	num := r.Num()
-	if !num.IsInt64() {
+	if !r.Num().IsInt64() || r.Num().Int64() > maxInt || r.Num().Int64() < minInt {
 		return 0, fmt.Errorf("%s: %s is too large", tool, key)
 	}
-	v := num.Int64()
-	if v > maxInt || v < minInt {
-		return 0, fmt.Errorf("%s: %s is too large", tool, key)
-	}
-	return int(v), nil
+	return int(r.Num().Int64()), nil
 }
 
-// maxInt/minInt are the platform int bounds as int64 for range checks.
-const (
-	maxInt = int64(^uint(0) >> 1)
-	minInt = -maxInt - 1
-)
-
-// stripPrivateArgs copies args without model-supplied private `_melta_`
-// fields, so no private receipt or canonical path can survive into
-// executable authority. Unrelated schema-accepted fields are retained.
-func stripPrivateArgs(args map[string]any) map[string]any {
-	clean := make(map[string]any, len(args))
-	for k, v := range args {
-		if strings.HasPrefix(k, "_melta_") {
-			continue
-		}
-		clean[k] = v
-	}
-	return clean
-}
-
-// NormalizeReadArgs performs target read_file argument normalization: it
-// strips private `_melta_` fields, checks the JSON argument schema with
-// strict consumed-field types and applies the retained defaults/clamps for
-// offset and limit. It never touches the filesystem and preserves unrelated
-// schema-accepted fields.
-func NormalizeReadArgs(args map[string]any, defaultLimit int) (map[string]any, error) {
-	clean := stripPrivateArgs(args)
-	path, _ := clean["path"].(string)
+func ReadArgs(args map[string]any, defaultLimit int) (path string, offset, limit int, err error) {
+	path, _ = args["path"].(string)
 	if path == "" {
-		return nil, fmt.Errorf("read_file: path is required")
+		err = fmt.Errorf("read_file: path is required")
+		return
 	}
-	if _, present := clean["offset"]; present {
-		offset, err := normalizeIntArg(clean, "read_file", "offset")
+	offset, limit = 1, defaultLimit
+	if value, ok := args["offset"]; ok {
+		offset, err = jsonNumberToInt(value, "read_file", "offset")
 		if err != nil {
-			return nil, err
+			return
 		}
 		if offset < 1 {
 			offset = 1
 		}
-		clean["offset"] = canonicalInt(offset)
-	} else {
-		clean["offset"] = canonicalInt(1)
 	}
-	if _, present := clean["limit"]; present {
-		limit, err := normalizeIntArg(clean, "read_file", "limit")
+	if value, ok := args["limit"]; ok {
+		limit, err = jsonNumberToInt(value, "read_file", "limit")
 		if err != nil {
-			return nil, err
+			return
 		}
 		if limit < 1 {
 			limit = defaultLimit
 		}
-		clean["limit"] = canonicalInt(limit)
-	} else {
-		clean["limit"] = canonicalInt(defaultLimit)
 	}
-	return clean, nil
+	return
 }
 
-// NormalizeRunCommandArgs performs target run_command argument normalization:
-// private `_melta_` fields are stripped, the required command must be a
-// nonempty string, and a supplied background member must be a boolean — an
-// absent member is written as false and present booleans are preserved, while
-// null or any non-boolean is rejected as an argument-validation error. A
-// background run normalizes an absent or sub-one timeout to 0; the foreground
-// keeps the retained default for an absent or sub-one value. The optional
-// timeout is a strict consumed integer bounded by the seconds-to-duration
-// conversion; a present null is rejected. The normalized form carries the
-// effective timeout as its canonical-integer lexeme.
-func NormalizeRunCommandArgs(args map[string]any, defaultTimeout int) (map[string]any, error) {
-	clean := stripPrivateArgs(args)
-	command, _ := clean["command"].(string)
+func WriteArgs(args map[string]any) (path, content string, err error) {
+	path, _ = args["path"].(string)
+	content, _ = args["content"].(string)
+	if path == "" {
+		err = fmt.Errorf("write_file: path is required")
+	}
+	return
+}
+
+func EditArgs(args map[string]any) (path, oldString, newString string, replaceAll bool, err error) {
+	path, _ = args["path"].(string)
+	oldString, _ = args["old_string"].(string)
+	newString, _ = args["new_string"].(string)
+	replaceAll, _ = args["replace_all"].(bool)
+	if path == "" {
+		err = fmt.Errorf("edit_file: path is required")
+	}
+	return
+}
+
+func RunCommandArgs(args map[string]any, defaultTimeout int) (command string, timeout int, background bool, err error) {
+	command, _ = args["command"].(string)
+	background, _ = args["background"].(bool)
 	if command == "" {
-		return nil, fmt.Errorf("run_command: command is required")
+		err = fmt.Errorf("run_command: command is required")
+		return
 	}
-	background := false
-	if v, present := clean["background"]; present {
-		b, ok := v.(bool)
-		if !ok {
-			return nil, fmt.Errorf("run_command: background must be a boolean")
-		}
-		background = b
-	} else {
-		clean["background"] = background
-	}
-	timeout := defaultTimeout
+	timeout = defaultTimeout
 	if background {
 		timeout = 0
 	}
-	if _, present := clean["timeout"]; present {
-		v, err := normalizeIntArg(clean, "run_command", "timeout")
+	if value, ok := args["timeout"]; ok {
+		var v int
+		v, err = jsonNumberToInt(value, "run_command", "timeout")
 		if err != nil {
-			return nil, err
+			return
 		}
 		if int64(v) > int64(math.MaxInt64/time.Second) {
-			return nil, fmt.Errorf("run_command: timeout is too large")
+			err = fmt.Errorf("run_command: timeout is too large")
+			return
 		}
 		if v >= 1 {
 			timeout = v
 		}
 	}
-	clean["timeout"] = canonicalInt(timeout)
-	return clean, nil
+	return
 }
 
-// NormalizeSleepArgs performs target sleep argument normalization: private
-// `_melta_` fields are stripped and a present seconds must be a strict
-// integer before the retained 1..300 clamp applies; an absent seconds keeps
-// the retained default of 1. The normalized form carries the clamped value
-// as its canonical-integer lexeme.
-func NormalizeSleepArgs(args map[string]any) (map[string]any, error) {
-	clean := stripPrivateArgs(args)
-	if _, present := clean["seconds"]; present {
-		v, err := normalizeIntArg(clean, "sleep", "seconds")
-		if err != nil {
-			return nil, err
+func ProcessArgs(args map[string]any) (action, id string, err error) {
+	action, _ = args["action"].(string)
+	id, _ = args["id"].(string)
+	switch action {
+	case "list":
+	case "read", "kill":
+		if id == "" {
+			err = fmt.Errorf("process: id is required for %s", action)
+			return
 		}
-		clean["seconds"] = canonicalInt(normalizeSleepSeconds(v))
-	} else {
-		clean["seconds"] = canonicalInt(1)
+	default:
+		err = fmt.Errorf("process: unknown action %q", action)
 	}
-	return clean, nil
-}
-
-// NormalizeWriteArgs performs target write_file argument normalization:
-// private `_melta_` fields are stripped and the schema-required path
-// and content must be strings — an absent, null or wrong-typed required
-// field is the same argument-validation error, never silent coercion.
-func NormalizeWriteArgs(args map[string]any) (map[string]any, error) {
-	clean := stripPrivateArgs(args)
-	path, _ := clean["path"].(string)
-	if path == "" {
-		return nil, fmt.Errorf("write_file: path is required")
-	}
-	if _, ok := clean["content"].(string); !ok {
-		return nil, fmt.Errorf("write_file: content is required")
-	}
-	return clean, nil
-}
-
-// NormalizeEditArgs performs target edit_file argument normalization:
-// private `_melta_` fields are stripped and the schema-required fields
-// must be strings — an absent, null or wrong-typed required field is the
-// same argument-validation error, never silent coercion. replace_all keeps
-// its schema default when absent.
-func NormalizeEditArgs(args map[string]any) (map[string]any, error) {
-	clean := stripPrivateArgs(args)
-	path, _ := clean["path"].(string)
-	if path == "" {
-		return nil, fmt.Errorf("edit_file: path is required")
-	}
-	for _, key := range []string{"old_string", "new_string"} {
-		if _, ok := clean[key].(string); !ok {
-			return nil, fmt.Errorf("edit_file: %s is required", key)
-		}
-	}
-	if v, present := clean["replace_all"]; present {
-		if _, ok := v.(bool); !ok {
-			return nil, fmt.Errorf("edit_file: replace_all must be a boolean")
-		}
-	}
-	return clean, nil
+	return
 }

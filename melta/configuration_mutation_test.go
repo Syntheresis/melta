@@ -20,7 +20,6 @@ import (
 	taskplugin "github.com/Syntheresis/melta/extensions/agents"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/atomicfs"
-	"github.com/Syntheresis/melta/internal/config"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/protocol"
@@ -665,57 +664,6 @@ func TestConfigurationMutateAgentModelEditsLatestRoot(t *testing.T) {
 	}
 }
 
-func TestConfigurationMutateAgentModelPreservesConcurrentSettings(t *testing.T) {
-	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, mutationConfigDocument())
-	writeAgentDefinitions(t, h.configPath, workerAgentsDocument)
-	var armed atomic.Bool
-	entered, release := make(chan struct{}), make(chan struct{})
-	candidateBarrier = func() {
-		if armed.CompareAndSwap(true, false) {
-			close(entered)
-			<-release
-		}
-	}
-	t.Cleanup(func() { candidateBarrier = nil })
-	alpha := servicePlugin("alpha", &h.opens, acceptValidator)
-	svc := h.preparedService(context.Background(), alpha, fixtureAgentPlugin())
-	initial, err := svc.publish(context.Background())
-	testassert.NoError(t, err)
-	settings := projectSettings(initial.snapshot)
-	settings.Extensions["agents"] = `{"enabled":true,"task":{"max_concurrent":7},"definitions":{"worker":{"system_prompt":"simple","description":"latest","tools":[]}}}`
-	settings.Extensions["uninstalled"] = `{"enabled":true,"unknown":9007199254740993}`
-	armed.Store(true)
-	settingsDone := make(chan error, 1)
-	go func() { _, err := svc.mutate(context.Background(), editSettings(settings)); settingsDone <- err }()
-	<-entered
-	modelStarted, modelDone := make(chan struct{}), make(chan error, 1)
-	go func() {
-		close(modelStarted)
-		_, err := svc.editAgentModel(context.Background(), "worker", "prov/m")
-		modelDone <- err
-	}()
-	<-modelStarted
-	select {
-	case err := <-modelDone:
-		t.Fatalf("model edit escaped the held settings build: %v", err)
-	default:
-	}
-	close(release)
-	testassert.NoError(t, <-settingsDone)
-	testassert.NoError(t, <-modelDone)
-	definitions := definitionsRoot(t, h.configPath)
-	testassert.Equal(t, compactJSON(t, definitions["worker"]), `{"description":"latest","model":"prov/m","system_prompt":"simple","tools":[]}`)
-	root := fileRoot(t, h.configPath)
-	var extensions map[string]json.RawMessage
-	testassert.NoError(t, json.Unmarshal(root["extensions"], &extensions))
-	testassert.Equal(t, compactJSON(t, extensions["uninstalled"]), `{"enabled":true,"unknown":9007199254740993}`)
-	var section map[string]json.RawMessage
-	testassert.NoError(t, json.Unmarshal(extensions["agents"], &section))
-	testassert.Equal(t, compactJSON(t, section["task"]), `{"max_concurrent":7}`)
-	testassert.Equal(t, svc.current().generation, uint64(3))
-}
-
 // TestConfigurationMutateAgentModelClearAlwaysWritesAndPublishes proves the
 // nearest sibling of the retained public absent-override reset: a known
 // builtin with NO user model override and an empty-ref request is still a
@@ -996,30 +944,6 @@ func TestConfigurationMutateAgentEditInvalidCandidateLeavesEverythingUnchanged(t
 			testassert.Require(t, err == nil && candidate.snapshot.generation == 2 && svc.current() == candidate.snapshot, "inverse edit = (%v, generation %d), want a successful publication at 2", err, candidate.snapshot.generation)
 			nextConfigurationEvent(t, sub, "2")
 		})
-	}
-}
-
-// TestConfigurationMutateMalformedPermissionsFallbackPublishes proves a
-// hand-edited malformed Workspace permissions.json is captured and resolved
-// to the built-in fallback without failing the mutation's publication.
-func TestConfigurationMutateMalformedPermissionsFallbackPublishes(t *testing.T) {
-	h := newServiceHarness(t)
-	writeServiceFile(t, h.configPath, mutationConfigDocument())
-	svc := h.service(context.Background(), servicePlugin("capowner", &h.opens, acceptValidator))
-	{
-		_, err := svc.publish(context.Background())
-		testassert.NoError(t, err)
-	}
-	dirID, err := config.WorkspacePermissionDirID("/ws")
-	testassert.NoError(t, err)
-	permissionPath := filepath.Join(h.home, ".melta", "projects", dirID, "permissions.json")
-	writeServiceFile(t, permissionPath, `NOT JSON`)
-	candidate, err := svc.mutate(context.Background(), editSettings(mutationSettings()))
-	testassert.NoError(t, err)
-	var builtin harness.PermissionPolicy
-	{
-		got := candidate.snapshot.permissionPolicy("/ws")
-		testassert.Require(t, fmt.Sprint(got) == fmt.Sprint(builtin), "malformed permission policy = %#v, want the built-in fallback %#v", got, builtin)
 	}
 }
 
@@ -1698,7 +1622,7 @@ func TestMutationPublishesOneCoherentCredentialCapture(t *testing.T) {
 	testassert.NoError(t, err)
 	t.Cleanup(func() {
 		if resources := svc.current().resources; resources != nil {
-			_ = resources.release()
+			resources.release()
 		}
 	})
 

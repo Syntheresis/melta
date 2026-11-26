@@ -101,7 +101,6 @@ type executableActivation struct {
 	stopc      chan struct{}
 	done       chan struct{}
 	terminated chan struct{}
-	ready      chan struct{}
 	waitDone   chan struct{}
 	writerDone chan struct{}
 	readerDone chan struct{}
@@ -127,7 +126,6 @@ func newExecutableActivation(entryPoint string, environment func(context.Context
 		out:         make(chan outboundFrame, executableQueuedFrames),
 		done:        make(chan struct{}),
 		terminated:  make(chan struct{}),
-		ready:       make(chan struct{}),
 		stopc:       make(chan struct{}),
 		waitDone:    make(chan struct{}),
 		writerDone:  make(chan struct{}),
@@ -141,7 +139,6 @@ func newExecutableActivation(entryPoint string, environment func(context.Context
 // start spawns the process and completes the exact-manifest author handshake
 // before any callback runs.
 func (a *executableActivation) start(ctx context.Context, excluded []string) (err error) {
-	defer close(a.ready)
 	a.mu.Lock()
 	closed, failed := a.closed, a.failed
 	a.mu.Unlock()
@@ -677,7 +674,6 @@ func executableFailure(err error) *worker.Error {
 	var typed *worker.Error
 	if errors.As(err, &typed) {
 		failure.Interrupted = typed.Interrupted
-		failure.Evidence = typed.Evidence
 		if len(typed.Partial) != 0 {
 			failure.Partial = append(worker.JSONBytes(nil), typed.Partial...)
 		}

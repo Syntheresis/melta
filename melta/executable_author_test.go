@@ -173,7 +173,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			spawns := 0
 			host := extension.Extension{Manifest: registrarManifest("host-fixture"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 				_, err := api.RegisterService(extension.Service{Name: "host-service", Methods: []extension.RegisteredMethod{{
-					Method: extension.Method{Name: "echo", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "echo", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						return extension.Result{Value: args}, nil
 					},
@@ -233,7 +233,7 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if err := candidate.publishForTest(); err != nil {
 				t.Fatal(err)
 			}
-			result, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"value":123}`), &nativeCallScope{pure: true})
+			result, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"value":123}`), &nativeCallScope{})
 			if err != nil || string(result.Value) != `{"value":123}` {
 				t.Fatalf("nested worker call: %s, %v", result.Value, err)
 			}
@@ -255,14 +255,10 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}
 			oldTool := oldBinding.entry.value.(nativeTool).tool
 			call := model.ToolCall{ID: "call", Name: "worker-tool", Arguments: json.RawMessage(`{"arg":1}`)}
-			normalized, err := oldTool.Normalize(extension.AuthorContext{}, call)
-			if err != nil || string(normalized) != string(call.Arguments) {
-				t.Fatalf("normalize = %s, %v", normalized, err)
-			}
 			parked, proceed := make(chan struct{}), make(chan struct{})
-			prepared := make(chan extension.ToolPlan, 1)
+			finished := make(chan harness.ToolOutcome, 1)
 			go func() {
-				prepared <- oldTool.Prepare(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+				finished <- oldTool(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
 					close(parked)
 					<-proceed
 					return extension.Result{Value: json.RawMessage(`{}`)}, nil
@@ -270,8 +266,8 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}()
 			select {
 			case <-parked:
-			case plan := <-prepared:
-				t.Fatalf("prepare returned before parking: %+v", plan)
+			case outcome := <-finished:
+				t.Fatalf("tool returned before parking: %+v", outcome)
 			case <-time.After(5 * time.Second):
 				t.Fatal("prepare did not park")
 			}
@@ -284,9 +280,9 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}
 			during.release()
 			close(proceed)
-			plan := <-prepared
-			if plan.Immediate != nil {
-				t.Fatalf("prepare: %+v", plan.Immediate)
+			outcome := <-finished
+			if outcome.Result.Status != model.ResultSuccess || outcome.Result.Content != "old handler" {
+				t.Fatalf("old handler: %+v", outcome)
 			}
 			newStage, err := work.stage()
 			if err != nil {
@@ -296,10 +292,6 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 				t.Fatal("replacement did not appear in next stage")
 			}
 			oldStage.release()
-			outcome := oldTool.Execute(context.Background(), extension.AuthorContext{}, plan)
-			if outcome.Result.Status != model.ResultSuccess || outcome.Result.Content != "old handler" {
-				t.Fatalf("prepared old handler: %+v", outcome)
-			}
 			oldBinding.release()
 			newStage.release()
 			removalStage, err := work.stage()
@@ -316,11 +308,11 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			removalBinding.entry.release = func() { releases.Add(1); release() }
 			owner.nativeMu.Unlock()
 			removalTool := removalBinding.entry.value.(nativeTool).tool
-			removalPlan := removalTool.Prepare(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+			removalOutcome := removalTool(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			}}, model.ToolCall{ID: "remove", Name: "removable-tool", Arguments: json.RawMessage(`{}`)})
-			if removalPlan.Immediate != nil || releases.Load() != 0 {
-				t.Fatalf("self-removal released prepared handler: %+v, releases %d", removalPlan, releases.Load())
+			if removalOutcome.Result.Status != model.ResultSuccess || releases.Load() != 0 {
+				t.Fatalf("self-removal released handler: %+v, releases %d", removalOutcome, releases.Load())
 			}
 			afterRemoval, err := work.stage()
 			if err != nil || afterRemoval.tools["removable-tool"] != nil {
@@ -330,9 +322,6 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			removalStage.release()
 			if releases.Load() != 0 {
 				t.Fatal("plan did not retain removed handler")
-			}
-			if got := removalTool.Execute(context.Background(), extension.AuthorContext{}, removalPlan); got.Result.Status != model.ResultSuccess {
-				t.Fatalf("removed handler execution: %+v", got)
 			}
 			removalBinding.release()
 			removalBinding.release()
@@ -373,11 +362,11 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			if err != nil || content != "worker: output" {
 				t.Fatalf("result hook: %q, %v", content, err)
 			}
-			if len(stage.hooks["authorization"]) != 1 {
-				t.Fatal("missing authorization hook")
+			if len(stage.hooks["check"]) != 1 {
+				t.Fatal("missing check hook")
 			}
-			authorization := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
-			refusal, err := authorization(context.Background(), extension.AuthorContext{}, extension.AuthorizationInput{Arguments: json.RawMessage{0xff, '{'}})
+			authorization := stage.hooks["check"][0].value.(nativeHook).handler.(extension.ToolCheckHook)
+			refusal, err := authorization(context.Background(), extension.AuthorContext{}, model.ToolCall{Arguments: json.RawMessage{0xff, '{'}})
 			if err != nil || refusal == nil || *refusal != "denied by worker" {
 				t.Fatalf("authorization: %v, %v", refusal, err)
 			}
@@ -428,10 +417,10 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 			}
 			defer captured.release()
 			_, err = candidate.callServiceScoped(context.Background(), "worker-service", "crash", json.RawMessage(`{}`), &nativeCallScope{})
-			if err == nil || harness.DeclaredExecutionKnowledge(err) != harness.ExecutionUnknown {
-				t.Fatalf("lost terminal evidence: %v", err)
+			if err == nil {
+				t.Fatal("lost worker served a call")
 			}
-			if _, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{}`), &nativeCallScope{pure: true}); err == nil {
+			if _, err := candidate.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{}`), &nativeCallScope{}); err == nil {
 				t.Fatal("lost activation served another call")
 			}
 			if _, err := captured.stage(); err == nil {
@@ -447,10 +436,10 @@ func TestExecutableAuthorFixtureHandshakeAndService(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer nextStage.release()
-			if nextStage.services["worker-service"] != nil || nextStage.services["host-service"] == nil {
+			if stagedService(nextStage, "worker-service") != nil || stagedService(nextStage, "host-service") == nil {
 				t.Fatal("new admission did not omit only the failed worker")
 			}
-			if result, err := candidate.callServiceScoped(context.Background(), "host-service", "echo", json.RawMessage(`{"ok":true}`), &nativeCallScope{pure: true}); err != nil || string(result.Value) != `{"ok":true}` {
+			if result, err := candidate.callServiceScoped(context.Background(), "host-service", "echo", json.RawMessage(`{"ok":true}`), &nativeCallScope{}); err != nil || string(result.Value) != `{"ok":true}` {
 				t.Fatalf("healthy sibling: %s, %v", result.Value, err)
 			}
 			makeCandidate := func(section string, secret string, enabled bool) *nativeCandidate {
@@ -542,7 +531,7 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	spawns := 0
 	host := extension.Extension{Manifest: registrarManifest("host-fixture"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "host-service", Methods: []extension.RegisteredMethod{{
-			Method: extension.Method{Name: "echo", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "echo", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: args}, nil
 			},
@@ -596,9 +585,9 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	binding := parkedStage.bindTool("worker-tool")
 	tool := binding.entry.value.(nativeTool).tool
 	parked, proceed := make(chan struct{}), make(chan struct{})
-	prepared := make(chan extension.ToolPlan, 1)
+	finished := make(chan harness.ToolOutcome, 1)
 	go func() {
-		prepared <- tool.Prepare(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+		finished <- tool(context.Background(), extension.AuthorContext{Call: func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
 			close(parked)
 			<-proceed
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
@@ -606,8 +595,8 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	}()
 	select {
 	case <-parked:
-	case plan := <-prepared:
-		t.Fatalf("callback returned before parking: %+v", plan)
+	case outcome := <-finished:
+		t.Fatalf("callback returned before parking: %+v", outcome)
 	case <-time.After(5 * time.Second):
 		t.Fatal("callback did not park")
 	}
@@ -620,12 +609,8 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 		t.Fatalf("rotation spawned %d workers", spawns)
 	}
 	close(proceed)
-	plan := <-prepared
-	if plan.Immediate != nil {
-		t.Fatalf("parked callback failed after publication: %+v", plan.Immediate)
-	}
-	if outcome := tool.Execute(context.Background(), extension.AuthorContext{}, plan); outcome.Result.Status != model.ResultSuccess {
-		t.Fatalf("old prepared handler failed after publication: %+v", outcome)
+	if outcome := <-finished; outcome.Result.Status != model.ResultSuccess {
+		t.Fatalf("old handler failed after publication: %+v", outcome)
 	}
 	parkedStage.release()
 	binding.release()
@@ -638,11 +623,11 @@ func TestExecutableAuthorRetiredLossKeepsSuccessor(t *testing.T) {
 	next := successor.capture()
 	defer next.release()
 	stage, err := next.stage()
-	if err != nil || stage.services["worker-service"] == nil {
+	if err != nil || stagedService(stage, "worker-service") == nil {
 		t.Fatalf("healthy successor omitted: %v", err)
 	}
 	stage.release()
-	if result, err := successor.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"ok":true}`), &nativeCallScope{pure: true}); err != nil || string(result.Value) != `{"ok":true}` {
+	if result, err := successor.callServiceScoped(context.Background(), "worker-service", "relay", json.RawMessage(`{"ok":true}`), &nativeCallScope{}); err != nil || string(result.Value) != `{"ok":true}` {
 		t.Fatalf("healthy successor: %s, %v", result.Value, err)
 	}
 	reused := build(`{"revision":2}`)

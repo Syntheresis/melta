@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -30,7 +27,7 @@ func TestBuiltinPrimaryKeepsRegisteredTools(t *testing.T) {
 	e.fixtureStore(storage.NewMemory())
 	e.server.setScript(func(_ context.Context, _ string) []string { return textTurnEvents("done") })
 	probe := extension.Extension{Manifest: registrarManifest("third-party"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(testDescribeTool("third_party_tool"), testRegisteredTool{}, nil)
+		_, err := api.RegisterTool(testDescribeTool("third_party_tool"), testRegisteredTool, nil)
 		return nil, err
 	}}
 	enableFixturePlugin(t, e.configPath, "third-party")
@@ -46,19 +43,16 @@ func TestBuiltinPrimaryKeepsRegisteredTools(t *testing.T) {
 }
 
 func TestBundledAuthorNativeWorkerParity(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "bundled")
-	command := exec.Command("go", "build", "-o", binary, "./testdata/authorbundled")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v: %s", err, output)
-	}
 	for _, entry := range []extension.Extension{agents.Author(), adaptation.Author()} {
 		for _, worker := range []bool{false, true} {
 			t.Run(entry.Manifest.ID+map[bool]string{false: "/native", true: "/worker"}[worker], func(t *testing.T) {
 				selected := entry
 				if worker {
-					selected = executableAuthorExtension(entry.Manifest, binary, func(context.Context, []string) ([]string, error) {
-						return append(os.Environ(), "BUNDLED_EXTENSION="+entry.Manifest.ID), nil
-					})
+					spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+						return entry, nil
+					}}
+					spawner.install()
+					selected = executableAuthorExtension(entry.Manifest, "author-worker", adapterEnvironment)
 				}
 				owner := &configurationService{}
 				var section []byte
@@ -153,8 +147,11 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 				if err != nil || denied.Refusal == nil {
 					t.Fatalf("missing tool command restriction: %#v %v", denied, err)
 				}
-				auth := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
-				refusal, err := auth(context.Background(), call, extension.AuthorizationInput{ToolName: "other", Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: "/workspace/file"}}})
+				auth := stage.hooks["check"][0].value.(nativeHook).handler.(extension.ToolCheckHook)
+				call.Call = func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
+					return extension.Result{Value: []byte(`{"canonical_path":"/workspace/file"}`)}, nil
+				}
+				refusal, err := auth(context.Background(), call, model.ToolCall{Name: "write_file", Arguments: []byte(`{"path":"/workspace/file"}`)})
 				if err != nil || refusal == nil {
 					t.Fatalf("missing tool write restriction: %v %v", refusal, err)
 				}
@@ -167,10 +164,10 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 				if err := json.Unmarshal(rewrite.Arguments, &normalized); err != nil {
 					t.Fatal(err)
 				}
-				normalized["timeout"], normalized["background"] = 120, false
+				normalized["background"] = false
 				raw, _ := json.Marshal(normalized)
-				authorize := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
-				input := extension.AuthorizationInput{ToolName: "run_command", Arguments: raw, ToolSettings: []byte(`{"command_timeout":120}`)}
+				authorize := stage.hooks["check"][0].value.(nativeHook).handler.(extension.ToolCheckHook)
+				input := model.ToolCall{Name: "run_command", Arguments: raw}
 				reason, err := authorize(context.Background(), call, input)
 				if err != nil || reason != nil {
 					t.Fatalf("authorization: %v %v", reason, err)
@@ -190,71 +187,45 @@ func TestBundledAuthorNativeWorkerParity(t *testing.T) {
 					t.Fatal("task roster omitted guard")
 				}
 				impl := task.entry.value.(nativeTool).tool
+				var start extension.SessionStart
 				call.Call = func(_ context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
-					if service != "melta.session" || string(args) != "{}" {
+					if service != "melta.session" {
 						t.Fatalf("task host call: %s.%s %s", service, method, args)
 					}
 					switch method {
 					case "members":
 						return extension.Result{Value: []byte(`[]`)}, nil
 					case "start":
+						var err error
+						start, err = extension.DecodeSessionStart(args)
+						if err != nil {
+							t.Fatal(err)
+						}
 						return extension.Result{Value: []byte(`{"session_id":"child"}`)}, nil
 					default:
 						t.Fatalf("unexpected task method: %s", method)
 						return extension.Result{}, nil
 					}
 				}
-				plan := impl.Prepare(context.Background(), call, model.ToolCall{ID: "task-call", Name: "task", Arguments: []byte(`{"subagent_type":"explore","prompt":"work"}`)})
-				if plan.Immediate != nil || plan.Start == nil || plan.Start.Target != "explore" || string(plan.Start.InitialState) != `{"agent":"explore"}` {
-					t.Fatalf("task plan: %#v", plan)
+				outcome := impl(context.Background(), call, model.ToolCall{ID: "task-call", Name: "task", Arguments: []byte(`{"subagent_type":"explore","prompt":"work"}`)})
+				if outcome.Result.Status != model.ResultSuccess || string(start.InitialState) != `{"agent":"explore"}` {
+					t.Fatalf("task start: %#v, outcome %#v", start, outcome)
 				}
-				guardPlan := impl.Prepare(context.Background(), call, model.ToolCall{ID: "guard-call", Name: "task", Arguments: []byte(`{"subagent_type":"guard","prompt":"work"}`)})
-				if guardPlan.Immediate != nil || guardPlan.Start == nil || guardPlan.Start.Target != "guard" {
-					t.Fatalf("task roster disagreement: %#v", guardPlan)
+				outcome = impl(context.Background(), call, model.ToolCall{ID: "guard-call", Name: "task", Arguments: []byte(`{"subagent_type":"guard","prompt":"work"}`)})
+				if outcome.Result.Status != model.ResultSuccess || string(start.InitialState) != `{"agent":"guard"}` {
+					t.Fatalf("task roster disagreement: %#v", outcome)
 				}
-				outcome := impl.Execute(context.Background(), call, plan)
-				if outcome.Result.Status != model.ResultSuccess {
-					t.Fatalf("task outcome: %#v", outcome)
-				}
-				call.Call = func(_ context.Context, _, _ string, _ json.RawMessage) (extension.Result, error) {
+				call.Call = func(_ context.Context, _, method string, _ json.RawMessage) (extension.Result, error) {
+					if method == "members" {
+						return extension.Result{Value: []byte(`[]`)}, nil
+					}
 					return extension.Result{}, &extension.CallError{Err: errors.New("failed after start"), Partial: []byte(`{"session_id":"child"}`)}
 				}
-				outcome = impl.Execute(context.Background(), call, plan)
+				outcome = impl(context.Background(), call, model.ToolCall{ID: "task-call", Name: "task", Arguments: []byte(`{"subagent_type":"explore","prompt":"work"}`)})
 				if outcome.Result.Status != model.ResultError || !strings.Contains(outcome.Result.Content, "child") {
 					t.Fatalf("task partial: %#v", outcome)
 				}
 			})
 		}
-	}
-}
-
-func TestAgentsRegisteredWriteWitness(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "allowed"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	owner := &configurationService{}
-	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: agents.Author(), section: []byte(`{"enabled":true,"definitions":{"writer":{"write_dir":"allowed"}}}`)}})
-	if err != nil || candidate.inactive["agents"] != nil {
-		t.Fatalf("activation: %v %v", err, candidate.inactive)
-	}
-	defer candidate.release()
-	stage := candidate.snapshotForTest()
-	defer stage.release()
-	hooks := stage.authorizationHooks(ToolContext{Workspace: root}, map[string]harness.SessionStateValue{"agents": []byte(`{"agent":"writer"}`)}, nil, nil, nil, nil)
-	binds := 0
-	bind := func(path string) (string, error) {
-		binds++
-		return filepath.Join(root, path), nil
-	}
-	action := harness.PreparedAction{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionFileWrite, Target: filepath.Join(root, "allowed", "file")}}}
-	refusal, err := hooks[0].Run(context.Background(), action, bind)
-	if err != nil || refusal != nil || binds != 1 {
-		t.Fatalf("inside: %v %v binds=%d", refusal, err, binds)
-	}
-	action.Permissions[0].Target = filepath.Join(root, "elsewhere")
-	refusal, err = hooks[0].Run(context.Background(), action, bind)
-	if err != nil || refusal == nil {
-		t.Fatalf("outside: %v %v", refusal, err)
 	}
 }

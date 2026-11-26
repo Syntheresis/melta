@@ -21,7 +21,7 @@ var builtins = map[string]Definition{
 		Subagent:     boolPtr(true),
 	},
 	"explore": {
-		Tools:       toolsPtr([]string{"read_file", "run_command", "process", "sleep", "task"}),
+		Tools:       toolsPtr([]string{"read_file", "run_command", "process", "task"}),
 		Prompt:      stringPtr(explorePrompt),
 		Readonly:    boolPtr(true),
 		Description: stringPtr(exploreDescription),

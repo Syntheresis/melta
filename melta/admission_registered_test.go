@@ -56,7 +56,7 @@ func TestRegisteredAdmissionOrdersAndValidatesHooks(t *testing.T) {
 				Strategy: harness.StrategySelection{ID: harness.IncludedStrategyID},
 				Tools:    []model.ToolDefinition{{Name: "read", Parameters: json.RawMessage(`{}`)}},
 			}}
-			got, err := runRegisteredAdmission(context.Background(), stage, input, states, nil, map[string]bool{"read": true}, harness.IncludedStrategyID)
+			got, err := runRegisteredAdmission(context.Background(), stage, input, states, nil, nil, map[string]bool{"read": true}, harness.IncludedStrategyID)
 			if introduceUnknown {
 				if !errors.Is(err, harness.ErrInvalid) {
 					t.Fatalf("unknown tool error = %v", err)

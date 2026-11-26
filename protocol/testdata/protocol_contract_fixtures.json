@@ -684,7 +684,7 @@
     },
     {
      "name": "ScopeEvent",
-     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"runtime\"}}"
+     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}}"
     },
     {
      "name": "SessionChangedEvent",
@@ -724,7 +724,7 @@
     },
     {
      "name": "scope-closed",
-     "json": "{\"kind\":\"scope_closed\",\"scope\":{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"}}"
+     "json": "{\"kind\":\"scope_closed\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}}"
     }
    ],
    "reject": [
@@ -778,7 +778,7 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"24\"}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"25\"}"
     }
    ],
    "reject": [
@@ -792,16 +792,16 @@
     },
     {
      "name": "bad-instance-pattern",
-     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"24\"}",
+     "json": "{\"instance_id\":\"XYZ\",\"protocol_version\":\"25\"}",
      "typescript": false
     },
     {
      "name": "missing-instance",
-     "json": "{\"protocol_version\":\"24\"}"
+     "json": "{\"protocol_version\":\"25\"}"
     },
     {
      "name": "unknown-member",
-     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"24\",\"extra\":true}"
+     "json": "{\"instance_id\":\"0123456789abcdef0123456789abcdef\",\"protocol_version\":\"25\",\"extra\":true}"
     }
    ]
   },
@@ -1523,23 +1523,19 @@
      "json": "{\"kind\":\"operation\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"job_id\":\"job-1\"}"
     },
     {
-     "name": "workspace-identity",
-     "json": "{\"kind\":\"workspace\",\"workspace\":\"/workspace\"}"
-    },
-    {
      "name": "session-identity",
      "json": "{\"kind\":\"session\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"}"
     },
     {
      "name": "job-identity",
      "json": "{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"}"
-    },
-    {
-     "name": "agent-identity",
-     "json": "{\"kind\":\"invocation\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}"
     }
    ],
    "reject": [
+    {
+     "name": "invocation-kind",
+     "json": "{\"kind\":\"invocation\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}"
+    },
     {
      "name": "unknown-kind",
      "json": "{\"kind\":\"galaxy\"}"
@@ -1547,10 +1543,6 @@
     {
      "name": "unknown-member",
      "json": "{\"kind\":\"runtime\",\"extra\":true}"
-    },
-    {
-     "name": "workspace-without-workspace",
-     "json": "{\"kind\":\"workspace\"}"
     },
     {
      "name": "session-without-session-id",
@@ -1581,11 +1573,6 @@
      "json": "{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\"}"
     },
     {
-     "name": "empty-workspace",
-     "json": "{\"kind\":\"workspace\",\"workspace\":\"\"}",
-     "typescript": false
-    },
-    {
      "name": "empty-operation-id",
      "json": "{\"kind\":\"operation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"\"}",
      "typescript": false
@@ -1607,20 +1594,6 @@
     {
      "name": "full",
      "json": "{\"kind\":\"runtime\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"job_id\":\"job-1\"}"
-    }
-   ],
-   "reject": []
-  },
-  {
-   "schema": "WorkspaceScope",
-   "accept": [
-    {
-     "name": "minimal",
-     "json": "{\"kind\":\"workspace\",\"workspace\":\"/workspace\"}"
-    },
-    {
-     "name": "full",
-     "json": "{\"kind\":\"workspace\",\"workspace\":\"/workspace\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"job_id\":\"job-1\"}"
     }
    ],
    "reject": []
@@ -1686,11 +1659,11 @@
    "accept": [
     {
      "name": "minimal",
-     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"runtime\"}}"
+     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}}"
     },
     {
-     "name": "scope-closed-job",
-     "json": "{\"kind\":\"scope_closed\",\"scope\":{\"kind\":\"job\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"job_id\":\"job-1\"}}"
+     "name": "scope-closed",
+     "json": "{\"kind\":\"scope_closed\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"}}"
     }
    ],
    "reject": [
@@ -1700,7 +1673,7 @@
     },
     {
      "name": "unknown-member",
-     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"runtime\"},\"extra\":1}"
+     "json": "{\"kind\":\"scope_opened\",\"scope\":{\"kind\":\"invocation\",\"session_id\":\"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f\",\"operation_id\":\"op-1\",\"invocation_id\":\"inv-1\",\"purpose\":\"conversation\"},\"extra\":1}"
     },
     {
      "name": "scope-missing-kind",
@@ -2460,8 +2433,8 @@
   },
   {
    "schema": "RegisteredExtensionOperation",
-   "accept": [{"name":"minimal","json":"{\"method\":{\"name\":\"echo\",\"mode\":\"pure\",\"input\":\"{}\",\"success\":\"{}\"},\"target\":\"harness\"}"}],
-   "reject": [{"name":"wrong-target","json":"{\"method\":{\"name\":\"echo\",\"mode\":\"pure\",\"input\":\"{}\",\"success\":\"{}\"},\"target\":\"other\"}"}]
+   "accept": [{"name":"minimal","json":"{\"method\":{\"name\":\"echo\",\"input\":\"{}\",\"success\":\"{}\"},\"target\":\"harness\"}"}],
+   "reject": [{"name":"wrong-target","json":"{\"method\":{\"name\":\"echo\",\"input\":\"{}\",\"success\":\"{}\"},\"target\":\"other\"}"}]
   },
   {
    "schema": "ExtensionFailure",
@@ -2495,9 +2468,9 @@
   },
   {
    "schema": "ExtensionMethod",
-   "accept": [{"name":"minimal","json":"{\"name\":\"echo\",\"mode\":\"service_io\",\"input\":\"{}\",\"success\":\"{}\"}"},
-    {"name":"full","json":"{\"name\":\"echo\",\"mode\":\"service_io\",\"input\":\"{}\",\"success\":\"{}\",\"error\":\"{}\",\"partial\":\"{}\"}"}],
-   "reject": [{"name":"wrong-mode","json":"{\"name\":\"echo\",\"mode\":\"other\",\"input\":\"{}\",\"success\":\"{}\"}"}]
+   "accept": [{"name":"minimal","json":"{\"name\":\"echo\",\"input\":\"{}\",\"success\":\"{}\"}"},
+    {"name":"full","json":"{\"name\":\"echo\",\"input\":\"{}\",\"success\":\"{}\",\"error\":\"{}\",\"partial\":\"{}\"}"}],
+   "reject": []
   },
   {
    "schema": "ExtensionSuccess",

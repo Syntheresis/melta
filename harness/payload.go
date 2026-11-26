@@ -637,6 +637,36 @@ func decodeToolImplementation(obj map[string]json.RawMessage) (*ToolImplementati
 	return &ToolImplementation{ID: id, ExtensionID: extensionID}, nil
 }
 
+// decodeHookIdentityObject reads one hook identity object with exact keys.
+func decodeHookIdentityObject(value map[string]json.RawMessage) (HookIdentity, error) {
+	if err := rejectUnknownMembers(value, "extension_id", "hook_id"); err != nil {
+		return HookIdentity{}, err
+	}
+	extensionID, err := stringMember(value, "extension_id", true)
+	if err != nil {
+		return HookIdentity{}, err
+	}
+	hookID, err := stringMember(value, "hook_id", true)
+	if err != nil {
+		return HookIdentity{}, err
+	}
+	return HookIdentity{ExtensionID: extensionID, HookID: hookID}, nil
+}
+
+// decodeHookIdentityMember reads one optional hook identity object with exact
+// keys.
+func decodeHookIdentityMember(obj map[string]json.RawMessage, key string) (*HookIdentity, error) {
+	value, err := objectMember(obj, key, false)
+	if err != nil || value == nil {
+		return nil, err
+	}
+	identity, err := decodeHookIdentityObject(value)
+	if err != nil {
+		return nil, err
+	}
+	return &identity, nil
+}
+
 // encodeToolResultEntry renders one tool-result entry payload.
 func encodeToolResultEntry(v toolResultEntry) (json.RawMessage, error) {
 	if err := validateToolResultEntry(v); err != nil {
@@ -672,6 +702,7 @@ func encodeToolResultEntry(v toolResultEntry) (json.RawMessage, error) {
 		NormalizedArguments json.RawMessage     `json:"normalized_arguments_base64,omitempty"`
 		HookIDs             json.RawMessage     `json:"hook_ids,omitempty"`
 		Implementation      *ToolImplementation `json:"implementation,omitempty"`
+		RefusedBy           *HookIdentity       `json:"refused_by,omitempty"`
 	}{
 		SessionID:           v.SessionID,
 		EntryID:             v.EntryID,
@@ -687,6 +718,7 @@ func encodeToolResultEntry(v toolResultEntry) (json.RawMessage, error) {
 		NormalizedArguments: normalized,
 		HookIDs:             hookIDs,
 		Implementation:      v.Implementation,
+		RefusedBy:           v.RefusedBy,
 	})
 	if err != nil {
 		return nil, err
@@ -704,7 +736,7 @@ func decodeToolResultEntry(env Entry) (toolResultEntry, error) {
 	if err != nil {
 		return toolResultEntry{}, err
 	}
-	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "assistant_entry", "tool_call_id", "status", "content", "original_content", "shaping_failure", "evidence", "metadata_base64", "normalized_arguments_base64", "hook_ids", "implementation"); err != nil {
+	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "assistant_entry", "tool_call_id", "status", "content", "original_content", "shaping_failure", "evidence", "metadata_base64", "normalized_arguments_base64", "hook_ids", "implementation", "refused_by"); err != nil {
 		return toolResultEntry{}, err
 	}
 	sessionID, err := stringMember(obj, "session_id", true)
@@ -767,6 +799,10 @@ func decodeToolResultEntry(env Entry) (toolResultEntry, error) {
 	if err != nil {
 		return toolResultEntry{}, err
 	}
+	refusedBy, err := decodeHookIdentityMember(obj, "refused_by")
+	if err != nil {
+		return toolResultEntry{}, err
+	}
 	if sessionID != env.SessionID {
 		return toolResultEntry{}, fmt.Errorf("payload session id %q does not agree with the envelope", sessionID)
 	}
@@ -791,6 +827,7 @@ func decodeToolResultEntry(env Entry) (toolResultEntry, error) {
 		NormalizedArguments: normalizedArguments,
 		HookIDs:             hookIDs,
 		Implementation:      implementation,
+		RefusedBy:           refusedBy,
 	}
 	if err := validateToolResultEntry(v); err != nil {
 		return toolResultEntry{}, err
@@ -853,345 +890,15 @@ func validateToolResultEntry(v toolResultEntry) error {
 	if len(v.HookIDs) > 0 && len(v.NormalizedArguments) == 0 {
 		return errors.New("tool result hook provenance requires its accepted normalized arguments")
 	}
+	if v.RefusedBy != nil {
+		if v.Status != model.ResultDenied || v.Evidence != ExecutionNotStarted {
+			return errors.New("tool result refused_by requires a denied, not-started result")
+		}
+		if v.RefusedBy.ExtensionID == "" || v.RefusedBy.HookID == "" {
+			return errors.New("tool result refused_by requires both hook identities")
+		}
+	}
 	return validateHookIdentities(v.HookIDs)
-}
-
-// encodeHookResultEntry renders one hook-result entry payload through the
-// closed member codecs: nested evidence and consequence values ride the shared
-// RequestEvidence and RequestConsequence codecs, never struct marshaling.
-func encodeHookResultEntry(v hookResultEntry) (json.RawMessage, error) {
-	if err := validateHookResultEntry(v); err != nil {
-		return nil, invalidInput("hook result entry: %v", err)
-	}
-	obj := map[string]json.RawMessage{
-		"session_id":   mustMarshal(v.SessionID),
-		"entry_id":     mustMarshal(v.EntryID),
-		"operation_id": mustMarshal(v.OperationID),
-		"hook_id":      mustMarshal(v.HookID),
-		"extension_id": mustMarshal(v.ExtensionID),
-		"status":       mustMarshal(string(v.Status)),
-		"evidence":     mustMarshal(string(v.Evidence)),
-	}
-	if v.ToolCallID != "" {
-		obj["tool_call_id"] = mustMarshal(v.ToolCallID)
-	}
-	if v.RequestID != "" {
-		obj["request_id"] = mustMarshal(v.RequestID)
-	}
-	if v.Purpose != "" {
-		obj["purpose"] = mustMarshal(string(v.Purpose))
-	}
-	if v.Status == hookSucceeded {
-		// A successful effectful execution always carries its binding-owned
-		// consequence: a refusal or replacement for a tool binding, the closed
-		// record for a request binding.
-		if v.ToolCallID != "" {
-			if v.Refusal != "" {
-				obj["refusal"] = mustMarshal(v.Refusal)
-			} else {
-				obj["arguments_base64"] = frame(v.Arguments)
-			}
-		} else {
-			raw, err := encodeRequestConsequence(*v.Consequence)
-			if err != nil {
-				return nil, err
-			}
-			obj["consequence"] = raw
-		}
-	}
-	if v.Error != "" {
-		obj["error"] = mustMarshal(v.Error)
-	}
-	if v.ToolCallID != "" {
-		obj["input_arguments_base64"] = mustMarshal(v.InputArgumentsBase64)
-	} else {
-		raw, err := encodeRequestEvidence(*v.InputEvidence)
-		if err != nil {
-			return nil, err
-		}
-		obj["input_evidence"] = raw
-	}
-	return json.Marshal(obj)
-}
-
-// decodeHookResultEntry reads one hook-result entry payload and enforces its
-// agreement with the addressed envelope identity. A hook result is never
-// independently copied: its owning Operation identity is required.
-func decodeHookResultEntry(env Entry) (hookResultEntry, error) {
-	if err := decodeEntryEnvelope(env); err != nil {
-		return hookResultEntry{}, err
-	}
-	obj, err := decodePayloadObject(env.Payload)
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	if err := rejectUnknownMembers(obj, "session_id", "entry_id", "operation_id", "hook_id", "extension_id", "tool_call_id", "request_id", "purpose", "status", "evidence", "arguments_base64", "refusal", "error", "input_arguments_base64", "input_evidence", "consequence"); err != nil {
-		return hookResultEntry{}, err
-	}
-	sessionID, err := stringMember(obj, "session_id", true)
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	entryID, err := stringMember(obj, "entry_id", true)
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	operationID, err := stringMember(obj, "operation_id", true)
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	hookID, err := stringMember(obj, "hook_id", true)
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	extensionID, err := stringMember(obj, "extension_id", true)
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	toolCallID, err := optionalNonEmptyString(obj, "tool_call_id")
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	requestID, err := optionalNonEmptyString(obj, "request_id")
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	purpose, err := optionalNonEmptyString(obj, "purpose")
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	status, err := stringMember(obj, "status", true)
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	evidence, err := stringMember(obj, "evidence", true)
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	refusal, err := optionalNonEmptyString(obj, "refusal")
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	_, hasArguments := obj["arguments_base64"]
-	if hasArguments != (toolCallID != "" && hookResultStatus(status) == hookSucceeded && refusal == "") {
-		return hookResultEntry{}, errors.New("hook result argument consequence membership does not match its binding and status")
-	}
-	var arguments json.RawMessage
-	if hasArguments {
-		argumentsFrame, err := stringMember(obj, "arguments_base64", true)
-		if err != nil {
-			return hookResultEntry{}, err
-		}
-		arguments, err = decodeFrame(argumentsFrame)
-		if err != nil {
-			return hookResultEntry{}, fmt.Errorf("member %q: %w", "arguments_base64", err)
-		}
-	}
-	errorText, err := optionalNonEmptyString(obj, "error")
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	// The "input_arguments_base64" member is permitted only on a tool-bound
-	// hook result: reject its raw membership outright for every other binding
-	// before any base64 decoding, whatever the member's value.
-	if toolCallID == "" {
-		if _, present := obj["input_arguments_base64"]; present {
-			return hookResultEntry{}, errors.New(`hook result binding forbids the "input_arguments_base64" member`)
-		}
-	}
-	inputArgumentsBase64, err := optionalStoredBase64(obj, "input_arguments_base64")
-	if err != nil {
-		return hookResultEntry{}, err
-	}
-	if toolCallID != "" && requestID == "" {
-		if _, present := obj["input_arguments_base64"]; !present {
-			return hookResultEntry{}, errors.New(`tool-bound hook result requires the "input_arguments_base64" member`)
-		}
-	}
-	var inputEvidence *RequestEvidence
-	if _, present := obj["input_evidence"]; present {
-		decoded, err := decodeRequestEvidence(obj["input_evidence"])
-		if err != nil {
-			return hookResultEntry{}, fmt.Errorf("member %q: %w", "input_evidence", err)
-		}
-		inputEvidence = &decoded
-	}
-	var consequence *RequestConsequence
-	if _, present := obj["consequence"]; present {
-		decoded, err := decodeRequestConsequence(obj["consequence"])
-		if err != nil {
-			return hookResultEntry{}, fmt.Errorf("member %q: %w", "consequence", err)
-		}
-		consequence = &decoded
-	}
-	if sessionID != env.SessionID {
-		return hookResultEntry{}, fmt.Errorf("payload session id %q does not agree with the envelope", sessionID)
-	}
-	if entryID != env.ID {
-		return hookResultEntry{}, fmt.Errorf("payload entry id %q does not agree with the envelope", entryID)
-	}
-	if operationID != env.OperationID {
-		return hookResultEntry{}, fmt.Errorf("payload operation id %q does not agree with the envelope", operationID)
-	}
-	v := hookResultEntry{
-		SessionID:            sessionID,
-		EntryID:              entryID,
-		OperationID:          operationID,
-		HookID:               hookID,
-		ExtensionID:          extensionID,
-		ToolCallID:           toolCallID,
-		RequestID:            requestID,
-		Purpose:              InvocationPurpose(purpose),
-		Status:               hookResultStatus(status),
-		Evidence:             ExecutionEvidence(evidence),
-		Arguments:            arguments,
-		Refusal:              refusal,
-		Error:                errorText,
-		InputArgumentsBase64: inputArgumentsBase64,
-		InputEvidence:        inputEvidence,
-		Consequence:          consequence,
-	}
-	if err := validateHookResultEntry(v); err != nil {
-		return hookResultEntry{}, err
-	}
-	return v, nil
-}
-
-// optionalStoredBase64 reads one base64 string member whose presence is
-// meaningful and whose value may encode empty bytes; it must be canonical
-// standard-alphabet base64.
-func optionalStoredBase64(obj map[string]json.RawMessage, key string) (string, error) {
-	if _, present := obj[key]; !present {
-		return "", nil
-	}
-	s, err := stringMember(obj, key, true)
-	if err != nil {
-		return "", err
-	}
-	if _, err := base64.StdEncoding.Strict().DecodeString(s); err != nil {
-		return "", fmt.Errorf("member %q is not canonical base64: %w", key, err)
-	}
-	return s, nil
-}
-
-// validateHookResultEntry enforces the closed hook-result shape: durable
-// identities with a required owning Operation, non-empty hook and extension
-// identities, exactly one binding (tool call or request), the closed status
-// and knowledge enums, and the binding-owned member rules — a success carries
-// observed knowledge and its binding consequence (opaque bytes or the
-// refusal for a tool binding, the closed record for a request binding) and no
-// error, while every other status carries a non-empty error and no
-// consequence. The consumed input member is binding-owned and unconditional:
-// canonical base64 bytes (empty allowed) for a tool binding, the closed
-// evidence record for a request binding.
-func validateHookResultEntry(v hookResultEntry) error {
-	if err := validateHexID(v.SessionID, "session id"); err != nil {
-		return err
-	}
-	if err := validateHexID(v.EntryID, "entry id"); err != nil {
-		return err
-	}
-	if err := validateOperationIdentity(v.OperationID, "operation id"); err != nil {
-		return err
-	}
-	if v.HookID == "" {
-		return errors.New("hook id must be non-empty")
-	}
-	if v.ExtensionID == "" {
-		return errors.New("hook extension id must be non-empty")
-	}
-	if (v.ToolCallID == "") == (v.RequestID == "") {
-		return errors.New("hook result binds exactly one of a tool call or a request")
-	}
-	if v.ToolCallID != "" {
-		if v.Purpose != "" {
-			return errors.New("tool-bound hook result carries no purpose")
-		}
-		if err := validateOperationIdentity(v.ToolCallID, "hook result tool call id"); err != nil {
-			return err
-		}
-		if v.InputEvidence != nil {
-			return errors.New("tool-bound hook result carries no evidence input")
-		}
-		if _, err := base64.StdEncoding.Strict().DecodeString(v.InputArgumentsBase64); err != nil {
-			return errors.New("hook result input_arguments_base64 is not canonical base64")
-		}
-		if v.Consequence != nil {
-			return errors.New("tool-bound hook result carries no request consequence")
-		}
-		if v.Refusal != "" && len(v.Arguments) > 0 {
-			return errors.New("tool-bound hook result carries a refusal or arguments, never both")
-		}
-	} else {
-		switch v.Purpose {
-		case InvocationPurposeConversation, InvocationPurposeMaintenance:
-		default:
-			return fmt.Errorf("request-bound hook result purpose %q is not one of conversation or maintenance", v.Purpose)
-		}
-		if err := validateOperationIdentity(v.RequestID, "hook result request id"); err != nil {
-			return err
-		}
-		if v.Purpose != InvocationPurposeMaintenance && v.InputEvidence != nil && v.InputEvidence.BoundaryEntryID == "" {
-			return errors.New("conversation request-bound hook result requires a nonempty boundary reference")
-		}
-		if v.InputArgumentsBase64 != "" {
-			return errors.New("request-bound hook result carries no argument bytes input")
-		}
-		if v.InputEvidence == nil {
-			return errors.New("request-bound hook result requires its consumed input evidence")
-		}
-		if err := validateRequestHookEvidence(v.Purpose, *v.InputEvidence); err != nil {
-			return fmt.Errorf("input_evidence: %w", err)
-		}
-		if len(v.Arguments) > 0 {
-			return errors.New("request-bound hook result carries no arguments")
-		}
-		if v.Refusal != "" {
-			return errors.New("request-bound hook result carries no refusal")
-		}
-	}
-	switch v.Status {
-	case hookSucceeded:
-		if !validExecutionEvidence(v.Evidence) || v.Evidence != ExecutionObserved {
-			return fmt.Errorf("successful hook result requires %s execution knowledge", ExecutionObserved)
-		}
-		if v.Error != "" {
-			return errors.New("successful hook result must not carry an error")
-		}
-		if v.ToolCallID != "" {
-			if v.Refusal == "" {
-				input, _ := base64.StdEncoding.Strict().DecodeString(v.InputArgumentsBase64)
-				if !bytes.Equal(input, v.Arguments) {
-					if _, err := decodePayloadObject(v.Arguments); err != nil {
-						return fmt.Errorf("changed hook result arguments must be one complete JSON object: %v", err)
-					}
-				}
-			}
-		} else if v.Consequence == nil {
-			return errors.New("successful request-bound hook result requires its consequence")
-		} else if err := validateRequestConsequenceShape(*v.Consequence); err != nil {
-			return fmt.Errorf("consequence: %w", err)
-		}
-	case hookFailed, hookInterrupted:
-		if !validExecutionEvidence(v.Evidence) {
-			return fmt.Errorf("hook result evidence %q is not one of not_started, observed or unknown", v.Evidence)
-		}
-		if v.Error == "" {
-			return fmt.Errorf("%s hook result requires a non-empty error", v.Status)
-		}
-		if len(v.Arguments) > 0 {
-			return fmt.Errorf("%s hook result must not carry arguments", v.Status)
-		}
-		if v.Refusal != "" {
-			return fmt.Errorf("%s hook result must not carry a refusal", v.Status)
-		}
-		if v.Consequence != nil {
-			return fmt.Errorf("%s hook result must not carry a consequence", v.Status)
-		}
-	default:
-		return fmt.Errorf("hook result status %q is not one of success, error or interrupted", v.Status)
-	}
-	return nil
 }
 
 // encodeSignalEntry renders one signal entry payload directly from the
@@ -3353,9 +3060,6 @@ func encodeActiveEffect(v ActiveEffect) (json.RawMessage, error) {
 	if v.ToolCallID != "" {
 		obj["tool_call_id"] = mustMarshal(v.ToolCallID)
 	}
-	if v.HookID != "" {
-		obj["hook_id"] = mustMarshal(v.HookID)
-	}
 	if v.RequestID != "" {
 		obj["request_id"] = mustMarshal(v.RequestID)
 	}
@@ -3376,16 +3080,6 @@ func encodeActiveEffect(v ActiveEffect) (json.RawMessage, error) {
 		}
 		obj["evidence"] = raw
 	}
-	if v.ExtensionID != "" {
-		obj["hook_extension_id"] = mustMarshal(v.ExtensionID)
-	}
-	if v.InputArgumentsBase64 != "" {
-		obj["input_arguments_base64"] = mustMarshal(v.InputArgumentsBase64)
-	} else if v.Kind == EffectHook && v.HookID != "" && v.ToolCallID != "" {
-		// An argument hook's consumed bytes are a binding-required member even
-		// when the consumed selection is empty.
-		obj["input_arguments_base64"] = mustMarshal("")
-	}
 	if len(v.FinalArguments) > 0 {
 		obj["final_arguments_base64"] = frame(v.FinalArguments)
 	}
@@ -3404,7 +3098,7 @@ func encodeActiveEffect(v ActiveEffect) (json.RawMessage, error) {
 
 // decodeActiveEffect reads one active effect with exact keys.
 func decodeActiveEffect(obj map[string]json.RawMessage) (ActiveEffect, error) {
-	if err := rejectUnknownMembers(obj, "kind", "result_entry_id", "tool_call_id", "hook_id", "request_id", "model", "purpose", "evidence", "hook_extension_id", "input_arguments_base64", "final_arguments_base64", "hook_ids", "implementation"); err != nil {
+	if err := rejectUnknownMembers(obj, "kind", "result_entry_id", "tool_call_id", "request_id", "model", "purpose", "evidence", "final_arguments_base64", "hook_ids", "implementation"); err != nil {
 		return ActiveEffect{}, err
 	}
 	kind, err := stringMember(obj, "kind", true)
@@ -3416,10 +3110,6 @@ func decodeActiveEffect(obj map[string]json.RawMessage) (ActiveEffect, error) {
 		return ActiveEffect{}, err
 	}
 	toolCallID, err := optionalNonEmptyString(obj, "tool_call_id")
-	if err != nil {
-		return ActiveEffect{}, err
-	}
-	hookID, err := optionalNonEmptyString(obj, "hook_id")
 	if err != nil {
 		return ActiveEffect{}, err
 	}
@@ -3451,28 +3141,6 @@ func decodeActiveEffect(obj map[string]json.RawMessage) (ActiveEffect, error) {
 		}
 		evidence = &decoded
 	}
-	extensionID, err := optionalNonEmptyString(obj, "hook_extension_id")
-	if err != nil {
-		return ActiveEffect{}, err
-	}
-	// The "input_arguments_base64" member is permitted only on a tool-bound
-	// hook effect intent: model, tool, and request-bound hook effects reject
-	// its raw membership outright before any base64 decoding, whatever the
-	// member's value.
-	if EffectKind(kind) != EffectHook || toolCallID == "" {
-		if _, present := obj["input_arguments_base64"]; present {
-			return ActiveEffect{}, errors.New(`active effect binding forbids the "input_arguments_base64" member`)
-		}
-	}
-	inputArgumentsBase64, err := optionalStoredBase64(obj, "input_arguments_base64")
-	if err != nil {
-		return ActiveEffect{}, err
-	}
-	if EffectKind(kind) == EffectHook && hookID != "" && toolCallID != "" && requestID == "" {
-		if _, present := obj["input_arguments_base64"]; !present {
-			return ActiveEffect{}, errors.New(`tool-bound hook active effect requires the "input_arguments_base64" member`)
-		}
-	}
 	finalArguments, err := framedMember(obj, "final_arguments_base64", false)
 	if err != nil {
 		return ActiveEffect{}, err
@@ -3486,19 +3154,16 @@ func decodeActiveEffect(obj map[string]json.RawMessage) (ActiveEffect, error) {
 		return ActiveEffect{}, err
 	}
 	v := ActiveEffect{
-		Kind:                 EffectKind(kind),
-		ResultEntryID:        resultEntryID,
-		ToolCallID:           toolCallID,
-		HookID:               hookID,
-		RequestID:            requestID,
-		Model:                modelRef,
-		Purpose:              InvocationPurpose(purpose),
-		Evidence:             evidence,
-		ExtensionID:          extensionID,
-		InputArgumentsBase64: inputArgumentsBase64,
-		FinalArguments:       finalArguments,
-		ContributionIDs:      contributionIDs,
-		Implementation:       implementation,
+		Kind:            EffectKind(kind),
+		ResultEntryID:   resultEntryID,
+		ToolCallID:      toolCallID,
+		RequestID:       requestID,
+		Model:           modelRef,
+		Purpose:         InvocationPurpose(purpose),
+		Evidence:        evidence,
+		FinalArguments:  finalArguments,
+		ContributionIDs: contributionIDs,
+		Implementation:  implementation,
 	}
 	if err := validateActiveEffect(v); err != nil {
 		return ActiveEffect{}, err
@@ -3511,10 +3176,7 @@ func decodeActiveEffect(obj map[string]json.RawMessage) (ActiveEffect, error) {
 // conversation model effect also requires its effective input evidence and a
 // maintenance effect forbids it. A tool effect requires its bound
 // implementation and consumed normalized selection as one complete JSON object
-// with optional contributing hook provenance. A hook effect carries its
-// extension identity and exactly one binding: a tool-bound hook its opaque
-// consumed bytes (empty allowed), a request-bound hook its consumed evidence
-// record. Cross-kind identity and
+// with optional contributing hook provenance. Cross-kind identity and
 // input members are forbidden for the other kinds.
 func validateActiveEffect(v ActiveEffect) error {
 	if err := validateHexID(v.ResultEntryID, "active effect result entry id"); err != nil {
@@ -3525,10 +3187,10 @@ func validateActiveEffect(v ActiveEffect) error {
 		if v.Implementation != nil {
 			return errors.New("model active effect carries no tool implementation")
 		}
-		if v.ToolCallID != "" || v.HookID != "" || v.ExtensionID != "" {
-			return errors.New("model active effect carries no call, hook, or extension identity")
+		if v.ToolCallID != "" {
+			return errors.New("model active effect carries no call identity")
 		}
-		if v.InputArgumentsBase64 != "" || len(v.FinalArguments) > 0 || len(v.ContributionIDs) > 0 {
+		if len(v.FinalArguments) > 0 || len(v.ContributionIDs) > 0 {
 			return errors.New("model active effect carries no input or provenance members")
 		}
 		if v.RequestID == "" {
@@ -3561,9 +3223,6 @@ func validateActiveEffect(v ActiveEffect) error {
 			}
 		}
 	case EffectTool:
-		if v.HookID != "" || v.ExtensionID != "" {
-			return errors.New("tool active effect carries no hook identity")
-		}
 		if v.Implementation == nil {
 			return errors.New("tool active effect requires its implementation")
 		}
@@ -3572,9 +3231,6 @@ func validateActiveEffect(v ActiveEffect) error {
 		}
 		if v.RequestID != "" || v.Purpose != "" || v.Model != nil || v.Evidence != nil {
 			return errors.New("tool active effect carries no request identity or evidence")
-		}
-		if v.InputArgumentsBase64 != "" {
-			return errors.New("tool active effect carries no consumed hook bytes")
 		}
 		if v.ToolCallID == "" {
 			return errors.New("tool active effect requires its tool call id")
@@ -3585,59 +3241,8 @@ func validateActiveEffect(v ActiveEffect) error {
 		if err := validateHookIdentities(v.ContributionIDs); err != nil {
 			return err
 		}
-	case EffectHook:
-		if v.Implementation != nil {
-			return errors.New("hook active effect carries no tool implementation")
-		}
-		if v.RequestID != "" && v.ToolCallID != "" {
-			return errors.New("hook active effect binds exactly one of a request or a tool call")
-		}
-		if v.RequestID == "" && v.ToolCallID == "" {
-			return errors.New("hook active effect requires its request or tool call binding")
-		}
-		if v.HookID == "" {
-			return errors.New("hook active effect requires its hook id")
-		}
-		if v.ExtensionID == "" {
-			return errors.New("hook active effect requires its extension identity")
-		}
-		if v.Model != nil {
-			return errors.New("hook active effect carries no model identity")
-		}
-		if v.RequestID != "" {
-			switch v.Purpose {
-			case InvocationPurposeConversation, InvocationPurposeMaintenance:
-			default:
-				return fmt.Errorf("request-bound hook active effect purpose %q is not one of conversation or maintenance", v.Purpose)
-			}
-			if v.Evidence == nil {
-				return errors.New("request-bound hook active effect requires its consumed input evidence")
-			}
-			if v.Purpose == InvocationPurposeConversation && v.Evidence.BoundaryEntryID == "" {
-				return errors.New("conversation request-bound hook active effect requires a nonempty boundary reference")
-			}
-			if err := validateRequestHookEvidence(v.Purpose, *v.Evidence); err != nil {
-				return fmt.Errorf("evidence: %w", err)
-			}
-			if v.InputArgumentsBase64 != "" || len(v.FinalArguments) > 0 || len(v.ContributionIDs) > 0 {
-				return errors.New("request-bound hook active effect carries no argument members")
-			}
-		} else {
-			if v.Purpose != "" {
-				return errors.New("tool-bound hook active effect carries no purpose")
-			}
-			if v.Evidence != nil {
-				return errors.New("tool-bound hook active effect carries no evidence input")
-			}
-			if _, err := base64.StdEncoding.Strict().DecodeString(v.InputArgumentsBase64); err != nil {
-				return errors.New("hook active effect input_arguments_base64 is not canonical base64")
-			}
-			if len(v.FinalArguments) > 0 || len(v.ContributionIDs) > 0 {
-				return errors.New("hook active effect carries no tool selection members")
-			}
-		}
 	default:
-		return fmt.Errorf("active effect kind %q is not one of model, tool or hook", v.Kind)
+		return fmt.Errorf("active effect kind %q is not one of model or tool", v.Kind)
 	}
 	return nil
 }
@@ -3652,7 +3257,7 @@ func encodeRunningRequest(v RunningRequest) (json.RawMessage, error) {
 
 // decodeRunningRequest reads one suspended request state with exact keys.
 func decodeRunningRequest(obj map[string]json.RawMessage) (RunningRequest, error) {
-	if err := rejectUnknownMembers(obj, "request_id", "purpose", "checkpoint_entry_id", "boundary_entry_id", "hook_results"); err != nil {
+	if err := rejectUnknownMembers(obj, "request_id", "purpose", "checkpoint_entry_id", "boundary_entry_id"); err != nil {
 		return RunningRequest{}, err
 	}
 	requestID, err := stringMember(obj, "request_id", true)
@@ -3671,28 +3276,11 @@ func decodeRunningRequest(obj map[string]json.RawMessage) (RunningRequest, error
 	if err != nil {
 		return RunningRequest{}, err
 	}
-	var hookResults []EntryRef
-	refsRaw, err := arrayMember(obj, "hook_results", false)
-	if err != nil {
-		return RunningRequest{}, err
-	}
-	for i, raw := range refsRaw {
-		refObj, err := decodePayloadObject(raw)
-		if err != nil {
-			return RunningRequest{}, fmt.Errorf("hook_results[%d]: %w", i, err)
-		}
-		ref, err := decodeEntryRef(refObj)
-		if err != nil {
-			return RunningRequest{}, fmt.Errorf("hook_results[%d]: %w", i, err)
-		}
-		hookResults = append(hookResults, ref)
-	}
 	v := RunningRequest{
 		RequestID:         requestID,
 		Purpose:           InvocationPurpose(purpose),
 		CheckpointEntryID: checkpointEntryID,
 		BoundaryEntryID:   boundaryEntryID,
-		HookResults:       hookResults,
 	}
 	if err := validateRunningRequest(v); err != nil {
 		return RunningRequest{}, err
@@ -3702,8 +3290,7 @@ func decodeRunningRequest(obj map[string]json.RawMessage) (RunningRequest, error
 
 // validateRunningRequest enforces the closed running-request shape: the bound
 // request identity and actual purpose, the required canonical boundary
-// reference, an optional checkpoint reference, and committed request-hook
-// result references.
+// reference, and an optional checkpoint reference.
 func validateRunningRequest(v RunningRequest) error {
 	if err := validateOperationIdentity(v.RequestID, "running request id"); err != nil {
 		return err
@@ -3728,19 +3315,6 @@ func validateRunningRequest(v RunningRequest) error {
 		if err := validateHexID(v.CheckpointEntryID, "running request checkpoint entry id"); err != nil {
 			return err
 		}
-	}
-	seen := make(map[EntryRef]bool, len(v.HookResults))
-	for i, ref := range v.HookResults {
-		if err := validateHexID(ref.SessionID, "running request hook result session id"); err != nil {
-			return fmt.Errorf("hook_results[%d]: %w", i, err)
-		}
-		if err := validateHexID(ref.EntryID, "running request hook result entry id"); err != nil {
-			return fmt.Errorf("hook_results[%d]: %w", i, err)
-		}
-		if seen[ref] {
-			return fmt.Errorf("hook_results[%d]: reference %s is not unique", i, ref.EntryID)
-		}
-		seen[ref] = true
 	}
 	return nil
 }
@@ -3854,30 +3428,22 @@ func validateOperationState(v OperationCurrentState) error {
 		if err := validateActiveEffect(*v.ActiveEffect); err != nil {
 			return err
 		}
-		switch v.ActiveEffect.Kind {
-		case EffectTool:
+		if v.ActiveEffect.Kind == EffectTool {
 			if len(v.PendingToolCalls) == 0 || v.ActiveEffect.ToolCallID != v.PendingToolCalls[0].CallID {
 				return errors.New("tool active effect must address the matching first pending call")
 			}
 			if v.ActiveEffect.ResultEntryID != v.PendingToolCalls[0].ResultEntryID {
 				return errors.New("tool active effect must reserve the first pending call's result identity")
 			}
-		case EffectHook:
-			if v.ActiveEffect.ToolCallID != "" {
-				if len(v.PendingToolCalls) == 0 || v.ActiveEffect.ToolCallID != v.PendingToolCalls[0].CallID {
-					return errors.New("tool-bound hook active effect must address the matching first pending call")
-				}
-			}
 		}
 		// One frozen request association rule covers every request-bound
-		// intent: every model effect and every request-bound hook requires the
-		// published running request with the same request identity and actual
-		// purpose, and identical frozen canonical references when the intent
-		// carries them. An empty-history summary still publishes its
-		// purpose-bound slot with no canonical boundary. A missing or
-		// mismatched slot is corruption before repair.
-		if v.ActiveEffect.Kind == EffectModel ||
-			v.ActiveEffect.Kind == EffectHook && v.ActiveEffect.RequestID != "" {
+		// intent: every model effect requires the published running request
+		// with the same request identity and actual purpose, and identical
+		// frozen canonical references when the intent carries them. An
+		// empty-history summary still publishes its purpose-bound slot with no
+		// canonical boundary. A missing or mismatched slot is corruption
+		// before repair.
+		if v.ActiveEffect.Kind == EffectModel {
 			if v.Request == nil {
 				return errors.New("request-bound active effect requires the published running request state")
 			}
@@ -4187,18 +3753,11 @@ func decodeHookIdentities(obj map[string]json.RawMessage, key string) ([]HookIde
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d]: %w", key, i, err)
 		}
-		if err := rejectUnknownMembers(itemObj, "extension_id", "hook_id"); err != nil {
-			return nil, fmt.Errorf("%s[%d]: %w", key, i, err)
-		}
-		extensionID, err := stringMember(itemObj, "extension_id", true)
+		identity, err := decodeHookIdentityObject(itemObj)
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d]: %w", key, i, err)
 		}
-		hookID, err := stringMember(itemObj, "hook_id", true)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d]: %w", key, i, err)
-		}
-		list = append(list, HookIdentity{ExtensionID: extensionID, HookID: hookID})
+		list = append(list, identity)
 	}
 	if err := validateHookIdentities(list); err != nil {
 		return nil, err
@@ -4342,16 +3901,6 @@ func validateFrozenInputEvidence(v RequestEvidence, requireBoundary bool) error 
 		return errors.New("frozen input evidence carries only canonical boundary and checkpoint references")
 	}
 	return nil
-}
-
-func validateRequestHookEvidence(purpose InvocationPurpose, v RequestEvidence) error {
-	if v.SummaryInput != nil {
-		return errors.New("request hook evidence cannot carry summary model input")
-	}
-	if purpose == InvocationPurposeMaintenance && v.SummaryBase == nil {
-		return errors.New("maintenance request hook evidence requires its summary base")
-	}
-	return validateRequestEvidence(v)
 }
 
 func validateRequestEvidence(v RequestEvidence) error {

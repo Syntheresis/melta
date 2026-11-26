@@ -3,12 +3,10 @@ package agents
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/Syntheresis/melta/extension"
-	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 )
 
@@ -17,7 +15,8 @@ func (s authorInstance) arguments(_ context.Context, call extension.AuthorContex
 	if err != nil || !definition.Readonly || input.Name != "run_command" {
 		return extension.ArgumentsResult{}, nil
 	}
-	args, err := decodeArguments(input.Arguments)
+	var args map[string]any
+	err = (extension.ToolCall{Arguments: input.Arguments}).Decode(&args)
 	if err != nil {
 		return extension.ArgumentsResult{}, nil
 	}
@@ -38,14 +37,15 @@ func (s authorInstance) arguments(_ context.Context, call extension.AuthorContex
 	return extension.ArgumentsResult{Arguments: value}, err
 }
 
-func (s authorInstance) authorize(ctx context.Context, call extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
+func (s authorInstance) check(ctx context.Context, call extension.AuthorContext, input model.ToolCall) (*string, error) {
 	definition, err := s.definitions.Resolve(selected(call.State))
 	if err != nil {
 		return nil, nil
 	}
 	refuse := func(message string) (*string, error) { return &message, nil }
-	if definition.Readonly && input.ToolName == "run_command" {
-		args, err := decodeArguments(input.Arguments)
+	if definition.Readonly && input.Name == "run_command" {
+		var args map[string]any
+		err := (extension.ToolCall{Arguments: input.Arguments}).Decode(&args)
 		if err != nil {
 			return refuse(ReadOnlyRunCommandRejected)
 		}
@@ -54,46 +54,34 @@ func (s authorInstance) authorize(ctx context.Context, call extension.AuthorCont
 			return refuse(ReadOnlyRunCommandRejected)
 		}
 		if background, _ := args["background"].(bool); !background {
-			var settings struct {
-				CommandTimeout int `json:"command_timeout"`
-			}
-			if json.Unmarshal(input.ToolSettings, &settings) != nil || settings.CommandTimeout <= 0 {
-				return refuse("read-only command timeout unavailable")
-			}
-			timeout, ok := args["timeout"].(json.Number)
-			if !ok || timeout.String() != fmt.Sprint(settings.CommandTimeout) {
+			if _, ok := args["timeout"]; ok {
 				return refuse("read-only command timeout changed")
 			}
 		}
 	}
 	writeDir := strings.TrimSpace(definition.WriteDir)
-	for _, pair := range input.Permissions {
-		if pair.Permission != harness.PermissionFileWrite {
-			continue
-		}
+	if input.Name == "write_file" || input.Name == "edit_file" {
 		if writeDir == "" {
 			if definition.Readonly {
 				return refuse("read-only agent cannot write files")
 			}
-			continue
+			return nil, nil
 		}
-		args, _ := json.Marshal(struct {
-			Path string `json:"path"`
-		}{writeDir})
-		bound, err := call.Call(ctx, "melta.workspace", "bind", args)
+		var arguments map[string]any
+		err := (extension.ToolCall{Arguments: input.Arguments}).Decode(&arguments)
 		if err != nil {
 			return nil, err
 		}
-		if bound.Failure != nil {
-			return refuse(bound.Failure.Message)
-		}
-		var root struct {
-			CanonicalPath string `json:"canonical_path"`
-		}
-		if err := json.Unmarshal(bound.Value, &root); err != nil {
+		path, _ := arguments["path"].(string)
+		file, err := call.StatFile(ctx, path)
+		if err != nil {
 			return nil, err
 		}
-		relative, err := filepath.Rel(root.CanonicalPath, pair.Target)
+		root, err := call.StatFile(ctx, writeDir)
+		if err != nil {
+			return nil, err
+		}
+		relative, err := filepath.Rel(root.Path, file.Path)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
 			return refuse("write target is outside the agent write root")
 		}

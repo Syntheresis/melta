@@ -361,55 +361,32 @@ func seedLifecycleChild(t *testing.T, store harness.Storage, parentID, childID, 
 
 // --- the native background fixture ---
 
-// lifecycleTools is the background suite's registered tool pair: pure object
-// normalization and one per-test-configured Prepare dispatcher, so the real
-// model's tool calls exercise real prepared outcomes.
+// lifecycleTools dispatches the background suite's configured tool function.
 type lifecycleTools struct {
-	mu      sync.Mutex
-	prepare func(ctx context.Context, call model.ToolCall) extension.ToolPlan
-	execute func(ctx context.Context, plan extension.ToolPlan) harness.ToolOutcome
+	mu  sync.Mutex
+	run extension.ToolFunc
 }
 
-func (t *lifecycleTools) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-
-func (t *lifecycleTools) Prepare(ctx context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+func (t *lifecycleTools) call(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	t.mu.Lock()
-	prepare := t.prepare
+	run := t.run
 	t.mu.Unlock()
-	if prepare != nil {
-		return prepare(ctx, call)
+	if run != nil {
+		return run(ctx, call)
 	}
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: "command.run", Target: "test"}}, Immediate: &harness.ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ok"}}}
+	return extension.ToolResult{Content: "ok"}, nil
 }
 
-func (t *lifecycleTools) Execute(ctx context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	t.mu.Lock()
-	execute := t.execute
-	t.mu.Unlock()
-	if execute != nil {
-		return execute(ctx, plan)
-	}
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "ok"}}
-}
-
-func (t *lifecycleTools) setExecute(execute func(ctx context.Context, plan extension.ToolPlan) harness.ToolOutcome) {
+func (t *lifecycleTools) setRun(run extension.ToolFunc) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.execute = execute
-}
-
-func (t *lifecycleTools) setPrepare(prepare func(ctx context.Context, call model.ToolCall) extension.ToolPlan) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.prepare = prepare
+	t.run = run
 }
 
 func lifecycleToolsPlugin(tools *lifecycleTools) extension.Extension {
 	return testNative("bgtools", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		for _, name := range []string{"bg_read", "bg_grep"} {
-			if _, err := api.RegisterTool(testDescribeTool(name), tools, nil); err != nil {
+			if _, err := api.RegisterTool(testDescribeTool(name), tools.call, nil); err != nil {
 				return nil, err
 			}
 		}

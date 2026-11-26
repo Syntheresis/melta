@@ -41,7 +41,7 @@ const (
 // recordContent builds one private discovery document pointing at the
 // fixture endpoint.
 func recordContent(endpoint string) string {
-	return fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"24","credential":%q}`,
+	return fmt.Sprintf(`{"endpoint":%q,"instance_id":%q,"protocol_version":"25","credential":%q}`,
 		endpoint, testInstance, testCredential)
 }
 
@@ -70,7 +70,7 @@ func newFixture(t *testing.T, health, events http.HandlerFunc, extra ...map[stri
 func jsonHealth() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"instance_id":%q,"protocol_version":"24"}`, testInstance)
+		fmt.Fprintf(w, `{"instance_id":%q,"protocol_version":"25"}`, testInstance)
 	}
 }
 
@@ -386,10 +386,8 @@ func TestDesktopHostNextEventPullOwnership(t *testing.T) {
 	t.Run("an observed loss retires the generation and its buffered progress", func(t *testing.T) {
 		events := make(chan protocol.Event, 1)
 		errs := make(chan error, 1)
-		var scope protocol.Scope
-		testassert.NoError(t, scope.FromRuntimeScope(protocol.RuntimeScope{Kind: protocol.RuntimeScopeKindRuntime}))
 		var event protocol.Event
-		testassert.NoError(t, event.FromScopeEvent(protocol.ScopeEvent{Kind: protocol.ScopeOpened, Scope: scope}))
+		testassert.NoError(t, event.FromScopeEvent(protocol.ScopeEvent{Kind: protocol.ScopeOpened, Scope: protocol.InvocationScope{Kind: protocol.Invocation, SessionId: "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f", OperationId: "op-1", InvocationId: "inv-1", Purpose: protocol.Conversation}}))
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		host := &Host{generation: "1", events: events, errs: errs, connCtx: ctx, connCancel: cancel}
@@ -420,10 +418,8 @@ func TestDesktopHostNextEventPullOwnership(t *testing.T) {
 func TestDesktopHostProgressPrecedesUnobservedTerminal(t *testing.T) {
 	events := make(chan protocol.Event, 1)
 	errs := make(chan error, 1)
-	var scope protocol.Scope
-	testassert.NoError(t, scope.FromRuntimeScope(protocol.RuntimeScope{Kind: protocol.RuntimeScopeKindRuntime}))
 	var event protocol.Event
-	testassert.NoError(t, event.FromScopeEvent(protocol.ScopeEvent{Kind: protocol.ScopeOpened, Scope: scope}))
+	testassert.NoError(t, event.FromScopeEvent(protocol.ScopeEvent{Kind: protocol.ScopeOpened, Scope: protocol.InvocationScope{Kind: protocol.Invocation, SessionId: "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f", OperationId: "op-1", InvocationId: "inv-1", Purpose: protocol.Conversation}}))
 	want, err := json.Marshal(event)
 	testassert.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1096,7 +1092,7 @@ func TestDesktopHostMountedRuntime(t *testing.T) {
 	testassert.Equal(t, response.Status, http.StatusOK)
 	var health protocol.Health
 	testassert.NoError(t, json.Unmarshal([]byte(response.Body), &health))
-	testassert.Require(t, health.InstanceId == info.InstanceID && health.ProtocolVersion == protocol.N24, "health = %+v, want the connected owner", health)
+	testassert.Require(t, health.InstanceId == info.InstanceID && health.ProtocolVersion == protocol.N25, "health = %+v, want the connected owner", health)
 
 	discovery, err := host.Call(info.Generation, "ListExtensions", `{}`)
 	testassert.NoError(t, err)

@@ -49,11 +49,11 @@ func snapshotTurnPrepared(script *scriptModel) harness.PreparedExecution {
 	return harness.PreparedExecution{
 		Capture: publicCapture(),
 		Open: func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-			return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+			return publicExecutionOver(script.effect, script.effect, func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+				return harness.ToolOutcome{
 					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call"},
 					Metadata: json.RawMessage(`{"n":[1,1.0],"s":"<>&"}`),
-				}}
+				}
 			}), nil
 		},
 	}
@@ -61,7 +61,7 @@ func snapshotTurnPrepared(script *scriptModel) harness.PreparedExecution {
 
 // TestPublicReadSessionHistoryOwnedCapture proves the narrow history
 // producer over both stores: exact envelope identity/kind/order of every
-// committed entry with hook evidence excluded, the revision pair of the same
+// committed entry, the revision pair of the same
 // capture, and nested returned-value ownership against a serialized
 // expectation captured before mutation.
 func TestPublicReadSessionHistoryOwnedCapture(t *testing.T) {
@@ -84,11 +84,10 @@ func TestPublicReadSessionHistoryOwnedCapture(t *testing.T) {
 		view, err := h.ReadHistoryView(ctx, fixture.SessionID)
 		testassert.NoError(t, err)
 		facts := view.HistoryFacts(historyIDsOf(view.HistoryHeaders()))
-		testassert.Require(t, fixture.HookEntryID != "", "%v", "the owning fixture lost its hook evidence entry")
 		testassert.Equal(t, len(facts), len(fixture.Identities))
 		for i, want := range fixture.Identities {
 			got := facts[i]
-			testassert.Require(t, got.EntryID == want.EntryID && got.OperationID == want.OperationID && got.Kind == want.Kind && got.EntryID != fixture.HookEntryID, "fact %d = (%s/%s/%s), want the fixture envelope (%s/%s/%s); fact %d leaked the hook evidence entry", i, got.EntryID, got.OperationID, got.Kind, want.EntryID, want.OperationID, want.Kind, i)
+			testassert.Require(t, got.EntryID == want.EntryID && got.OperationID == want.OperationID && got.Kind == want.Kind, "fact %d = (%s/%s/%s), want the fixture envelope (%s/%s/%s)", i, got.EntryID, got.OperationID, got.Kind, want.EntryID, want.OperationID, want.Kind)
 		}
 		testassert.Require(t, view.Revision.LocalRevision == 0 && view.Revision.DurableRevision > 0, "history revision pair = %+v, want the durable register revision with a fresh coordinator's zero local counter", view.Revision)
 
@@ -1335,22 +1334,20 @@ func TestPublicSnapshotOwnershipMatrix(t *testing.T) {
 			compactInput := 0.5
 			capture.Pricing = &harness.ModelPricing{Input: &conversationInput, Output: &conversationOutput}
 			capture.Compact.Pricing = &harness.ModelPricing{Input: &compactInput}
-			immediateTool := func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				return harness.PreparedTool{Permissions: publicPermission, Immediate: &harness.ToolOutcome{
+			immediateTool := func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+				return harness.ToolOutcome{
 					Result:   model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran call"},
 					Metadata: json.RawMessage(`{"n":[1,1.0]}`),
-				}}
+				}
 			}
-			parkingTool := func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-				return harness.PreparedTool{Permissions: publicPermission, Execute: func(execCtx context.Context) harness.ToolOutcome {
-					close(parkEntered)
-					select {
-					case <-parkRelease:
-						return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran parked"}}
-					case <-execCtx.Done():
-						return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: "canceled"}}
-					}
-				}}
+			parkingTool := func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+				close(parkEntered)
+				select {
+				case <-parkRelease:
+					return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran parked"}}
+				case <-ctx.Done():
+					return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultInterrupted, Content: "canceled"}}
+				}
 			}
 			tool := immediateTool
 			if call == 1 { // the second admission runs the parking tool plan

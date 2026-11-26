@@ -47,28 +47,25 @@ type extraJSON struct {
 	Value JSONBytes `json:"value"`
 }
 
-func extraFrom(v model.Extra) []extraJSON {
-	if len(v) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(v))
-	for key := range v {
+func encodeExtra(extra model.Extra) []extraJSON {
+	keys := make([]string, 0, len(extra))
+	for key := range extra {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	out := make([]extraJSON, 0, len(v))
+	var out []extraJSON
 	for _, key := range keys {
-		out = append(out, extraJSON{Key: JSONBytes(key), Value: JSONBytes(v[key])})
+		out = append(out, extraJSON{Key: JSONBytes(key), Value: JSONBytes(extra[key])})
 	}
 	return out
 }
 
-func extraValue(v []extraJSON) model.Extra {
-	if len(v) == 0 {
+func decodeExtra(extra []extraJSON) model.Extra {
+	if len(extra) == 0 {
 		return nil
 	}
-	out := make(model.Extra, len(v))
-	for _, entry := range v {
+	out := make(model.Extra, len(extra))
+	for _, entry := range extra {
 		out[string(entry.Key)] = append(json.RawMessage(nil), entry.Value...)
 	}
 	return out
@@ -82,30 +79,18 @@ type contentPartJSON struct {
 	Extra          []extraJSON `json:"extra,omitempty"`
 }
 
-func contentFrom(v []model.ContentPart) []contentPartJSON {
-	out := make([]contentPartJSON, len(v))
-	for i, part := range v {
-		out[i] = contentPartJSON{
-			Kind:           string(part.Kind),
-			Text:           part.Text,
-			URL:            part.URL,
-			OpaqueWireType: part.OpaqueWireType,
-			Extra:          extraFrom(part.Extra),
-		}
+func contentFrom(parts []model.ContentPart) []contentPartJSON {
+	out := make([]contentPartJSON, len(parts))
+	for i, part := range parts {
+		out[i] = contentPartJSON{Kind: string(part.Kind), Text: part.Text, URL: part.URL, OpaqueWireType: part.OpaqueWireType, Extra: encodeExtra(part.Extra)}
 	}
 	return out
 }
 
-func contentValue(v []contentPartJSON) []model.ContentPart {
-	out := make([]model.ContentPart, len(v))
-	for i, part := range v {
-		out[i] = model.ContentPart{
-			Kind:           model.PartKind(part.Kind),
-			Text:           part.Text,
-			URL:            part.URL,
-			OpaqueWireType: part.OpaqueWireType,
-			Extra:          extraValue(part.Extra),
-		}
+func contentValue(parts []contentPartJSON) []model.ContentPart {
+	out := make([]model.ContentPart, len(parts))
+	for i, part := range parts {
+		out[i] = model.ContentPart{Kind: model.PartKind(part.Kind), Text: part.Text, URL: part.URL, OpaqueWireType: part.OpaqueWireType, Extra: decodeExtra(part.Extra)}
 	}
 	return out
 }
@@ -118,11 +103,11 @@ type toolCallJSON struct {
 }
 
 func toolCallFrom(v model.ToolCall) toolCallJSON {
-	return toolCallJSON{ID: v.ID, Name: v.Name, Arguments: JSONBytes(v.Arguments), Extra: extraFrom(v.Extra)}
+	return toolCallJSON{ID: v.ID, Name: v.Name, Arguments: JSONBytes(v.Arguments), Extra: encodeExtra(v.Extra)}
 }
 
 func toolCallValue(v toolCallJSON) model.ToolCall {
-	return model.ToolCall{ID: v.ID, Name: v.Name, Arguments: append(json.RawMessage(nil), v.Arguments...), Extra: extraValue(v.Extra)}
+	return model.ToolCall{ID: v.ID, Name: v.Name, Arguments: append(json.RawMessage(nil), v.Arguments...), Extra: decodeExtra(v.Extra)}
 }
 
 type messageJSON struct {
@@ -143,7 +128,7 @@ func messageFrom(v model.Message) (messageJSON, error) {
 		Refusal:    v.Refusal,
 		ToolCallID: v.ToolCallID,
 		Name:       v.Name,
-		Extra:      extraFrom(v.Extra),
+		Extra:      encodeExtra(v.Extra),
 	}
 	if len(v.ToolCalls) != 0 {
 		out.ToolCalls = make([]toolCallJSON, len(v.ToolCalls))
@@ -166,7 +151,7 @@ func messageValue(v messageJSON) model.Message {
 		Refusal:    v.Refusal,
 		ToolCallID: v.ToolCallID,
 		Name:       v.Name,
-		Extra:      extraValue(v.Extra),
+		Extra:      decodeExtra(v.Extra),
 	}
 	if len(v.ToolCalls) != 0 {
 		out.ToolCalls = make([]model.ToolCall, len(v.ToolCalls))
@@ -266,84 +251,6 @@ func toolOutcomeValue(v toolOutcomeJSON) harness.ToolOutcome {
 	}
 }
 
-type permissionJSON struct {
-	Permission string `json:"permission"`
-	Target     string `json:"target"`
-}
-
-type toolPlanJSON struct {
-	Permissions        []permissionJSON `json:"permissions"`
-	CanonicalWorkspace string           `json:"canonical_workspace,omitempty"`
-	Immediate          *toolOutcomeJSON `json:"immediate,omitempty"`
-	Data               JSONBytes        `json:"data,omitempty"`
-}
-
-func toolPlanFrom(v extension.ToolPlan) toolPlanJSON {
-	out := toolPlanJSON{
-		Permissions:        make([]permissionJSON, len(v.Permissions)),
-		CanonicalWorkspace: v.CanonicalWorkspace,
-		Data:               JSONBytes(v.Data),
-	}
-	for i, permission := range v.Permissions {
-		out.Permissions[i] = permissionJSON{Permission: permission.Permission, Target: permission.Target}
-	}
-	if v.Immediate != nil {
-		immediate := toolOutcomeFrom(*v.Immediate)
-		out.Immediate = &immediate
-	}
-	return out
-}
-
-func toolPlanValue(v toolPlanJSON) extension.ToolPlan {
-	out := extension.ToolPlan{
-		Permissions:        make([]harness.PermissionRequest, len(v.Permissions)),
-		CanonicalWorkspace: v.CanonicalWorkspace,
-		Data:               append([]byte(nil), v.Data...),
-	}
-	for i, permission := range v.Permissions {
-		out.Permissions[i] = harness.PermissionRequest{Permission: permission.Permission, Target: permission.Target}
-	}
-	if v.Immediate != nil {
-		immediate := toolOutcomeValue(*v.Immediate)
-		out.Immediate = &immediate
-	}
-	return out
-}
-
-type argumentsJSON struct {
-	Arguments JSONBytes `json:"arguments"`
-}
-
-// EncodeArguments encodes the shared {arguments} result of normalize and the
-// before-tool hook.
-func EncodeArguments(v json.RawMessage) (json.RawMessage, error) {
-	return marshalValue(argumentsJSON{Arguments: JSONBytes(v)})
-}
-
-// DecodeArguments decodes the shared {arguments} result of normalize and the
-// before-tool hook.
-func DecodeArguments(raw json.RawMessage) (json.RawMessage, error) {
-	var wire argumentsJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return nil, err
-	}
-	return append(json.RawMessage(nil), wire.Arguments...), nil
-}
-
-// EncodePrepareResult encodes one prepared tool plan.
-func EncodePrepareResult(v extension.ToolPlan) (json.RawMessage, error) {
-	return marshalValue(toolPlanFrom(v))
-}
-
-// DecodePrepareResult decodes one prepared tool plan.
-func DecodePrepareResult(raw json.RawMessage) (extension.ToolPlan, error) {
-	var wire toolPlanJSON
-	if err := unmarshalValue(raw, &wire); err != nil {
-		return extension.ToolPlan{}, err
-	}
-	return toolPlanValue(wire), nil
-}
-
 // EncodeExecuteResult encodes one tool execution outcome.
 func EncodeExecuteResult(v harness.ToolOutcome) (json.RawMessage, error) {
 	return marshalValue(toolOutcomeFrom(v))
@@ -355,7 +262,14 @@ func DecodeExecuteResult(raw json.RawMessage) (harness.ToolOutcome, error) {
 	if err := unmarshalValue(raw, &wire); err != nil {
 		return harness.ToolOutcome{}, err
 	}
-	return toolOutcomeValue(wire), nil
+	out := toolOutcomeValue(wire)
+	if out.Result.Status != model.ResultSuccess && out.Result.Status != model.ResultError && out.Result.Status != model.ResultInterrupted {
+		return harness.ToolOutcome{}, fmt.Errorf("worker: invalid tool result status %q", out.Result.Status)
+	}
+	if out.Evidence != "" && out.Evidence != harness.ExecutionObserved && out.Evidence != harness.ExecutionUnknown {
+		return harness.ToolOutcome{}, fmt.Errorf("worker: invalid tool result evidence %q", out.Evidence)
+	}
+	return out, nil
 }
 
 type requestHookInputJSON struct {
@@ -412,7 +326,7 @@ func EncodeRequestHookParams(v harness.RequestHookInput) (json.RawMessage, error
 		Catalog:           toolDefinitionsFrom(v.Catalog),
 		Tools:             toolDefinitionsFrom(v.Tools),
 		MessagePositions:  positions,
-		Parameters:        extraFrom(v.Parameters),
+		Parameters:        encodeExtra(v.Parameters),
 	})
 }
 
@@ -445,7 +359,7 @@ func DecodeRequestHookParams(raw json.RawMessage) (harness.RequestHookInput, err
 		Catalog:           toolDefinitionsValue(wire.Catalog),
 		Tools:             toolDefinitionsValue(wire.Tools),
 		MessagePositions:  positions,
-		Parameters:        extraValue(wire.Parameters),
+		Parameters:        decodeExtra(wire.Parameters),
 	}, nil
 }
 
@@ -466,7 +380,7 @@ type requestMessageEditJSON struct {
 // EncodeRequestHookResult encodes one request consequence. An absent tool set
 // remains absent; a present empty set stays present and empty.
 func EncodeRequestHookResult(v harness.RequestConsequence) (json.RawMessage, error) {
-	out := requestConsequenceJSON{Prompt: v.Prompt, Parameters: extraFrom(v.Parameters)}
+	out := requestConsequenceJSON{Prompt: v.Prompt, Parameters: encodeExtra(v.Parameters)}
 	if v.Tools != nil {
 		tools := toolDefinitionsFrom(v.Tools)
 		out.Tools = &tools
@@ -501,7 +415,7 @@ func DecodeRequestHookResult(raw json.RawMessage) (harness.RequestConsequence, e
 	if err := unmarshalValue(raw, &wire); err != nil {
 		return harness.RequestConsequence{}, err
 	}
-	out := harness.RequestConsequence{Prompt: wire.Prompt, Parameters: extraValue(wire.Parameters)}
+	out := harness.RequestConsequence{Prompt: wire.Prompt, Parameters: decodeExtra(wire.Parameters)}
 	if wire.Tools != nil {
 		out.Tools = toolDefinitionsValue(*wire.Tools)
 	}

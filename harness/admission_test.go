@@ -196,7 +196,7 @@ func validExecution() Execution {
 			Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 				select {} // the fixture owns the admitted Operation's state assertions
 			},
-			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 		}, nil
 	}}
 }
@@ -217,7 +217,7 @@ func modelPrepared(modelFn func(context.Context, model.Request, model.Extra) (mo
 	exec := validExecution()
 	if modelFn != nil {
 		exec = Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-			return invocationExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }), nil
+			return invocationExecution(modelFn, func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }), nil
 		}}
 	}
 	return preparedExecuting(exec)
@@ -1543,7 +1543,7 @@ func foreignCorruptRevision(tx Transaction, sessionID string) error {
 	if _, err := tx.ReplaceRegister(key, reg.Revision, payload); err != nil {
 		return err
 	}
-	_, err = tx.InsertEntry(EntryDraft{SessionID: sessionID, ID: hexID(77), Kind: EntryHookResult, Payload: json.RawMessage(`{}`)})
+	_, err = tx.InsertEntry(EntryDraft{SessionID: sessionID, ID: hexID(77), Kind: EntryKind("unknown"), Payload: json.RawMessage(`{}`)})
 	return err
 }
 

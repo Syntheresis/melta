@@ -32,9 +32,8 @@ var ErrOwned = errors.New("melta: data directory owned by another Melta")
 // sources, and the complete plugin set — builtin.Plugins() for the shipped
 // registration, an ordinary custom slice for a custom build. Optional
 // locations are independently selected; an omitted location performs no
-// lookup there. Empty Defaults supplies no Session defaults, a nil Strategy
-// selects the included one, and nil NewEvaluator selects the included
-// permission evaluator.
+// lookup there. Empty Defaults supplies no Session defaults and a nil
+// Strategy selects the included one.
 type Options struct {
 	DataDir       string
 	Configuration ConfigurationSource
@@ -61,8 +60,6 @@ type Options struct {
 	// supplied factory owns exclusivity of its actual storage namespace; the
 	// acquired closer releases that namespace after durable access closes.
 	OpenStore func(context.Context, string) (harness.Storage, func() error, error)
-
-	NewEvaluator func(PolicyInputs) (harness.PermissionEvaluator, error)
 
 	// BeforeRelease is the optional host withdrawal callback: it runs once
 	// after admitted work and scopes settle and before storage or the
@@ -152,7 +149,6 @@ func Open(ctx context.Context, opts Options) (*Melta, error) {
 		Extensions:    cloneAuthorExtensions(opts.Extensions),
 		Access:        access,
 		OpenStore:     opts.OpenStore,
-		NewEvaluator:  opts.NewEvaluator,
 		BeforeRelease: opts.BeforeRelease,
 	})
 }
@@ -175,7 +171,6 @@ type options struct {
 	Access        map[string]ExtensionAccess
 
 	OpenStore     func(context.Context, string) (harness.Storage, func() error, error)
-	NewEvaluator  func(PolicyInputs) (harness.PermissionEvaluator, error)
 	BeforeRelease func() error
 	sweepTicks    <-chan time.Time
 }
@@ -318,7 +313,6 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	}
 	configService.authors = append(configService.authors, installed...)
 	configService.authorFailures = packages.authorFailures
-	configService.unusablePackages = packages.unusable
 	configService.instance = instance
 	configService.attachWarnings(warnings)
 	// The private per-Session artifact interval registry initializes before
@@ -372,11 +366,20 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	jobsService := newJobs(dataDir)
 	acquired = append(acquired, jobsService.Close)
 	toolOutput := newLiveToolOutput(obs)
-	c.standardValues = newStandardTools(dataDir, jobsService, toolOutput)
 	background := &backgroundBridge{}
 	c.hosts.background = background
 	resources := initial.resources
-	acquired = append(acquired, resources.release)
+	// The resource set's release only drops its held credential names, so the
+	// unwind's error-returning closer shape carries no failure.
+	acquired = append(acquired, func() error { resources.release(); return nil })
+	tools := newStandardTools(dataDir, jobsService, toolOutput)
+	for _, declaration := range standardToolDeclarations() {
+		validate, err := compileToolValidator(declaration.definition)
+		if err != nil {
+			return unwind(err)
+		}
+		c.standardValues[declaration.id] = standardTool{tool: tools[declaration.id], validate: validate}
+	}
 	if err := configService.canceled(work); err != nil {
 		return unwind(err)
 	}
@@ -396,7 +399,7 @@ func open(ctx context.Context, options options) (*Melta, error) {
 	h, err := harness.New(work, harness.Dependencies{
 		Storage: store,
 		Jobs:    jobsService,
-		Prepare: newPreparation(configService, options.Locations, options.Identity, background, adapter, artifacts, configService.subprocessEnvironment, options.NewEvaluator).bind(),
+		Prepare: newPreparation(configService, options.Locations, options.Identity, background, adapter, artifacts, configService.subprocessEnvironment).bind(),
 		Observe: adapter.observe,
 	})
 	if err != nil {
@@ -650,7 +653,7 @@ func (r *Melta) joinShutdown() error {
 		errs = append(errs, err)
 	}
 	if current := r.config.current(); current != nil && current.resources != nil {
-		_ = current.resources.release()
+		current.resources.release()
 	}
 	if current := r.config.current(); current != nil && current.native != nil {
 		errs = append(errs, current.native.release())

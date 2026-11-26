@@ -86,7 +86,7 @@ func mountedReporterPlugin() extension.Extension {
 			if _, err := api.Call(ctx, "melta.warnings", "report", json.RawMessage(`{"kind":"mounted_notice","message":"mounted plugin warning"}`)); err != nil {
 				return nil, err
 			}
-			_, err := api.RegisterOperation(extension.Operation{Target: extension.ExposedTargetHarness, Method: extension.PureMethod("call", `{}`, `{}`), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+			_, err := api.RegisterOperation(extension.Operation{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("call", `{}`, `{}`, "", ""), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			}}, nil)
 			return nil, err

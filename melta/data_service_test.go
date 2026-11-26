@@ -45,7 +45,7 @@ func newDataProbe(id string, cleanup func(context.Context, extension.AuthorConte
 	manifest.Services = []string{extension.ContractData}
 	probe.native = extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: probe.capability, Methods: []extension.RegisteredMethod{{
-			Method: extension.PureMethod("ping", `{"type":"object","additionalProperties":false}`, `{"type":"object","additionalProperties":false}`),
+			Method: extension.ServiceMethod("ping", `{"type":"object","additionalProperties":false}`, `{"type":"object","additionalProperties":false}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`{}`)}, nil
 			},
@@ -96,12 +96,13 @@ func dataView(t *testing.T, r *Melta, capabilityID, sessionID string, _ nativeGr
 	r.config.nativeMu.Unlock()
 	testassert.Require(t, candidate != nil, "no published candidate")
 	stage := candidate.snapshotForTest()
-	testassert.Require(t, stage != nil && stage.services[capabilityID] != nil, "service %q is not registered", capabilityID)
-	entry := stage.services[capabilityID]
+	testassert.Require(t, stage != nil, "no published stage")
+	entry := stagedService(stage, capabilityID)
+	testassert.Require(t, entry != nil, "service %q is not registered", capabilityID)
 	ctx, cancel := context.WithCancel(context.Background())
 	scope := &nativeCallScope{
 		nativeCallLifetime: nativeCallLifetime{ctx: ctx, cancel: cancel},
-		candidate:          candidate, activation: entry.activation, host: r.config.composition,
+		candidate:          candidate, activation: entry.activation, kind: callKindHook, host: r.config.composition,
 		session: harness.SessionIdentity{SessionID: sessionID},
 		lease:   &artifactCallLease{intervals: r.artifacts, key: sessionArtifactDir(r.dataDir, sessionID)},
 	}
@@ -164,7 +165,7 @@ func TestDataServiceActivationCallNamespaces(t *testing.T) {
 	}
 	testassert.NoError(t, json.Unmarshal(cacheResult.Value, &cache))
 	testassert.Require(t, cache.Directory == filepath.Join(e.dataDir, "extensions", extensionDataHash("data-activation"), "cache"), "cache directory = %q, want the extension cache path", cache.Directory)
-	testassert.Require(t, errors.Is(sessionErr, ErrClosed), "session_namespace = %v, want closed without a call-owned Session", sessionErr)
+	testassert.Require(t, errors.Is(sessionErr, ErrDenied), "session_namespace = %v, want denied without a call-owned Session", sessionErr)
 }
 
 // TestDataServiceAssignsExtensionOwnedDirectories proves the declared service
@@ -266,13 +267,13 @@ func TestDataServiceAssignsExtensionOwnedDirectories(t *testing.T) {
 		foreignView.end()
 		mustNotExist(t, filepath.Join(e.dataDir, "code", routingID, "extensions", extensionDataHash("probe_a")), "a refused namespace argument created a directory")
 		pureView, pureCalls := dataView(t, r, a.capability, routingID, nativeGrant{})
-		pureView.nativeCallScope.pure = true
+		pureView.nativeCallScope.kind = callKindAdmission
 		{
 			_, err := callData(t, pureCalls, "session_namespace")
-			testassert.Require(t, errors.Is(err, ErrDenied), "pure namespace call = %v, want the purity refusal", err)
+			testassert.Require(t, errors.Is(err, ErrDenied), "operation-less namespace call = %v, want the kind refusal", err)
 		}
 		pureView.end()
-		mustNotExist(t, filepath.Join(e.dataDir, "code", routingID, "extensions", extensionDataHash("probe_a")), "a pure namespace call created a directory")
+		mustNotExist(t, filepath.Join(e.dataDir, "code", routingID, "extensions", extensionDataHash("probe_a")), "a refused namespace call created a directory")
 	})
 }
 
@@ -857,42 +858,31 @@ type operationDataTool struct {
 	sentinel string
 }
 
-func (t *operationDataTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-
-func (t *operationDataTool) Prepare(_ context.Context, tool extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{
-		Permissions:        []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: filepath.Join(tool.Session.Workspace, "probe.txt")}},
-		CanonicalWorkspace: tool.Session.Workspace,
-	}
-}
-
-func (t *operationDataTool) Execute(ctx context.Context, tool extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (t *operationDataTool) run(ctx context.Context, tool extension.ToolCall) (extension.ToolResult, error) {
 	claim, err := tool.Call(ctx, extension.ContractData, "claim_external_data", json.RawMessage(`{}`))
 	if err != nil || string(claim.Value) != "null" {
 		t.err <- fmt.Errorf("claim = (%+v, %v)", claim, err)
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "claim failed"}}
+		return extension.ToolResult{}, errors.New("claim failed")
 	}
 	result, err := tool.Call(ctx, extension.ContractData, "session_namespace", json.RawMessage(`{}`))
 	if err != nil {
 		t.err <- err
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "namespace failed"}}
+		return extension.ToolResult{}, errors.New("namespace failed")
 	}
 	var decoded struct {
 		Directory string `json:"directory"`
 	}
 	if err := json.Unmarshal(result.Value, &decoded); err != nil {
 		t.err <- err
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "namespace invalid"}}
+		return extension.ToolResult{}, errors.New("namespace invalid")
 	}
 	if err := os.WriteFile(t.sentinel, []byte("external"), 0o600); err != nil {
 		t.err <- err
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "external data failed"}}
+		return extension.ToolResult{}, errors.New("external data failed")
 	}
 	t.arrived <- decoded.Directory
 	<-t.release
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "wrote"}}
+	return extension.ToolResult{Content: "wrote"}, nil
 }
 
 // TestDataServiceOperationClaimAndCleanup proves an actual admitted Operation
@@ -922,7 +912,7 @@ func TestDataServiceOperationClaimAndCleanup(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				_, err = api.RegisterTool(model.ToolDefinition{Name: "probe_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, tool, nil)
+				_, err = api.RegisterTool(model.ToolDefinition{Name: "probe_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, tool.run, nil)
 				return nil, err
 			}}
 			writeServiceFile(t, e.configPath, strings.TrimSuffix(dataConfig(e.server.URL, "probe_tool"), "}")+`,"sessions":{"auto_archive":true,"archive_after_days":1,"delete_after_archive_days":1}}`)
@@ -1027,7 +1017,7 @@ func nestedProviderNative() extension.Extension {
 	manifest.Services = []string{extension.ContractData}
 	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "nested.provider", Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceIOMethod("namespace", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["directory"],"properties":{"directory":{"type":"string"}},"additionalProperties":false}`),
+			Method: extension.ServiceMethod("namespace", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["directory"],"properties":{"directory":{"type":"string"}},"additionalProperties":false}`, "", ""),
 			Handler: func(ctx context.Context, calls extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return calls.Call(ctx, extension.ContractData, "session_namespace", json.RawMessage(`{}`))
 			},
@@ -1039,7 +1029,7 @@ func nestedProviderNative() extension.Extension {
 func nestedCallerNative() extension.Extension {
 	return extension.Extension{Manifest: registrarManifest("nested_caller"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "nested.caller", Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceIOMethod("run", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["directory"],"properties":{"directory":{"type":"string"}},"additionalProperties":false}`),
+			Method: extension.ServiceMethod("run", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["directory"],"properties":{"directory":{"type":"string"}},"additionalProperties":false}`, "", ""),
 			Handler: func(ctx context.Context, calls extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return calls.Call(ctx, "nested.provider", "namespace", json.RawMessage(`{}`))
 			},
@@ -1347,7 +1337,7 @@ func (p *hookClaimProbe) native(cleanup func() error) extension.Extension {
 		}
 		switch p.boundary {
 		case "arguments":
-			_, err = api.AttachArguments(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
+			_, err = api.AttachArguments(func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
 				if _, err := claimAndHold(ctx, call); err != nil {
 					p.err <- err
 					return extension.ArgumentsResult{}, err
@@ -1355,7 +1345,7 @@ func (p *hookClaimProbe) native(cleanup func() error) extension.Extension {
 				return extension.ArgumentsResult{Arguments: toolCall.Arguments}, nil
 			}, nil)
 		case "request":
-			_, err = api.AttachRequest(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			_, err = api.AttachRequest(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				if _, err := claimAndHold(ctx, call); err != nil {
 					p.err <- err
 					return harness.RequestConsequence{}, err
@@ -1367,16 +1357,8 @@ func (p *hookClaimProbe) native(cleanup func() error) extension.Extension {
 	}}
 }
 
-type immediateErrorTool struct{}
-
-func (immediateErrorTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-func (immediateErrorTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "hooked"}}}
-}
-func (immediateErrorTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "hooked"}}
+func immediateErrorTool(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+	return extension.ToolResult{}, errors.New("hooked")
 }
 
 // TestDataServiceRootHookClaimAcrossLifetimes proves registered effectful
@@ -1397,7 +1379,7 @@ func TestDataServiceRootHookClaimAcrossLifetimes(t *testing.T) {
 				writeAgentDefinitions(t, e.configPath, `{"hook_agent":{"model":"prov/m","system_prompt":"full","tools":["probe_tool"]}}`)
 				e.fixtureStore(store)
 				tool := extension.Extension{Manifest: registrarManifest("probe_tool"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-					_, err := api.RegisterTool(model.ToolDefinition{Name: "probe_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, immediateErrorTool{}, nil)
+					_, err := api.RegisterTool(model.ToolDefinition{Name: "probe_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, immediateErrorTool, nil)
 					return nil, err
 				}}
 				native := probe.native(func() error {
@@ -1493,22 +1475,13 @@ type nestedClaimCaller struct {
 	release chan struct{}
 }
 
-func (t *nestedClaimCaller) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return runtimeNormalize(call)
-}
-func (t *nestedClaimCaller) Prepare(_ context.Context, tool extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{
-		Permissions:        []harness.PermissionRequest{{Permission: harness.PermissionFileRead, Target: filepath.Join(tool.Session.Workspace, "nested.txt")}},
-		CanonicalWorkspace: tool.Session.Workspace,
-	}
-}
-func (t *nestedClaimCaller) Execute(ctx context.Context, tool extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func (t *nestedClaimCaller) run(ctx context.Context, tool extension.ToolCall) (extension.ToolResult, error) {
 	result, err := tool.Call(ctx, "nested.provider", "run", json.RawMessage(`{}`))
 	if err != nil {
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultError, Content: "provider failed"}}
+		return extension.ToolResult{}, errors.New("provider failed")
 	}
 	<-t.release
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: string(result.Value)}}
+	return extension.ToolResult{Content: string(result.Value)}, nil
 }
 
 // TestDataServiceNestedClaimAcrossLifetime proves the execution lease survives
@@ -1526,7 +1499,7 @@ func TestDataServiceNestedClaimAcrossLifetime(t *testing.T) {
 		manifest.Services = []string{extension.ContractData}
 		provider := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			_, err := api.RegisterService(extension.Service{Name: "nested.provider", Methods: []extension.RegisteredMethod{{
-				Method: extension.ServiceIOMethod("run", `{"type":"object","additionalProperties":false}`, `{"type":"object","additionalProperties":false}`),
+				Method: extension.ServiceMethod("run", `{"type":"object","additionalProperties":false}`, `{"type":"object","additionalProperties":false}`, "", ""),
 				Handler: func(ctx context.Context, calls extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 					claimed, err := calls.Call(ctx, extension.ContractData, "claim_external_data", json.RawMessage(`{}`))
 					if err != nil || string(claimed.Value) != "null" {
@@ -1562,7 +1535,7 @@ func TestDataServiceNestedClaimAcrossLifetime(t *testing.T) {
 		releaseCaller := sync.OnceFunc(func() { close(callerTool.release) })
 		defer releaseCaller()
 		caller := extension.Extension{Manifest: registrarManifest("nested_caller"), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "nested_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, callerTool, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "nested_tool", Parameters: json.RawMessage(`{"type":"object"}`)}, callerTool.run, nil)
 			return nil, err
 		}}
 		writeServiceFile(t, e.configPath, dataConfig(e.server.URL, "nested_provider", "nested_caller"))
@@ -1691,7 +1664,7 @@ func TestDataServiceCleanupHasNoSessionOrWorkAuthority(t *testing.T) {
 	testassert.Require(t, len(result.CleanupFailures) == 0, "cleanup result = %+v, want success", result)
 	testassert.Require(t, cleanupCompleted.Load(), "cleanup callback did not complete")
 	testassert.Require(t, observedSession == "" && observedRequest == "", "cleanup identity = session %q request %q, want empty", observedSession, observedRequest)
-	testassert.Require(t, errors.Is(dataErr, extension.ErrClosed), "cleanup Session namespace error = %v, want the closed refusal", dataErr)
+	testassert.Require(t, errors.Is(dataErr, ErrDenied), "cleanup Session namespace error = %v, want the kind refusal", dataErr)
 	testassert.Require(t, errors.Is(launchErr, ErrDenied), "cleanup child-launch error = %v, want the denied/unauthorized refusal", launchErr)
 	{
 		err := r.withHarness(ctx, func(ctx context.Context, h *harness.Harness) error {
@@ -1746,7 +1719,7 @@ func (p *retainedCleanupProbe) native() extension.Extension {
 			p.openNew.Add(1)
 		}
 		_, err := api.RegisterService(extension.Service{Name: "probe." + p.id, Methods: []extension.RegisteredMethod{{
-			Method: extension.PureMethod("tag", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["tag"],"properties":{"tag":{"type":"string"}},"additionalProperties":false}`),
+			Method: extension.ServiceMethod("tag", `{"type":"object","additionalProperties":false}`, `{"type":"object","required":["tag"],"properties":{"tag":{"type":"string"}},"additionalProperties":false}`, "", ""),
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				value, err := json.Marshal(struct {
 					Tag string `json:"tag"`
@@ -1893,7 +1866,7 @@ func TestDataServiceCleanupBatchRetainsOriginalResourcesAcrossReload(t *testing.
 				current := r.config.nativeCurrent
 				r.config.nativeMu.Unlock()
 				stage := current.snapshotForTest()
-				testassert.Require(t, stage != nil && stage.services["probe.probe_b"] == nil, "disabled probe_b is still available in the reloaded set")
+				testassert.Require(t, stage != nil && stagedService(stage, "probe.probe_b") == nil, "disabled probe_b is still available in the reloaded set")
 				testassert.NoError(t, stage.release())
 				releaseFirst()
 				select {

@@ -157,7 +157,7 @@ func TestNativeOperationRequestIdentity(t *testing.T) {
 	service := extension.Extension{
 		Manifest: extension.Manifest{ID: "identity-provider", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			method := extension.ServiceMethod("echo", extension.ModeServiceIO, `{}`, `{}`, "", "")
+			method := extension.ServiceMethod("echo", `{}`, `{}`, "", "")
 			_, err := api.RegisterService(extension.Service{Name: "identity/echo", Methods: []extension.RegisteredMethod{{Method: method, Handler: func(_ context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				if call.RequestID != "native-request" || call.ExtensionID != "identity-provider" || !strings.Contains(string(call.Settings), `"provider"`) {
 					t.Errorf("nested identity = %q, %q, %s", call.RequestID, call.ExtensionID, call.Settings)
@@ -170,7 +170,7 @@ func TestNativeOperationRequestIdentity(t *testing.T) {
 	guest := extension.Extension{
 		Manifest: extension.Manifest{ID: "identity", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			method := extension.ServiceMethod("echo", extension.ModeServiceIO, `{}`, `{}`, "", "")
+			method := extension.ServiceMethod("echo", `{}`, `{}`, "", "")
 			_, err := api.RegisterOperation(extension.Operation{Target: extension.ExposedTargetHarness, Method: method, Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 				if call.RequestID != "native-request" || !strings.Contains(string(call.Settings), `"caller"`) {
 					t.Errorf("operation request = %q, %s", call.RequestID, call.Settings)
@@ -203,11 +203,11 @@ func main() {
  e := extension.Extension{
   Manifest: extension.Manifest{ID:"installed",Version:"1",APIVersion:extension.APIVersion,SettingsSchema:json.RawMessage("{\"type\":\"object\"}")},
   Activate: func(_ context.Context, api extension.API)(func(context.Context) error,error) {
-   _,err:=api.RegisterService(extension.Service{Name:"fixture/identity",Methods:[]extension.RegisteredMethod{{Method:extension.ServiceMethod("echo",extension.ModeServiceIO,"{}","{}","",""),Handler:func(_ context.Context,c extension.AuthorContext,args json.RawMessage)(extension.Result,error){if c.RequestID!="worker-raw"{panic("wrong nested request identity")};return extension.Result{Value:args},nil}}}},nil)
+   _,err:=api.RegisterService(extension.Service{Name:"fixture/identity",Methods:[]extension.RegisteredMethod{{Method:extension.ServiceMethod("echo","{}","{}","",""),Handler:func(_ context.Context,c extension.AuthorContext,args json.RawMessage)(extension.Result,error){if c.RequestID!="worker-raw"{panic("wrong nested request identity")};return extension.Result{Value:args},nil}}}},nil)
    if err!=nil{return nil,err}
    ops:=[]extension.Operation{
-    {Target:extension.ExposedTargetHarness,Method:extension.ServiceMethod("raw",extension.ModeServiceIO,"{}","{}","",""),Handler:func(ctx context.Context,c extension.AuthorContext,args json.RawMessage)(extension.Result,error){if c.RequestID!="worker-raw"{panic("wrong request identity")};return c.Call(ctx,"fixture/identity","echo",args)}},
-    {Target:extension.ExposedTargetHarness,Method:extension.ServiceMethod("fail",extension.ModeServiceIO,"{}","{}","{}","{}"),Handler:func(_ context.Context,_ extension.AuthorContext,_ json.RawMessage)(extension.Result,error){return extension.Result{Failure:&extension.Failure{Code:"fixture",Message:"refused",Partial:json.RawMessage("[1,null]")}},nil}},
+    {Target:extension.ExposedTargetHarness,Method:extension.ServiceMethod("raw","{}","{}","",""),Handler:func(ctx context.Context,c extension.AuthorContext,args json.RawMessage)(extension.Result,error){if c.RequestID!="worker-raw"{panic("wrong request identity")};return c.Call(ctx,"fixture/identity","echo",args)}},
+    {Target:extension.ExposedTargetHarness,Method:extension.ServiceMethod("fail","{}","{}","{}","{}"),Handler:func(_ context.Context,_ extension.AuthorContext,_ json.RawMessage)(extension.Result,error){return extension.Result{Failure:&extension.Failure{Code:"fixture",Message:"refused",Partial:json.RawMessage("[1,null]")}},nil}},
    }
    for _,op:=range ops {if _,err:=api.RegisterOperation(op,nil);err!=nil{return nil,err}}
    return nil,nil
@@ -318,33 +318,21 @@ type capturedCredentialTool struct {
 	values  chan [2]string
 }
 
-func (t *capturedCredentialTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *capturedCredentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionSleep, Target: "*"}}, Data: []byte(call.ID)}
-}
-
-func (t *capturedCredentialTool) Execute(ctx context.Context, call extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t *capturedCredentialTool) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	if t.count.Add(1) == 1 {
 		close(t.entered)
 		<-t.release
 	}
 	var values [2]string
 	for i, field := range []string{"/activation", "/operation"} {
-		result, err := call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"`+field+`"}`))
+		value, err := call.Credential(ctx, field)
 		if err != nil {
-			return harness.ToolOutcome{Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultError, Content: err.Error()}}
+			return extension.ToolResult{}, err
 		}
-		var body struct {
-			Value string `json:"value"`
-		}
-		_ = json.Unmarshal(result.Value, &body)
-		values[i] = body.Value
+		values[i] = value
 	}
 	t.values <- values
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: "done"}}
+	return extension.ToolResult{Content: "done"}, nil
 }
 
 func TestRetainedOperationKeepsCredentialCapture(t *testing.T) {
@@ -378,7 +366,7 @@ func TestRetainedOperationKeepsCredentialCapture(t *testing.T) {
 			},
 		},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(model.ToolDefinition{Name: "credential_probe", Parameters: json.RawMessage(`{"type":"object"}`)}, probe, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "credential_probe", Parameters: json.RawMessage(`{"type":"object"}`)}, probe.run, nil)
 			return nil, err
 		},
 	}
@@ -434,23 +422,12 @@ type replacementTool struct {
 	output  string
 }
 
-func (t replacementTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
+func (t replacementTool) run(_ context.Context, _ extension.ToolCall) (extension.ToolResult, error) {
 	if t.entered != nil {
 		close(t.entered)
 		<-t.release
 	}
-	return call.Arguments, nil
-}
-
-func (t replacementTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{
-		Permissions: []harness.PermissionRequest{{Permission: harness.PermissionSleep, Target: "*"}},
-		Data:        []byte(call.ID),
-	}
-}
-
-func (t replacementTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{Result: model.ToolResult{CallID: string(plan.Data), Status: model.ResultSuccess, Content: t.output}}
+	return extension.ToolResult{Content: t.output}, nil
 }
 
 func TestToolReplacementKeepsPreparedRegistration(t *testing.T) {
@@ -488,7 +465,7 @@ func TestToolReplacementKeepsPreparedRegistration(t *testing.T) {
 		Activate: func(_ context.Context, registered extension.API) (func(context.Context) error, error) {
 			api = registered
 			var err error
-			first, err = api.RegisterTool(definition, replacementTool{entered: entered, release: release, output: "old"}, nil)
+			first, err = api.RegisterTool(definition, (replacementTool{entered: entered, release: release, output: "old"}).run, nil)
 			return nil, err
 		},
 	}
@@ -516,7 +493,7 @@ func TestToolReplacementKeepsPreparedRegistration(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first tool was not bound")
 	}
-	if _, err := api.RegisterTool(replacement, replacementTool{output: "new"}, first); err != nil {
+	if _, err := api.RegisterTool(replacement, (replacementTool{output: "new"}).run, first); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
@@ -655,7 +632,7 @@ func TestAdmissionToolOverrideSurvivesReplacement(t *testing.T) {
 				return nil, err
 			}
 			var err error
-			first, err = api.RegisterTool(definition, replacementTool{entered: entered, release: release, output: "old"}, nil)
+			first, err = api.RegisterTool(definition, (replacementTool{entered: entered, release: release, output: "old"}).run, nil)
 			return nil, err
 		},
 	}
@@ -682,7 +659,7 @@ func TestAdmissionToolOverrideSurvivesReplacement(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("tool was not bound")
 	}
-	if _, err := api.RegisterTool(replacement, replacementTool{output: "new"}, first); err != nil {
+	if _, err := api.RegisterTool(replacement, (replacementTool{output: "new"}).run, first); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
@@ -709,6 +686,89 @@ func TestAdmissionToolOverrideSurvivesReplacement(t *testing.T) {
 	}
 }
 
+func TestAdmissionOverrideUsesRegisteredToolSchema(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if wireLastRole(string(body)) == "tool" {
+			writeTextTurn(w, "done")
+			return
+		}
+		args := `{"registered":"yes"}`
+		if calls.Add(1) == 2 {
+			args = `{"advertised":true}`
+		}
+		writeToolTurn(w, "probe-call", "probe", args)
+	}))
+	defer server.Close()
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(configurationDocument(server.URL), &config); err != nil {
+		t.Fatal(err)
+	}
+	config["extensions"] = json.RawMessage(`{"fixture":{"enabled":true}}`)
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := extension.Extension{
+		Manifest: extension.Manifest{ID: "fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)},
+		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			if _, err := api.AttachAdmission(func(_ context.Context, _ extension.AuthorContext, input extension.AdmissionInput) (extension.AdmissionResult, error) {
+				candidate := input.Candidate
+				for i := range candidate.Tools {
+					if candidate.Tools[i].Name == "probe" {
+						candidate.Tools[i].Parameters = json.RawMessage(`{"type":"object","properties":{"advertised":{"type":"boolean"}},"required":["advertised"]}`)
+					}
+				}
+				return extension.AdmissionResult{Candidate: &candidate}, nil
+			}, nil); err != nil {
+				return nil, err
+			}
+			_, err := api.RegisterTool(model.ToolDefinition{Name: "probe", Parameters: json.RawMessage(`{"type":"object","properties":{"registered":{"type":"string"}},"required":["registered"]}`)}, (replacementTool{output: "ran"}).run, nil)
+			return nil, err
+		},
+	}
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	ref := model.ModelRef{Provider: "prov", Model: "m"}
+	owner := openOwner(t, melta.Options{DataDir: dataDir, Configuration: melta.NewValueConfigurationSource(raw), Credentials: &memoryCredentials{values: map[string]melta.CredentialValue{externalKeyEnv: {Value: externalKey, Defined: true}}}, Defaults: harness.SessionInputs{Model: &ref}, Extensions: []extension.Extension{guest}})
+	bound := caller(t, owner)
+	session, err := owner.CreateSession(ctx, bound, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit(t, owner, bound, session.SessionId, "registered", "registered")
+	submit(t, owner, bound, session.SessionId, "advertised", "advertised")
+	if err := owner.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite3", filepath.Join(dataDir, "melta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, row := range []struct {
+		op, status, evidence string
+	}{{"registered", "success", "observed"}, {"advertised", "error", "not_started"}} {
+		var payload []byte
+		if err := db.QueryRow(`SELECT payload FROM entries WHERE operation_id = ? AND kind = 'tool_result'`, row.op).Scan(&payload); err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			Status   string `json:"status"`
+			Evidence string `json:"evidence"`
+			Content  string `json:"content"`
+		}
+		if err := json.Unmarshal(payload, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Status != row.status || result.Evidence != row.evidence || (row.op == "registered" && result.Content != "ran") {
+			t.Fatalf("%s result = %+v, want status %s evidence %s", row.op, result, row.status, row.evidence)
+		}
+	}
+}
+
 func TestRequestHookReplacementKeepsRecordedRegistration(t *testing.T) {
 	ctx := context.Background()
 	server := newScriptedModel(t)
@@ -731,7 +791,7 @@ func TestRequestHookReplacementKeepsRecordedRegistration(t *testing.T) {
 		Activate: func(_ context.Context, registered extension.API) (func(context.Context) error, error) {
 			api = registered
 			var err error
-			first, err = api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			first, err = api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				close(entered)
 				<-release
 				return harness.RequestConsequence{}, nil
@@ -763,7 +823,7 @@ func TestRequestHookReplacementKeepsRecordedRegistration(t *testing.T) {
 		t.Fatal("first hook did not run")
 	}
 	secondCalled := make(chan struct{}, 1)
-	_, err = api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+	_, err = api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 		secondCalled <- struct{}{}
 		return harness.RequestConsequence{}, nil
 	}, first)
@@ -841,7 +901,7 @@ func TestReusedActivationKeepsPerSessionCandidates(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachRequest(extension.HookModePure, func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			_, err = api.AttachRequest(func(context.Context, extension.AuthorContext, extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				return harness.RequestConsequence{}, nil
 			}, nil)
 			return nil, err

@@ -9,9 +9,9 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-func fixtureToolLookup(prepare func(context.Context, model.ToolCall) harness.PreparedTool, normalize func(context.Context, model.ToolCall) (json.RawMessage, error)) func(string) (harness.ToolBinding, bool) {
-	return func(name string) (harness.ToolBinding, bool) {
-		return harness.ToolBinding{Identity: harness.ToolImplementation{ID: name}, Normalize: normalize, Prepare: prepare}, true
+func fixtureToolLookup(run func(context.Context, model.ToolCall) harness.ToolOutcome) func(string) (harness.ToolBinding, bool, error) {
+	return func(name string) (harness.ToolBinding, bool, error) {
+		return harness.ToolBinding{Identity: harness.ToolImplementation{ID: name}, Validate: func(json.RawMessage) error { return nil }, Run: run}, true, nil
 	}
 }
 
@@ -22,7 +22,7 @@ func fixtureToolLookup(prepare func(context.Context, model.ToolCall) harness.Pre
 func TestRegisteredToolBindingIdentity(t *testing.T) {
 	owner := &configurationService{}
 	candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{
-		extension: testToolNative("probe", testRegisteredTool{}), section: []byte(`{}`),
+		extension: testToolNative("probe", testRegisteredTool), section: []byte(`{}`),
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -43,10 +43,13 @@ func TestRegisteredToolBindingIdentity(t *testing.T) {
 	}
 }
 
-func fixturePrepare(inv harness.InvocationExecution, ctx context.Context, call model.ToolCall) harness.PreparedTool {
-	binding, ok := inv.LookupTool(call.Name)
-	if !ok {
-		panic("missing test tool " + call.Name)
+func fixtureBinding(inv harness.InvocationExecution, name string) harness.ToolBinding {
+	binding, ok, err := inv.LookupTool(name)
+	if err != nil {
+		panic(err)
 	}
-	return binding.Prepare(ctx, call)
+	if !ok {
+		panic("missing test tool " + name)
+	}
+	return binding
 }

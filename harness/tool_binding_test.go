@@ -6,9 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"testing"
-	"time"
 
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
@@ -16,106 +14,82 @@ import (
 
 func TestToolBindingSettlement(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		callName   string
-		missing    bool
-		broken     string
-		invalid    bool
-		denied     bool
-		executor   bool
-		wantStatus model.ToolResultStatus
-		wantBound  bool
-		wantArgs   bool
+		name, call, broken       string
+		missing, invalid, denied bool
+		status                   model.ToolResultStatus
+		bound, args              bool
 	}{
-		{name: "unadvertised", callName: "ghost", wantStatus: model.ResultError},
-		{name: "missing", callName: "echo", missing: true, wantStatus: model.ResultError},
-		{name: "invalid binding without callbacks", callName: "echo", broken: "both", wantStatus: model.ResultError},
-		{name: "invalid binding without normalizer", callName: "echo", broken: "normalizer", wantStatus: model.ResultError},
-		{name: "invalid binding without preparer", callName: "echo", broken: "preparer", wantStatus: model.ResultError},
-		{name: "invalid binding without identity", callName: "echo", broken: "identity", wantStatus: model.ResultError},
-		{name: "normalization failure", callName: "echo", invalid: true, wantStatus: model.ResultError, wantBound: true},
-		{name: "denied", callName: "echo", denied: true, wantStatus: model.ResultDenied, wantBound: true, wantArgs: true},
-		{name: "immediate", callName: "echo", wantStatus: model.ResultSuccess, wantBound: true, wantArgs: true},
-		{name: "executor", callName: "echo", executor: true, wantStatus: model.ResultSuccess, wantBound: true, wantArgs: true},
+		{name: "unadvertised", call: "ghost", status: model.ResultError},
+		{name: "missing", call: "echo", missing: true, status: model.ResultError},
+		{name: "invalid binding without validator", call: "echo", broken: "validate", status: model.ResultError},
+		{name: "invalid binding without run", call: "echo", broken: "run", status: model.ResultError},
+		{name: "invalid binding without identity", call: "echo", broken: "identity", status: model.ResultError},
+		{name: "validation failure", call: "echo", invalid: true, status: model.ResultError},
+		{name: "denied", call: "echo", denied: true, status: model.ResultDenied, bound: true, args: true},
+		{name: "success", call: "echo", status: model.ResultSuccess, bound: true, args: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lookups, normalizations, prepares, executions, releases := 0, 0, 0, 0, 0
+			lookups, validations, runs, releases := 0, 0, 0, 0
 			identity := ToolImplementation{ID: "actual-capability", ExtensionID: "actual-extension"}
-			inv := InvocationExecution{LookupTool: func(name string) (ToolBinding, bool) {
+			inv := InvocationExecution{LookupTool: func(string) (ToolBinding, bool, error) {
 				lookups++
 				if tc.missing {
-					return ToolBinding{}, false
+					return ToolBinding{}, false, nil
 				}
-				binding := ToolBinding{
-					Identity: identity,
-					Release:  func() { releases++ },
-					Normalize: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-						normalizations++
-						if tc.invalid {
-							return nil, errors.New("bad arguments")
-						}
-						return objectNormalize(ctx, call)
-					},
-					Prepare: func(ctx context.Context, call model.ToolCall) PreparedTool {
-						prepares++
-						result := ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
-						if tc.denied {
-							return PreparedTool{Permissions: []PermissionRequest{{Permission: PermissionFileRead, Target: "/outside"}}, CanonicalWorkspace: "/w", Execute: func(context.Context) ToolOutcome {
-								executions++
-								return result
-							}}
-						}
-						if tc.executor {
-							return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-								executions++
-								return result
-							}}
-						}
-						return PreparedTool{Permissions: fixturePermission, Immediate: &result}
-					},
-				}
+				binding := ToolBinding{Identity: identity, Release: func() { releases++ }, Validate: func(json.RawMessage) error {
+					validations++
+					if tc.invalid {
+						return errors.New("bad arguments")
+					}
+					return nil
+				}, Run: func(_ context.Context, call model.ToolCall) ToolOutcome {
+					runs++
+					return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
+				}}
 				switch tc.broken {
-				case "both":
-					binding.Normalize, binding.Prepare = nil, nil
-				case "normalizer":
-					binding.Normalize = nil
-				case "preparer":
-					binding.Prepare = nil
+				case "validate":
+					binding.Validate = nil
+				case "run":
+					binding.Run = nil
 				case "identity":
 					binding.Identity.ID = ""
 				}
-				return binding, true
+				return binding, true, nil
 			}}
-			_, _, _, result, err := freshToolBoundary(t, testCapture(), inv, model.ToolCall{ID: "call-1", Name: tc.callName, Arguments: json.RawMessage(`{"x":1}`)})
-			testassert.NoError(t, err)
-			testassert.Equal(t, result.Status, tc.wantStatus)
-			wantEvidence := ExecutionNotStarted
-			if tc.wantStatus == model.ResultSuccess {
-				wantEvidence = ExecutionObserved
+			if tc.denied {
+				inv.CheckStage = func() CheckStage {
+					return CheckStage{Hooks: []ToolCheckHook{{ID: "check", ExtensionID: "actual-extension", Run: func(context.Context, model.ToolCall) (*string, error) { reason := "restricted"; return &reason, nil }}}}
+				}
 			}
-			testassert.Equal(t, result.Evidence, wantEvidence)
-			testassert.Require(t, (result.Implementation != nil) == tc.wantBound, "implementation = %+v", result.Implementation)
-			if tc.wantBound {
+			_, _, _, result, err := freshToolBoundary(t, testCapture(), inv, model.ToolCall{ID: "call-1", Name: tc.call, Arguments: json.RawMessage(`{"x":1}`)})
+			testassert.NoError(t, err)
+			testassert.Equal(t, result.Status, tc.status)
+			evidence := ExecutionNotStarted
+			if tc.status == model.ResultSuccess {
+				evidence = ExecutionObserved
+			}
+			testassert.Equal(t, result.Evidence, evidence)
+			testassert.Require(t, (result.Implementation != nil) == tc.bound, "implementation=%+v", result.Implementation)
+			if tc.bound {
 				testassert.Equal(t, *result.Implementation, identity)
 			}
-			testassert.Require(t, (len(result.NormalizedArguments) > 0) == tc.wantArgs, "arguments = %q", result.NormalizedArguments)
-			if tc.callName == "ghost" {
+			testassert.Require(t, (len(result.NormalizedArguments) > 0) == tc.args, "arguments=%q", result.NormalizedArguments)
+			if tc.call == "ghost" {
 				testassert.Equal(t, lookups, 0)
 			} else {
 				testassert.Equal(t, lookups, 1)
 			}
-			if tc.missing || tc.broken != "" || tc.callName == "ghost" {
-				testassert.Equal(t, normalizations, 0)
+			if tc.missing || tc.broken != "" || tc.call == "ghost" {
+				testassert.Equal(t, validations, 0)
 			} else {
-				testassert.Equal(t, normalizations, 1)
+				testassert.Equal(t, validations, 1)
 			}
-			if !tc.wantArgs {
-				testassert.Equal(t, prepares, 0)
+			if tc.status == model.ResultSuccess {
+				testassert.Equal(t, runs, 1)
+			} else {
+				testassert.Equal(t, runs, 0)
 			}
-			if !tc.executor {
-				testassert.Equal(t, executions, 0)
-			}
-			if tc.callName == "ghost" || tc.missing {
+			if tc.call == "ghost" || tc.missing {
 				testassert.Equal(t, releases, 0)
 			} else {
 				testassert.Equal(t, releases, 1)
@@ -124,58 +98,75 @@ func TestToolBindingSettlement(t *testing.T) {
 	}
 }
 
-func TestNormalizationFailureInterruption(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		cause       error
-		cancel      bool
-		deadline    bool
-		interrupted bool
-	}{
-		{name: "operation cancellation", cause: context.Canceled, cancel: true, interrupted: true},
-		{name: "wrapped operation cancellation", cause: fmt.Errorf("normalize: %w", context.Canceled), cancel: true, interrupted: true},
-		{name: "deadline error with canceled operation", cause: context.DeadlineExceeded, cancel: true, interrupted: true},
-		{name: "operation deadline", cause: context.DeadlineExceeded, deadline: true, interrupted: true},
-		{name: "declared interruption", cause: &EffectError{Err: errors.New("stopped"), Interrupted: true}, interrupted: true},
-		{name: "cancellation with live operation", cause: context.Canceled},
-		{name: "deadline with live operation", cause: context.DeadlineExceeded},
-		{name: "cancellation wrapped by effect error with canceled operation", cause: &EffectError{Err: context.Canceled}, cancel: true, interrupted: true},
-		{name: "cancellation wrapped by effect error with live operation", cause: &EffectError{Err: context.Canceled}},
-		{name: "validation wrapped by effect error with canceled operation", cause: &EffectError{Err: errors.New("invalid arguments")}, cancel: true},
-		{name: "validation failure with canceled operation", cause: errors.New("invalid arguments"), cancel: true},
-		{name: "validation failure with live operation", cause: errors.New("invalid arguments")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			if tc.deadline {
-				cancel()
-				ctx, cancel = context.WithTimeout(context.Background(), 500*time.Millisecond)
+func TestToolBindingCaptureErrors(t *testing.T) {
+	lost := errors.New("captured activation lost")
+	rewrite := ToolArgumentsHook{ID: "rewrite", ExtensionID: "ext", Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+		return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":2}`)}, nil
+	}}
+	for _, afterValidation := range []bool{false, true} {
+		t.Run(map[bool]string{false: "lookup", true: "check"}[afterValidation], func(t *testing.T) {
+			runs := 0
+			inv := InvocationExecution{ToolHooks: []ToolArgumentsHook{rewrite}}
+			inv.LookupTool = func(string) (ToolBinding, bool, error) {
+				if !afterValidation {
+					return ToolBinding{}, false, lost
+				}
+				return ToolBinding{Identity: ToolImplementation{ID: "echo"}, Validate: func(json.RawMessage) error { return nil }, Run: func(context.Context, model.ToolCall) ToolOutcome {
+					runs++
+					return ToolOutcome{}
+				}}, true, nil
 			}
-			defer cancel()
-			prepares := 0
-			exec := hookFixtureExecution(func(context.Context, model.ToolCall) PreparedTool {
-				prepares++
-				return PreparedTool{}
-			}, func(normalizeCtx context.Context, _ model.ToolCall) (json.RawMessage, error) {
-				if tc.cancel {
-					cancel()
-				}
-				if tc.deadline {
-					<-normalizeCtx.Done()
-				}
-				return nil, tc.cause
-			})
-			_, _, _, _, results, err := freshExecutionToolCallsCtx(t, ctx, testCapture(), exec, testToolCall("call-1"))
+			if afterValidation {
+				inv.CheckStage = func() CheckStage { return CheckStage{Error: lost} }
+			}
+			_, _, _, result, err := freshToolBoundary(t, testCapture(), inv, testToolCall("call-1"))
 			testassert.NoError(t, err)
-			testassert.Equal(t, prepares, 0)
-			wantStatus, wantContent := model.ResultError, tc.cause.Error()
-			if tc.interrupted {
-				wantStatus, wantContent = model.ResultInterrupted, interruptedToolResultContent
+			testassert.Equal(t, result.Status, model.ResultError)
+			testassert.Equal(t, result.Content, lost.Error())
+			testassert.Equal(t, result.Evidence, ExecutionNotStarted)
+			testassert.Equal(t, runs, 0)
+			if afterValidation {
+				testassert.Require(t, result.Implementation != nil && result.Implementation.ID == "echo" && string(result.NormalizedArguments) == `{"x":2}` && len(result.HookIDs) == 1 && result.HookIDs[0].HookID == "rewrite", "result = %+v", result)
+			} else {
+				testassert.Require(t, result.Implementation == nil && len(result.NormalizedArguments) == 0 && len(result.HookIDs) == 0, "result = %+v", result)
 			}
-			result := results[0]
-			testassert.Require(t, result.Status == wantStatus && result.Content == wantContent && result.Evidence == ExecutionNotStarted &&
-				result.Implementation != nil && result.Implementation.ID == "echo" && len(result.NormalizedArguments) == 0,
-				"result = %+v, want %s %q with binding and no effective arguments", result, wantStatus, wantContent)
+		})
+	}
+}
+
+func TestToolStageErrorsRemainValidationFailures(t *testing.T) {
+	for _, stage := range []string{"lookup", "arguments", "check", "malformed check", "hook"} {
+		t.Run(stage, func(t *testing.T) {
+			failure := &EffectError{Err: errors.New("stage failed"), Interrupted: true}
+			runs := 0
+			inv := InvocationExecution{LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome {
+				runs++
+				return ToolOutcome{}
+			})}
+			switch stage {
+			case "lookup":
+				inv.LookupTool = func(string) (ToolBinding, bool, error) { return ToolBinding{}, false, failure }
+			case "arguments":
+				inv.ArgumentStage = func() ArgumentStage { return ArgumentStage{Error: failure} }
+			case "check":
+				inv.CheckStage = func() CheckStage { return CheckStage{Error: failure} }
+			case "malformed check":
+				inv.CheckStage = func() CheckStage { return CheckStage{Hooks: []ToolCheckHook{{ID: "broken", ExtensionID: "ext"}}} }
+			case "hook":
+				inv.CheckStage = func() CheckStage {
+					return CheckStage{Hooks: []ToolCheckHook{{ID: "check", ExtensionID: "ext", Run: func(context.Context, model.ToolCall) (*string, error) { return nil, failure }}}}
+				}
+			}
+			_, _, _, result, err := freshToolBoundary(t, testCapture(), inv, testToolCall("call-1"))
+			testassert.NoError(t, err)
+			want := model.ResultError
+			if stage == "hook" {
+				want = model.ResultInterrupted
+			}
+			testassert.Equal(t, result.Status, want)
+			testassert.Equal(t, result.Evidence, ExecutionNotStarted)
+			testassert.Equal(t, runs, 0)
+			testassert.Require(t, (result.Implementation != nil) == (stage == "check" || stage == "malformed check" || stage == "hook"), "result = %+v", result)
 		})
 	}
 }
@@ -184,21 +175,19 @@ func TestOpaqueArgumentHookConsequences(t *testing.T) {
 	for _, raw := range [][]byte{nil, []byte("not json"), {0xff, 0xfe}, []byte(`[1,2]`)} {
 		t.Run(base64.StdEncoding.EncodeToString(raw), func(t *testing.T) {
 			hooks := []ToolArgumentsHook{
-				{ID: "keep", ExtensionID: "ext", Mode: HookModeEffectful, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+				{ID: "keep", ExtensionID: "ext", Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 					return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 				}},
-				{ID: "repair", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+				{ID: "repair", ExtensionID: "ext", Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 					testassert.Require(t, bytes.Equal(call.Arguments, raw), "repair input = %q, want %q", call.Arguments, raw)
 					return ToolArgumentsResult{Arguments: json.RawMessage(`{"fixed":true}`)}, nil
 				}},
 			}
 			spy := &hookToolSpy{}
-			exec := hookFixtureExecution(spy.tool, objectNormalize, hooks...)
-			_, store, _, sessionID, results, err := freshExecutionToolCalls(t, testCapture(), exec, model.ToolCall{ID: "call-1", Name: "echo", Arguments: raw})
+			exec := hookFixtureExecution(spy.tool, hooks...)
+			_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, model.ToolCall{ID: "call-1", Name: "echo", Arguments: raw})
 			testassert.NoError(t, err)
 			testassert.Equal(t, results[0].Status, model.ResultSuccess)
-			history := hookGraphHookResults(t, store, sessionID)
-			testassert.Require(t, len(history) == 1 && bytes.Equal(history[0].Arguments, raw), "retained consequence = %+v, want %q", history, raw)
 			testassert.Require(t, string(results[0].NormalizedArguments) == `{"fixed":true}`, "effective arguments = %q", results[0].NormalizedArguments)
 		})
 	}
@@ -206,35 +195,39 @@ func TestOpaqueArgumentHookConsequences(t *testing.T) {
 
 func TestToolLookupAfterHooksKeepsBoundImplementation(t *testing.T) {
 	current := "before"
-	var prepared, executed string
-	hook := ToolArgumentsHook{ID: "replace", ExtensionID: "ext", Mode: HookModePure, Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+	var executed string
+	hook := ToolArgumentsHook{ID: "replace", ExtensionID: "ext", Run: func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		current = "after"
 		return ToolArgumentsResult{Arguments: call.Arguments}, nil
 	}}
 	inv := InvocationExecution{
 		ToolHooks: []ToolArgumentsHook{hook},
-		LookupTool: func(string) (ToolBinding, bool) {
+		LookupTool: func(string) (ToolBinding, bool, error) {
 			bound := current
 			return ToolBinding{
 				Identity: ToolImplementation{ID: bound},
-				Normalize: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-					current = "later"
-					return objectNormalize(ctx, call)
+				Validate: func(json.RawMessage) error { return nil },
+				Run: func(_ context.Context, call model.ToolCall) ToolOutcome {
+					executed = bound
+					return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 				},
-				Prepare: func(_ context.Context, call model.ToolCall) PreparedTool {
-					prepared = bound
-					current = "after preparation"
-					return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-						executed = bound
-						return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
-					}}
-				},
-			}, true
+			}, true, nil
 		},
 	}
 	_, _, _, result, err := freshToolBoundary(t, testCapture(), inv, testToolCall("call-1"))
 	testassert.NoError(t, err)
-	testassert.Require(t, prepared == "after" && executed == "after" && result.Implementation != nil && result.Implementation.ID == "after", "prepared %q executed %q result %+v", prepared, executed, result)
+	testassert.Require(t, executed == "before" && result.Implementation != nil && result.Implementation.ID == "before", "executed %q result %+v", executed, result)
+
+	hookCalls := 0
+	inv.ToolHooks[0].Run = func(_ context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+		hookCalls++
+		return ToolArgumentsResult{Arguments: call.Arguments}, nil
+	}
+	inv.LookupTool = func(string) (ToolBinding, bool, error) { return ToolBinding{}, false, nil }
+	_, _, _, result, err = freshToolBoundary(t, testCapture(), inv, testToolCall("call-1"))
+	testassert.NoError(t, err)
+	testassert.Equal(t, hookCalls, 0)
+	testassert.Equal(t, result.Status, model.ResultError)
 }
 
 func TestToolResultArgumentsRequireBinding(t *testing.T) {
@@ -262,25 +255,6 @@ func TestObservedToolResultRequiresArguments(t *testing.T) {
 		result.NormalizedArguments = json.RawMessage(`{}`)
 		testassert.NoError(t, validateToolResultEntry(result))
 	}
-}
-
-func TestCancellationDuringNormalizationStopsPreparation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	prepares := 0
-	normalize := func(context.Context, model.ToolCall) (json.RawMessage, error) {
-		cancel()
-		return json.RawMessage(`{"x":1}`), nil
-	}
-	prepare := func(context.Context, model.ToolCall) PreparedTool {
-		prepares++
-		return PreparedTool{}
-	}
-	exec := hookFixtureExecution(prepare, normalize)
-	_, _, _, _, results, err := freshExecutionToolCallsCtx(t, ctx, testCapture(), exec, testToolCall("call-1"))
-	testassert.NoError(t, err)
-	testassert.Equal(t, prepares, 0)
-	testassert.Require(t, results[0].Status == model.ResultInterrupted && results[0].Implementation != nil && string(results[0].NormalizedArguments) == `{"x":1}`, "settlement = %+v", results[0])
 }
 
 func TestToolImplementationCodec(t *testing.T) {

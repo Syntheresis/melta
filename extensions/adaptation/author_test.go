@@ -22,10 +22,10 @@ func (a *requestAPI) Settings() json.RawMessage {
 	}
 	return []byte(`{"enabled":true}`)
 }
-func (a *requestAPI) RegisterTool(_ model.ToolDefinition, _ extension.RegisteredTool, _ extension.Registration) (extension.Registration, error) {
+func (a *requestAPI) RegisterTool(_ model.ToolDefinition, _ extension.ToolFunc, _ extension.Registration) (extension.Registration, error) {
 	return nil, nil
 }
-func (a *requestAPI) AttachRequest(_ extension.HookMode, h extension.AuthorRequestHook, _ extension.Registration) (extension.Registration, error) {
+func (a *requestAPI) AttachRequest(h extension.AuthorRequestHook, _ extension.Registration) (extension.Registration, error) {
 	a.hook = h
 	return nil, nil
 }

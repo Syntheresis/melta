@@ -3,6 +3,8 @@ package melta
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,8 +17,8 @@ import (
 )
 
 // TestLostCapturedWorkerFailsRestrictedStage covers the captured-worker
-// contract: an Operation admitted with a worker activation whose authorization
-// hook enforces a restriction must fail its next tool call once that worker is
+// contract: an Operation admitted with a worker activation whose check hook
+// enforces a restriction must fail its next tool call once that worker is
 // lost, never execute the call without the hook; new work admitted afterwards
 // proceeds without the lost extension. The positive sibling proves the live
 // hook denies the same call.
@@ -27,8 +29,9 @@ func TestLostCapturedWorkerFailsRestrictedStage(t *testing.T) {
 		submitThroughRuntime(t, r, session, "run", "run")
 		awaitOperation(t, r, session, "run", harness.OperationSuccess)
 		result := toolResultFact(t, r, session, "run")
-		testassert.Require(t, result.Status == model.ResultDenied && result.Content == "worker restriction", "tool result = %+v, want the authorization refusal", result)
+		testassert.Require(t, result.Status == model.ResultDenied && result.Content == "worker restriction", "tool result = %+v, want the check refusal", result)
 		testassert.Equal(t, result.Evidence, harness.ExecutionNotStarted)
+		testassert.Require(t, result.RefusedBy != nil && result.RefusedBy.ExtensionID == "peer" && result.RefusedBy.HookID != "", "refusal identity = %+v", result.RefusedBy)
 		testassert.Equal(t, executed.Load(), int64(0))
 		testassert.Require(t, spawner.count() == 1, "worker spawns = %d, want one", spawner.count())
 	})
@@ -65,6 +68,61 @@ func TestLostCapturedWorkerFailsRestrictedStage(t *testing.T) {
 		body := awaitBody(t, e, func(body string) bool { return lastUserText(body) == "new work" })
 		testassert.Require(t, !advertisesTool(t, body, "peer.tool"), "new admission still advertised the lost tool: %v", advertisedTools(t, body))
 	})
+
+	t.Run("check worker lost during rewrite", func(t *testing.T) {
+		e := newOwnerEnv(t)
+		enableFixturePlugin(t, e.configPath, "peer")
+		enableFixturePlugin(t, e.configPath, "rewrite")
+		e.fixtureStore(storage.NewMemory())
+		manifest := extension.Manifest{ID: "peer", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+		spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+			return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+				_, err := api.AttachToolCheck(func(context.Context, extension.AuthorContext, model.ToolCall) (*string, error) {
+					reason := "worker restriction"
+					return &reason, nil
+				}, nil)
+				return nil, err
+			}), nil
+		}}
+		spawner.install()
+		entered, release := make(chan struct{}), make(chan struct{})
+		rewriter := testNative("rewrite", func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+			_, err := api.AttachArguments(func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
+				close(entered)
+				<-release
+				return extension.ArgumentsResult{Arguments: json.RawMessage(`{"path":"file"}`)}, nil
+			}, nil)
+			return nil, err
+		})
+		e.server.setScript(func(_ context.Context, body string) []string {
+			if lastMessageRole(body) == "tool" || lastUserText(body) == "new work" {
+				return textTurnEvents("done")
+			}
+			return toolCallTurnEvents("call-read", "read_file", `{"path":"other"}`)
+		})
+		r, err := e.open(context.Background(), executableAuthorExtension(manifest, "peer", func(context.Context, []string) ([]string, error) { return []string{}, nil }), rewriter)
+		testassert.NoError(t, err)
+		t.Cleanup(func() { _ = r.Close(context.Background()) })
+		workspace := t.TempDir()
+		testassert.NoError(t, os.WriteFile(filepath.Join(workspace, "file"), []byte("must not read"), 0600))
+		session, err := r.createSession(context.Background(), workspace, "")
+		testassert.NoError(t, err)
+		submitThroughRuntime(t, r, session.Identity.SessionID, "run", "run")
+		select {
+		case <-entered:
+		case <-time.After(executableTestTimeout):
+			t.Fatal("rewrite hook did not run")
+		}
+		testassert.NoError(t, spawner.last().Kill())
+		lost := awaitCapturedActivationLoss(t, r)
+		close(release)
+		awaitOperation(t, r, session.Identity.SessionID, "run", harness.OperationFailure)
+		result := toolResultFact(t, r, session.Identity.SessionID, "run")
+		testassert.Require(t, result.Status == model.ResultError && result.Evidence == harness.ExecutionNotStarted && result.Content == lost.Error(), "result = %+v", result)
+		testassert.Require(t, result.Implementation != nil && result.Implementation.ID == "read_file" && string(result.NormalizedArguments) == `{"path":"file"}` && len(result.HookIDs) >= 1 && result.HookIDs[0].ExtensionID == "rewrite", "result provenance = %+v", result)
+		submitThroughRuntime(t, r, session.Identity.SessionID, "after", "new work")
+		awaitOperation(t, r, session.Identity.SessionID, "after", harness.OperationSuccess)
+	})
 }
 
 // newRestrictedWorkerOwner opens the owner, enables the worker section and
@@ -77,11 +135,14 @@ func newRestrictedWorkerOwner(t *testing.T, executed *atomic.Int64) (*Melta, *ow
 	manifest := extension.Manifest{ID: "peer", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
 	spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
 		return adapterAuthor(manifest, func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			if _, err := api.RegisterTool(model.ToolDefinition{Name: "peer.tool", Description: "restricted", Parameters: json.RawMessage(`{"type":"object"}`)}, restrictedWorkerTool{executed: executed}, nil); err != nil {
+			if _, err := api.RegisterTool(model.ToolDefinition{Name: "peer.tool", Description: "restricted", Parameters: json.RawMessage(`{"type":"object"}`)}, func(context.Context, extension.ToolCall) (extension.ToolResult, error) {
+				executed.Add(1)
+				return extension.ToolResult{Content: "executed"}, nil
+			}, nil); err != nil {
 				return nil, err
 			}
-			if _, err := api.AttachAuthorization(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
-				if input.ToolName != "peer.tool" {
+			if _, err := api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, input model.ToolCall) (*string, error) {
+				if input.Name != "peer.tool" {
 					return nil, nil
 				}
 				refusal := "worker restriction"
@@ -106,20 +167,6 @@ func newRestrictedWorkerOwner(t *testing.T, executed *atomic.Int64) (*Melta, *ow
 	session, err := r.createSession(ctx, e.dataDir, "")
 	testassert.NoError(t, err)
 	return r, e, spawner, session.Identity.SessionID
-}
-
-// restrictedWorkerTool records execution and succeeds when reached.
-type restrictedWorkerTool struct{ executed *atomic.Int64 }
-
-func (restrictedWorkerTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (restrictedWorkerTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "*"}}}
-}
-func (t restrictedWorkerTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	t.executed.Add(1)
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{Status: model.ResultSuccess, Content: "executed"}}
 }
 
 // toolResultFact returns the committed tool result of one Operation.

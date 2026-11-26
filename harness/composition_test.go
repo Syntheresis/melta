@@ -50,10 +50,10 @@ func compositionAssistant(t *testing.T, store *graphStorage, sessionID string) *
 // assistant, and the pure hook commits no durable effect of its own.
 func TestRequestHookPurePromptRemoval(t *testing.T) {
 	h, store, c, sessionID := newEffectHarness(t, nil)
-	remover := RequestHook{ID: "req.prompt.remove", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+	remover := RequestHook{ID: "req.prompt.remove", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Prompt: emptyText()}, nil
 	}}
-	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{remover}...)}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{remover}...)}
 	sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 	testassert.NoError(t, err)
 	testassert.Require(t, len(sent.Messages) > 0 && sent.Messages[0].Role != model.RoleSystem, "dispatch request = %+v, want no system prompt message after a present-empty prompt", sent.Messages)
@@ -62,11 +62,6 @@ func TestRequestHookPurePromptRemoval(t *testing.T) {
 	testassert.Require(t, assistant.Evidence != nil && assistant.Evidence.Prompt == "", "assistant evidence = %+v, want the recorded empty-prompt contribution", assistant.Evidence)
 	testassert.Require(t, len(assistant.Evidence.HookIDs) == 1 && assistant.Evidence.HookIDs[0].HookID == "req.prompt.remove" && assistant.Evidence.HookIDs[0].ExtensionID == "req-ext", "assistant evidence hook identities = %+v, want the pure contributor recorded", assistant.Evidence.HookIDs)
 
-	graph, err := validateFixture(t, store, sessionID)
-	testassert.NoError(t, err)
-	for _, entry := range graph.Entries {
-		testassert.Require(t, entry.HookResult == nil, "pure request hook committed a durable hook result: %+v", entry.HookResult)
-	}
 }
 
 // TestRequestHookPureToolView proves the pure tool-view rows: a present
@@ -78,10 +73,10 @@ func TestRequestHookPurePromptRemoval(t *testing.T) {
 func TestRequestHookPureToolView(t *testing.T) {
 	t.Run("narrowed view advertised", func(t *testing.T) {
 		h, store, c, sessionID := newEffectHarness(t, nil)
-		empty := RequestHook{ID: "req.tools.empty", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		empty := RequestHook{ID: "req.tools.empty", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Tools: fixtureDefinitions()}, nil
 		}}
-		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{empty}...)}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{empty}...)}
 		sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 		testassert.NoError(t, err)
 		testassert.Require(t, len(sent.Tools) == 0, "dispatch tools = %+v, want the actual request narrowed to the empty advertised view", sent.Tools)
@@ -92,10 +87,10 @@ func TestRequestHookPureToolView(t *testing.T) {
 	t.Run("outside catalog rejects before dispatch", func(t *testing.T) {
 		h, _, c, _ := newEffectHarness(t, nil)
 		calls := 0
-		bad := RequestHook{ID: "req.tools.bad", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		bad := RequestHook{ID: "req.tools.bad", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Tools: fixtureDefinitions("not-captured")}, nil
 		}}
-		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{bad}...)}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{bad}...)}
 		inv.Model = func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			calls++
 			return completedTurnStream(), nil
@@ -106,13 +101,13 @@ func TestRequestHookPureToolView(t *testing.T) {
 	})
 	t.Run("restored view keeps accepted identities with no delta", func(t *testing.T) {
 		h, store, c, sessionID := newEffectHarness(t, nil)
-		narrow := RequestHook{ID: "req.tools.narrow", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		narrow := RequestHook{ID: "req.tools.narrow", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Tools: fixtureDefinitions()}, nil
 		}}
-		restore := RequestHook{ID: "req.tools.restore", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		restore := RequestHook{ID: "req.tools.restore", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{Tools: fixtureDefinitions("echo")}, nil // a selection covering the captured catalog restores the full view
 		}}
-		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{narrow, restore}...)}
+		inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{narrow, restore}...)}
 		sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 		testassert.NoError(t, err)
 		testassert.Require(t, len(sent.Tools) == 1 && sent.Tools[0].Name == "echo", "dispatch tools = %+v, want the restored full catalog", sent.Tools)
@@ -129,7 +124,7 @@ func TestRequestHookPureToolView(t *testing.T) {
 func TestRequestHookFrozenInputOwnership(t *testing.T) {
 	h, store, c, sessionID := newEffectHarness(t, nil)
 	var saw RequestHookInput
-	observer := RequestHook{ID: "req.observe", ExtensionID: "req-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	observer := RequestHook{ID: "req.observe", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		saw = in
 		for i := range in.Messages {
 			for j := range in.Messages[i].Content {
@@ -140,7 +135,7 @@ func TestRequestHookFrozenInputOwnership(t *testing.T) {
 		in.Prompt += " mutated"
 		return RequestConsequence{}, nil
 	}}
-	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{observer}...)}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{observer}...)}
 	sent, err := compositionRun(t, h, c, executionForInvocation(inv))
 	testassert.NoError(t, err)
 	testassert.Require(t, saw.RequestID != "" && saw.BoundaryEntryID != "", "hook input = %+v, want the bound request identity and canonical boundary", saw)
@@ -154,10 +149,8 @@ func TestRequestHookFrozenInputOwnership(t *testing.T) {
 
 // TestHookFamiliesDisjointForSameIdentity proves the binding-isolation rows:
 // a request-bound hook and a tool-bound hook configured with identical
-// extension and hook identities never cross-bind — the request family records
-// consumed evidence with no argument members, the tool family records consumed
-// bytes with no evidence, and each family's provenance lands only on its own
-// record.
+// extension and hook identities never cross-bind, and each family's provenance
+// lands only on its own record.
 func TestHookFamiliesDisjointForSameIdentity(t *testing.T) {
 	sharedID := "shared.hook"
 	sharedExt := "shared-ext"
@@ -174,11 +167,11 @@ func TestHookFamiliesDisjointForSameIdentity(t *testing.T) {
 				}
 				return completedTurnStream(), nil
 			},
-			LookupTool: fixtureToolLookup(spy.tool, objectNormalize),
-			RequestStage: fixtureRequestStage([]RequestHook{{ID: sharedID, ExtensionID: sharedExt, Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+			LookupTool: fixtureToolLookup(spy.tool),
+			RequestStage: fixtureRequestStage([]RequestHook{{ID: sharedID, ExtensionID: sharedExt, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 				return RequestConsequence{Prompt: &prompt}, nil
 			}}}...),
-			ToolHooks: []ToolArgumentsHook{{ID: sharedID, ExtensionID: sharedExt, Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+			ToolHooks: []ToolArgumentsHook{{ID: sharedID, ExtensionID: sharedExt, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 				return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":2}`)}, nil
 			}}},
 		}, nil
@@ -194,38 +187,30 @@ func TestHookFamiliesDisjointForSameIdentity(t *testing.T) {
 
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
-	var hookResult *hookResultEntry
 	var toolResult *toolResultEntry
 	for _, entry := range graph.Entries {
-		if entry.HookResult != nil {
-			hookResult = entry.HookResult
-		}
 		if entry.ToolResult != nil {
 			toolResult = entry.ToolResult
 		}
 	}
-	testassert.Require(t, hookResult != nil && hookResult.RequestID == "" && hookResult.ToolCallID == "call-1" && hookResult.InputEvidence == nil, "tool-bound hook result carries a request binding or consumed evidence: %+v", hookResult)
-	testassert.Require(t, hookResult.InputArgumentsBase64 != "", "tool-bound hook result carries no consumed input bytes: %+v", hookResult)
 	testassert.Require(t, toolResult != nil && len(toolResult.HookIDs) == 1 && toolResult.HookIDs[0].HookID == sharedID && toolResult.HookIDs[0].ExtensionID == sharedExt, "tool result hook provenance = %+v, want only the tool-bound family record", toolResult.HookIDs)
 }
 
 // TestArgumentHookChainPureRestoreKeepsAcceptedIdentities proves the chain
-// provenance rule: every successfully accepted hook identity — pure
-// replacements and an effectful hook alike, changed or restored — stays in the
-// tool settlement's provenance in configured order, while an effectful hook
-// always records its own result and retains the consumed intermediate bytes
-// it actually consumed.
+// provenance rule: every successfully accepted hook identity — changed or
+// restored — stays in the tool settlement's provenance in configured order,
+// and the final replacement is what the preparer receives.
 func TestArgumentHookChainPureRestoreKeepsAcceptedIdentities(t *testing.T) {
 	original := json.RawMessage(`{"x":1}`)
 	spy := &hookToolSpy{}
-	exec := hookFixtureExecution(spy.tool, objectNormalize,
-		ToolArgumentsHook{ID: "cap.pure.one", ExtensionID: "cap-a", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+	exec := hookFixtureExecution(spy.tool,
+		ToolArgumentsHook{ID: "cap.pure.one", ExtensionID: "cap-a", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 			return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":9}`)}, nil
 		}},
-		ToolArgumentsHook{ID: "cap.pure.two", ExtensionID: "cap-a", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+		ToolArgumentsHook{ID: "cap.pure.two", ExtensionID: "cap-a", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 			return ToolArgumentsResult{Arguments: model.CloneRaw(original)}, nil // restore the original, not the preceding hook's replacement
 		}},
-		ToolArgumentsHook{ID: "cap.effectful", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+		ToolArgumentsHook{ID: "cap.pure.three", ExtensionID: "cap-a", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 			return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":7}`)}, nil
 		}},
 	)
@@ -236,22 +221,15 @@ func TestArgumentHookChainPureRestoreKeepsAcceptedIdentities(t *testing.T) {
 
 	graph, gerr := validateFixture(t, store, sessionID)
 	testassert.NoError(t, gerr)
-	var hookResults []hookResultEntry
 	var toolResult *toolResultEntry
 	for _, entry := range graph.Entries {
-		if entry.HookResult != nil {
-			hookResults = append(hookResults, *entry.HookResult)
-		}
 		if entry.ToolResult != nil {
 			toolResult = entry.ToolResult
 		}
 	}
-	testassert.Require(t, len(hookResults) == 1 && hookResults[0].HookID == "cap.effectful", "committed hook results = %+v, want only the effectful hook's own result", hookResults)
-	consumed, derr := base64.StdEncoding.DecodeString(hookResults[0].InputArgumentsBase64)
-	testassert.Require(t, derr == nil && string(consumed) == string(original), "effectful hook result consumed input = %q, want the restored original bytes", consumed)
-	testassert.Require(t, toolResult != nil && len(toolResult.HookIDs) == 3 && toolResult.HookIDs[0].HookID == "cap.pure.one" && toolResult.HookIDs[1].HookID == "cap.pure.two" && toolResult.HookIDs[2].HookID == "cap.effectful", "tool result hook provenance = %+v, want every accepted identity in configured order", toolResult.HookIDs)
+	testassert.Require(t, toolResult != nil && len(toolResult.HookIDs) == 3 && toolResult.HookIDs[0].HookID == "cap.pure.one" && toolResult.HookIDs[1].HookID == "cap.pure.two" && toolResult.HookIDs[2].HookID == "cap.pure.three", "tool result hook provenance = %+v, want every accepted identity in configured order", toolResult.HookIDs)
 	prepared := spy.received()
-	testassert.Require(t, len(prepared) == 1 && string(prepared[0].Arguments) == `{"x":7}`, "preparer received %+v, want the effectful final value", prepared)
+	testassert.Require(t, len(prepared) == 1 && string(prepared[0].Arguments) == `{"x":7}`, "preparer received %+v, want the final replacement", prepared)
 }
 
 // TestMaintenanceFactsSettleOnce proves the maintenance provenance rows: a
@@ -350,9 +328,9 @@ func TestMaintenanceFactsSettleOnce(t *testing.T) {
 				return inv, err
 			}
 			if request.Purpose == InvocationPurposeConversation {
-				inv.LookupTool = fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
-					return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
-				}, objectNormalize)
+				inv.LookupTool = fixtureToolLookup(func(ctx context.Context, call model.ToolCall) ToolOutcome {
+					return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
+				})
 			}
 			return inv, nil
 		}
@@ -430,7 +408,7 @@ func TestRunningRequestSuspendAndClear(t *testing.T) {
 				}
 				return completedTurnStream(), nil
 			},
-			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) ToolOutcome {
 				saw := observe()
 				toolSaw = append(toolSaw, saw)
 				testassert.Require(t, saw.requestID != "", "tool prepare observed no producing request")
@@ -453,9 +431,9 @@ func TestRunningRequestSuspendAndClear(t *testing.T) {
 					}
 				}
 				testassert.Require(t, found, "no committed assistant carries the preparing call %q", call.ID)
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
-			}, objectNormalize),
-			RequestStage: fixtureRequestStage([]RequestHook{{ID: "req.observe", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
+			}),
+			RequestStage: fixtureRequestStage([]RequestHook{{ID: "req.observe", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 				hookSaw = append(hookSaw, observe())
 				return RequestConsequence{}, nil
 			}}}...),
@@ -508,7 +486,7 @@ func TestModelAttemptDeepOwnedRequestCopies(t *testing.T) {
 		return completedTurnStream(), nil
 	}
 	h, store, c, sessionID := newEffectHarness(t, nil)
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{{ID: "req.copy", ExtensionID: "req-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{{ID: "req.copy", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Edits: appendRequestFixture(in, model.Message{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "extra", Extra: model.Extra{"raw": json.RawMessage(` { "x" : "<" } `)}}}})}, nil
 	}}}...)})
 	exec.Retry = (&retrySpy{limit: 1}).retry
@@ -530,7 +508,7 @@ func TestModelAttemptDeepOwnedRequestCopies(t *testing.T) {
 func TestPhysicalDispatchMatchesSourceRequest(t *testing.T) {
 	h, store, c, sessionID := newEffectHarness(t, nil)
 	contribution := model.Message{Role: model.RoleUser, Content: []model.ContentPart{{Kind: model.PartText, Text: "added", Extra: model.Extra{"raw": json.RawMessage(` { "value" : "<raw>" } `)}}}}
-	hook := RequestHook{ID: "req.extra", ExtensionID: "req-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	hook := RequestHook{ID: "req.extra", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Edits: appendRequestFixture(in, contribution)}, nil
 	}}
 	var sent model.Request
@@ -547,7 +525,7 @@ func TestPhysicalDispatchMatchesSourceRequest(t *testing.T) {
 		c.mu.Unlock()
 		return completedTurnStream(), nil
 	}
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{hook}...)})
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{hook}...)})
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	})))
@@ -569,7 +547,7 @@ func TestPhysicalDispatchMatchesSourceRequest(t *testing.T) {
 
 func TestUnadvertisedCallSettlesUnavailable(t *testing.T) {
 	h, store, c, sessionID := newEffectHarness(t, nil)
-	modelCalls, normalizeCalls, prepareCalls := 0, 0, 0
+	modelCalls, prepareCalls := 0, 0
 	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		modelCalls++
 		if modelCalls == 1 {
@@ -577,18 +555,14 @@ func TestUnadvertisedCallSettlesUnavailable(t *testing.T) {
 		}
 		return completedTurnStream(), nil
 	}
-	normalize := func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-		normalizeCalls++
-		return objectNormalize(ctx, call)
-	}
-	prepare := func(context.Context, model.ToolCall) PreparedTool { prepareCalls++; return PreparedTool{} }
-	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(prepare, normalize)})
+	prepare := func(context.Context, model.ToolCall) ToolOutcome { prepareCalls++; return ToolOutcome{} }
+	exec := executionForInvocation(InvocationExecution{Model: modelFn, LookupTool: fixtureToolLookup(prepare)})
 	testassert.NoError(t, executeDirect(h, c, context.Background(), testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
 		return exec, nil
 	})))
 	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
 	testassert.NoError(t, err)
-	testassert.Require(t, rec.State.Status == OperationSuccess && modelCalls == 2 && normalizeCalls == 0 && prepareCalls == 0, "state=%+v model=%d normalize=%d prepare=%d", rec.State, modelCalls, normalizeCalls, prepareCalls)
+	testassert.Require(t, rec.State.Status == OperationSuccess && modelCalls == 2 && prepareCalls == 0, "state=%+v model=%d run=%d", rec.State, modelCalls, prepareCalls)
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
 	var call *toolCallRecord
@@ -610,10 +584,10 @@ func TestUnadvertisedCallSettlesUnavailable(t *testing.T) {
 // nothing, and the round dispatches nothing.
 func TestRequestHookConsequenceToolMembersRejectBeforeDispatch(t *testing.T) {
 	sneaky := model.ToolCall{ID: "call-9", Name: "echo", Arguments: json.RawMessage(`{}`)}
-	hook := RequestHook{ID: "req.bad", ExtensionID: "req-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	hook := RequestHook{ID: "req.bad", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		return RequestConsequence{Edits: appendRequestFixture(in, model.Message{Role: model.RoleAssistant, Content: []model.ContentPart{{Kind: model.PartText, Text: "x"}}, ToolCalls: []model.ToolCall{sneaky}})}, nil
 	}}
-	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil, objectNormalize), RequestStage: fixtureRequestStage([]RequestHook{hook}...)}
+	inv := InvocationExecution{LookupTool: fixtureToolLookup(nil), RequestStage: fixtureRequestStage([]RequestHook{hook}...)}
 	calls := 0
 	inv.Model = func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 		calls++
@@ -677,19 +651,13 @@ func TestAcceptedPureRequestIdentitiesRecordInOrder(t *testing.T) {
 
 func TestArgumentRefusalDoesNotAcceptInvalidOriginal(t *testing.T) {
 	spy := &hookToolSpy{}
-	normalize := func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-		if string(call.Arguments) == "not json" {
-			return nil, errors.New("invalid original")
-		}
-		return objectNormalize(ctx, call)
-	}
-	hook := ToolArgumentsHook{ID: "pure.refuse", ExtensionID: "ext.test", Mode: HookModePure, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+	hook := ToolArgumentsHook{ID: "pure.refuse", ExtensionID: "ext.test", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		if call.ID == "call-1" {
 			return ToolArgumentsResult{}, errors.New("refused")
 		}
 		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
-	exec := hookFixtureExecution(spy.tool, normalize, hook)
+	exec := hookFixtureExecution(spy.tool, hook)
 	first, second := testToolCall("call-1"), testToolCall("call-2")
 	first.Arguments = json.RawMessage("not json")
 	_, store, _, sessionID, results, err := freshExecutionToolCalls(t, testCapture(), exec, first, second)
@@ -710,11 +678,11 @@ func TestFinalArgumentHookCancellationPreventsPreparation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	spy := &hookToolSpy{}
-	hook := ToolArgumentsHook{ID: "pure.cancel", ExtensionID: "ext.test", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+	hook := ToolArgumentsHook{ID: "pure.cancel", ExtensionID: "ext.test", Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
 		cancel()
 		return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":9}`)}, nil
 	}}
-	exec := hookFixtureExecution(spy.tool, objectNormalize, hook)
+	exec := hookFixtureExecution(spy.tool, hook)
 	call := testToolCall("call-1")
 	_, store, _, sessionID, results, err := freshExecutionToolCallsCtx(t, ctx, testCapture(), exec, call)
 	testassert.NoError(t, err)
@@ -729,50 +697,20 @@ func TestFinalArgumentHookCancellationPreventsPreparation(t *testing.T) {
 	}
 }
 
-func TestEffectfulNoopKeepsSurvivingPureArgumentIdentity(t *testing.T) {
+func TestArgumentHookNoopKeepsSurvivingPureArgumentIdentity(t *testing.T) {
 	spy := &hookToolSpy{}
-	pure := ToolArgumentsHook{ID: "pure.repair", ExtensionID: "ext.test", Mode: HookModePure, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+	pure := ToolArgumentsHook{ID: "pure.repair", ExtensionID: "ext.test", Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
 		return ToolArgumentsResult{Arguments: json.RawMessage(`{"x":9}`)}, nil
 	}}
-	effect := ToolArgumentsHook{ID: "effect.noop", ExtensionID: "ext.test", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
+	noop := ToolArgumentsHook{ID: "noop", ExtensionID: "ext.test", Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
 		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
 	}}
-	exec := hookFixtureExecution(spy.tool, objectNormalize, pure, effect)
+	exec := hookFixtureExecution(spy.tool, pure, noop)
 	call := testToolCall("call-1")
 	_, _, _, _, results, err := freshExecutionToolCalls(t, testCapture(), exec, call)
 	testassert.NoError(t, err)
-	want := []HookIdentity{{ExtensionID: pure.ExtensionID, HookID: pure.ID}, {ExtensionID: effect.ExtensionID, HookID: effect.ID}}
+	want := []HookIdentity{{ExtensionID: pure.ExtensionID, HookID: pure.ID}, {ExtensionID: noop.ExtensionID, HookID: noop.ID}}
 	testassert.Require(t, reflect.DeepEqual(results[0].HookIDs, want), "surviving contributors = %+v, want %+v", results[0].HookIDs, want)
-}
-
-func TestRequestEvidenceRequiresOrderedEffectfulIdentities(t *testing.T) {
-	a := HookIdentity{ExtensionID: "ext.test", HookID: "effect.a"}
-	b := HookIdentity{ExtensionID: "ext.test", HookID: "effect.b"}
-	pure := HookIdentity{ExtensionID: "ext.test", HookID: "pure"}
-	results := []graphEntry{
-		{Envelope: Entry{ID: hexID(10), Sequence: 2}, HookResult: &hookResultEntry{ExtensionID: a.ExtensionID, HookID: a.HookID}},
-		{Envelope: Entry{ID: hexID(11), Sequence: 3}, HookResult: &hookResultEntry{ExtensionID: b.ExtensionID, HookID: b.HookID}},
-	}
-	for _, tc := range []struct {
-		name string
-		ids  []HookIdentity
-		seq  int64
-		bad  bool
-	}{
-		{"complete", []HookIdentity{a, b}, 4, false},
-		{"pure identities may interleave", []HookIdentity{pure, a, b}, 4, false},
-		{"missing all", nil, 4, true},
-		{"missing earlier", []HookIdentity{b}, 4, true},
-		{"reversed", []HookIdentity{b, a}, 4, true},
-		{"consumed prefix", []HookIdentity{a}, 3, false},
-		{"future identity", []HookIdentity{a, b}, 3, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			v := &graphValidation{}
-			err := v.validateEvidenceHookOrder(tc.ids, results, graphEntry{Envelope: Entry{Sequence: tc.seq}})
-			testassert.Require(t, (err != nil) == tc.bad, "order validation = %v, want bad=%v", err, tc.bad)
-		})
-	}
 }
 
 func TestContributionMessageEmptyNameIsUnnamed(t *testing.T) {
@@ -814,8 +752,8 @@ func historicalProbe(messages []model.Message) string {
 // TestRequestHookHistoricalToolCallMutationStaysLocal proves the actual
 // pipeline's deep ownership of historical conversation state: a pure request
 // hook that rewrites the nested ToolCalls (arguments, extras) and text of the
-// messages it receives cannot reach the later effectful hook's materialized
-// view, the actual model dispatch request, or the canonical-only maintenance
+// messages it receives cannot reach the later hook's materialized view, the
+// actual model dispatch request, or the canonical-only maintenance
 // summary input, and the committed assistant record keeps its original bytes.
 func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 	originalPair := string(model.RoleAssistant) + "/done [call-1 " + `{"x":1}` + ` {"keep":1}` + "]"
@@ -840,9 +778,9 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 	roundA := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
 			Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) { return pairStream, nil },
-			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "tool done"}}}
-			}, objectNormalize),
+			LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) ToolOutcome {
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "tool done"}}
+			}),
 		}, nil
 	}}
 
@@ -850,7 +788,7 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 	var checkerView string
 	var dispatchView string
 	var summaryInput []model.Message
-	mutator := RequestHook{ID: "req.mutator", ExtensionID: "req-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	mutator := RequestHook{ID: "req.mutator", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		mutatorSawOriginal = historicalProbe(in.Messages)
 		for i := range in.Messages {
 			m := &in.Messages[i]
@@ -864,7 +802,7 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 		}
 		return RequestConsequence{}, nil
 	}}
-	checker := RequestHook{ID: "req.checker", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	checker := RequestHook{ID: "req.checker", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		checkerView = historicalProbe(in.Messages)
 		return RequestConsequence{}, nil
 	}}
@@ -874,7 +812,7 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 				dispatchView = historicalProbe(r.Messages)
 				return streamOf(turnDelta("stop", "mid"), usageDelta(model.Usage{InputTokens: 13})), nil
 			},
-			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 			RequestStage: fixtureRequestStage([]RequestHook{mutator, checker}...),
 		}, nil
 	}}
@@ -907,8 +845,8 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 	testassert.NoError(t, executeDirect(h, c, context.Background(), "op-2", preparedB))
 
 	// The mutating hook really received the seeded pair, then poisoned only
-	// its own copy; the effectful hook's materialized view and the actual
-	// dispatch still carry the committed bytes exactly.
+	// its own copy; the later hook's materialized view and the actual dispatch
+	// still carry the committed bytes exactly.
 	testassert.Require(t, strings.Contains(mutatorSawOriginal, originalPair), "mutator view = %q, want the seeded pair before mutating", mutatorSawOriginal)
 	testassert.Require(t, strings.Contains(checkerView, originalPair), "checker view = %q, want the seeded pair byte-identical after the earlier hook's mutation", checkerView)
 	testassert.Require(t, strings.Contains(dispatchView, originalPair), "dispatch view = %q, want the seeded pair byte-identical in the actual model request", dispatchView)
@@ -945,24 +883,19 @@ func TestRequestHookHistoricalToolCallMutationStaysLocal(t *testing.T) {
 		seededKept = true
 	}
 	testassert.Require(t, seededKept, "the graph carries no committed assistant pair")
-	{
-		committed := hookGraphHookResults(t, store, sessionID)
-		testassert.Require(t, len(committed) == 1 && committed[0].HookID == "req.checker" && committed[0].Status == hookSucceeded,
-			"hook results = %+v, want only the effectful checker's own committed effect", committed)
-	}
 }
 
 // TestRequestHookPureRestoreMatchesBaselineTransactions proves the D2 pure
 // request boundary through the actual pipeline: a pure change restored to the
 // captured original by a later pure hook performs exactly the durable mutation
-// steps of the identical hookless round — no hook_result entries, no extra
-// register or entry transactions — and the dispatch keeps the original prompt.
+// steps of the identical hookless round — no extra register or entry
+// transactions — and the dispatch keeps the original prompt.
 func TestRequestHookPureRestoreMatchesBaselineTransactions(t *testing.T) {
-	drive := func(t *testing.T, hooks ...RequestHook) (int, int, string) {
+	drive := func(t *testing.T, hooks ...RequestHook) (int, string) {
 		exec := requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 			return completedTurnStream(), nil
 		}, nil, hooks...)
-		h, store, c, sessionID := newHookHarness(t, exec)
+		h, store, c, _ := newHookHarness(t, exec)
 		steps := 0
 		store.txHook = func(string) error { steps++; return nil }
 		sent, err := runAdmittedExecution(t, h, c, context.Background(), testOpID, testCapture(), exec)
@@ -973,21 +906,20 @@ func TestRequestHookPureRestoreMatchesBaselineTransactions(t *testing.T) {
 				prompt = m.TextContent()
 			}
 		}
-		return steps, len(hookGraphHookResults(t, store, sessionID)), prompt
+		return steps, prompt
 	}
-	baseSteps, baseHooks, basePrompt := drive(t)
+	baseSteps, basePrompt := drive(t)
 	var capturedOriginal string
-	pureA := RequestHook{ID: "req.pure.one", ExtensionID: "req-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	pureA := RequestHook{ID: "req.pure.one", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		capturedOriginal = in.Prompt
 		changed := "pure changed " + in.Prompt
 		return RequestConsequence{Prompt: &changed}, nil
 	}}
-	pureB := RequestHook{ID: "req.pure.two", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+	pureB := RequestHook{ID: "req.pure.two", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 		restored := capturedOriginal // the captured original bytes, not an echo of the previous replacement
 		return RequestConsequence{Prompt: &restored}, nil
 	}}
-	pureSteps, pureHooks, purePrompt := drive(t, pureA, pureB)
-	testassert.Require(t, baseHooks == 0 && pureHooks == 0, "hook entries = baseline %d pure %d, want none", baseHooks, pureHooks)
+	pureSteps, purePrompt := drive(t, pureA, pureB)
 	testassert.Require(t, pureSteps == baseSteps, "pure restore round performed %d durable mutation steps, want the baseline %d", pureSteps, baseSteps)
 	testassert.Require(t, purePrompt == basePrompt && basePrompt != "", "dispatch prompt = %q, want the restored original %q", purePrompt, basePrompt)
 }
@@ -998,8 +930,8 @@ func TestRequestHookPureRestoreMatchesBaselineTransactions(t *testing.T) {
 // the checkpoint commits, and only then the rebuilt conversation request is
 // shaped once by the conversation invocation's hooks before its model. The
 // summary request exposes its own leading system prompt — never a second copy
-// of the configured summary instructions — and the durable entries commit in
-// summary-hook → checkpoint → conversation-hook → assistant order.
+// of the configured summary instructions — and the checkpoint commits before
+// the answering assistant.
 func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 	seed := UsageCount{InputTokens: 13}
 	h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
@@ -1007,19 +939,19 @@ func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 	var summaryConsumedPrompt, conversationConsumedPrompt string
 	var summarySerialized, dispatchPrompt string
 	var dispatchHooked int
-	pure := RequestHook{ID: "req.pure", ExtensionID: "req-ext", Mode: HookModePure, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	pure := RequestHook{ID: "req.pure", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		events = append(events, "pure-"+string(in.Purpose))
 		changed := "hooked " + in.Prompt
 		return RequestConsequence{Prompt: &changed}, nil
 	}}
-	noop := RequestHook{ID: "req.effectful.noop", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
-		events = append(events, "effectful-"+string(in.Purpose))
+	noop := RequestHook{ID: "req.noop", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+		events = append(events, "noop-"+string(in.Purpose))
 		if in.Purpose == InvocationPurposeMaintenance {
 			summaryConsumedPrompt = in.Prompt
 		} else {
 			conversationConsumedPrompt = in.Prompt
 		}
-		reasserted := in.Prompt // the exact value the hook received: an effectful no-op
+		reasserted := in.Prompt // the exact value the hook received: a no-op
 		return RequestConsequence{Prompt: &reasserted}, nil
 	}}
 	exec := Execution{OpenInvocation: func(_ context.Context, request InvocationRequest) (InvocationExecution, error) {
@@ -1046,26 +978,24 @@ func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 		}
 		return InvocationExecution{
 			Model:        modelFn,
-			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 			RequestStage: fixtureRequestStage([]RequestHook{pure, noop}...),
 		}, nil
 	}}
 	testassert.NoError(t, runAutomaticMaintenance(t, h, c, exec))
 	testassert.Require(t, reflect.DeepEqual(events, []string{
-		"pure-maintenance", "effectful-maintenance", "model-maintenance",
-		"pure-conversation", "effectful-conversation", "model-conversation",
+		"pure-maintenance", "noop-maintenance", "model-maintenance",
+		"pure-conversation", "noop-conversation", "model-conversation",
 	}), "pipeline events = %v, want the summary hooks and model before the rebuilt conversation hooks and model", events)
 	// The summary request is shaped from the strategy's own leading prompt:
 	// the configured instructions appear once and the hook contribution once.
 	testassert.Require(t, strings.Count(summarySerialized, "hooked") == 1 && strings.Count(summarySerialized, "summarize") == 1,
 		"maintenance input = %q, want one hooked strategy prompt over the configured instructions", summarySerialized)
-	// The effectful summary no-op consumed the pure intermediate.
+	// The summary no-op consumed the pure intermediate.
 	testassert.Require(t, summaryConsumedPrompt == "hooked summarize", "summarized consumed prompt = %q, want the pure intermediate", summaryConsumedPrompt)
 	// The conversation request was shaped after the rebuilt projection.
 	testassert.Require(t, dispatchPrompt == conversationConsumedPrompt && strings.HasPrefix(dispatchPrompt, "hooked "), "dispatch prompt = %q, want the conversation hook contribution", dispatchPrompt)
 	testassert.Require(t, dispatchHooked == 1, "dispatch carries the contribution %d times, want exactly once", dispatchHooked)
-	committed := hookGraphHookResults(t, store, sessionID)
-	testassert.Require(t, len(committed) == 2, "hook results = %+v, want one effectful summary hook and one effectful conversation hook", committed)
 	graph, err := validateFixture(t, store, sessionID)
 	testassert.NoError(t, err)
 	var checkpoint *contextCheckpointEntry
@@ -1079,40 +1009,29 @@ func TestRequestHooksRunBeforeCanonicalOnlyMaintenance(t *testing.T) {
 		}
 	}
 	testassert.Require(t, checkpoint != nil && answering != nil && len(checkpoint.Facts) == 1, "missing checkpoint, assistant or summary producer")
-	summaryRequestID := checkpoint.Facts[0].RequestID
-	var summaryHookSeq, conversationHookSeq, checkpointSeq, assistantSeq int64 = -1, -1, -1, -1
+	var checkpointSeq, assistantSeq int64 = -1, -1
 	for _, entry := range graph.Entries {
 		switch {
-		case entry.HookResult != nil && entry.HookResult.RequestID == summaryRequestID:
-			summaryHookSeq = entry.Envelope.Sequence
-			testassert.Require(t, entry.HookResult.InputEvidence != nil && entry.HookResult.InputEvidence.Prompt == "hooked summarize",
-				"summary hook consumed evidence = %+v, want the strategy prompt it actually received", entry.HookResult.InputEvidence)
-		case entry.HookResult != nil && entry.HookResult.RequestID == answering.RequestID:
-			conversationHookSeq = entry.Envelope.Sequence
-			testassert.Require(t, entry.HookResult.InputEvidence != nil && len(entry.HookResult.InputEvidence.HookIDs) == 1 &&
-				entry.HookResult.InputEvidence.HookIDs[0].HookID == "req.pure",
-				"conversation hook consumed evidence = %+v, want the pure intermediate it consumed", entry.HookResult.InputEvidence)
 		case entry.Compaction != nil:
 			checkpointSeq = entry.Envelope.Sequence
 		case entry.Assistant != nil && entry.Assistant.RequestID == answering.RequestID:
 			assistantSeq = entry.Envelope.Sequence
 		}
 	}
-	testassert.Require(t, summaryHookSeq >= 0 && checkpointSeq >= 0 && conversationHookSeq >= 0 && assistantSeq >= 0 &&
-		summaryHookSeq < checkpointSeq && checkpointSeq < conversationHookSeq && conversationHookSeq < assistantSeq,
-		"committed sequences = summary hook %d checkpoint %d conversation hook %d assistant %d", summaryHookSeq, checkpointSeq, conversationHookSeq, assistantSeq)
+	testassert.Require(t, checkpointSeq >= 0 && assistantSeq >= 0 && checkpointSeq < assistantSeq,
+		"committed sequences = checkpoint %d assistant %d", checkpointSeq, assistantSeq)
 	// Maintenance evidence names only the frozen canonical references; the
 	// conversation request did not exist when it committed.
 	testassert.Require(t, checkpoint.Evidence != nil && len(checkpoint.Evidence.HookIDs) == 0 && checkpoint.Evidence.Prompt == "" && len(checkpoint.Evidence.Tools) == 0,
 		"checkpoint evidence = %+v, want only the frozen canonical references", checkpoint.Evidence)
 	// The conversation request's final evidence carries the accepted chain.
 	testassert.Require(t, answering.Evidence != nil && len(answering.Evidence.HookIDs) == 2 &&
-		answering.Evidence.HookIDs[0].HookID == "req.pure" && answering.Evidence.HookIDs[1].HookID == "req.effectful.noop",
+		answering.Evidence.HookIDs[0].HookID == "req.pure" && answering.Evidence.HookIDs[1].HookID == "req.noop",
 		"assistant evidence = %+v, want both accepted conversation hook identities", answering.Evidence)
 }
 
 // maintenanceHookedRound runs one hooked real automatic-maintenance round with
-// two effectful request hooks and returns the storage the durable rows live in
+// two request hooks and returns the storage the durable rows live in
 // plus how many times the conversation transport ran. A non-nil summaryErr
 // fails the maintenance summary; a non-nil openerErr fails the maintenance
 // OpenInvocation before the summary effect is ever attempted.
@@ -1120,11 +1039,11 @@ func maintenanceHookedRound(t *testing.T, summaryErr, openerErr error) (*Harness
 	t.Helper()
 	seed := UsageCount{InputTokens: 13}
 	h, store, c, sessionID := seededTriggerHarness(t, triggerUsageCapture(4), &seed)
-	e1 := RequestHook{ID: "req.effectful.one", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	e1 := RequestHook{ID: "req.hook.one", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		prompt := "effect one " + in.Prompt
 		return RequestConsequence{Prompt: &prompt}, nil
 	}}
-	e2 := RequestHook{ID: "req.effectful.two", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
+	e2 := RequestHook{ID: "req.hook.two", ExtensionID: "req-ext", Run: func(_ context.Context, in RequestHookInput) (RequestConsequence, error) {
 		prompt := "effect two " + in.Prompt
 		return RequestConsequence{Prompt: &prompt}, nil
 	}}
@@ -1147,7 +1066,7 @@ func maintenanceHookedRound(t *testing.T, summaryErr, openerErr error) (*Harness
 		}
 		return InvocationExecution{
 			Model:        modelFn,
-			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool:   fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 			RequestStage: fixtureRequestStage([]RequestHook{e1, e2}...),
 		}, nil
 	}}
@@ -1207,8 +1126,8 @@ func removeStoredMember(t *testing.T, store *graphStorage, sessionID string, kin
 // TestAutomaticMaintenanceEvidenceNamesFrozenInputAndSummaryProducer proves
 // the new maintenance boundary: the durable checkpoint evidence names only
 // the frozen canonical input references — no conversation request existed
-// before the procedure ran — while the summary request's own effectful hook
-// executions name the per-plan producer recorded on the maintenance facts.
+// before the procedure ran — and the maintenance facts carry the per-plan
+// producer.
 func TestAutomaticMaintenanceEvidenceNamesFrozenInputAndSummaryProducer(t *testing.T) {
 	_, store, sessionID, _ := maintenanceHookedRound(t, nil, nil)
 	graph, err := validateFixture(t, store, sessionID)
@@ -1218,14 +1137,6 @@ func TestAutomaticMaintenanceEvidenceNamesFrozenInputAndSummaryProducer(t *testi
 	testassert.Require(t, comp.Evidence != nil && comp.Evidence.BoundaryEntryID != "", "checkpoint evidence = %+v, want the frozen canonical boundary", comp.Evidence)
 	testassert.Require(t, len(comp.Evidence.HookIDs) == 0 && comp.Evidence.Prompt == "" && len(comp.Evidence.Tools) == 0,
 		"checkpoint evidence = %+v, want only the frozen canonical references", comp.Evidence)
-	var summaryHooks int
-	for _, entry := range graph.Entries {
-		if entry.HookResult == nil || entry.HookResult.RequestID != comp.Facts[0].RequestID {
-			continue
-		}
-		summaryHooks++
-	}
-	testassert.Equal(t, summaryHooks, 2) // the two effectful hooks ran on the summary producer's own request
 	// The failure terminal keeps the same frozen-input evidence and facts.
 	_, failStore, failSession, _ := maintenanceHookedRound(t, errMaintenanceSummary, nil)
 	failGraph, gerr := validateFixture(t, failStore, failSession)

@@ -80,7 +80,7 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 					Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return summaryStream("bound summary", model.Usage{InputTokens: 1}), nil
 					},
-					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 					Close: func() error {
 						closeOrder = append(closeOrder, "maintenance-close")
 						return nil
@@ -99,11 +99,9 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 					}
 					return completedTurnStream(), nil
 				},
-				LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) PreparedTool {
-					return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-						return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}, Evidence: ExecutionObserved}
-					}}
-				}, objectNormalize),
+				LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) ToolOutcome {
+					return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}, Evidence: ExecutionObserved}
+				}),
 				Close: func() error {
 					closeOrder = append(closeOrder, "conversation-close")
 					return nil
@@ -122,160 +120,64 @@ func TestInvocationCloseOrderAndStreamLifetime(t *testing.T) {
 		"disposal order = %v, want every automatic final maintenance stage closed before its continuation and the conversation invocation closed at completion", closeOrder)
 }
 
-// planReleaseRecorder captures one acquired plan's execute calls.
-type planReleaseRecorder struct {
-	executeCalls int
-}
-
-// executing returns the ordinary executor callback for one declared result.
-func executing(callID string, status model.ToolResultStatus, content string, evidence ExecutionEvidence) func(context.Context) ToolOutcome {
-	return func(context.Context) ToolOutcome {
-		return ToolOutcome{Result: model.ToolResult{CallID: callID, Status: status, Content: content}, Evidence: evidence}
-	}
-}
-
-// TestToolPlanEvidence proves one complete ToolOutcome reaches the canonical
-// result with the producer's declared knowledge, never inferred from the
-// result's shape, and that a supplied immediate plan's evidence is ignored in
-// favour of the fixed success/other-status derivation.
+// TestToolPlanEvidence checks the evidence attached to returned tool outcomes.
 func TestToolPlanEvidence(t *testing.T) {
-	modelFn := func() func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-		rounds := 0
-		return func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			rounds++
-			if rounds == 1 {
-				return completedTurnStream(testToolCall("call-1")), nil
-			}
-			return completedTurnStream(), nil
-		}
-	}
-	type row struct {
-		name        string
-		plan        PreparedTool
-		stimulus    func(context.Context, context.CancelFunc, PreparedTool) PreparedTool
-		wantStatus  model.ToolResultStatus
-		wantContent string
-		wantEvid    ExecutionEvidence
-		wantExecute bool
-	}
-	rows := []row{
-		{
-			name:       "immediate success settles once",
-			plan:       PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}}},
-			wantStatus: model.ResultSuccess, wantContent: "done", wantEvid: ExecutionObserved,
-		},
-		{
-			name:       "immediate error stays not started",
-			plan:       PreparedTool{Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultError, Content: "boom"}}},
-			wantStatus: model.ResultError, wantContent: "boom", wantEvid: ExecutionNotStarted,
-		},
-		{
-			name:       "supplied immediate evidence is ignored",
-			plan:       PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}, Evidence: ExecutionNotStarted}},
-			wantStatus: model.ResultSuccess, wantContent: "done", wantEvid: ExecutionObserved,
-		},
-		{
-			name: "malformed plan shape is rejected before execution",
-			plan: PreparedTool{Permissions: fixturePermission,
-				Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}},
-				Execute:   func(context.Context) ToolOutcome { return ToolOutcome{} }},
-			wantStatus: model.ResultError, wantContent: invalidToolResultContent, wantEvid: ExecutionNotStarted,
-		},
-		{
-			name:       "denied executor does not run",
-			plan:       PreparedTool{Execute: func(context.Context) ToolOutcome { return ToolOutcome{} }},
-			wantStatus: model.ResultDenied, wantContent: PermissionDeniedContent, wantEvid: ExecutionNotStarted,
-		},
-		{
-			name:       "observed executor success keeps its knowledge",
-			plan:       PreparedTool{Permissions: fixturePermission, Execute: executing("call-1", model.ResultSuccess, "ran", ExecutionObserved)},
-			wantStatus: model.ResultSuccess, wantContent: "ran", wantEvid: ExecutionObserved, wantExecute: true,
-		},
-		{
-			name:       "declared not_started executor outcome reaches the canonical result",
-			plan:       PreparedTool{Permissions: fixturePermission, Execute: executing("call-1", model.ResultError, "refused before handoff", ExecutionNotStarted)},
-			wantStatus: model.ResultError, wantContent: "refused before handoff", wantEvid: ExecutionNotStarted, wantExecute: true,
-		},
-		{
-			name:       "declared unknown executor outcome carries the uncertainty prefix",
-			plan:       PreparedTool{Permissions: fixturePermission, Execute: executing("call-1", model.ResultError, "may have run", ExecutionUnknown)},
-			wantStatus: model.ResultError, wantContent: unknownToolResultPrefix + "\n\n" + "may have run", wantEvid: ExecutionUnknown, wantExecute: true,
-		},
-		{
-			name:       "malformed executor result is unknown",
-			plan:       PreparedTool{Permissions: fixturePermission, Execute: executing("another-call", model.ResultSuccess, "ran", ExecutionObserved)},
-			wantStatus: model.ResultError, wantContent: unknownToolResultPrefix + "\n\n" + invalidToolResultContent, wantEvid: ExecutionUnknown, wantExecute: true,
-		},
-		{
-			name: "undeclared executor knowledge is observed",
-			plan: PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-				return ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ran"}}
-			}},
-			wantStatus: model.ResultSuccess, wantContent: "ran", wantEvid: ExecutionObserved, wantExecute: true,
-		},
-		{
-			name: "undeclared executor error is observed",
-			plan: PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-				return ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultError, Content: "boom"}}
-			}},
-			wantStatus: model.ResultError, wantContent: "boom", wantEvid: ExecutionObserved, wantExecute: true,
-		},
-		{
-			name:       "success with not_started knowledge is the invalid replacement",
-			plan:       PreparedTool{Permissions: fixturePermission, Execute: executing("call-1", model.ResultSuccess, "ran", ExecutionNotStarted)},
-			wantStatus: model.ResultError, wantContent: unknownToolResultPrefix + "\n\n" + invalidToolResultContent, wantEvid: ExecutionUnknown, wantExecute: true,
-		},
-		{
-			name: "cancellation before start settles interrupted",
-			plan: PreparedTool{Permissions: fixturePermission, Execute: executing("call-1", model.ResultSuccess, "must not run", ExecutionObserved)},
-			stimulus: func(_ context.Context, cancel context.CancelFunc, plan PreparedTool) PreparedTool {
-				cancel()
-				return plan
-			},
-			wantStatus: model.ResultInterrupted, wantContent: interruptedToolResultContent, wantEvid: ExecutionNotStarted,
-		},
-	}
-	for _, tc := range rows {
+	for _, tc := range []struct {
+		name     string
+		outcome  ToolOutcome
+		status   model.ToolResultStatus
+		evidence ExecutionEvidence
+	}{
+		{"empty success", ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ok"}}, model.ResultSuccess, ExecutionObserved},
+		{"observed success", ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ran"}, Evidence: ExecutionObserved}, model.ResultSuccess, ExecutionObserved},
+		{"empty error", ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultError, Content: "failed"}}, model.ResultError, ExecutionObserved},
+		{"not started", ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultError, Content: "unavailable"}, Evidence: ExecutionNotStarted}, model.ResultError, ExecutionNotStarted},
+		{"lost", ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultError, Content: "lost"}, Evidence: ExecutionUnknown}, model.ResultError, ExecutionUnknown},
+		{"invalid call id", ToolOutcome{Result: model.ToolResult{CallID: "other", Status: model.ResultSuccess, Content: "ok"}}, model.ResultError, ExecutionUnknown},
+		{"success unknown", ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ok"}, Evidence: ExecutionUnknown}, model.ResultError, ExecutionUnknown},
+		{"success not started", ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "ok"}, Evidence: ExecutionNotStarted}, model.ResultError, ExecutionUnknown},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			rec := &planReleaseRecorder{}
-			var store *graphStorage
-			var sessionID string
-			preparedRec := preparedExecuting(effectExecution(modelFn(), func(ctx context.Context, call model.ToolCall) PreparedTool {
-				plan := tc.plan
-				if tc.stimulus != nil {
-					plan = tc.stimulus(ctx, cancel, plan)
-				}
-				if plan.Execute != nil {
-					inner := plan.Execute
-					plan.Execute = func(ctx context.Context) ToolOutcome {
-						rec.executeCalls++
-						return inner(ctx)
-					}
-				}
-				return plan
-			}))
-			preparedRec.Capture = testCapture()
-			h, st, c, sid := newAdmittedHarness(t, context.Background(), preparedRec)
-			store, sessionID = st, sid
-			err := executeDirect(h, c, ctx, testOpID, preparedRec)
+			calls := 0
+			inv := InvocationExecution{LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { calls++; return tc.outcome })}
+			_, _, _, result, err := freshToolBoundary(t, testCapture(), inv, testToolCall("call-1"))
 			testassert.NoError(t, err)
-			testassert.Equal(t, rec.executeCalls > 0, tc.wantExecute)
-
-			graph, gerr := validateFixture(t, store, sessionID)
-			testassert.NoError(t, gerr)
-			var result *toolResultEntry
-			for i := range graph.Entries {
-				if graph.Entries[i].ToolResult != nil {
-					result = graph.Entries[i].ToolResult
-				}
+			testassert.Equal(t, calls, 1)
+			testassert.Equal(t, result.Status, tc.status)
+			testassert.Equal(t, result.Evidence, tc.evidence)
+			content := tc.outcome.Result.Content
+			if tc.name == "invalid call id" || tc.name == "success unknown" || tc.name == "success not started" {
+				content = invalidToolResultContent
 			}
-			testassert.Require(t, result != nil, "the call produced no canonical tool result")
-			testassert.Require(t, result.Status == tc.wantStatus && result.Content == tc.wantContent && result.Evidence == tc.wantEvid,
-				"canonical result = %+v, want status %s content %q knowledge %s", result, tc.wantStatus, tc.wantContent, tc.wantEvid)
+			if tc.evidence == ExecutionUnknown {
+				content = unknownToolResultPrefix + "\n\n" + content
+			}
+			testassert.Equal(t, result.Content, content)
 		})
 	}
+	t.Run("cancellation before start settles interrupted", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		calls := 0
+		inv := InvocationExecution{
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome {
+				calls++
+				return ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "must not run"}}
+			}),
+			CheckStage: func() CheckStage {
+				return CheckStage{Hooks: []ToolCheckHook{{ID: "cancel", ExtensionID: "test", Run: func(context.Context, model.ToolCall) (*string, error) {
+					cancel()
+					return nil, nil
+				}}}}
+			},
+		}
+		_, _, _, _, results, err := freshExecutionToolCallsCtx(t, ctx, testCapture(), executionForInvocation(inv), testToolCall("call-1"))
+		testassert.NoError(t, err)
+		testassert.Equal(t, calls, 0)
+		testassert.Equal(t, results[0].Status, model.ResultInterrupted)
+		testassert.Equal(t, results[0].Evidence, ExecutionNotStarted)
+		testassert.Equal(t, results[0].Content, interruptedToolResultContent)
+	})
 }
 
 // newCompactOperationStore builds the settled-conversation Session with one
@@ -329,7 +231,7 @@ func TestExecuteDirectOwnsCancellableChildContext(t *testing.T) {
 				ctxDuringStream = ctx
 				return &checkingStream{ctx: ctx, inner: streamOf(turnDelta("stop", "done")), onRead: func(live bool) { streamLive = live }}, nil
 			},
-			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 		}, nil
 	}}
 	testassert.NoError(t, executeDirect(h, c, parent, testOpID, preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
@@ -384,7 +286,7 @@ func TestManualMaintenanceDisposalFollowsCompletionPublication(t *testing.T) {
 				OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 					return InvocationExecution{
 						Model:      modelFn,
-						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 						Close: func() error {
 							events = append(events, "maintenance-close")
 							rec, err := h.ReadOperation(context.Background(), sessionID, "compact-op")
@@ -452,7 +354,7 @@ func TestManualMaintenanceDisposalFollowsCompletionPublication(t *testing.T) {
 func TestQuietCompletionSettlesUnmarkedStorageCallbackError(t *testing.T) {
 	t.Run("ordinary request-hook storage cause settles failure and drains", func(t *testing.T) {
 		hookErr := fmt.Errorf("hook transport: %w", ErrStorage)
-		hook := RequestHook{ID: "req.storage", ExtensionID: "req-ext", Mode: HookModePure, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
+		hook := RequestHook{ID: "req.storage", ExtensionID: "req-ext", Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
 			return RequestConsequence{}, hookErr
 		}}
 		exec := requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
@@ -743,10 +645,8 @@ func TestToolOutputShapingCannotChangeKnowledge(t *testing.T) {
 		return completedTurnStream(), nil
 	}
 	prepared := preparedExecuting(Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-		inv := invocationExecution(modelFn, func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "raw failure"}, Evidence: ExecutionUnknown}
-			}}
+		inv := invocationExecution(modelFn, func(ctx context.Context, call model.ToolCall) ToolOutcome {
+			return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultError, Content: "raw failure"}, Evidence: ExecutionUnknown}
 		})
 		inv.ToolOutputHooks = []ToolOutputHook{{ID: "shape.one", ExtensionID: "shape-ext", Run: func(_ context.Context, in ToolOutputInput) (string, error) {
 			testassert.Equal(t, in.Outcome.Evidence, ExecutionUnknown)
@@ -811,7 +711,7 @@ func TestExecutionAdoptsCommittedCapture(t *testing.T) {
 				sent = request
 				return completedTurnStream(), nil
 			},
-			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+			LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 		}, nil
 	}}
 	prepared := preparedExecutionFor(capture, func(_ context.Context, admission OperationAdmission) (Execution, error) {
@@ -861,103 +761,7 @@ func assertOwnedCaptureProvenance(t *testing.T, capture ExecutionCapture) {
 	testassert.Require(t, len(capture.Implementations[2].Settings) == 0, "absent settings = %q, want absence", capture.Implementations[2].Settings)
 }
 
-// TestPreparedPlanSnapshotFreezesMutableData proves plan ownership: the
-// permission pairs and immediate outcome are frozen immediately after
-// acquisition, so a permission evaluator that synchronously mutates the
-// producer-retained containers cannot change evaluation, the authorized
-// pairs or the committed result/metadata.
-func TestPreparedPlanSnapshotFreezesMutableData(t *testing.T) {
-	t.Run("permission pairs are frozen before evaluation", func(t *testing.T) {
-		rounds := 0
-		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			rounds++
-			if rounds == 1 {
-				return completedTurnStream(testToolCall("call-1")), nil
-			}
-			return completedTurnStream(), nil
-		}
-		permissions := []PermissionRequest{{Permission: PermissionCommandRun, Target: "original"}}
-		var evaluated []PermissionRequest
-		exec := effectExecution(modelFn, func(ctx context.Context, call model.ToolCall) PreparedTool {
-			return PreparedTool{Permissions: permissions, Execute: func(context.Context) ToolOutcome {
-				return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "ran"}}
-			}}
-		})
-		exec.Permissions = permissionEvaluatorFunc(func(_ context.Context, action PreparedAction) (PermissionDecision, error) {
-			evaluated = append([]PermissionRequest(nil), action.Permissions...)
-			permissions[0] = PermissionRequest{Permission: PermissionFileWrite, Target: "/etc/passwd"}
-			return PermissionAllow, nil
-		})
-		prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return exec, nil
-		})
-		store := emptyStore(t)
-		h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
-			return prepared, nil
-		})
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
-		testassert.NoError(t, err)
-		c := leaseCoordinator(t, h, session.Identity.SessionID)
-		rec, adopted := admitPrepared(t, h, c, session.Identity.SessionID, testOpID, prepared)
-		testassert.NoError(t, executeDirect(h, c, h.ctx, rec.Admission.OperationID, adopted))
-		want := []PermissionRequest{{Permission: PermissionCommandRun, Target: "original"}}
-		testassert.Require(t, reflect.DeepEqual(evaluated, want), "evaluated pairs = %+v, want the frozen acquisition %+v", evaluated, want)
-	})
-
-	t.Run("immediate content and metadata are frozen at acceptance", func(t *testing.T) {
-		rounds := 0
-		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			rounds++
-			if rounds == 1 {
-				return completedTurnStream(testToolCall("call-1")), nil
-			}
-			return completedTurnStream(), nil
-		}
-		permissions := []PermissionRequest{{Permission: PermissionCommandRun, Target: "original"}}
-		metadata := json.RawMessage(`{"k":1}`)
-		immediate := &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "original"}, Metadata: metadata}
-		exec := effectExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool {
-			return PreparedTool{Permissions: permissions, Immediate: immediate}
-		})
-		exec.Permissions = permissionEvaluatorFunc(func(context.Context, PreparedAction) (PermissionDecision, error) {
-			immediate.Result.Content = "mutated"
-			metadata[0] = 'X'
-			return PermissionAllow, nil
-		})
-		prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return exec, nil
-		})
-		store := emptyStore(t)
-		h := newTestHarness(t, store, func(context.Context, PreparationRequest) (PreparedExecution, error) {
-			return prepared, nil
-		})
-		session, err := h.CreateSession(context.Background(), CreateSessionRequest{Workspace: "/tmp/works", Inputs: testInputs("coder")})
-		testassert.NoError(t, err)
-		c := leaseCoordinator(t, h, session.Identity.SessionID)
-		rec, adopted := admitPrepared(t, h, c, session.Identity.SessionID, testOpID, prepared)
-		testassert.NoError(t, executeDirect(h, c, h.ctx, rec.Admission.OperationID, adopted))
-		graph, err := validateFixture(t, store, session.Identity.SessionID)
-		testassert.NoError(t, err)
-		var result *toolResultEntry
-		for i := range graph.Entries {
-			if graph.Entries[i].ToolResult != nil {
-				result = graph.Entries[i].ToolResult
-			}
-		}
-		testassert.Require(t, result != nil && result.Status == model.ResultSuccess && result.Content == "original", "result = %+v, want the frozen immediate content, never the evaluator mutation", result)
-		testassert.Require(t, string(result.Metadata) == `{"k":1}`, "metadata = %s, want the frozen immediate metadata", result.Metadata)
-	})
-}
-
-// permissionEvaluatorFunc adapts one function to PermissionEvaluator.
-type permissionEvaluatorFunc func(context.Context, PreparedAction) (PermissionDecision, error)
-
-func (f permissionEvaluatorFunc) Evaluate(ctx context.Context, action PreparedAction) (PermissionDecision, error) {
-	return f(ctx, action)
-}
-
-// multiPassStrategy plans two maintenance models, then ends at none; it never
-// commits or closes anything itself.
+// multiPassStrategy plans two maintenance models, then ends at none.
 type multiPassStrategy struct {
 	plans  int
 	passes int
@@ -1021,7 +825,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 						}
 						return streamOf(turnDelta("stop", fmt.Sprintf("pass %d", pass))), nil
 					},
-					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 					Close: func() error {
 						events = append(events, fmt.Sprintf("maintenance-close-%d", pass))
 						return nil
@@ -1033,7 +837,7 @@ func TestAdmittedMultiModelStrategyNoneThenOrdinaryTerminal(t *testing.T) {
 					events = append(events, "conversation-dispatch")
 					return streamOf(turnDelta("stop", "final answer"), usageDelta(model.Usage{InputTokens: 2, OutputTokens: 1})), nil
 				},
-				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 			}, nil
 		},
 	}
@@ -1124,7 +928,7 @@ func TestWaitRetainsManualPublicationBeforeLaterExecution(t *testing.T) {
 				Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 					return summaryStream("manual summary", model.Usage{InputTokens: 1}), nil
 				},
-				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+				LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 				Close: func() error {
 					race.aCloseArrived <- struct{}{}
 					<-race.aCloseGate
@@ -1181,7 +985,7 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 						Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 							return summaryStream("automatic summary", model.Usage{InputTokens: 1}), nil
 						},
-						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+						LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 						Close: func() error {
 							race.aCloseArrived <- struct{}{}
 							<-race.aCloseGate
@@ -1193,7 +997,7 @@ func TestWaitRetainsAutomaticPublicationBeforeLaterExecution(t *testing.T) {
 					Model: func(context.Context, model.Request, model.Extra) (model.Stream, error) {
 						return completedTurnStream(), nil
 					},
-					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, objectNormalize),
+					LookupTool: fixtureToolLookup(func(context.Context, model.ToolCall) ToolOutcome { return ToolOutcome{} }),
 				}, nil
 			},
 		}

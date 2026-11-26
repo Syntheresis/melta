@@ -31,19 +31,19 @@ func extensionOwnerOptions(t *testing.T) melta.Options {
 		Manifest: extension.Manifest{ID: "fixture", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`), Services: []string{"melta.commands"}},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 			operations := []extension.Operation{
-				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("raw", extension.ModeServiceIO, `{}`, `{}`, "", ""), Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("raw", `{}`, `{}`, "", ""), Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return extension.Result{Value: append(json.RawMessage(nil), args...)}, nil
 				}},
-				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("echo", extension.ModeServiceIO, `{"type":"object"}`, `{}`, "", ""), Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("echo", `{"type":"object"}`, `{}`, "", ""), Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return extension.Result{Value: args}, nil
 				}},
-				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("fail", extension.ModeServiceIO, `{}`, `{}`, `{}`, `{}`), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("fail", `{}`, `{}`, `{}`, `{}`), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 					return extension.Result{Failure: &extension.Failure{Code: "guest_code", Message: "guest message", Data: json.RawMessage("{\n  \"big\": 9007199254740993\n}"), Partial: json.RawMessage(`["partial", null, 1]`)}}, nil
 				}},
-				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("corrupt", extension.ModeServiceIO, `{}`, `{}`, "", ""), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("corrupt", `{}`, `{}`, "", ""), Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 					return extension.Result{}, fmt.Errorf("fixture corrupt: %w", harness.ErrCorrupt)
 				}},
-				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("call_error", extension.ModeServiceIO, `{}`, `{}`, "", ""), Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+				{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("call_error", `{}`, `{}`, "", ""), Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					var input struct {
 						Mode string `json:"mode"`
 					}
@@ -59,7 +59,7 @@ func extensionOwnerOptions(t *testing.T) melta.Options {
 					}
 					return extension.Result{}, &extension.CallError{Err: fmt.Errorf("fixture call failure: %w", harness.ErrStorage), Partial: partial}
 				}},
-				{Target: extension.ExposedTargetSession, Method: extension.ServiceMethod("command", extension.ModeServiceIO, `{}`, `{}`, "", ""), Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
+				{Target: extension.ExposedTargetSession, Method: extension.ServiceMethod("command", `{}`, `{}`, "", ""), Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					var input struct {
 						Method    string          `json:"method"`
 						Arguments json.RawMessage `json:"arguments"`

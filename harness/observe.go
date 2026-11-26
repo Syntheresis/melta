@@ -26,7 +26,7 @@ const (
 	FactReasoningDelta HarnessFactKind = "reasoning_delta"
 	// FactToolStarted reports one dispatched tool call. It is emitted once at
 	// the live dispatcher entry, before any branch-specific validation, hook,
-	// permission decision, or execution.
+	// check, or execution.
 	FactToolStarted HarnessFactKind = "tool_started"
 	// FactToolFinished reports one committed tool result, including the
 	// synthetic interrupted result a terminal settlement writes for a call

@@ -15,7 +15,6 @@ import (
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/internal/config"
-	"github.com/Syntheresis/melta/internal/pathutil"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/prompt"
 	"github.com/Syntheresis/melta/protocol"
@@ -26,26 +25,7 @@ import (
 // callback contracts. It is the preparation's only associated continuation:
 // there is no intermediate execution-plan type and no independently
 // configured opener.
-type openInvocation func(context.Context, harness.OperationAdmission, selection, harness.InvocationRequest) (harness.InvocationExecution, error)
-
-func locationBinder(workspace string) func(string) (string, func() error, error) {
-	return func(path string) (string, func() error, error) {
-		resolved, err := pathutil.ResolveFilePathFrom(workspace, path)
-		if err != nil {
-			return "", nil, err
-		}
-		return resolved.CanonicalPath, func() error {
-			current, err := pathutil.ResolveFilePathFrom(workspace, path)
-			if err != nil {
-				return err
-			}
-			if current.CanonicalPath != resolved.CanonicalPath {
-				return fmt.Errorf("approved canonical location changed: %s to %s", resolved.CanonicalPath, current.CanonicalPath)
-			}
-			return nil
-		}, nil
-	}
-}
+type openInvocation func(context.Context, harness.OperationAdmission, selection, harness.InvocationRequest) harness.InvocationExecution
 
 // selection is one immutable preparation or execution input set: the composed
 // candidate, the retained activation capture and Session state, the prompt
@@ -65,11 +45,6 @@ type selection struct {
 	// borrowed pointer regardless of its implementation lifetime; nil outside
 	// an admitted execution.
 	lease *artifactCallLease
-
-	// permissions is the preparation-time permission evaluator, built before
-	// durable admission so a factory error or nil evaluator rejects the
-	// preparation instead of failing an admitted Operation.
-	permissions harness.PermissionEvaluator
 
 	// operationSecrets are the operation-lifetime declared credential values
 	// captured at preparation and retained through the prepared opener. Every
@@ -141,12 +116,11 @@ func protocolWarnings(sessionID string, warnings []model.ProtocolWarning) []prot
 
 // preparation supplies the existing Harness preparation contract for every
 // admission producer: root, queued delivery and Fork all bind through the one
-// closure returned by bind, with only resource lifetime and the selected
-// invocation context added to what Harness already validates. The snapshot
-// pointer loads once per call, so a reload overlapping preparation affects the
-// next capture, not the in-flight one; the returned opener keeps the same
-// immutable snapshot while borrowed bindings and the call context stay inside
-// the preparation guard.
+// closure returned by bind, adding only the selected invocation context to
+// what Harness already validates. The snapshot pointer loads once per call, so
+// a reload overlapping preparation affects the next capture, not the in-flight
+// one; the returned opener keeps the same immutable snapshot while borrowed
+// bindings stay inside the given call context.
 type preparation struct {
 	config *configurationService
 
@@ -154,17 +128,16 @@ type preparation struct {
 	// inputs: the application persona text and the explicit global rules and
 	// wire-debug locations. Their zero values supply no identity, no global
 	// rules and no wire diagnostics, never an implicit fallback.
-	identity     string
-	locations    Locations
-	background   *backgroundBridge
-	passive      *observationAdapter
-	newEvaluator func(PolicyInputs) (harness.PermissionEvaluator, error)
+	identity   string
+	locations  Locations
+	background *backgroundBridge
+	passive    *observationAdapter
 
 	// artifacts is the Melta's private per-Session artifact interval
 	// registry. Every committed opener acquires its Session's token here
-	// before any scope, plugin, model, tool or hook effect and releases it
-	// last, after the scoped cleanup; nil leaves an isolated preparation
-	// without artifact ownership.
+	// before any plugin, model or tool work and releases it last, after the
+	// execution cleanup; nil leaves an isolated preparation without artifact
+	// ownership.
 	artifacts *artifactIntervals
 
 	// subprocessEnv is the Melta's live subprocess-environment producer.
@@ -178,10 +151,9 @@ type preparation struct {
 // services bridge armed after harness.New returns, the Melta's passive
 // publication adapter (nil in isolated preparation tests, dropping only
 // passive presentation), the Melta's private artifact interval registry
-// (nil without a Melta), the Melta's live child-environment producer, and
-// the optional evaluator factory. One concrete preparation path serves every
-// admission.
-func newPreparation(config *configurationService, locations Locations, identity string, background *backgroundBridge, passive *observationAdapter, artifacts *artifactIntervals, subprocessEnv func(context.Context) ([]string, error), newEvaluator func(PolicyInputs) (harness.PermissionEvaluator, error)) *preparation {
+// (nil without a Melta), and the Melta's live child-environment producer. One
+// concrete preparation path serves every admission.
+func newPreparation(config *configurationService, locations Locations, identity string, background *backgroundBridge, passive *observationAdapter, artifacts *artifactIntervals, subprocessEnv func(context.Context) ([]string, error)) *preparation {
 	return &preparation{
 		config:        config,
 		identity:      identity,
@@ -190,7 +162,6 @@ func newPreparation(config *configurationService, locations Locations, identity 
 		passive:       passive,
 		artifacts:     artifacts,
 		subprocessEnv: subprocessEnv,
-		newEvaluator:  newEvaluator,
 	}
 }
 
@@ -213,7 +184,7 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		if snapshot != nil {
 			defer func() {
 				if resultErr != nil {
-					resultErr = errors.Join(resultErr, snapshot.resources.release())
+					snapshot.resources.release()
 					captured.releaseHeldNames()
 				}
 			}()
@@ -307,7 +278,8 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 				Sections: promptProvider.sections, Rules: promptProvider.ruleSections, Environment: promptProvider.environment,
 			},
 		}
-		candidate, err = runRegisteredAdmission(ctx, stage, admission, req.Session.ExtensionState, snapshot.composition, known, p.config.strategy.ID)
+		operationSecrets := captured.operationSecrets()
+		candidate, err = runRegisteredAdmission(ctx, stage, admission, req.Session.ExtensionState, snapshot.composition, operationSecrets, known, p.config.strategy.ID)
 		if err != nil {
 			return harness.PreparedExecution{}, err
 		}
@@ -321,36 +293,18 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		for i, tool := range candidate.Tools {
 			finalNames[i] = tool.Name
 		}
-		sel := selection{candidate: candidate, native: native, states: req.Session.ExtensionState, prompt: promptProvider, catalog: catalog, defaultAll: defaults.Tools == nil && slices.Equal(initialNames, finalNames), strategy: strategy, invocation: invocation, credentials: captured.snapshot.credentials}
+		sel := selection{candidate: candidate, native: native, states: req.Session.ExtensionState, prompt: promptProvider, catalog: catalog, defaultAll: defaults.Tools == nil && slices.Equal(initialNames, finalNames), strategy: strategy, invocation: invocation, credentials: captured.snapshot.credentials, operationSecrets: operationSecrets}
 		entry, transport, err := p.bindModel(ctx, &sel)
 		if err != nil {
 			return harness.PreparedExecution{}, err
 		}
 		workspace := req.Session.Identity.Workspace
-		evaluator, err := p.permissionEvaluator(snapshot, workspace)
-		if err != nil {
-			return harness.PreparedExecution{}, err
-		}
-		runtimeScope, workspaces := snapshot.resources.runtime, snapshot.resources.workspaces
-		workspaceInfo := ScopeInfo{Kind: ScopeWorkspace, DataDir: runtimeScope.info.DataDir, Workspace: workspace, Revision: snapshot.resources.revisionString()}
-		workspaceScope, err := workspaces.get(ctx, workspaceInfo)
-		if err != nil {
-			return harness.PreparedExecution{}, err
-		}
-		sel.permissions = evaluator
-		sel.operationSecrets = captured.operationSecrets()
-
-		callCtx, release, err := workspaceScope.enter(ctx)
-		if err != nil {
-			return harness.PreparedExecution{}, err
-		}
-		defer release() // the one preparation guard covers the concrete preparation and every pure hook
 
 		// The per-preparation collector is allocated owned: only a successful
 		// preparation — validation, hooks and cancellation checks all passed —
 		// publishes its values under the admitted Session identity.
 		sel.warnings = &preparationWarnings{}
-		capture, opener, err := p.concretePrepare(callCtx, req, sel, entry, transport)
+		capture, opener, err := p.concretePrepare(ctx, req, sel, entry, transport)
 		if err != nil {
 			return harness.PreparedExecution{}, err
 		}
@@ -361,13 +315,14 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 		prepared = harness.PreparedExecution{
 			Capture: capture,
 			Open: func(openCtx context.Context, admission harness.OperationAdmission) (harness.Execution, error) {
-				return p.open(openCtx, admission, workspace, runtimeScope, workspaceScope, sel, snapshot, warnings, opener, &releaseArtifacts)
+				return p.open(openCtx, admission, workspace, sel, warnings, opener, &releaseArtifacts)
 			},
 		}
 		p.passive.retainCapture(req.Session.Identity.SessionID, native)
 		prepared.Release = func() error {
 			p.passive.releaseCapture(req.Session.Identity.SessionID, native)
-			err := errors.Join(native.release(), snapshot.resources.release())
+			err := native.release()
+			snapshot.resources.release()
 			if releaseArtifacts != nil {
 				releaseArtifacts()
 			}
@@ -378,100 +333,51 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 	}
 }
 
-// permissionEvaluator builds the preparation-time evaluator from the
-// captured policy inputs. A nil factory selects the included resolver; a
-// factory error, nil evaluator or empty evaluator is an invalid preparation.
-func (p *preparation) permissionEvaluator(snapshot *configuration, workspace string) (harness.PermissionEvaluator, error) {
-	if p.newEvaluator == nil {
-		return snapshot.permissionPolicy(workspace), nil
-	}
-	built, err := p.newEvaluator(snapshot.policyInputs(workspace))
-	if err != nil {
-		return nil, fmt.Errorf("prepare permission evaluator: %w", err)
-	}
-	if built == nil {
-		return nil, fmt.Errorf("prepare permission evaluator: nil evaluator: %w", harness.ErrInvalid)
-	}
-	return built, nil
-}
-
 // open turns the committed admission into the execution: it first acquires
-// the Session's whole artifact interval — before any scope, plugin, model,
-// tool or hook effect — then opens only the Operation scope and enters its
-// guard. The returned Execution carries the invocation factory: every Engine
-// call — the conversation run and each maintenance model request — opens its
-// own Agent-tier scope over the same Operation, enters its guard, selects the
-// Agent's capabilities over the four scopes, and hands the new selection with
-// the actual committed admission and the Harness-issued request to this
-// preparation's opener, so hooks' final prompt and tools can never be replaced
-// by stale pre-hook values. The Operation guard covers opening and every
-// nested invocation until the returned Close releases it and closes the
-// Operation scope; each invocation's own Close releases its guard and closes
-// its Agent scope before that; the prepared reservation releases the artifact
-// token after the resource-set hold, and an opening failure releases it before returning. Only
-// after the opening succeeds does the collected prompt presentation publish,
-// so a failed fork or admission never creates warnings for an unpublished
-// Session and a successful opener publishes before any progress.
-func (p *preparation) open(ctx context.Context, admission harness.OperationAdmission, workspace string, runtimeScope, workspaceScope *scope, sel selection, snapshot *configuration, warnings *preparationWarnings, opener openInvocation, artifactRelease *func()) (harness.Execution, error) {
-	releaseArtifacts, err := p.artifacts.acquireExecution(ctx, sessionArtifactDir(runtimeScope.info.DataDir, admission.SessionID))
+// the Session's whole artifact interval, then publishes the invocation's
+// opening and closure around every Engine call — the conversation run and
+// each maintenance model request. The returned Execution carries the
+// invocation factory, which publishes scope_opened for the invocation before
+// it calls the opener and scope_closed when the invocation closes. Hooks'
+// final prompt and tools can never be replaced by stale pre-hook values: each
+// invocation hands the new selection with the actual committed admission and
+// the Harness-issued request to this preparation's opener. The committed opener receives the
+// artifact token's release and runs it from the prepared execution's own
+// release. Only after the opening succeeds does the collected prompt
+// presentation publish, so a failed fork or admission never creates warnings
+// for an unpublished Session and a successful opener publishes before any
+// progress.
+func (p *preparation) open(ctx context.Context, admission harness.OperationAdmission, workspace string, sel selection, warnings *preparationWarnings, opener openInvocation, artifactRelease *func()) (harness.Execution, error) {
+	releaseArtifacts, err := p.artifacts.acquireExecution(ctx, sessionArtifactDir(p.config.dataDir, admission.SessionID))
 	if err != nil {
 		return harness.Execution{}, err
 	}
 	artifactLease := &artifactCallLease{
 		intervals: p.artifacts,
-		key:       sessionArtifactDir(runtimeScope.info.DataDir, admission.SessionID),
+		key:       sessionArtifactDir(p.config.dataDir, admission.SessionID),
 		borrowed:  true,
 		release:   releaseArtifacts,
 	}
-	base := ScopeInfo{DataDir: runtimeScope.info.DataDir, Workspace: workspace, SessionID: admission.SessionID, OperationID: admission.OperationID, Revision: snapshot.resources.revisionString()}
-	operationInfo := base
-	operationInfo.Kind = ScopeOperation
-	operation, err := snapshot.composition.openScope(ctx, operationInfo, []*scope{runtimeScope, workspaceScope})
-	if err != nil {
-		releaseArtifacts()
-		return harness.Execution{}, err
+	publishScope := func(kind protocol.ScopeEventKind, request harness.InvocationRequest) {
+		p.config.obs.publish(func() []Event {
+			return []Event{scopeEvent(kind, workspace, admission.SessionID, admission.OperationID, request.ID, string(request.Purpose))}
+		})
 	}
-	_, releaseOperation, err := operation.enter(ctx)
-	if err != nil {
-		err = errors.Join(err, operation.close())
-		releaseArtifacts() // the opened scope unwind finishes before the ownership releases
-		return harness.Execution{}, err
-	}
-	agentInfo := base
-	agentInfo.Kind = ScopeAgent
 	openInvocation := func(ctx context.Context, request harness.InvocationRequest) (harness.InvocationExecution, error) {
-		agentInfo.InvocationID = request.ID
-		agentInfo.Purpose = string(request.Purpose)
-		agentScope, err := snapshot.composition.openScope(ctx, agentInfo, []*scope{runtimeScope, workspaceScope, operation})
-		if err != nil {
-			return harness.InvocationExecution{}, err
-		}
-		unwind := func(cause error, release func()) (harness.InvocationExecution, error) {
-			if release != nil {
-				release()
-			}
-			return harness.InvocationExecution{}, errors.Join(cause, agentScope.close())
-		}
-		callCtx, releaseAgent, err := agentScope.enter(ctx)
-		if err != nil {
-			return unwind(err, nil)
-		}
+		publishScope(protocol.ScopeOpened, request)
 		// The invocation view carries the execution's artifact lease; the
 		// registered tool and hook lookups come from the retained capture.
 		invocationSelection := sel
 		invocationSelection.lease = artifactLease
-		invocation, err := opener(callCtx, admission, invocationSelection, request)
-		if err != nil {
-			return unwind(err, releaseAgent)
-		}
+		invocation := opener(ctx, admission, invocationSelection, request)
 		closeInvocation := invocation.Close
 		invocation.Close = func() error {
 			var closeErr error
 			if closeInvocation != nil {
 				closeErr = closeInvocation()
 			}
-			releaseAgent()
-			return errors.Join(closeErr, agentScope.close())
+			publishScope(protocol.ScopeClosed, request)
+			return closeErr
 		}
 		return invocation, nil
 	}
@@ -499,13 +405,7 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 	}
 	return harness.Execution{
 		OpenInvocation:  openInvocation,
-		Permissions:     sel.permissions,
 		ResolveStrategy: lookup,
-		Close: func() error {
-			releaseOperation()
-			err := operation.close()
-			return err
-		},
 	}, nil
 }
 
@@ -812,8 +712,8 @@ func wireDebugDir(location string) string {
 }
 
 // concreteOpener returns the production invocation factory: per Engine call
-// it binds every advertised tool name from that invocation's view over all
-// four scopes, binds the selected argument hooks, owns one ToolContext
+// it binds every advertised tool name from that invocation's view, binds the
+// selected argument hooks, owns one ToolContext
 // carrying the prepare-time Workspace, the calling Operation's admitted-input
 // identity, the captured Invocation, the validated hard constraints and a
 // never-armed background object for normalization, and answers with the
@@ -822,17 +722,16 @@ func wireDebugDir(location string) string {
 // conversation request and the effective compact transport for a maintenance
 // request, the same construction over the one shared transport when the
 // compact model is the conversation model. Each tool dispatch copies that
-// context with a fresh background object, prepares, freezes the plan's
-// permissions and wraps its executor, so the plugin holds no background
+// context with a fresh background object and wraps its executor, so the plugin holds no background
 // authority outside Execute. The ToolContext's environment callback is the
 // preparation's fixed wrapper over the Melta's live producer: it filters the
 // captured provider and declared credential names from every snapshot it
 // returns, never rereads the selected execution policy, and keeps the nil
 // producer and nil snapshot fail-closed shapes unchanged. The shared
 // advertisement gate rejects unknown names before dispatch; retry
-// classification and scope disposal belong to the shared machinery.
+// classification and disposal belong to the shared machinery.
 func (p *preparation) concreteOpener(transport, compactTransport preparedTransport, session harness.SessionIdentity, workspace string, catalog []model.ToolDefinition, visible []string, overridden map[string]bool, subprocessEnv func(context.Context) ([]string, error)) openInvocation {
-	return func(_ context.Context, admission harness.OperationAdmission, sel selection, request harness.InvocationRequest) (harness.InvocationExecution, error) {
+	return func(_ context.Context, admission harness.OperationAdmission, sel selection, request harness.InvocationRequest) harness.InvocationExecution {
 		sessionID := admission.AdmittedEntry.SessionID
 		tc := ToolContext{
 			Session:       session,
@@ -850,16 +749,7 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 		if request.Purpose == harness.InvocationPurposeMaintenance {
 			attemptTransport = compactTransport
 		}
-		toolSettings, err := decodeToolSettings(sel.invocation.snapshot.tools)
-		if err != nil {
-			return harness.InvocationExecution{}, err
-		}
-		settings, err := json.Marshal(toolSettings)
-		if err != nil {
-			return harness.InvocationExecution{}, err
-		}
 		return harness.InvocationExecution{
-			BindLocation:    locationBinder(workspace),
 			ModelParameters: attemptTransport.parameters.Clone(),
 			RequestStage: func() harness.RequestStage {
 				current, err := sel.native.stage()
@@ -882,12 +772,10 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 					}
 					present[name] = true
 				}
-				if sel.defaultAll {
-					for _, entry := range current.entries {
-						if entry.kind == "tool" && !present[entry.name] {
-							definitions = append(definitions, entry.value.(nativeTool).definition)
-							present[entry.name] = true
-						}
+				for _, entry := range current.entries {
+					if entry.kind == "tool" && !present[entry.name] {
+						definitions = append(definitions, entry.value.(nativeTool).definition)
+						present[entry.name] = true
 					}
 				}
 				var names []string
@@ -909,42 +797,35 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 				p.passive.replaceProtocolWarnings(admission.SessionID, protocolWarnings(admission.SessionID, warnings))
 				return stream, err
 			},
-			LookupTool: func(name string) (harness.ToolBinding, bool) {
+			LookupTool: func(name string) (harness.ToolBinding, bool, error) {
 				current, err := sel.native.stage()
 				if err != nil {
-					return harness.ToolBinding{Identity: harness.ToolImplementation{ID: name}, Normalize: func(context.Context, model.ToolCall) (json.RawMessage, error) { return nil, err }, Prepare: func(context.Context, model.ToolCall) harness.PreparedTool { return harness.PreparedTool{} }}, true
+					return harness.ToolBinding{}, false, err
 				}
-				if tool := sel.invocation.snapshot.composition.standardValues[name]; tool != nil {
+				if standard, ok := sel.invocation.snapshot.composition.standardValues[name]; ok {
 					_ = current.release()
 					return harness.ToolBinding{
 						Identity: harness.ToolImplementation{ID: name},
-						Normalize: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-							return tool.Normalize(ctx, tc, call)
+						Validate: standard.validate,
+						Run: func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+							return standard.tool(ctx, tc, call)
 						},
-						Prepare: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-							callTC := tc
-							background := &boundBackground{bridge: p.background, sessionID: sessionID}
-							callTC.Background = background
-							return background.bindPlan(tool.Prepare(ctx, callTC, call))
-						},
-					}, true
+					}, true, nil
 				}
 				binding := current.bindTool(name)
 				_ = current.release()
 				if binding == nil {
-					return harness.ToolBinding{}, false
+					return harness.ToolBinding{}, false, nil
 				}
 				tool := registeredExtensionTool{binding: binding, dataDir: p.config.dataDir, lease: sel.lease, states: sel.states, host: sel.invocation.snapshot.composition, operationSecrets: sel.operationSecrets}
 				return harness.ToolBinding{
 					Identity: harness.ToolImplementation{ID: binding.entry.id, ExtensionID: binding.entry.activation.id},
-					Normalize: func(ctx context.Context, call model.ToolCall) (json.RawMessage, error) {
-						return tool.Normalize(ctx, tc, call)
-					},
-					Prepare: func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-						return tool.Prepare(ctx, tc, call)
+					Validate: binding.entry.value.(nativeTool).validate,
+					Run: func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+						return tool.Run(ctx, tc, call)
 					},
 					Release: func() { _ = binding.release() },
-				}, true
+				}, true, nil
 			},
 			ArgumentStage: func() harness.ArgumentStage {
 				current, err := sel.native.stage()
@@ -953,12 +834,12 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 				}
 				return harness.ArgumentStage{Hooks: registeredArgumentHooks(current, sel, session), Release: func() { _ = current.release() }}
 			},
-			AuthorizationStage: func() harness.AuthorizationStage {
+			CheckStage: func() harness.CheckStage {
 				current, err := sel.native.stage()
 				if err != nil {
-					return harness.AuthorizationStage{Error: err}
+					return harness.CheckStage{Error: err}
 				}
-				return harness.AuthorizationStage{Hooks: current.authorizationHooks(tc, sel.states, settings, sel.invocation.snapshot.composition, sel.lease, sel.operationSecrets), Release: func() { _ = current.release() }}
+				return harness.CheckStage{Hooks: current.checkHooks(tc, sel), Release: func() { _ = current.release() }}
 			},
 			ResultStage: func() harness.ResultStage {
 				current, err := sel.native.stage()
@@ -967,7 +848,7 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 				}
 				return harness.ResultStage{Hooks: registeredResultHooks(current, sel, session), Release: func() { _ = current.release() }}
 			},
-		}, nil
+		}
 	}
 }
 

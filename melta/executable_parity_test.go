@@ -1,11 +1,10 @@
 package melta
 
-// Native/worker transport-boundary parity: the shipped author worker fixture
-// (extension/worker/testdata/author) runs as a real stdio process, and its
-// in-process native counterpart runs the same manifest, registrations, and
-// handler semantics. Every case compares the semantic values both transports
-// produce at the owner boundary; the filesystem, lifecycle, and client cases
-// belong to their owners and are not reproduced in both forms.
+// Native/worker transport-boundary parity: one author fixture's manifest,
+// registrations, and handler semantics run directly and through the
+// in-process pipe adapter. Every case compares the semantic values both
+// transports produce at the owner boundary; the filesystem, lifecycle, and
+// client cases belong to their owners and are not reproduced in both forms.
 
 import (
 	"context"
@@ -14,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"testing"
 
@@ -44,12 +42,71 @@ func hashHex(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func TestToolReturnTransportParity(t *testing.T) {
+	for _, workerHost := range []bool{false, true} {
+		for _, row := range []struct {
+			name     string
+			cancel   bool
+			err      error
+			status   model.ToolResultStatus
+			evidence harness.ExecutionEvidence
+		}{
+			{"success", false, nil, model.ResultSuccess, harness.ExecutionObserved},
+			{"error", false, errors.New("failed"), model.ResultError, harness.ExecutionObserved},
+			{"unknown", false, extension.ErrOutcomeUnknown, model.ResultError, harness.ExecutionUnknown},
+			{"cancel unknown", true, fmt.Errorf("%w: %w", extension.ErrOutcomeUnknown, context.Canceled), model.ResultInterrupted, harness.ExecutionUnknown},
+			{"cancel", true, context.Canceled, model.ResultInterrupted, harness.ExecutionObserved},
+			{"late success", true, nil, model.ResultSuccess, harness.ExecutionObserved},
+			{"late unrelated error", true, errors.New("failed"), model.ResultError, harness.ExecutionObserved},
+			{"live cancellation error", false, context.Canceled, model.ResultError, harness.ExecutionObserved},
+		} {
+			name := "native"
+			if workerHost {
+				name = "worker"
+			}
+			t.Run(name+"/"+row.name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				manifest := registrarManifest("tool-parity")
+				author := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+					_, err := api.RegisterTool(testDescribeTool("tool"), func(callCtx context.Context, _ extension.ToolCall) (extension.ToolResult, error) {
+						if row.cancel {
+							cancel()
+							<-callCtx.Done()
+						}
+						return extension.ToolResult{Content: "ok"}, row.err
+					}, nil)
+					return nil, err
+				}}
+				if workerHost {
+					workerAuthor := author
+					spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) { return workerAuthor, nil }}
+					spawner.install()
+					author = executableAuthorExtension(manifest, "tool-parity", adapterEnvironment)
+				}
+				owner := &configurationService{}
+				candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: author, section: json.RawMessage(`{}`)}})
+				testassert.NoError(t, err)
+				defer candidate.release()
+				stage := candidate.snapshotForTest()
+				defer stage.release()
+				binding := stage.bindTool("tool")
+				testassert.Require(t, binding != nil, "tool not registered")
+				defer binding.release()
+				outcome := binding.entry.value.(nativeTool).tool(ctx, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)})
+				if outcome.Result.Status != row.status || outcome.Evidence != row.evidence {
+					t.Fatalf("outcome = %+v, want %s/%s", outcome, row.status, row.evidence)
+				}
+			})
+		}
+	}
+}
+
 // eachAuthorTransport runs one case through the in-process native fixture and
-// the real worker process over the same candidate fixture, then compares the
-// two semantic observations.
-func eachAuthorTransport(t *testing.T, run func(t *testing.T, workerHost bool, binary string) parityObservation) {
+// the pipe adapter over the same candidate fixture, then compares the two
+// semantic observations.
+func eachAuthorTransport(t *testing.T, run func(t *testing.T, workerHost bool) parityObservation) {
 	t.Helper()
-	binary := buildAuthorWorker(t)
 	observed := make([]parityObservation, 2)
 	complete := true
 	for index, workerHost := range []bool{false, true} {
@@ -59,7 +116,13 @@ func eachAuthorTransport(t *testing.T, run func(t *testing.T, workerHost bool, b
 		}
 		index, workerHost := index, workerHost
 		if !t.Run(name, func(t *testing.T) {
-			observed[index] = run(t, workerHost, binary)
+			if workerHost {
+				spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+					return nativeAuthorFixture(), nil
+				}}
+				spawner.install()
+			}
+			observed[index] = run(t, workerHost)
 		}) {
 			complete = false
 		}
@@ -82,44 +145,34 @@ type parityFixtureTool struct {
 	remove bool
 }
 
-func (t *parityFixtureTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *parityFixtureTool) Prepare(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) extension.ToolPlan {
+func (t *parityFixtureTool) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	if !t.fresh {
 		if _, err := call.Call(ctx, "gate", "park", json.RawMessage(`{}`)); err != nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+			return extension.ToolResult{}, err
 		}
 		if t.remove {
 			if err := t.api.Remove(*t.handle); err != nil {
-				return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+				return extension.ToolResult{}, err
 			}
-			return extension.ToolPlan{Data: []byte("old-plan"), Start: &extension.SessionStart{Target: "raw/name", InitialState: []byte(`{"large":9007199254740993}`), Report: true}}
+			return extension.ToolResult{Content: "old handler"}, nil
 		}
-		if _, err := t.api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, &parityFixtureTool{fresh: true}, *t.handle); err == nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "reserved replacement accepted"}}}
+		if _, err := t.api.RegisterTool(model.ToolDefinition{Name: "read_file", Parameters: json.RawMessage(`{}`)}, (&parityFixtureTool{fresh: true}).run, *t.handle); err == nil {
+			return extension.ToolResult{}, errors.New("reserved replacement accepted")
 		}
-		replacement, err := t.api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, &parityFixtureTool{fresh: true}, *t.handle)
+		replacement, err := t.api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, (&parityFixtureTool{fresh: true}).run, *t.handle)
 		if err != nil {
-			return extension.ToolPlan{Immediate: &harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: err.Error()}}}
+			return extension.ToolResult{}, err
 		}
 		*t.handle = replacement
+		return extension.ToolResult{Content: "old handler"}, nil
 	}
-	return extension.ToolPlan{Data: []byte("old-plan"), Start: &extension.SessionStart{Target: "raw/name", InitialState: []byte(`{"large":9007199254740993}`), Report: true}}
-}
-
-func (t *parityFixtureTool) Execute(_ context.Context, _ extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	if t.fresh || string(plan.Data) != "old-plan" || plan.Start == nil || plan.Start.Target != "raw/name" || string(plan.Start.InitialState) != `{"large":9007199254740993}` || !plan.Start.Report {
-		return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultError, Content: "incorrect handler or plan"}}
-	}
-	return harness.ToolOutcome{Result: model.ToolResult{Status: model.ResultSuccess, Content: "old handler"}, Evidence: harness.ExecutionObserved}
+	return extension.ToolResult{}, errors.New("incorrect handler")
 }
 
 // nativeAuthorFixture is the in-process counterpart of the worker fixture's
 // default entry: same manifest, same registrations, same handler semantics.
 // Its "crash" method is the worker fixture's process exit; the parity script
-// never dispatches it, only proves both transports refuse it in a pure scope.
+// never dispatches it.
 func nativeAuthorFixture() extension.Extension {
 	return extension.Extension{
 		Manifest: authorFixtureManifest(),
@@ -136,13 +189,13 @@ func nativeAuthorFixture() extension.Extension {
 			}
 			_, err = api.RegisterService(extension.Service{Name: "worker-service", Methods: []extension.RegisteredMethod{
 				{
-					Method: extension.Method{Name: "relay", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "relay", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(ctx context.Context, call extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 						return call.Call(ctx, "host-service", "echo", args)
 					},
 				},
 				{
-					Method: extension.Method{Name: "crash", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+					Method: extension.Method{Name: "crash", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 					Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 						return extension.Result{}, errors.New("native crash stand-in")
 					},
@@ -153,13 +206,13 @@ func nativeAuthorFixture() extension.Extension {
 			}
 			var handle extension.Registration
 			tool := &parityFixtureTool{api: api, handle: &handle}
-			handle, err = api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, tool, nil)
+			handle, err = api.RegisterTool(model.ToolDefinition{Name: "worker-tool", Parameters: json.RawMessage(`{}`)}, tool.run, nil)
 			if err != nil {
 				return nil, err
 			}
 			var removable extension.Registration
 			remover := &parityFixtureTool{api: api, handle: &removable, remove: true}
-			removable, err = api.RegisterTool(model.ToolDefinition{Name: "removable-tool", Parameters: json.RawMessage(`{}`)}, remover, nil)
+			removable, err = api.RegisterTool(model.ToolDefinition{Name: "removable-tool", Parameters: json.RawMessage(`{}`)}, remover.run, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -167,13 +220,13 @@ func nativeAuthorFixture() extension.Extension {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachArguments(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
+			_, err = api.AttachArguments(func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (extension.ArgumentsResult, error) {
 				return extension.ArgumentsResult{Arguments: append(json.RawMessage(nil), call.Arguments...)}, nil
 			}, nil)
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachRequest(extension.HookModePure, func(_ context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			_, err = api.AttachRequest(func(_ context.Context, _ extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
 				prompt := "worker prompt"
 				return harness.RequestConsequence{Prompt: &prompt}, nil
 			}, nil)
@@ -186,9 +239,9 @@ func nativeAuthorFixture() extension.Extension {
 			if err != nil {
 				return nil, err
 			}
-			_, err = api.AttachAuthorization(func(_ context.Context, _ extension.AuthorContext, input extension.AuthorizationInput) (*string, error) {
+			_, err = api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, input model.ToolCall) (*string, error) {
 				if string(input.Arguments) != string([]byte{0xff, '{'}) {
-					return nil, errors.New("authorization arguments changed")
+					return nil, errors.New("check arguments changed")
 				}
 				refusal := "denied by worker"
 				return &refusal, nil
@@ -198,7 +251,7 @@ func nativeAuthorFixture() extension.Extension {
 			}
 			_, err = api.RegisterOperation(extension.Operation{
 				Target: extension.ExposedTargetHarness,
-				Method: extension.Method{Name: "operation", Mode: extension.ModePure, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+				Method: extension.Method{Name: "operation", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 				Handler: func(_ context.Context, _ extension.AuthorContext, args json.RawMessage) (extension.Result, error) {
 					return extension.Result{Value: args}, nil
 				},
@@ -244,8 +297,8 @@ func (parityStrategy) Consume(harness.ConsumeInput) (harness.PlanOutput, error) 
 
 // TestAuthorTransportBoundaryParity runs the author fixture's registered
 // service values, tool handler chain, strategy, hooks, operation, activation
-// hostcall, activation failure, and pure-scope refusal through both
-// transports and compares the semantic observations.
+// hostcall and activation failure through both transports and compares the
+// semantic observations.
 func TestAuthorTransportBoundaryParity(t *testing.T) {
 	corpus := []string{
 		"{\n  \"a\": 1,\n  \"nested\": {\"b\": [true, null]}\n}",
@@ -253,13 +306,11 @@ func TestAuthorTransportBoundaryParity(t *testing.T) {
 		"{\"big\":9007199254740993,\"precise\":1.0000000000000002}",
 		"{\"text\":\"line\\nbreak\\ttab <>& \\u2028 \\u00e9 \\\"quoted\\\"\"}",
 	}
-	eachAuthorTransport(t, func(t *testing.T, workerHost bool, binary string) parityObservation {
+	eachAuthorTransport(t, func(t *testing.T, workerHost bool) parityObservation {
 		manifest := authorFixtureManifest()
 		guest := nativeAuthorFixture()
 		if workerHost {
-			guest = executableAuthorExtension(manifest, binary, func(context.Context, []string) ([]string, error) {
-				return append([]string(nil), os.Environ()...), nil
-			})
+			guest = executableAuthorExtension(manifest, "author-worker", adapterEnvironment)
 		}
 		owner := &configurationService{}
 		ctx := context.Background()
@@ -286,22 +337,18 @@ func TestAuthorTransportBoundaryParity(t *testing.T) {
 		testassert.NoError(t, candidate.publishForTest())
 		observation.set("activation", "ok")
 
-		callScoped := func(service, method string, args json.RawMessage, pure bool) (extension.Result, error) {
-			scope := &nativeCallScope{}
-			if pure {
-				scope = &nativeCallScope{pure: true}
-			}
-			return candidate.callServiceScoped(ctx, service, method, args, scope)
+		callScoped := func(service, method string, args json.RawMessage) (extension.Result, error) {
+			return candidate.callServiceScoped(ctx, service, method, args, &nativeCallScope{})
 		}
 		for index, payload := range corpus {
-			result, err := callScoped("worker-service", "relay", json.RawMessage(payload), true)
+			result, err := callScoped("worker-service", "relay", json.RawMessage(payload))
 			testassert.NoError(t, err)
 			testassert.Require(t, string(result.Value) == payload, "service relay %d = %q, want the exact arguments %q", index, result.Value, payload)
 			observation.set(fmt.Sprintf("relay-%d", index), hashHex(result.Value))
 		}
-		_, err := callScoped("worker-service", "crash", json.RawMessage(`{}`), true)
-		testassert.Require(t, errors.Is(err, ErrDenied) && errors.Is(err, ErrComposition), "pure-scope ServiceIO call = %v, want the composition refusal", err)
-		observation.set("pure-refused", "denied")
+		_, err := callScoped("worker-service", "crash", json.RawMessage(`{}`))
+		testassert.Require(t, err != nil, "crash service = %v, want its handler's error", err)
+		observation.set("crash", string(ErrorCode(err)))
 
 		stage := candidate.snapshotForTest()
 		defer stage.release()
@@ -311,23 +358,10 @@ func TestAuthorTransportBoundaryParity(t *testing.T) {
 		}
 		defer binding.release()
 		tool := binding.entry.value.(nativeTool).tool
-		for index, payload := range corpus {
-			normalized, err := tool.Normalize(extension.AuthorContext{}, model.ToolCall{ID: fmt.Sprintf("call-%d", index), Name: "worker-tool", Arguments: json.RawMessage(payload)})
-			testassert.NoError(t, err)
-			testassert.Require(t, string(normalized) == payload, "normalized arguments %d = %q, want the exact call arguments", index, normalized)
-			observation.set(fmt.Sprintf("normalize-%d", index), hashHex(normalized))
-		}
 		gate := func(context.Context, string, string, json.RawMessage) (extension.Result, error) {
 			return extension.Result{Value: json.RawMessage(`{}`)}, nil
 		}
-		plan := tool.Prepare(ctx, extension.AuthorContext{Call: gate}, model.ToolCall{ID: "call", Name: "worker-tool", Arguments: json.RawMessage(`{}`)})
-		if plan.Immediate != nil {
-			t.Fatalf("prepare: %+v", plan.Immediate)
-		}
-		start, err := json.Marshal(plan.Start)
-		testassert.NoError(t, err)
-		observation.set("plan", hashHex(plan.Data)+":"+hashHex(start))
-		outcome := tool.Execute(ctx, extension.AuthorContext{}, plan)
+		outcome := tool(ctx, extension.AuthorContext{Call: gate}, model.ToolCall{ID: "call", Name: "worker-tool", Arguments: json.RawMessage(`{}`)})
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Result.Content == "old handler" && outcome.Evidence == harness.ExecutionObserved, "execute = %+v, want the old handler's observed success", outcome)
 		observation.set("execute", outcome.Result.Content+":"+string(outcome.Evidence))
 
@@ -355,13 +389,13 @@ func TestAuthorTransportBoundaryParity(t *testing.T) {
 		content, err := resultHook(ctx, extension.AuthorContext{}, harness.ToolOutputInput{Content: "output"})
 		testassert.NoError(t, err)
 		observation.set("hook-result", content)
-		authorizationHook := stage.hooks["authorization"][0].value.(nativeHook).handler.(extension.AuthorizationHook)
-		refusal, err := authorizationHook(ctx, extension.AuthorContext{}, extension.AuthorizationInput{Arguments: json.RawMessage{0xff, '{'}})
+		checkHook := stage.hooks["check"][0].value.(nativeHook).handler.(extension.ToolCheckHook)
+		refusal, err := checkHook(ctx, extension.AuthorContext{}, model.ToolCall{Arguments: json.RawMessage{0xff, '{'}})
 		testassert.NoError(t, err)
-		testassert.Require(t, refusal != nil && *refusal == "denied by worker", "authorization = %v", refusal)
-		kept, err := authorizationHook(ctx, extension.AuthorContext{}, extension.AuthorizationInput{Arguments: json.RawMessage(`{}`)})
-		testassert.Require(t, err != nil && kept == nil, "authorization with changed arguments = (%v, %v), want the refusal error", kept, err)
-		observation.set("hook-authorization", *refusal+":refused")
+		testassert.Require(t, refusal != nil && *refusal == "denied by worker", "check = %v", refusal)
+		kept, err := checkHook(ctx, extension.AuthorContext{}, model.ToolCall{Arguments: json.RawMessage(`{}`)})
+		testassert.Require(t, err != nil && kept == nil, "check with changed arguments = (%v, %v), want the refusal error", kept, err)
+		observation.set("hook-check", *refusal+":refused")
 
 		admissionHook := stage.hooks["admission"][0].value.(nativeHook).handler.(extension.AdmissionHook)
 		promptReads := 0

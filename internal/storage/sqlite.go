@@ -39,12 +39,14 @@ const (
 	// request purpose; 22 records positional request edits, advertised tool
 	// definitions, body parameters, and materialized summary inputs; 23
 	// replaces the durable Agent selection with per-extension Session state;
-	// 24 adds the before-tool refusal consequence to successful hook results;
-	// 25 adds retried-attempt usage to assistant entries, settlements and
-	// maintenance facts, narrows assistant entries to completed or interrupted,
-	// and removes the model-failure continuation signal.
+	// 24 records the before-tool refusal consequence on successful hook
+	// records; 25 adds retried-attempt usage to assistant entries, settlements
+	// and maintenance facts, narrows assistant entries to completed or
+	// interrupted, and removes the model-failure continuation signal; 26
+	// removes hook records from the closed entry kinds and the hook member
+	// from the operation register.
 	// The SQL tables are unchanged.
-	sqliteSchemaVersion = 25
+	sqliteSchemaVersion = 26
 
 	// sqlitePoolDSN configures every physical connection of the long-lived
 	// pool: write-ahead logging, full synchronous durability, immediate
@@ -67,7 +69,7 @@ const sqliteEntriesDDL = `CREATE TABLE entries (
     operation_id    TEXT    NOT NULL,
     kind            TEXT    NOT NULL CHECK (kind IN (
         'input', 'assistant', 'tool_result', 'signal',
-        'hook_result', 'context_checkpoint', 'operation_settlement'
+        'context_checkpoint', 'operation_settlement'
     )),
     committed_at_ns INTEGER NOT NULL CHECK (committed_at_ns > 0),
     payload         TEXT    NOT NULL CHECK (json_valid(payload)),

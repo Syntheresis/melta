@@ -2,7 +2,6 @@ package melta
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -11,80 +10,43 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-func TestRunCommandNormalization(t *testing.T) {
-	byID := directTools(t.TempDir())
-	tc := callToolContext(t.TempDir())
-	runCommand := byID["run_command"]
+type cancelledBackground struct{}
 
-	t.Run("applies the default timeout and strips private fields", func(t *testing.T) {
-		raw, err := normalize(t, runCommand, tc, "run_command", `{"command":"ls","_melta_receipt":"x"}`)
-		testassert.NoError(t, err)
-		var args map[string]any
-		testassert.NoError(t, json.Unmarshal(raw, &args))
-		testassert.Require(t, args["command"] == "ls" && args["timeout"] == float64(120) && args["background"] == false, "normalized = %s, want the command with the default 120 timeout and background false", raw)
-		{
-			_, ok := args["_melta_receipt"]
-			testassert.Require(t, !ok, "normalized arguments retained a private field")
-		}
-	})
+func (cancelledBackground) StartJob(ctx context.Context, _ string, _ func(context.Context, func(string) error) error) error {
+	return ctx.Err()
+}
 
-	t.Run("background booleans are accepted and non-booleans are rejected", func(t *testing.T) {
-		raw, err := normalize(t, runCommand, tc, "run_command", `{"command":"ls","background":true}`)
-		testassert.NoError(t, err)
-		var args map[string]any
-		testassert.NoError(t, json.Unmarshal(raw, &args))
-		testassert.Require(t, args["background"] == true && args["timeout"] == float64(0), "normalized = %s, want background true with the sub-one timeout 0", raw)
-		raw, err = normalize(t, runCommand, tc, "run_command", `{"command":"ls","background":false,"timeout":5}`)
-		testassert.NoError(t, err)
-		args = nil
-		testassert.NoError(t, json.Unmarshal(raw, &args))
-		testassert.Require(t, args["background"] == false && args["timeout"] == float64(5), "normalized = %s, want background false with the foreground timeout 5", raw)
-		raw, err = normalize(t, runCommand, tc, "run_command", `{"command":"ls","background":true,"timeout":7}`)
-		testassert.NoError(t, err)
-		args = nil
-		testassert.NoError(t, json.Unmarshal(raw, &args))
-		testassert.Require(t, args["background"] == true && args["timeout"] == float64(7), "normalized = %s, want background true with the forwarded timeout 7", raw)
-		for _, args := range []string{
-			`{"command":"ls","background":null}`,
-			`{"command":"ls","background":0}`,
-			`{"command":"ls","background":"later"}`,
-		} {
-			{
-				_, err := normalize(t, runCommand, tc, "run_command", args)
-				testassert.Check(t, err != nil && strings.Contains(err.Error(), "run_command: background must be a boolean"), "run_command normalized %s to %v, want the boolean rejection", args, err)
-			}
-		}
-	})
+func TestCancelledBackgroundStartAbortsReservation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	jobs := &fakeJobs{}
+	output := newLiveToolOutput(newObservation())
+	run := newStandardTools(t.TempDir(), jobs, output)["run_command"]
+	tc := envCallContext(t, t.TempDir())
+	tc.Background = cancelledBackground{}
+	call := makeCall(t, "run_command", `{"command":"true","background":true}`)
+	got := run(ctx, tc, call)
+	testassert.Require(t, got.Result.Status == model.ResultInterrupted && got.Result.Content == "command cancelled", "outcome = %+v", got)
+	testassert.Require(t, len(jobs.aborted) == 1 && jobs.aborted[0] == "b0b0b0b0" && len(jobs.started) == 0, "jobs = %+v", jobs)
+}
 
-	t.Run("timeout is a strict consumed integer within the duration bound", func(t *testing.T) {
-		raw, err := normalize(t, runCommand, tc, "run_command", `{"command":"ls","timeout":5}`)
-		testassert.Require(t, err == nil && strings.Contains(string(raw), `"timeout":5`), "normalized = (%s, %v), want the override kept", raw, err)
-		for _, args := range []string{
-			`{"command":"ls","timeout":1.5}`,
-			`{"command":"ls","timeout":"many"}`,
-			`{"command":"ls","timeout":true}`,
-			`{"command":"ls","timeout":null}`,
-			`{"command":"ls","timeout":9223372036854775808}`,
-			`{"command":"ls","timeout":9223372037}`,
-		} {
-			{
-				_, err := normalize(t, runCommand, tc, "run_command", args)
-				testassert.Check(t, err != nil, "run_command normalized %s, want rejection", args)
-			}
-		}
-		// The default keeps sub-one and negative supplied values.
-		raw, err = normalize(t, runCommand, tc, "run_command", `{"command":"ls","timeout":0}`)
-		testassert.Require(t, err == nil && strings.Contains(string(raw), `"timeout":120`), "normalized = (%s, %v), want the default for a sub-one override", raw, err)
-	})
-
-	t.Run("empty command text keeps the retained argument error", func(t *testing.T) {
-		for _, args := range []string{`{}`, `{"command":""}`, `{"command":null}`, `{"command":5}`} {
-			{
-				_, err := normalize(t, runCommand, tc, "run_command", args)
-				testassert.Check(t, err != nil && strings.Contains(err.Error(), "run_command: command is required"), "run_command normalized %s to %v, want the retained required error", args, err)
-			}
-		}
-	})
+func TestRunCommandPreservesCommandText(t *testing.T) {
+	const command = " \tprintf x; printf y"
+	jobs := &fakeJobs{}
+	run := newStandardTools(t.TempDir(), jobs, newLiveToolOutput(newObservation()))["run_command"]
+	tc := envCallContext(t, t.TempDir())
+	tc.Background = scriptBackground{}
+	original := runForegroundCommandFn
+	t.Cleanup(func() { runForegroundCommandFn = original })
+	runForegroundCommandFn = func(_ context.Context, got, _ string, _ int, _ *cmdoutput.Capture, _ []string) (string, error) {
+		testassert.Equal(t, got, command)
+		return "ok", nil
+	}
+	foreground := makeCall(t, "run_command", `{"command":" \tprintf x; printf y"}`)
+	testassert.Equal(t, run(context.Background(), tc, foreground).Result.Status, model.ResultSuccess)
+	background := makeCall(t, "run_command", `{"command":" \tprintf x; printf y","background":true}`)
+	testassert.Equal(t, run(context.Background(), tc, background).Result.Status, model.ResultSuccess)
+	testassert.Require(t, len(jobs.started) == 1 && jobs.started[0].Command == command, "jobs = %+v", jobs.started)
 }
 
 // TestCommandOutcomeClassifiesByDeliveredCause pins the causal settlement of

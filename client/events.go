@@ -169,7 +169,7 @@ func decodeNotification(raw []byte, instance string) (protocol.Event, error) {
 		if err := requireMembers(members, "kind", "scope"); err != nil {
 			return protocol.Event{}, err
 		}
-		if err := validateScope(members["scope"]); err != nil {
+		if err := validateInvocationScope(members["scope"]); err != nil {
 			return protocol.Event{}, err
 		}
 		var out protocol.Event
@@ -411,9 +411,23 @@ func requireMembers(members map[string]json.RawMessage, names ...string) error {
 
 // The closed scope member vocabulary shared by every union branch, and the
 // identities each kind must carry to address its subject; the runtime scope
-// alone names the whole Runtime with none.
+// alone names the whole Runtime with none. Scope events carry only the
+// invocation scope, with its own vocabulary and identities.
 var (
 	scopeMembers = map[string]bool{
+		"kind":         true,
+		"workspace":    true,
+		"session_id":   true,
+		"operation_id": true,
+		"job_id":       true,
+	}
+	scopeRequiredIdentities = map[string][]string{
+		"runtime":   nil,
+		"session":   {"session_id"},
+		"operation": {"session_id", "operation_id"},
+		"job":       {"session_id", "job_id"},
+	}
+	invocationScopeMembers = map[string]bool{
 		"kind":          true,
 		"workspace":     true,
 		"session_id":    true,
@@ -422,13 +436,8 @@ var (
 		"invocation_id": true,
 		"purpose":       true,
 	}
-	scopeRequiredIdentities = map[string][]string{
-		"runtime":    nil,
-		"workspace":  {"workspace"},
-		"session":    {"session_id"},
-		"operation":  {"session_id", "operation_id"},
+	invocationScopeIdentities = map[string][]string{
 		"invocation": {"session_id", "operation_id", "invocation_id", "purpose"},
-		"job":        {"session_id", "job_id"},
 	}
 )
 
@@ -440,6 +449,16 @@ var (
 // present. The generated union's decode stores the raw value without
 // inspecting it, so this is the scope's one validation.
 func validateScope(raw json.RawMessage) error {
+	return validateScopeIn(raw, scopeMembers, scopeRequiredIdentities)
+}
+
+// validateInvocationScope proves one scope event's scope is an invocation
+// scope under the same rules.
+func validateInvocationScope(raw json.RawMessage) error {
+	return validateScopeIn(raw, invocationScopeMembers, invocationScopeIdentities)
+}
+
+func validateScopeIn(raw json.RawMessage, vocabulary map[string]bool, kinds map[string][]string) error {
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &members); err != nil {
 		return fmt.Errorf("scope: %w", err)
@@ -454,7 +473,7 @@ func validateScope(raw json.RawMessage) error {
 		return fmt.Errorf("scope: %w", err)
 	}
 	for name, value := range members {
-		if !scopeMembers[name] {
+		if !vocabulary[name] {
 			return fmt.Errorf("scope member %q is unknown", name)
 		}
 		if name == "kind" {
@@ -481,7 +500,7 @@ func validateScope(raw json.RawMessage) error {
 	if err := json.Unmarshal(members["kind"], &kind); err != nil {
 		return fmt.Errorf("scope kind: %w", err)
 	}
-	required, known := scopeRequiredIdentities[kind]
+	required, known := kinds[kind]
 	if !known {
 		return fmt.Errorf("scope kind %q is outside the closed set", kind)
 	}

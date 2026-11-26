@@ -170,11 +170,11 @@ function basicMocks(connection: ReturnType<typeof fakeConnection>) {
   vi.mocked(sdk.ListExtensions).mockResolvedValue(json(200, [{
     extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: ['task'],
     operations: [
-      { method: { name: 'create', mode: 'service_io', input: '{}', success: '{}' }, target: 'workspace' },
-      { method: { name: 'list', mode: 'pure', input: '{}', success: '{}' }, target: 'harness' },
-      { method: { name: 'current', mode: 'pure', input: '{}', success: '{}' }, target: 'session' },
-      { method: { name: 'select', mode: 'service_io', input: '{}', success: '{}' }, target: 'session' },
-      { method: { name: 'set_model', mode: 'service_io', input: '{}', success: '{}' }, target: 'harness' },
+      { method: { name: 'create', input: '{}', success: '{}' }, target: 'workspace' },
+      { method: { name: 'list', input: '{}', success: '{}' }, target: 'harness' },
+      { method: { name: 'current', input: '{}', success: '{}' }, target: 'session' },
+      { method: { name: 'select', input: '{}', success: '{}' }, target: 'session' },
+      { method: { name: 'set_model', input: '{}', success: '{}' }, target: 'harness' },
     ],
   }]));
   vi.mocked(sdk.InvokeExtension).mockImplementation(async (params: string) => {
@@ -447,7 +447,7 @@ describe('initial composition', () => {
     vi.mocked(sdk.ListSessions).mockResolvedValue(json(200, []));
     vi.mocked(sdk.ListExtensions).mockResolvedValue(json(200, [
       { extension_id: 'guest', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [] },
-      { extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [{ method: { name: 'create', mode: 'service_io', input: '{}', success: '{}' }, target: 'workspace' }] },
+      { extension_id: 'agents', version: '1', configuration_schema: '{}', settings: '{}', tools: [], operations: [{ method: { name: 'create', input: '{}', success: '{}' }, target: 'workspace' }] },
     ]));
     vi.mocked(sdk.InvokeExtension).mockResolvedValue(json(200, { kind: 'success', result: { session_id: 'primary1' } }));
     vi.mocked(sdk.GetSessionHydration).mockResolvedValue(json(200, hydration({ session: session('primary1', NEWER) })));

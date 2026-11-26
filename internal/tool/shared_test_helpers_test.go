@@ -272,14 +272,14 @@ func producerMutationCases() []producerMutationCase {
 		{
 			name: "write", existing: true, seed: "before", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, root, store, map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},
 		{
 			name: "edit", existing: true, seed: "before", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execEdit(t, root, "", store, map[string]any{
+				_, err := execEdit(t, root, store, map[string]any{
 					"path": path, "old_string": "before", "new_string": "after",
 				})
 				return err
@@ -288,7 +288,7 @@ func producerMutationCases() []producerMutationCase {
 		{
 			name: "write_created", existing: false, seed: "", intended: "after",
 			run: func(t *testing.T, root, path string, store testCodeGroupStore) error {
-				_, err := execWrite(t, root, "", store, map[string]any{"path": path, "content": "after"})
+				_, err := execWrite(t, root, store, map[string]any{"path": path, "content": "after"})
 				return err
 			},
 		},

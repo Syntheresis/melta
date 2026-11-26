@@ -54,12 +54,10 @@ func TestPublicExecutionCancellationAtToolIntentHandoff(t *testing.T) {
 				return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
 					return harness.InvocationExecution{
 						Model: script.effect,
-						LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-							return harness.PreparedTool{Permissions: publicPermission, Execute: func(context.Context) harness.ToolOutcome {
-								executed++
-								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
-							}}
-						}, publicNormalize),
+						LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.ToolOutcome {
+							executed++
+							return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
+						}),
 					}, nil
 				}}, nil
 			}
@@ -83,61 +81,5 @@ func TestPublicExecutionCancellationAtToolIntentHandoff(t *testing.T) {
 		testassert.NoError(t, err)
 		testassert.Require(t, rec.State.Status == harness.OperationInterruption && rec.State.Terminal != nil && rec.State.Terminal.Detail == "agent interrupted" && len(rec.State.PendingToolCalls) == 0,
 			"operation after the tool-intent-handoff shutdown = %+v, want the committed ordinary interruption with the call settled", rec.State)
-	})
-}
-
-// TestPublicExecutionCancellationAtHookIntentHandoff mirrors the same row at
-// the argument-hook effect's intent: the committed hook intent is followed by
-// the interrupted hook settlement, the hook callback never runs, and Wait
-// converges clean.
-func TestPublicExecutionCancellationAtHookIntentHandoff(t *testing.T) {
-	eachStore(t, func(t *testing.T, store harness.Storage) {
-		script := newScriptModel(publicTurn("call-1"), publicTurn())
-		probe := &publicationCancelStore{Storage: store}
-		f := newPublicFixture(t, probe, script, nil)
-		defer f.close()
-		session := createSession(t, f.h)
-		var hookRan, prepared int
-		intentHandoff := make(chan struct{})
-		f.prepareHook = func(call int, req harness.PreparationRequest) (harness.PreparedExecution, error) {
-			prep := f.defaultPrep
-			prep.Open = func(context.Context, harness.OperationAdmission) (harness.Execution, error) {
-				return harness.Execution{OpenInvocation: func(context.Context, harness.InvocationRequest) (harness.InvocationExecution, error) {
-					return harness.InvocationExecution{
-						Model: script.effect,
-						LookupTool: fixtureToolLookup(func(ctx context.Context, call model.ToolCall) harness.PreparedTool {
-							prepared++
-							return harness.PreparedTool{Permissions: publicPermission, Execute: func(context.Context) harness.ToolOutcome {
-								return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
-							}}
-						}, publicNormalize),
-						ToolHooks: []harness.ToolArgumentsHook{{ID: "hook.handoff", ExtensionID: "handoff-ext", Mode: harness.HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (harness.ToolArgumentsResult, error) {
-							hookRan++
-							return harness.ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
-						}}},
-					}, nil
-				}}, nil
-			}
-			armIntentHandoffShutdown(probe, f, intentHandoff)
-			return prep, nil
-		}
-		res, err := submit(t, f.h, session, "op-hook-intent", harness.MessageModeRegular, "hello")
-		testassert.Require(t, err == nil && res.Disposition == harness.DispositionAdmitted && res.Operation != nil, "submit = %+v err %v, want the admitted operation", res, err)
-		select { // the hook intent transaction is at the store handoff: the pre-Transact check already passed
-		case <-intentHandoff:
-		case <-time.After(10 * time.Second):
-			t.Fatalf("the argument hook effect intent never reached the store handoff")
-		}
-		{
-			err := converge(t, f)
-			testassert.Require(t, err == nil, "Wait after the hook-intent-handoff shutdown = %v, want no retained publication or storage failure", err)
-		}
-		testassert.Require(t, hookRan == 0, "the canceled effect ran the hook %d times, want zero after the committed intent", hookRan)
-		testassert.Require(t, prepared == 0, "the canceled chain prepared the call %d times, want zero", prepared)
-		testassert.Require(t, len(script.seen()) == 1, "the canceled execution dispatched %d model requests, want only the publishing turn", len(script.seen()))
-		rec, err := f.h.ReadOperation(context.Background(), session, "op-hook-intent")
-		testassert.NoError(t, err)
-		testassert.Require(t, rec.State.Status == harness.OperationInterruption && rec.State.Terminal != nil && rec.State.Terminal.Detail == "agent interrupted" && len(rec.State.PendingToolCalls) == 0,
-			"operation after the hook-intent-handoff shutdown = %+v, want the committed ordinary interruption with the call settled", rec.State)
 	})
 }

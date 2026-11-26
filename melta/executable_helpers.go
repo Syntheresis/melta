@@ -67,9 +67,8 @@ func decodeOutcome(outcome requestOutcome) (any, error) {
 	}
 	if outcome.failure != nil {
 		cause := ownedWorkerFailure(outcome.failure)
-		known := outcome.failure.Interrupted || outcome.failure.Evidence != ""
-		if known {
-			return nil, &harness.EffectError{Evidence: outcome.failure.Evidence, Interrupted: outcome.failure.Interrupted, Err: cause}
+		if outcome.failure.Interrupted {
+			return nil, &harness.EffectError{Interrupted: outcome.failure.Interrupted, Err: cause}
 		}
 		if !(outcome.hostCancelled && outcome.failure.Class == worker.ClassCancelled) {
 			return nil, cause
@@ -83,5 +82,5 @@ func decodeOutcome(outcome requestOutcome) (any, error) {
 	if err == nil {
 		err = extension.ErrClosed
 	}
-	return nil, &harness.EffectError{Evidence: outcome.evidence, Interrupted: outcome.hostCancelled, Err: err}
+	return nil, &harness.EffectError{Interrupted: outcome.hostCancelled, Err: err}
 }

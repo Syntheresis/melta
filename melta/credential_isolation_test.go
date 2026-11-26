@@ -36,20 +36,11 @@ type heldCredentialTool struct {
 	values map[string]string
 }
 
-func (t *heldCredentialTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *heldCredentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "held"}}, Data: []byte(call.ID)}
-}
-
-func (t *heldCredentialTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	callID := string(plan.Data)
+func (t *heldCredentialTool) run(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	for _, field := range t.fields {
 		result, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"`+field+`"}`))
 		if err != nil {
-			return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
+			return extension.ToolResult{}, err
 		}
 		value := credentialString(result)
 		t.mu.Lock()
@@ -66,10 +57,10 @@ func (t *heldCredentialTool) Execute(ctx context.Context, tc extension.AuthorCon
 		select {
 		case <-t.release:
 		case <-ctx.Done():
-			return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: ctx.Err().Error()}}
+			return extension.ToolResult{}, ctx.Err()
 		}
 	}
-	return credentialOutcome(callID, "held")
+	return extension.ToolResult{Content: "held"}, nil
 }
 
 func (t *heldCredentialTool) value(field string) string {
@@ -85,7 +76,7 @@ func heldCredentialNative(t *testing.T, id string, secrets []extension.SecretRef
 	manifest.Secrets = secrets
 	manifest.Services = []string{extension.ContractCredentials}
 	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(model.ToolDefinition{Name: toolID, Parameters: json.RawMessage(`{"type":"object"}`)}, tool, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: toolID, Parameters: json.RawMessage(`{"type":"object"}`)}, tool.run, nil)
 		return nil, err
 	}}
 }
@@ -377,7 +368,7 @@ func TestCandidateResourceHoldsNamesBeforeOpen(t *testing.T) {
 	built := <-buildDone
 	testassert.Require(t, built.err == nil && built.snapshot != nil && built.snapshot.native.inactive["credlife"] != nil, "candidate with a failing activation = (%v, %+v), want the extension left out with a reason", built.err, built.snapshot)
 	testassert.Require(t, built.snapshot.native.release() == nil, "releasing the unpublished candidate")
-	testassert.Require(t, built.snapshot.resources.release() == nil, "releasing the unpublished candidate resources")
+	built.snapshot.resources.release()
 	testassert.Require(t, slices.Contains(subprocessEnvForTest(t, svc), name+"=candidate-open-value"), "name stayed held after an unpublished candidate unwound")
 }
 
@@ -477,7 +468,7 @@ func TestHeldCredentialNamesProtectOtherSessionsAfterReload(t *testing.T) {
 	testassert.Require(t, strings.Contains(afterOutput, "shell="+shellValue+"|old="+oldValue+"|new=|unrelated="+unrelatedV), "after output = %q, want released old/shell visible and the still-current new name excluded", afterOutput)
 }
 
-func TestProviderOnlyRenameUsesAdoptedResourcesAndHeldNames(t *testing.T) {
+func TestProviderOnlyRenameUsesHeldNames(t *testing.T) {
 	const (
 		oldProvider = "MELTA_HELD_PROVIDER_OLD"
 		newProvider = "MELTA_HELD_PROVIDER_NEW"
@@ -519,12 +510,9 @@ func TestProviderOnlyRenameUsesAdoptedResourcesAndHeldNames(t *testing.T) {
 			return out
 		}())
 	}
-	resources := r.config.current().resources
-
 	writeServiceFile(t, e.configPath, heldProviderConfig(e.server.URL, newProvider))
 	_, err = r.Reload(context.Background(), testCaller(r))
 	testassert.NoError(t, err)
-	testassert.Require(t, r.config.current().resources == resources, "provider-only rename did not adopt the existing resource set")
 
 	second := createHeldSession(t, r, e.workspace("provider-b"), []string{"run_command"})
 	submitThroughRuntime(t, r, second.Identity.SessionID, "op-provider", "fg")
@@ -554,7 +542,7 @@ func TestFailedPreparationReleasesHeldCredentialNames(t *testing.T) {
 	defer svc.current().resources.release()
 	testassert.Require(t, !slices.Contains(svc.heldCredentialNames(), name), "published provider name was held without a reserving capture")
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil)
 	_, err = p.bind()(context.Background(), harness.PreparationRequest{Session: harness.PreparationSession{Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir}}})
 	testassert.Require(t, err != nil, "discarded preparation without a selection succeeded")
 	testassert.Require(t, !slices.Contains(svc.heldCredentialNames(), name), "discarded preparation leaked held name %q: %v", name, svc.heldCredentialNames())

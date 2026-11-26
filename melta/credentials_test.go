@@ -110,7 +110,7 @@ func TestOperationCredentialsUsePreparedOpeningCapture(t *testing.T) {
 	defer svc.current().resources.release()
 
 	artifacts := newArtifactIntervals()
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), artifacts, nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), artifacts, nil)
 	sessionID := testSessionID
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
@@ -144,12 +144,11 @@ func TestOperationCredentialsUsePreparedOpeningCapture(t *testing.T) {
 	releaseHolder()
 	<-openDone
 	testassert.NoError(t, openErr)
-	defer func() { testassert.NoError(t, execution.Close()) }()
 
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-prepared", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-prepared", Name: "cred_probe", Arguments: json.RawMessage(`{"key":"probe"}`)}).Execute(context.Background())
+	outcome := fixtureBinding(inv, "cred_probe").Run(context.Background(), model.ToolCall{ID: "call-prepared", Name: "cred_probe", Arguments: json.RawMessage(`{"key":"probe"}`)})
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "tool outcome = %+v, want success", outcome.Result)
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
@@ -171,7 +170,7 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), newArtifactIntervals(), nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), newArtifactIntervals(), nil)
 	sessionID := testSessionID
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
@@ -186,12 +185,11 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	t.Setenv(name, "changed-value")
 	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: sessionID, OperationID: "op-shared", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
 	testassert.NoError(t, err)
-	defer func() { testassert.NoError(t, execution.Close()) }()
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-shared", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-a", Name: "cred_probe_a", Arguments: json.RawMessage(`{"key":"a"}`)}).Execute(context.Background())
-	fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-b", Name: "cred_probe_b", Arguments: json.RawMessage(`{"key":"b"}`)}).Execute(context.Background())
+	fixtureBinding(inv, "cred_probe_a").Run(context.Background(), model.ToolCall{ID: "call-a", Name: "cred_probe_a", Arguments: json.RawMessage(`{"key":"a"}`)})
+	fixtureBinding(inv, "cred_probe_b").Run(context.Background(), model.ToolCall{ID: "call-b", Name: "cred_probe_b", Arguments: json.RawMessage(`{"key":"b"}`)})
 	first.mu.Lock()
 	second.mu.Lock()
 	defer first.mu.Unlock()
@@ -200,12 +198,11 @@ func TestOperationCredentialNamesShareOnePreparationCapture(t *testing.T) {
 	testassert.Equal(t, second.values["b"], "shared-value|shared-value")
 }
 
-// TestDeclaredCredentialRotationReplacesResources proves a candidate whose
-// active sections are unchanged but whose declared binding value rotated
-// re-activates with the new captured value and prepares a replacement
-// resource set, while an identical candidate reuses the current activation
-// and resource set.
-func TestDeclaredCredentialRotationReplacesResources(t *testing.T) {
+// TestDeclaredCredentialRotationReactivates proves a candidate whose active
+// sections are unchanged but whose declared binding value rotated
+// re-activates with the new captured value, while an identical candidate
+// keeps the current activation.
+func TestDeclaredCredentialRotationReactivates(t *testing.T) {
 	const name = "MELTA_RES_ROTATE"
 	t.Setenv(name, "one")
 	h := newServiceHarness(t)
@@ -219,20 +216,15 @@ func TestDeclaredCredentialRotationReplacesResources(t *testing.T) {
 	svc := h.preparedService(context.Background(), author)
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	first := svc.current().resources
 	testassert.Equal(t, strings.Join(opens, ","), "one")
 
 	t.Setenv(name, "two")
 	_, err = svc.publish(context.Background())
 	testassert.NoError(t, err)
-	second := svc.current().resources
-	testassert.Require(t, second != first, "a rotated declared binding reused the old resource set")
 	testassert.Equal(t, strings.Join(opens, ","), "one,two")
 
 	_, err = svc.publish(context.Background())
 	testassert.NoError(t, err)
-	third := svc.current().resources
-	testassert.Require(t, third == second, "an identical candidate replaced the resource set")
 	testassert.Equal(t, strings.Join(opens, ","), "one,two")
 	defer svc.current().resources.release()
 }
@@ -276,7 +268,7 @@ func TestExternalSharedCredentialRotationKeepsProviderObservation(t *testing.T) 
 
 // TestManagedKeyEditRefreshesSharedDeclaredBinding proves a connection edit
 // that writes a managed key shared with a declared reference publishes the
-// new binding and replaces the resource set instead of reusing stale values.
+// new binding instead of keeping the stale value.
 func TestManagedKeyEditRefreshesSharedDeclaredBinding(t *testing.T) {
 	const name = "MELTA_SHARED_MANAGED"
 	h := newServiceHarness(t)
@@ -291,7 +283,6 @@ func TestManagedKeyEditRefreshesSharedDeclaredBinding(t *testing.T) {
 	svc := h.preparedService(context.Background(), author)
 	_, err := svc.publish(context.Background())
 	testassert.NoError(t, err)
-	first := svc.current().resources
 	provider := svc.current().catalog.Providers["prov"]
 	testassert.Require(t, provider != nil, "provider fixture is missing")
 
@@ -299,8 +290,6 @@ func TestManagedKeyEditRefreshesSharedDeclaredBinding(t *testing.T) {
 		providerID: "prov", transport: provider.Transport, keyAction: keyActionSet, keyEnv: name, keyValue: "new-value",
 	}))
 	testassert.NoError(t, err)
-	second := svc.current().resources
-	testassert.Require(t, second != first, "a managed-key edit reused the stale resource set")
 	binding := mutation.snapshot.declaredBindings[declaredField{extensionID: "credmanaged", field: "/operation"}]
 	testassert.Equal(t, binding.value, "new-value")
 	testassert.Equal(t, captureValueForTest(t, managed, name), "new-value")
@@ -321,7 +310,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	h := newServiceHarness(t)
 	providerAuthor := credentialAuthor(t, "credprovider", []extension.SecretRef{{Field: "/provider", Lifetime: extension.SecretActivation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterService(extension.Service{Name: "cred_provider", Methods: []extension.RegisteredMethod{{
-			Method: extension.ServiceMethod("call", extension.ModeServiceIO, `{}`, `{"type":"object"}`, "", ""),
+			Method: extension.ServiceMethod("call", `{}`, `{"type":"object"}`, "", ""),
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/provider"}`))
 			},
@@ -329,7 +318,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 		return nil, err
 	})
 	callerAuthor := credentialAuthor(t, "credcaller", []extension.SecretRef{{Field: "/caller", Lifetime: extension.SecretActivation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
-		_, err := api.RegisterTool(model.ToolDefinition{Name: "cred_caller", Description: "reads its own credential and nests a provider call", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, credentialNestedTool{}, nil)
+		_, err := api.RegisterTool(model.ToolDefinition{Name: "cred_caller", Description: "reads its own credential and nests a provider call", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, credentialNestedTool, nil)
 		return nil, err
 	})
 	writeServiceFile(t, h.configPath, credentialServiceConfig(`{"credprovider":{"enabled":true,"provider":"`+providerName+`"},"credcaller":{"enabled":true,"caller":"`+callerName+`"}}`))
@@ -338,7 +327,7 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil)
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
@@ -350,56 +339,85 @@ func TestCredentialNestedProviderUsesItsOwnDeclaredField(t *testing.T) {
 	defer prepared.Release()
 	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-nested", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
 	testassert.NoError(t, err)
-	defer func() { testassert.NoError(t, execution.Close()) }()
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-nested", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-nested", Name: "cred_caller", Arguments: json.RawMessage(`{}`)}).Execute(context.Background())
+	outcome := fixtureBinding(inv, "cred_caller").Run(context.Background(), model.ToolCall{ID: "call-nested", Name: "cred_caller", Arguments: json.RawMessage(`{}`)})
 	testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "nested outcome = %+v, want success", outcome.Result)
 	testassert.Equal(t, outcome.Result.Content, "caller=caller-value|provider=provider-value")
 }
 
 // credentialNestedTool is one caller tool whose nested provider call reads
 // the provider's own declared credential field.
-type credentialNestedTool struct{}
-
-func (credentialNestedTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-func (credentialNestedTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (credentialNestedTool) Execute(ctx context.Context, tc extension.AuthorContext, _ extension.ToolPlan) harness.ToolOutcome {
+func credentialNestedTool(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	own, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/caller"}`))
 	if err != nil {
-		return credentialOutcome("call", "caller error: "+err.Error())
+		return extension.ToolResult{Content: "caller error: " + err.Error()}, nil
 	}
 	nested, err := tc.Call(ctx, "cred_provider", "call", json.RawMessage(`{}`))
 	if err != nil {
-		return credentialOutcome("call", "provider error: "+err.Error())
+		return extension.ToolResult{Content: "provider error: " + err.Error()}, nil
 	}
-	return credentialOutcome("call", "caller="+credentialString(own)+"|provider="+credentialString(nested))
+	return extension.ToolResult{Content: "caller=" + credentialString(own) + "|provider=" + credentialString(nested)}, nil
 }
 
-// TestCredentialEffectfulHookUsesOperationCapture proves an effectful
-// arguments hook receives the retained Operation capture through the same
-// callback handoff as tools.
-func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
+// TestCredentialHookUsesOperationCapture proves every callback kind
+// receives the retained Operation capture through the same handoff: the
+// admission hook changes the declared environment variable to a third value
+// before its own read, and every hook still observes the later value captured
+// for the Operation.
+func TestCredentialHookUsesOperationCapture(t *testing.T) {
 	const name = "MELTA_EFFECTFUL_HOOK"
 	t.Setenv(name, "hook-value")
 	h := newServiceHarness(t)
-	var hookValue string
+	var mu sync.Mutex
+	values := map[string]string{}
+	var undeclared error
+	read := func(kind string, call extension.AuthorContext, hookCtx context.Context) {
+		result, err := call.Call(hookCtx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
+		if err != nil {
+			t.Errorf("%s hook credential read: %v", kind, err)
+			return
+		}
+		mu.Lock()
+		values[kind] = credentialString(result)
+		mu.Unlock()
+	}
 	author := credentialAuthor(t, "credhook", []extension.SecretRef{{Field: "/operation", Lifetime: extension.SecretOperation}}, func(ctx context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(testDescribeTool("cred_tool"), testRegisteredTool{}, nil); err != nil {
+		if _, err := api.RegisterTool(testDescribeTool("cred_tool"), testRegisteredTool, nil); err != nil {
 			return nil, err
 		}
-		_, err := api.AttachArguments(extension.HookModeEffectful, func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
-			result, err := call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
-			if err != nil {
-				return extension.ArgumentsResult{}, err
+		if _, err := api.AttachAdmission(func(ctx context.Context, call extension.AuthorContext, _ extension.AdmissionInput) (extension.AdmissionResult, error) {
+			if err := os.Setenv(name, "third-value"); err != nil {
+				return extension.AdmissionResult{}, err
 			}
-			hookValue = credentialString(result)
+			read("admission", call, ctx)
+			return extension.AdmissionResult{}, nil
+		}, nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.AttachRequest(func(ctx context.Context, call extension.AuthorContext, _ extension.AuthorRequestInput) (harness.RequestConsequence, error) {
+			read("request", call, ctx)
+			return harness.RequestConsequence{}, nil
+		}, nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.AttachArguments(func(ctx context.Context, call extension.AuthorContext, toolCall model.ToolCall) (extension.ArgumentsResult, error) {
+			read("arguments", call, ctx)
 			return extension.ArgumentsResult{Arguments: toolCall.Arguments}, nil
+		}, nil); err != nil {
+			return nil, err
+		}
+		if _, err := api.AttachToolCheck(func(ctx context.Context, call extension.AuthorContext, _ model.ToolCall) (*string, error) {
+			read("check", call, ctx)
+			return nil, nil
+		}, nil); err != nil {
+			return nil, err
+		}
+		_, err := api.AttachResult(func(ctx context.Context, call extension.AuthorContext, input harness.ToolOutputInput) (string, error) {
+			read("result", call, ctx)
+			_, undeclared = call.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/other"}`))
+			return input.Content, nil
 		}, nil)
 		return nil, err
 	})
@@ -414,7 +432,7 @@ func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
 		testassert.NoError(t, err)
 	}
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), nil, nil)
 	prepared, err := p.bind()(context.Background(), harness.PreparationRequest{
 		Session: harness.PreparationSession{
 			Identity: harness.SessionIdentity{SessionID: testSessionID, Workspace: h.dataDir},
@@ -424,21 +442,55 @@ func TestCredentialEffectfulHookUsesOperationCapture(t *testing.T) {
 	})
 	testassert.NoError(t, err)
 	defer prepared.Release()
+	testassert.Equal(t, os.Getenv(name), "third-value")
 	execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: testSessionID, OperationID: "op-hook", RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
 	testassert.NoError(t, err)
-	defer func() { testassert.NoError(t, execution.Close()) }()
 	inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: "inv-hook", Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
 	defer func() { testassert.NoError(t, inv.Close()) }()
-	stage := inv.ArgumentStage()
-	if stage.Release != nil {
-		defer stage.Release()
+
+	request := inv.RequestStage()
+	if request.Release != nil {
+		defer request.Release()
 	}
-	testassert.NoError(t, stage.Error)
-	testassert.Require(t, len(stage.Hooks) == 1 && stage.Hooks[0].Mode == harness.HookModeEffectful, "tool hooks = %d, want one effectful hook", len(stage.Hooks))
-	_, err = stage.Hooks[0].Run(context.Background(), model.ToolCall{ID: "call-hook", Name: "cred_tool", Arguments: json.RawMessage(`{}`)})
+	testassert.NoError(t, request.Error)
+	testassert.Require(t, len(request.Hooks) == 1, "request hooks = %d, want one", len(request.Hooks))
+	_, err = request.Hooks[0].Run(context.Background(), harness.RequestHookInput{Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 	testassert.NoError(t, err)
-	testassert.Equal(t, hookValue, "later-value")
+
+	arguments := inv.ArgumentStage()
+	if arguments.Release != nil {
+		defer arguments.Release()
+	}
+	testassert.NoError(t, arguments.Error)
+	testassert.Require(t, len(arguments.Hooks) == 1, "tool hooks = %d, want one", len(arguments.Hooks))
+	_, err = arguments.Hooks[0].Run(context.Background(), model.ToolCall{ID: "call-hook", Name: "cred_tool", Arguments: json.RawMessage(`{}`)})
+	testassert.NoError(t, err)
+
+	check := inv.CheckStage()
+	if check.Release != nil {
+		defer check.Release()
+	}
+	testassert.NoError(t, check.Error)
+	testassert.Require(t, len(check.Hooks) == 1, "check hooks = %d, want one", len(check.Hooks))
+	_, err = check.Hooks[0].Run(context.Background(), model.ToolCall{})
+	testassert.NoError(t, err)
+
+	result := inv.ResultStage()
+	if result.Release != nil {
+		defer result.Release()
+	}
+	testassert.NoError(t, result.Error)
+	testassert.Require(t, len(result.Hooks) == 1, "result hooks = %d, want one", len(result.Hooks))
+	_, err = result.Hooks[0].Run(context.Background(), harness.ToolOutputInput{Content: "kept"})
+	testassert.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, kind := range []string{"admission", "request", "arguments", "check", "result"} {
+		testassert.Equal(t, values[kind], "later-value")
+	}
+	testassert.Require(t, undeclared != nil, "an undeclared credential field resolved")
 }
 
 // TestCustomProviderCreateRefreshesSharedDeclaredBinding proves a custom
@@ -473,7 +525,6 @@ func TestCustomProviderCreateRefreshesSharedDeclaredBinding(t *testing.T) {
 			svc := h.preparedService(context.Background(), author)
 			_, err := svc.publish(context.Background())
 			testassert.NoError(t, err)
-			firstResources := svc.current().resources
 			testassert.Equal(t, opens.Load(), int64(1))
 
 			const keyValue = "supplied-create-key"
@@ -482,7 +533,6 @@ func TestCustomProviderCreateRefreshesSharedDeclaredBinding(t *testing.T) {
 			key := keyValue
 			mutation, err := svc.mutate(context.Background(), svc.editProviderCreate(context.Background(), "newp", protocol.ProviderEdit{BaseUrl: &baseURL, ApiKeyEnv: &testCase.envName}, map[string]protocol.ModelEdit{"m": {ContextWindow: &window}}, &key))
 			testassert.NoError(t, err)
-			testassert.Require(t, svc.current().resources != firstResources, "custom create reused the stale resource set")
 			testassert.Equal(t, opens.Load(), int64(2))
 			binding := mutation.snapshot.declaredBindings[declaredField{extensionID: "credcreate", field: "/operation"}]
 			testassert.Equal(t, binding.value, keyValue)
@@ -555,7 +605,7 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 	testassert.NoError(t, err)
 	defer svc.current().resources.release()
 
-	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), newArtifactIntervals(), nil, nil)
+	p := newPreparation(svc, h.locations(), "", nil, newObservationAdapter(newObservation(), newWarningStore()), newArtifactIntervals(), nil)
 	request := func(session string) harness.PreparationRequest {
 		return harness.PreparationRequest{
 			Session: harness.PreparationSession{
@@ -580,7 +630,6 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 		t.Helper()
 		execution, err := prepared.Open(context.Background(), harness.OperationAdmission{SessionID: session, OperationID: operation, RequestKind: harness.RequestKindMessage, AdmittedAt: time.Now()})
 		testassert.NoError(t, err)
-		defer func() { testassert.NoError(t, execution.Close()) }()
 		inv, err := execution.OpenInvocation(context.Background(), harness.InvocationRequest{ID: invocation, Purpose: harness.InvocationPurposeConversation, Model: prepared.Capture.Model})
 		testassert.NoError(t, err)
 		defer func() { testassert.NoError(t, inv.Close()) }()
@@ -591,7 +640,7 @@ func TestPreparationUsesCurrentCredentialObservationAfterStartup(t *testing.T) {
 			_ = stream.Close()
 		}
 		testassert.Require(t, server.requests() == before+1 && server.authAt(before) == "Bearer "+key, "provider authorization = %q, want %q", server.authAt(before), "Bearer "+key)
-		outcome := fixturePrepare(inv, context.Background(), model.ToolCall{ID: "call-" + key, Name: "cred_probe", Arguments: json.RawMessage(`{"key":"` + key + `"}`)}).Execute(context.Background())
+		outcome := fixtureBinding(inv, "cred_probe").Run(context.Background(), model.ToolCall{ID: "call-" + key, Name: "cred_probe", Arguments: json.RawMessage(`{"key":"` + key + `"}`)})
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "tool outcome = %+v, want success", outcome.Result)
 	}
 	run(newPrepared, "session-new", "op-new", "inv-new", "shared-later")
@@ -647,7 +696,7 @@ func (p *credentialProbe) author(t *testing.T) extension.Extension {
 			if err != nil {
 				p.openUndeclared = err.Error()
 			}
-			_, err = api.RegisterTool(model.ToolDefinition{Name: "cred_probe", Description: "reads declared credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, &credentialTool{probe: p}, nil)
+			_, err = api.RegisterTool(model.ToolDefinition{Name: "cred_probe", Description: "reads declared credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, (&credentialTool{probe: p}).run, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -681,28 +730,20 @@ func (p *credentialProbe) prepare(_ context.Context, _ extension.AuthorContext, 
 
 type credentialTool struct{ probe *credentialProbe }
 
-func (t *credentialTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *credentialTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "cred_probe"}}, Data: []byte(call.ID)}
-}
-
-func (t *credentialTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
+func (t *credentialTool) run(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	activation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 	if err != nil {
-		return credentialOutcome(string(plan.Data), "activation error: "+err.Error())
+		return extension.ToolResult{Content: "activation error: " + err.Error()}, nil
 	}
 	operation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
 	if err != nil {
-		return credentialOutcome(string(plan.Data), "operation error: "+err.Error())
+		return extension.ToolResult{Content: "operation error: " + err.Error()}, nil
 	}
 	t.probe.mu.Lock()
 	combined := "activation=" + credentialString(activation) + "|operation=" + credentialString(operation)
 	t.probe.toolValues = append(t.probe.toolValues, combined)
 	t.probe.mu.Unlock()
-	return credentialOutcome(string(plan.Data), combined)
+	return extension.ToolResult{Content: combined}, nil
 }
 
 func credentialString(result extension.Result) string {
@@ -711,10 +752,6 @@ func credentialString(result extension.Result) string {
 	}
 	_ = json.Unmarshal(result.Value, &value)
 	return value.Value
-}
-
-func credentialOutcome(callID, content string) harness.ToolOutcome {
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: content}}
 }
 
 func credentialConfigDocument(endpoint, activation, operation string) string {
@@ -928,7 +965,6 @@ func TestDeclaredCredentialCapturesStayPerOperation(t *testing.T) {
 	}
 	firstSession := create()
 	submitThroughRuntime(t, r, firstSession.Identity.SessionID, "op-first", "hello")
-	firstResources := r.config.current().resources
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		probe.mu.Lock()
@@ -955,7 +991,6 @@ func TestDeclaredCredentialCapturesStayPerOperation(t *testing.T) {
 	writeServiceFile(t, e.configPath, credentialConfigDocument(e.server.URL, second, second))
 	revision, err := r.Reload(context.Background(), testCaller(r))
 	testassert.Require(t, err == nil && revision.Generation == "3", "Reload = (%q, %v), want 3", revision, err)
-	testassert.Require(t, r.config.current().resources != firstResources, "the rotated declared binding reused the pre-reload resource set")
 	thirdSession := create()
 	submitThroughRuntime(t, r, thirdSession.Identity.SessionID, "op-third", "hello")
 	awaitOperation(t, r, thirdSession.Identity.SessionID, "op-third", harness.OperationSuccess)
@@ -1003,7 +1038,7 @@ func (p *credentialGateProbe) authorFor(t *testing.T, id, toolID string) extensi
 			},
 		},
 		Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-			_, err := api.RegisterTool(model.ToolDefinition{Name: toolID, Description: "reads the captured credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, &credentialGateTool{probe: p}, nil)
+			_, err := api.RegisterTool(model.ToolDefinition{Name: toolID, Description: "reads the captured credentials", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, (&credentialGateTool{probe: p}).run, nil)
 			return nil, err
 		},
 	}
@@ -1011,29 +1046,12 @@ func (p *credentialGateProbe) authorFor(t *testing.T, id, toolID string) extensi
 
 type credentialGateTool struct{ probe *credentialGateProbe }
 
-func (t *credentialGateTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (t *credentialGateTool) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
-	data, _ := json.Marshal(struct {
-		CallID    string          `json:"call_id"`
-		Arguments json.RawMessage `json:"arguments"`
-	}{CallID: call.ID, Arguments: call.Arguments})
-	return extension.ToolPlan{Permissions: []harness.PermissionRequest{{Permission: harness.PermissionCommandRun, Target: "cred_probe"}}, Data: data}
-}
-
-func (t *credentialGateTool) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	var prepared struct {
-		CallID    string          `json:"call_id"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	_ = json.Unmarshal(plan.Data, &prepared)
+func (t *credentialGateTool) run(ctx context.Context, tc extension.ToolCall) (extension.ToolResult, error) {
 	var request struct {
 		Key  string `json:"key"`
 		Park bool   `json:"park"`
 	}
-	_ = json.Unmarshal(prepared.Arguments, &request)
+	_ = tc.Decode(&request)
 	if request.Park {
 		t.probe.mu.Lock()
 		t.probe.parked = true
@@ -1042,11 +1060,11 @@ func (t *credentialGateTool) Execute(ctx context.Context, tc extension.AuthorCon
 	}
 	activation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/activation"}`))
 	if err != nil {
-		return credentialOutcome(prepared.CallID, "activation error: "+err.Error())
+		return extension.ToolResult{Content: "activation error: " + err.Error()}, nil
 	}
 	operation, err := tc.Call(ctx, extension.ContractCredentials, "get", json.RawMessage(`{"field":"/operation"}`))
 	if err != nil {
-		return credentialOutcome(prepared.CallID, "operation error: "+err.Error())
+		return extension.ToolResult{Content: "operation error: " + err.Error()}, nil
 	}
 	t.probe.mu.Lock()
 	if t.probe.values == nil {
@@ -1054,7 +1072,7 @@ func (t *credentialGateTool) Execute(ctx context.Context, tc extension.AuthorCon
 	}
 	t.probe.values[request.Key] = credentialString(activation) + "|" + credentialString(operation)
 	t.probe.mu.Unlock()
-	return credentialOutcome(prepared.CallID, "probed")
+	return extension.ToolResult{Content: "probed"}, nil
 }
 
 // captureValueForTest returns one managed file value.

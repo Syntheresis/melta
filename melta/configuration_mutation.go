@@ -181,14 +181,16 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 		s.buildMu.Unlock()
 		return configurationCapture{}, err
 	}
-	fresh := s.freshResources(candidate)
-	discardNative := candidate.native
+	handedOver := false
 	defer func() {
-		if fresh != nil {
-			_ = fresh.release()
+		if handedOver {
+			return
 		}
-		if discardNative != nil {
-			_ = discardNative.release()
+		if candidate.resources != nil {
+			candidate.resources.release()
+		}
+		if candidate.native != nil {
+			_ = candidate.native.release()
 		}
 	}()
 	// The edit's pure edited-subject check runs once over the built
@@ -222,8 +224,7 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 			s.buildMu.Unlock()
 			return configurationCapture{}, err
 		}
-		fresh = nil
-		discardNative = nil
+		handedOver = true
 		return s.commit(candidate), nil
 	}
 	if err := s.configuration.Write(writeCtx, complete); err != nil {
@@ -244,12 +245,10 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 			s.buildMu.Unlock()
 			return configurationCapture{}, configurationFailure(errors.Join(fmt.Errorf("persist API key %s: %w", conn.keyEnv, err), restoreErr))
 		}
-		fresh = nil
-		discardNative = nil
+		handedOver = true
 		return s.commit(candidate), nil
 	}
-	fresh = nil
-	discardNative = nil
+	handedOver = true
 	return s.commit(candidate), nil
 }
 

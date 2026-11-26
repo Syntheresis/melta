@@ -34,7 +34,7 @@ func publicationFailureCauses() []error {
 // executorTurnFixture builds one executor tool turn: round one publishes
 // call-1, round two ends the turn, and the tool plan runs through the
 // executor path that commits the pending-call effect intent.
-func executorTurnFixture(t *testing.T, hook bool) (*Harness, *graphStorage, *coordinator, string, PreparedExecution, context.CancelFunc, *int, *int, *int) {
+func executorTurnFixture(t *testing.T) (*Harness, *graphStorage, *coordinator, string, PreparedExecution, context.CancelFunc, *int, *int, *int) {
 	t.Helper()
 	var rounds, preparedCalls, executed int
 	modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
@@ -44,27 +44,12 @@ func executorTurnFixture(t *testing.T, hook bool) (*Harness, *graphStorage, *coo
 		}
 		return completedTurnStream(), nil
 	}
-	planFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
+	planFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
 		preparedCalls++
-		return PreparedTool{Permissions: fixturePermission, Execute: func(context.Context) ToolOutcome {
-			executed++
-			return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
-		}}
+		executed++
+		return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 	}
-	if !hook {
-		h, store, c, sessionID, prepared, cancel := newExecutionHarness(t, modelFn, planFn)
-		return h, store, c, sessionID, prepared, cancel, &rounds, &preparedCalls, &executed
-	}
-	argHook := ToolArgumentsHook{ID: "cap.hook.one", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(ctx context.Context, call model.ToolCall) (ToolArgumentsResult, error) {
-		return ToolArgumentsResult{Arguments: model.CloneRaw(call.Arguments)}, nil
-	}}
-	h, store, c, sessionID, prepared, cancel := newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
-		return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-			inv := invocationExecution(modelFn, planFn)
-			inv.ToolHooks = []ToolArgumentsHook{argHook}
-			return inv, nil
-		}}, nil
-	})
+	h, store, c, sessionID, prepared, cancel := newExecutionHarness(t, modelFn, planFn)
 	return h, store, c, sessionID, prepared, cancel, &rounds, &preparedCalls, &executed
 }
 
@@ -101,7 +86,7 @@ func failEffectRegister(store *graphStorage, want func(*ActiveEffect) bool, clea
 
 // assertRetainsRunningState proves the failed-publication durable shape: the
 // Operation stays exactly Running with the given active effect, and no
-// settlement, tool result, or hook result write was fabricated.
+// settlement or tool result write was fabricated.
 func assertRetainsRunningState(t *testing.T, h *Harness, store *graphStorage, sessionID string, wantActiveEffect func(*ActiveEffect) bool) {
 	t.Helper()
 	rec, err := h.ReadOperation(context.Background(), sessionID, testOpID)
@@ -113,7 +98,6 @@ func assertRetainsRunningState(t *testing.T, h *Harness, store *graphStorage, se
 	for _, entry := range graph.Entries {
 		testassert.Require(t, entry.Settlement == nil, "the failed publication fabricated a compensating settlement write")
 		testassert.Require(t, entry.ToolResult == nil, "the failed publication fabricated a tool result write")
-		testassert.Require(t, entry.HookResult == nil, "the failed publication fabricated a hook result write")
 	}
 }
 
@@ -131,7 +115,7 @@ func TestToolEffectIntentPublicationFailureRetainsRunningState(t *testing.T) {
 				name += " under concurrent execution cancellation"
 			}
 			t.Run(name, func(t *testing.T) {
-				h, store, c, sessionID, prepared, cancel, rounds, preparedCalls, executed := executorTurnFixture(t, false)
+				h, store, c, sessionID, prepared, cancel, rounds, preparedCalls, executed := executorTurnFixture(t)
 				defer cancel()
 				failEffectRegister(store,
 					func(ae *ActiveEffect) bool { return ae.Kind == EffectTool && ae.ToolCallID == "call-1" },
@@ -145,7 +129,7 @@ func TestToolEffectIntentPublicationFailureRetainsRunningState(t *testing.T) {
 				testassert.Require(t, errors.Is(err, cause), "error = %v, want the original publication cause %v preserved", err, cause)
 				testassert.Require(t, isPublicationFailure(err), "error = %v, want the publication-origin classification", err)
 				testassert.Equal(t, *executed, 0) // no execution was started past the failed intent
-				testassert.Equal(t, *preparedCalls, 1)
+				testassert.Equal(t, *preparedCalls, 0)
 				testassert.Equal(t, *rounds, 1) // no compensating later dispatch
 				assertRetainsRunningState(t, h, store, sessionID, func(ae *ActiveEffect) bool { return ae == nil })
 			})
@@ -161,7 +145,7 @@ func TestToolEffectIntentPublicationFailureRetainsRunningState(t *testing.T) {
 func TestToolResultPublicationFailureRetainsActiveEffect(t *testing.T) {
 	for _, cause := range publicationFailureCauses() {
 		t.Run(cause.Error(), func(t *testing.T) {
-			h, store, c, sessionID, prepared, cancel, _, _, executed := executorTurnFixture(t, false)
+			h, store, c, sessionID, prepared, cancel, _, _, executed := executorTurnFixture(t)
 			defer cancel()
 			failEffectRegister(store,
 				func(ae *ActiveEffect) bool { return ae.Kind == EffectTool && ae.ToolCallID == "call-1" },
@@ -178,11 +162,9 @@ func TestToolResultPublicationFailureRetainsActiveEffect(t *testing.T) {
 	}
 }
 
-// TestImmediateToolResultPublicationFailureRetainsNoActiveEffect proves the
-// same result-publication marking on the immediate plan shape: no effect
-// intent was ever committed, so the retained Running state carries no active
-// effect, and the failed result transaction fabricates nothing.
-func TestImmediateToolResultPublicationFailureRetainsNoActiveEffect(t *testing.T) {
+// TestCheckRefusalPublicationFailureRetainsNoActiveEffect proves a failed
+// refusal publication retains the Running state with no tool effect intent.
+func TestCheckRefusalPublicationFailureRetainsNoActiveEffect(t *testing.T) {
 	for _, cause := range publicationFailureCauses() {
 		t.Run(cause.Error(), func(t *testing.T) {
 			var rounds int
@@ -193,11 +175,27 @@ func TestImmediateToolResultPublicationFailureRetainsNoActiveEffect(t *testing.T
 				}
 				return completedTurnStream(), nil
 			}
-			planFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
-				return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+			planFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
+				return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 			}
 			h, store, c, sessionID, prepared, cancel := newExecutionHarness(t, modelFn, planFn)
 			defer cancel()
+			open := prepared.Open
+			prepared.Open = func(ctx context.Context, admission OperationAdmission) (Execution, error) {
+				exec, err := open(ctx, admission)
+				openInvocation := exec.OpenInvocation
+				exec.OpenInvocation = func(ctx context.Context, request InvocationRequest) (InvocationExecution, error) {
+					inv, err := openInvocation(ctx, request)
+					inv.CheckStage = func() CheckStage {
+						return CheckStage{Hooks: []ToolCheckHook{{ID: "check", ExtensionID: "ext", Run: func(context.Context, model.ToolCall) (*string, error) {
+							reason := "restricted"
+							return &reason, nil
+						}}}}
+					}
+					return inv, err
+				}
+				return exec, err
+			}
 			store.entryHook = func(draft EntryDraft) error {
 				if draft.Kind != EntryToolResult {
 					return nil
@@ -218,225 +216,18 @@ func TestImmediateToolResultPublicationFailureRetainsNoActiveEffect(t *testing.T
 	}
 }
 
-// TestHookEffectPublicationFailuresAtIntentAndResult proves the argument-hook
-// effect's two publication boundaries with the same rule.
-func TestHookEffectPublicationFailuresAtIntentAndResult(t *testing.T) {
-	t.Run("the failed hook intent never runs the callback", func(t *testing.T) {
-		for _, cause := range publicationFailureCauses() {
-			t.Run(cause.Error(), func(t *testing.T) {
-				h, store, c, sessionID, prepared, cancel, _, preparedCalls, executed := executorTurnFixture(t, true)
-				defer cancel()
-				failEffectRegister(store,
-					func(ae *ActiveEffect) bool {
-						return ae.Kind == EffectHook && ae.HookID == "cap.hook.one" && ae.ToolCallID == "call-1"
-					},
-					false, cause, nil)
-				err := executeDirect(h, c, h.ctx, testOpID, prepared)
-				store.txHook = nil
-				testassert.Require(t, errors.Is(err, cause), "error = %v, want the original publication cause %v preserved", err, cause)
-				testassert.Require(t, isPublicationFailure(err), "error = %v, want the publication-origin classification", err)
-				testassert.Equal(t, *preparedCalls, 0) // the chain never reached preparation
-				testassert.Equal(t, *executed, 0)
-				assertRetainsRunningState(t, h, store, sessionID, func(ae *ActiveEffect) bool { return ae == nil })
-			})
-		}
-	})
-	t.Run("the failed hook result publication retains the hook intent", func(t *testing.T) {
-		for _, cause := range publicationFailureCauses() {
-			t.Run(cause.Error(), func(t *testing.T) {
-				h, store, c, sessionID, prepared, cancel, _, preparedCalls, executed := executorTurnFixture(t, true)
-				defer cancel()
-				failEffectRegister(store,
-					func(ae *ActiveEffect) bool {
-						return ae.Kind == EffectHook && ae.HookID == "cap.hook.one" && ae.ToolCallID == "call-1"
-					},
-					true, cause, nil)
-				err := executeDirect(h, c, h.ctx, testOpID, prepared)
-				store.txHook = nil
-				testassert.Require(t, errors.Is(err, cause), "error = %v, want the original publication cause %v preserved", err, cause)
-				testassert.Require(t, isPublicationFailure(err), "error = %v, want the publication-origin classification", err)
-				testassert.Equal(t, *preparedCalls, 0) // the chain stopped at the failed hook publication
-				testassert.Equal(t, *executed, 0)
-				assertRetainsRunningState(t, h, store, sessionID, func(ae *ActiveEffect) bool {
-					return ae != nil && ae.Kind == EffectHook && ae.HookID == "cap.hook.one" && ae.ToolCallID == "call-1"
-				})
-			})
-		}
-	})
-}
-
-// TestRequestHookPublicationFailuresAtIntentAndResult proves the request-bound
-// hook effect's intent and result publications through the real pipeline.
-func TestRequestHookPublicationFailuresAtIntentAndResult(t *testing.T) {
-	run := func(t *testing.T, cause error, failResult bool) {
-		t.Helper()
-		hookRan := 0
-		hook := RequestHook{ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-			hookRan++
-			return RequestConsequence{}, nil
-		}}
-		modelFn := func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-			return completedTurnStream(), nil
-		}
-		exec := requestHookFixtureExecution(modelFn, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, hook)
-		h, store, _, sessionID, err := freshExecutionRunConfig(t, context.Background(), testCapture(), exec, func(store *graphStorage) {
-			failEffectRegister(store,
-				func(ae *ActiveEffect) bool {
-					return ae.Kind == EffectHook && ae.HookID == "req.effectful" && ae.RequestID != ""
-				},
-				failResult, cause, nil)
-		})
-		testassert.Require(t, err != nil, "the pipeline completed past an injected publication failure")
-		testassert.Require(t, errors.Is(err, cause), "error = %v, want the original publication cause %v preserved", err, cause)
-		testassert.Require(t, isPublicationFailure(err), "error = %v, want the publication-origin classification", err)
-		if failResult {
-			testassert.Equal(t, hookRan, 1)
-		} else {
-			testassert.Equal(t, hookRan, 0)
-		}
-		assertRetainsRunningState(t, h, store, sessionID, func(ae *ActiveEffect) bool {
-			if !failResult {
-				return ae == nil // the failed intent committed nothing
-			}
-			return ae != nil && ae.Kind == EffectHook && ae.HookID == "req.effectful"
-		})
-		graph, gerr := validateFixture(t, store, sessionID)
-		testassert.NoError(t, gerr)
-		for _, entry := range graph.Entries {
-			testassert.Require(t, entry.Assistant == nil, "the failed hook publication dispatched a conversation request")
-		}
-	}
-	t.Run("the failed request hook intent never runs the callback", func(t *testing.T) {
-		for _, cause := range publicationFailureCauses() {
-			run(t, cause, false)
-		}
-	})
-	t.Run("the failed request hook result retains the hook intent and never dispatches", func(t *testing.T) {
-		for _, cause := range publicationFailureCauses() {
-			run(t, cause, true)
-		}
-	})
-}
-
-// TestRequestHookPublicationFailureThroughExecuteAndWait proves the real
-// request-hook publication boundaries through the admitted execution and Wait:
-// a failed intent publication never runs the callback, a failed result
-// publication retains the committed request-hook intent, and an explicitly
-// interrupted result publication preserves the marked cause rather than
-// settling or compensating. No model dispatch or fabricated terminal follows.
-func TestRequestHookPublicationFailureThroughExecuteAndWait(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		intentFail  bool
-		interrupted bool
-	}{
-		{"intent", true, false},
-		{"result", false, false},
-		{"interrupted result", false, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancelRun := context.WithCancel(context.Background())
-			defer cancelRun()
-			cause := fmt.Errorf("request hook publication: %w", context.Canceled)
-			hookCalls, modelCalls := 0, 0
-			h, store, c, sessionID, prepared, stop := newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
-				hook := RequestHook{ID: "req.effectful", ExtensionID: "req-ext", Mode: HookModeEffectful, Run: func(context.Context, RequestHookInput) (RequestConsequence, error) {
-					hookCalls++
-					if tc.interrupted {
-						return RequestConsequence{}, &EffectError{Evidence: ExecutionObserved, Err: context.Canceled, Interrupted: true}
-					}
-					return RequestConsequence{}, nil
-				}}
-				return requestHookFixtureExecution(func(context.Context, model.Request, model.Extra) (model.Stream, error) {
-					modelCalls++
-					return completedTurnStream(), nil
-				}, func(context.Context, model.ToolCall) PreparedTool { return PreparedTool{} }, hook), nil
-			})
-			defer stop()
-			if tc.intentFail {
-				failEffectRegister(store,
-					func(ae *ActiveEffect) bool {
-						return ae.Kind == EffectHook && ae.HookID == "req.effectful" && ae.RequestID != ""
-					},
-					false, cause, nil)
-			} else {
-				failEffectRegister(store,
-					func(ae *ActiveEffect) bool {
-						return ae.Kind == EffectHook && ae.HookID == "req.effectful" && ae.RequestID != ""
-					},
-					true, cause, nil)
-			}
-			err := executeDirect(h, c, ctx, testOpID, prepared)
-			store.replaceHook = nil
-			testassert.Require(t, errors.Is(err, cause), "execute = %v, want the original publication cause", err)
-			testassert.Require(t, isPublicationFailure(err), "execute = %v, want the publication-origin classification", err)
-			wantHookCalls := 0
-			if !tc.intentFail {
-				wantHookCalls = 1
-			}
-			testassert.Equal(t, hookCalls, wantHookCalls)
-			testassert.Equal(t, modelCalls, 0)
-			assertRetainsRunningState(t, h, store, sessionID, func(ae *ActiveEffect) bool {
-				if tc.intentFail {
-					return ae == nil
-				}
-				return ae != nil && ae.Kind == EffectHook && ae.HookID == "req.effectful"
-			})
-			stop() // the real Harness cancellation joins the retained publication failure
-			waitErr := h.Wait(context.Background())
-			testassert.Require(t, errors.Is(waitErr, cause), "Wait = %v, want the retained publication cause", waitErr)
-		})
-	}
-}
-
-// TestCommitResultNotFoundBoundariesAreMarked proves the ErrNotFound guards of
-// the result publications carry the publication-origin classification with
-// the original identity.
+// TestCommitResultNotFoundBoundariesAreMarked checks publication error origin.
 func TestCommitResultNotFoundBoundariesAreMarked(t *testing.T) {
 	h, _, c, sessionID := newEffectHarness(t, nil)
 	_, err := h.commitToolResult(context.Background(), c, "op-foreign", PendingToolCall{CallID: "call-1", AssistantEntry: EntryRef{SessionID: sessionID, EntryID: "00000000000000000000000000000001"}, ResultEntryID: "00000000000000000000000000000002"},
-		ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}, Evidence: ExecutionObserved}, nil, false, toolSelection{}, false)
+		ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}, Evidence: ExecutionObserved}, nil, false, toolSelection{}, nil)
 	testassert.Require(t, errors.Is(err, ErrNotFound), "commitToolResult = %v, want the original ErrNotFound cause", err)
 	testassert.Require(t, isPublicationFailure(err), "commitToolResult error = %v, want the publication-origin classification", err)
-	_, err = h.commitHookResult(context.Background(), c, "op-foreign", hookEffectBinding{hookID: "cap.hook.one", callID: "call-1"}, "00000000000000000000000000000003", hookResultEntry{Status: hookSucceeded, Evidence: ExecutionObserved})
-	testassert.Require(t, errors.Is(err, ErrNotFound), "commitHookResult = %v, want the original ErrNotFound cause", err)
-	testassert.Require(t, isPublicationFailure(err), "commitHookResult error = %v, want the publication-origin classification", err)
 }
 
-// TestEffectHookInvalidDeclaredKnowledgeRejects proves an effectful hook's
-// invalid EffectError declaration reaches the shared accepting validator at
-// its result publication: the declaration is rejected with the original
-// identity through a marked publication failure, the hook intent stays
-// committed for recovery, and no guessed execution knowledge is recorded.
-func TestEffectHookInvalidDeclaredKnowledgeRejects(t *testing.T) {
-	call := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{"x":1}`)}
-	exec := hookFixtureExecution(func(context.Context, model.ToolCall) PreparedTool {
-		return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: "call-1", Status: model.ResultSuccess, Content: "done"}}}
-	}, objectNormalize, ToolArgumentsHook{ID: "cap.hook.bogus", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
-		return ToolArgumentsResult{}, &EffectError{Evidence: ExecutionEvidence("bogus"), Err: errors.New("binding down")}
-	}})
-	h, store, _, sessionID, err := freshExecutionRunConfig(t, context.Background(), testCapture(), exec, nil, call)
-	testassert.Require(t, err != nil, "the invalid declaration settled without rejection")
-	testassert.Require(t, isPublicationFailure(err), "error = %v, want the publication-origin classification", err)
-	rec, rerr := h.ReadOperation(context.Background(), sessionID, testOpID)
-	testassert.NoError(t, rerr)
-	testassert.Require(t, rec.State.Status == OperationRunning && rec.State.ActiveEffect != nil && rec.State.ActiveEffect.HookID == "cap.hook.bogus",
-		"operation state = %+v, want the hook intent retained for recovery", rec.State)
-	graph, verr := validateFixture(t, store, sessionID)
-	testassert.NoError(t, verr)
-	for _, entry := range graph.Entries {
-		testassert.Require(t, entry.HookResult == nil, "a rejected declaration recorded a hook result: %+v", entry.HookResult)
-		testassert.Require(t, entry.ToolResult == nil && entry.Settlement == nil, "the rejection fabricated a follow-up write: %+v", entry.Envelope.ID)
-	}
-}
-
-// TestWaitRetainsPublicationFailureAtPendingCallBoundaries proves the Wait
-// consequence of the classification: a marked pending-call publication failure
-// is retained for Wait, while a hook's ordinary domain failure and a
-// synchronous invalid admission never contaminate it.
 func TestWaitRetainsPublicationFailureAtPendingCallBoundaries(t *testing.T) {
 	t.Run("a marked tool-intent publication failure is retained", func(t *testing.T) {
-		h, store, c, _, prepared, cancel, _, _, _ := executorTurnFixture(t, false)
+		h, store, c, _, prepared, cancel, _, _, _ := executorTurnFixture(t)
 		cause := fmt.Errorf("intent aborted: %w", context.DeadlineExceeded) // cancellation-shaped, live execution
 		failEffectRegister(store,
 			func(ae *ActiveEffect) bool { return ae.Kind == EffectTool && ae.ToolCallID == "call-1" },
@@ -458,14 +249,14 @@ func TestWaitRetainsPublicationFailureAtPendingCallBoundaries(t *testing.T) {
 			}
 			return completedTurnStream(), nil
 		}
-		planFn := func(ctx context.Context, call model.ToolCall) PreparedTool {
+		planFn := func(ctx context.Context, call model.ToolCall) ToolOutcome {
 			preparedCalls++
-			return PreparedTool{Permissions: fixturePermission, Immediate: &ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}}
+			return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 		}
 		h, store, c, sessionID, prepared, cancel := newOpenerHarness(t, func(context.Context, OperationAdmission) (Execution, error) {
 			return Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 				inv := invocationExecution(modelFn, planFn)
-				inv.ToolHooks = []ToolArgumentsHook{{ID: "cap.hook.domain", ExtensionID: "cap-a", Mode: HookModeEffectful, Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
+				inv.ToolHooks = []ToolArgumentsHook{{ID: "cap.hook.domain", ExtensionID: "cap-a", Run: func(context.Context, model.ToolCall) (ToolArgumentsResult, error) {
 					return ToolArgumentsResult{}, domainErr
 				}}}
 				return inv, nil
@@ -480,7 +271,7 @@ func TestWaitRetainsPublicationFailureAtPendingCallBoundaries(t *testing.T) {
 		_ = sessionID
 	})
 	t.Run("a synchronous invalid admission never contaminates Wait", func(t *testing.T) {
-		h, _, c, sessionID, _, cancel, _, _, _ := executorTurnFixture(t, false)
+		h, _, c, sessionID, _, cancel, _, _, _ := executorTurnFixture(t)
 		_, err := h.Submit(context.Background(), SubmitRequest{SessionID: sessionID, OperationID: "op-invalid", Origin: InputOriginUser, Content: admissionContent("hello"), Mode: MessageMode("urgent")})
 		testassert.Require(t, errors.Is(err, ErrInvalid), "invalid Submit = %v, want the synchronous rejection", err)
 		_ = c

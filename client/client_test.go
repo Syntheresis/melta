@@ -29,7 +29,7 @@ const (
 	testCredential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	// testVersion is the current wire identity every compatible fixture
 	// speaks; the incompatible rows keep the literal old "1".
-	testVersion = string(protocol.N24)
+	testVersion = string(protocol.N25)
 )
 
 // recordContent builds one private four-field discovery document.
@@ -128,7 +128,7 @@ func operationEventScope() protocol.Scope {
 
 // scopeOpenedEvent builds one valid scope lifecycle hint carrying the given
 // addressable scope.
-func scopeOpenedEvent(t *testing.T, scope protocol.Scope) protocol.Event {
+func scopeOpenedEvent(t *testing.T, scope protocol.InvocationScope) protocol.Event {
 	t.Helper()
 	var event protocol.Event
 	testassert.NoError(t, event.FromScopeEvent(protocol.ScopeEvent{Kind: protocol.ScopeOpened, Scope: scope}))
@@ -148,33 +148,17 @@ func sessionEventScope() protocol.Scope {
 	return scope
 }
 
-// workspaceEventScope builds one Workspace scope carrying the lexical root.
-func workspaceEventScope() protocol.Scope {
-	var scope protocol.Scope
-	if err := scope.FromWorkspaceScope(protocol.WorkspaceScope{
-		Kind:      protocol.WorkspaceScopeKindWorkspace,
-		Workspace: "/w",
-	}); err != nil {
-		panic(err) // plain members; the marshal cannot fail
-	}
-	return scope
-}
-
-// agentEventScope builds one Agent scope carrying its complete ancestor
-// identity, the producer shape of the agent lifecycle hints.
-func agentEventScope() protocol.Scope {
-	var scope protocol.Scope
-	if err := scope.FromInvocationScope(protocol.InvocationScope{
+// invocationEventScope builds one invocation scope carrying its complete
+// ancestor identity, the producer shape of the scope lifecycle hints.
+func invocationEventScope() protocol.InvocationScope {
+	return protocol.InvocationScope{
 		Kind:         protocol.Invocation,
 		InvocationId: "inv-1",
 		Purpose:      protocol.Conversation,
 		Workspace:    ptr("/w"),
 		SessionId:    testInstance,
 		OperationId:  "op-1",
-	}); err != nil {
-		panic(err) // plain members; the marshal cannot fail
 	}
-	return scope
 }
 
 // jobEventScope builds one job-member scope, the producer shape of the
@@ -470,8 +454,8 @@ func TestEventsFrames(t *testing.T) {
 	})
 
 	// Every non-global scope kind delivers through its real producer shape:
-	// the Workspace and Agent lifecycle hints and the job-member
-	// invalidation hint carry the identities that address their subject.
+	// the invocation lifecycle hint and the job-member invalidation hint
+	// carry the identities that address their subject.
 	t.Run("addressable scope kinds", func(t *testing.T) {
 		var job protocol.Event
 		testassert.NoError(t, job.FromSessionChangedEvent(protocol.SessionChangedEvent{
@@ -479,16 +463,15 @@ func TestEventsFrames(t *testing.T) {
 			Scope:           jobEventScope(),
 			SessionRevision: protocol.SessionRevision{InstanceId: testInstance, DurableRevision: "1", LocalRevision: "0"},
 		}))
-		frames := notificationFrame(t, scopeOpenedEvent(t, workspaceEventScope())) +
-			notificationFrame(t, scopeOpenedEvent(t, agentEventScope())) +
+		frames := notificationFrame(t, scopeOpenedEvent(t, invocationEventScope())) +
 			notificationFrame(t, job)
 		server := newFixture(t, jsonHealth(testInstance, testVersion), writeFrames(frames))
 		c := connectFixture(t, writeDiscovery(t, server.URL, testInstance, testVersion, testCredential))
 		events, errs := c.Events(context.Background())
 		delivered, err := drainEvents(events, errs)
 		testassert.Require(t, errors.Is(err, client.ErrResyncRequired), "disconnect error = %v, want ErrResyncRequired", err)
-		testassert.Equal(t, len(delivered), 3)
-		for i, want := range []string{"scope_opened", "scope_opened", "session_changed"} {
+		testassert.Equal(t, len(delivered), 2)
+		for i, want := range []string{"scope_opened", "session_changed"} {
 			{
 				kind, _ := delivered[i].Discriminator()
 				testassert.Require(t, kind == want, "event %d kind = %q, want %q", i, kind, want)
@@ -502,7 +485,7 @@ func TestEventsFrames(t *testing.T) {
 	}{
 		{"unknown kind", rawNotification(`{"kind":"bogus","scope":{"kind":"runtime"}}`)},
 		{"unknown member", rawNotification(strings.TrimSuffix(mustMarshal(t, sessionChangedEvent(t, testInstance, "1", "0")), "}") + `,"extra":1}`)},
-		{"top-level instance_id on a transient", rawNotification(fmt.Sprintf(`{"kind":"scope_opened","scope":{"kind":"runtime"},"instance_id":%q}`, testInstance))},
+		{"top-level instance_id on a transient", rawNotification(fmt.Sprintf(`{"kind":"scope_opened","scope":{"kind":"invocation","session_id":%q,"operation_id":"op-1","invocation_id":"inv-1","purpose":"conversation"},"instance_id":%q}`, testInstance, testInstance))},
 		{"missing required member", rawNotification(`{"kind":"session_changed","scope":{"kind":"session"}}`)},
 		{"null required member", rawNotification(`{"kind":"session_changed","scope":null,"session_revision":{"instance_id":"` + testInstance + `","durable_revision":"1","local_revision":"0"}}`)},
 		{"revision instance mismatch", notificationFrame(t, sessionChangedEvent(t, strings.Repeat("b", 32), "1", "0"))},
@@ -510,14 +493,15 @@ func TestEventsFrames(t *testing.T) {
 		{"unknown scope member", rawNotification(fmt.Sprintf(`{"kind":"session_changed","scope":{"kind":"session","bogus":true},"session_revision":{"instance_id":%q,"durable_revision":"1","local_revision":"0"}}`, testInstance))},
 		{"wrong-typed scope member", rawNotification(`{"kind":"scope_opened","scope":{"kind":5}}`)},
 		{"session_id is not hex32", rawNotification(fmt.Sprintf(`{"kind":"session_changed","scope":{"kind":"session","session_id":"nothex"},"session_revision":{"instance_id":%q,"durable_revision":"1","local_revision":"0"}}`, testInstance))},
-		{"workspace scope without its identity", rawNotification(`{"kind":"scope_opened","scope":{"kind":"workspace"}}`)},
-		{"session scope without its identity", rawNotification(`{"kind":"scope_opened","scope":{"kind":"session"}}`)},
-		{"operation scope without the session identity", rawNotification(`{"kind":"scope_opened","scope":{"kind":"operation","workspace":"/w","operation_id":"op-1"}}`)},
-		{"operation scope without the operation identity", rawNotification(fmt.Sprintf(`{"kind":"scope_opened","scope":{"kind":"operation","workspace":"/w","session_id":%q}}`, testInstance))},
-		{"agent scope without the operation identity", rawNotification(fmt.Sprintf(`{"kind":"scope_opened","scope":{"kind":"agent","session_id":%q}}`, testInstance))},
-		{"job scope without the session identity", rawNotification(`{"kind":"scope_opened","scope":{"kind":"job","job_id":"job-1"}}`)},
-		{"job scope without the job identity", rawNotification(fmt.Sprintf(`{"kind":"scope_opened","scope":{"kind":"job","session_id":%q}}`, testInstance))},
-		{"empty scope member", rawNotification(`{"kind":"scope_opened","scope":{"kind":"runtime","workspace":""}}`)},
+		{"session scope without its identity", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"session"},"content":"x"}`)},
+		{"operation scope without the session identity", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"operation","workspace":"/w","operation_id":"op-1"},"content":"x"}`)},
+		{"operation scope without the operation identity", rawNotification(fmt.Sprintf(`{"kind":"reasoning_delta","scope":{"kind":"operation","workspace":"/w","session_id":%q},"content":"x"}`, testInstance))},
+		{"invocation scope without the operation identity", rawNotification(fmt.Sprintf(`{"kind":"scope_opened","scope":{"kind":"invocation","session_id":%q,"invocation_id":"inv-1","purpose":"conversation"}}`, testInstance))},
+		{"scope event with a runtime scope", rawNotification(`{"kind":"scope_opened","scope":{"kind":"runtime"}}`)},
+		{"invocation scope on another event", rawNotification(fmt.Sprintf(`{"kind":"reasoning_delta","scope":{"kind":"invocation","session_id":%q,"operation_id":"op-1","invocation_id":"inv-1","purpose":"conversation"},"content":"x"}`, testInstance))},
+		{"job scope without the session identity", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"job","job_id":"job-1"},"content":"x"}`)},
+		{"job scope without the job identity", rawNotification(fmt.Sprintf(`{"kind":"reasoning_delta","scope":{"kind":"job","session_id":%q},"content":"x"}`, testInstance))},
+		{"empty scope member", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime","workspace":""},"content":"x"}`)},
 		{"negative text position", rawNotification(`{"kind":"text_delta","scope":{"kind":"runtime"},"position":-1,"content":"x"}`)},
 		{"empty text content", rawNotification(`{"kind":"text_delta","scope":{"kind":"runtime"},"position":0,"content":""}`)},
 		{"missing reasoning content", rawNotification(`{"kind":"reasoning_delta","scope":{"kind":"runtime"}}`)},

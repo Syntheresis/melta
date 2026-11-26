@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,26 +8,21 @@ import (
 	"github.com/Syntheresis/melta/internal/testassert"
 )
 
-// execWrite runs one write through the exported Normalize* + Prepare* entries.
-// An empty rootCanonical is bound from root inside the helper.
-func execWrite(t *testing.T, root, rootCanonical string, store SnapshotStore, args map[string]any) (string, error) {
+func execWrite(t *testing.T, root string, store SnapshotStore, args map[string]any) (string, error) {
 	t.Helper()
-	norm, err := NormalizeWriteArgs(args)
+	path, content, err := WriteArgs(args)
 	if err != nil {
 		return "", err
 	}
-	call, err := PrepareWriteCall(root, rootCanonical, store, norm)
-	if err != nil {
-		return "", err
-	}
-	return call.Execute(context.Background(), nil)
+	result, _, err := WriteFile(root, store, path, content)
+	return result, err
 }
 
-func TestPreparedWriteCreatesNewFileAndParentDirs(t *testing.T) {
+func TestWriteFileCreatesNewFileAndParentDirs(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "nested", "new.txt")
 
-	result, err := execWrite(t, root, "", newTempCodeGroupStore(t), map[string]any{
+	result, err := execWrite(t, root, newTempCodeGroupStore(t), map[string]any{
 		"path":    path,
 		"content": "created",
 	})
@@ -37,12 +31,12 @@ func TestPreparedWriteCreatesNewFileAndParentDirs(t *testing.T) {
 	assertFileContent(t, path, "created")
 }
 
-func TestPreparedWriteWritesContentExactlyIncludingTrailingNewline(t *testing.T) {
+func TestWriteFileWritesContentExactlyIncludingTrailingNewline(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "exact.txt")
 
 	{
-		_, err := execWrite(t, root, "", newTempCodeGroupStore(t), map[string]any{
+		_, err := execWrite(t, root, newTempCodeGroupStore(t), map[string]any{
 			"path":    path,
 			"content": "no trailing newline",
 		})
@@ -51,7 +45,7 @@ func TestPreparedWriteWritesContentExactlyIncludingTrailingNewline(t *testing.T)
 	assertFileContent(t, path, "no trailing newline")
 
 	{
-		_, err := execWrite(t, root, "", newTempCodeGroupStore(t), map[string]any{
+		_, err := execWrite(t, root, newTempCodeGroupStore(t), map[string]any{
 			"path":    path,
 			"content": "with trailing newline\n",
 		})
@@ -60,12 +54,12 @@ func TestPreparedWriteWritesContentExactlyIncludingTrailingNewline(t *testing.T)
 	assertFileContent(t, path, "with trailing newline\n")
 }
 
-func TestPreparedWriteWithSnapshotSnapshotsBeforeWrite(t *testing.T) {
+func TestWriteFileCapturesSnapshotBeforeWrite(t *testing.T) {
 	path := readFileTestFile(t, "file.txt", "before")
 	root := filepath.Dir(path)
 	store := &recordingCodeGroupStore{testCodeGroupStore: newCodeGroupStore(t, filepath.Join(t.TempDir(), "group"))}
 
-	result, err := execWrite(t, root, "", store, map[string]any{
+	result, err := execWrite(t, root, store, map[string]any{
 		"path":    path,
 		"content": "after",
 	})
@@ -77,7 +71,7 @@ func TestPreparedWriteWithSnapshotSnapshotsBeforeWrite(t *testing.T) {
 	assertFileContent(t, path, "after")
 }
 
-func TestPreparedWriteWithSnapshotUsesCanonicalTargetAndRequestedResult(t *testing.T) {
+func TestWriteFileSnapshotUsesCanonicalTargetAndRequestedResult(t *testing.T) {
 	root := t.TempDir()
 	realDir := t.TempDir()
 	target := filepath.Join(realDir, "file.txt")
@@ -87,7 +81,7 @@ func TestPreparedWriteWithSnapshotUsesCanonicalTargetAndRequestedResult(t *testi
 	requested := filepath.Join(linkDir, "file.txt")
 	store := &recordingCodeGroupStore{testCodeGroupStore: newCodeGroupStore(t, filepath.Join(t.TempDir(), "group"))}
 
-	result, err := execWrite(t, root, "", store, map[string]any{
+	result, err := execWrite(t, root, store, map[string]any{
 		"path":    requested,
 		"content": "after",
 	})

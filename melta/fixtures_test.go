@@ -35,26 +35,6 @@ var (
 	errWorkspaceClo = errors.New("test workspace closer failure")
 )
 
-func runtimeScopeInfo() ScopeInfo {
-	return ScopeInfo{Kind: ScopeRuntime, DataDir: "/owner/data"}
-}
-
-func workspaceScopeInfo(workspace string) ScopeInfo {
-	return ScopeInfo{Kind: ScopeWorkspace, DataDir: "/owner/data", Workspace: workspace}
-}
-
-func mustComposition(t *testing.T) *composition {
-	t.Helper()
-	return newComposition()
-}
-
-func mustOpenScope(t *testing.T, c *composition, ctx context.Context, info ScopeInfo, ancestors []*scope) *scope {
-	t.Helper()
-	sc, err := c.openScope(ctx, info, ancestors)
-	testassert.Require(t, err == nil, "openScope(%s %q): %v", info.Kind, info.Workspace, err)
-	return sc
-}
-
 type workspaceFactoryError struct{}
 type workspaceCleanupError struct{}
 
@@ -63,6 +43,17 @@ func (*workspaceCleanupError) Error() string { return "workspace cleanup failure
 
 func runtimeNormalizeContext(_ context.Context, call model.ToolCall) (json.RawMessage, error) {
 	return runtimeNormalize(call)
+}
+
+// stagedService returns one staged service registration by its registered
+// name, or nil when the staged capture holds none.
+func stagedService(stage *nativeSnapshot, name string) *nativeRegistration {
+	for _, entry := range stage.entries {
+		if entry.kind == "service" && entry.name == name {
+			return entry
+		}
+	}
+	return nil
 }
 
 // testCaller is the authenticated user grant the protocol host binds after

@@ -43,14 +43,13 @@ func (c Class) valid() bool {
 // Error is one author or infrastructure failure carried as the closed public
 // class plus a non-secret message. Unwrap exposes the matching Harness
 // sentinel where the class has one, so decoded failures classify with
-// errors.Is. Interrupted and Evidence carry the author's declared effect
-// knowledge when the author error is a *harness.EffectError.
+// errors.Is. Interrupted carries the author's declared interruption when the
+// author error is a *harness.EffectError.
 type Error struct {
-	Class       Class                     `json:"class"`
-	Message     string                    `json:"message"`
-	Interrupted bool                      `json:"interrupted,omitempty"`
-	Evidence    harness.ExecutionEvidence `json:"evidence,omitempty"`
-	Partial     JSONBytes                 `json:"partial,omitempty"`
+	Class       Class     `json:"class"`
+	Message     string    `json:"message"`
+	Interrupted bool      `json:"interrupted,omitempty"`
+	Partial     JSONBytes `json:"partial,omitempty"`
 }
 
 // Error returns the class and message.
@@ -66,6 +65,8 @@ func (e *Error) Unwrap() error {
 	switch e.Class {
 	case ClassClosed:
 		return extension.ErrClosed
+	case ClassDenied:
+		return extension.ErrDenied
 	case ClassCancelled:
 		return context.Canceled
 	case ClassInvalid:
@@ -100,7 +101,6 @@ func classifyError(err error) *Error {
 	var typed *Error
 	if errors.As(err, &typed) {
 		failure.Interrupted = typed.Interrupted
-		failure.Evidence = typed.Evidence
 		if len(typed.Partial) != 0 {
 			failure.Partial = append(JSONBytes(nil), typed.Partial...)
 		}
@@ -108,7 +108,6 @@ func classifyError(err error) *Error {
 	var effect *harness.EffectError
 	if errors.As(err, &effect) {
 		failure.Interrupted = harness.EffectInterrupted(err)
-		failure.Evidence = harness.DeclaredExecutionKnowledge(err)
 	}
 	var callErr *extension.CallError
 	if errors.As(err, &callErr) && len(callErr.Partial) != 0 {
@@ -134,6 +133,8 @@ func classOfError(err error) *Error {
 	switch {
 	case errors.Is(err, extension.ErrClosed):
 		return &Error{Class: ClassClosed, Message: message}
+	case errors.Is(err, extension.ErrDenied):
+		return &Error{Class: ClassDenied, Message: message}
 	case errors.Is(err, harness.ErrInvalid):
 		return &Error{Class: ClassInvalid, Message: message}
 	case errors.Is(err, harness.ErrNotFound):

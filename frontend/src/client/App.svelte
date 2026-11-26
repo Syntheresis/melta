@@ -452,7 +452,7 @@
       seen.add(entry.extension_id);
       return entry.operations.every((item) => item && typeof item === 'object' &&
         ['harness', 'workspace', 'session'].includes(item.target) && item.method && typeof item.method.name === 'string' &&
-        !!item.method.name && ['pure', 'service_io'].includes(item.method.mode) &&
+        !!item.method.name &&
         typeof item.method.input === 'string' && typeof item.method.success === 'string');
     });
   }

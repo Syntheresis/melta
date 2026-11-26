@@ -40,11 +40,7 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 		return nil, err
 	}
 	for _, warning := range definitions.Warnings() {
-		args, _ := json.Marshal(struct {
-			Kind    string `json:"kind"`
-			Message string `json:"message"`
-		}{warning.Kind, warning.Error()})
-		if _, err := api.Call(ctx, "melta.warnings", "report", args); err != nil {
+		if err := extension.Activation(api).ReportWarning(ctx, warning.Kind, warning.Error()); err != nil {
 			return nil, err
 		}
 	}
@@ -53,46 +49,28 @@ func activateAuthor(ctx context.Context, api extension.API) (func(context.Contex
 		return nil, err
 	}
 	s := authorInstance{definitions: definitions}
-	transform := extension.Service{Name: ConfigurationCapabilityID, Methods: []extension.RegisteredMethod{{
-		Method: extension.PureMethod("set_model", `{"type":"object","required":["section","arguments"],"properties":{"section":{"type":"object"},"arguments":`+setModelInputSchema+`},"additionalProperties":false}`, `{"type":"object"}`),
-		Handler: func(ctx context.Context, _ extension.AuthorContext, raw json.RawMessage) (extension.Result, error) {
-			var input struct {
-				Section   json.RawMessage `json:"section"`
-				Arguments json.RawMessage `json:"arguments"`
-			}
-			if err := json.Unmarshal(raw, &input); err != nil {
-				return extension.Result{}, err
-			}
-			return transformModel(input.Section, input.Arguments, func(data []byte) (*Config, error) {
-				return parse(data)
-			})
-		},
-	}}}
-	if _, err = api.RegisterService(transform, nil); err != nil {
-		return nil, err
-	}
 	operations := []extension.Operation{
-		{Target: extension.ExposedTargetHarness, Method: extension.PureMethod("list", emptyObject, rosterOutput), Handler: s.list},
-		{Target: extension.ExposedTargetSession, Method: extension.PureMethod("current", emptyObject, currentOutput), Handler: s.current},
-		{Target: extension.ExposedTargetSession, Method: extension.ServiceIOMethod("select", agentInput, `{"type":"null"}`), Handler: s.selectAgent},
-		{Target: extension.ExposedTargetWorkspace, Method: extension.ServiceMethod("create", extension.ModeServiceIO, createInput, `{"type":"object"}`, "", `{"type":"object"}`), Handler: s.create},
-		{Target: extension.ExposedTargetHarness, Method: extension.ServiceIOMethod("set_model", setModelInputSchema, `{"type":"null"}`), Handler: s.setModel},
+		{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("list", emptyObject, rosterOutput, "", ""), Handler: s.list},
+		{Target: extension.ExposedTargetSession, Method: extension.ServiceMethod("current", emptyObject, currentOutput, "", ""), Handler: s.current},
+		{Target: extension.ExposedTargetSession, Method: extension.ServiceMethod("select", agentInput, `{"type":"null"}`, "", ""), Handler: s.selectAgent},
+		{Target: extension.ExposedTargetWorkspace, Method: extension.ServiceMethod("create", createInput, `{"type":"object"}`, "", `{"type":"object"}`), Handler: s.create},
+		{Target: extension.ExposedTargetHarness, Method: extension.ServiceMethod("set_model", setModelInputSchema, `{"type":"null"}`, "", ""), Handler: s.setModel},
 	}
 	for _, op := range operations {
 		if _, err := api.RegisterOperation(op, nil); err != nil {
 			return nil, err
 		}
 	}
-	if _, err := api.RegisterTool(model.ToolDefinition{Name: TaskCapabilityID, Description: taskDescription(definitions), Parameters: []byte(taskParameters)}, authorTask{definitions: definitions, settings: settings}, nil); err != nil {
+	if _, err := api.RegisterTool(model.ToolDefinition{Name: TaskCapabilityID, Description: taskDescription(definitions), Parameters: []byte(taskParameters)}, (authorTask{definitions: definitions, settings: settings}).run, nil); err != nil {
 		return nil, err
 	}
 	if _, err := api.AttachAdmission(s.admit, nil); err != nil {
 		return nil, err
 	}
-	if _, err := api.AttachArguments(extension.HookModePure, s.arguments, nil); err != nil {
+	if _, err := api.AttachArguments(s.arguments, nil); err != nil {
 		return nil, err
 	}
-	if _, err := api.AttachAuthorization(s.authorize, nil); err != nil {
+	if _, err := api.AttachToolCheck(s.check, nil); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -191,13 +169,15 @@ func (s authorInstance) create(ctx context.Context, call extension.AuthorContext
 }
 
 func (s authorInstance) setModel(ctx context.Context, call extension.AuthorContext, raw json.RawMessage) (extension.Result, error) {
-	args, err := json.Marshal(struct {
-		Service   string          `json:"service"`
-		Method    string          `json:"method"`
-		Arguments json.RawMessage `json:"arguments"`
-	}{ConfigurationCapabilityID, "set_model", raw})
+	transformed, err := transformModel(call.Settings, raw, parse)
 	if err != nil {
 		return extension.Result{}, err
 	}
-	return call.Call(ctx, "melta.settings", "update", args)
+	args, err := json.Marshal(struct {
+		Section json.RawMessage `json:"section"`
+	}{transformed.Value})
+	if err != nil {
+		return extension.Result{}, err
+	}
+	return call.Call(ctx, "melta.settings", "replace", args)
 }

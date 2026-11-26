@@ -1,9 +1,7 @@
 package melta
 
-// Retained child-authority coverage over the actual registered tool ->
-// frozen ToolPlan start -> host session.start -> Harness admission bridge.
-// These tests drive the current RegisteredTool/AuthorContext contract and
-// assert the committed child and settlement identities.
+// Child-authority coverage over registered tools, session.start and Harness
+// admission, including committed child and settlement identities.
 
 import (
 	"context"
@@ -37,65 +35,44 @@ type bridgeChildProbe struct {
 	doneOnce     sync.Once
 }
 
-func (p *bridgeChildProbe) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	return call.Arguments, nil
-}
-
-func (p *bridgeChildProbe) Prepare(_ context.Context, _ extension.AuthorContext, call model.ToolCall) extension.ToolPlan {
+func (p *bridgeChildProbe) run(ctx context.Context, call extension.ToolCall) (extension.ToolResult, error) {
 	modelRef := model.ModelRef{Provider: "prov", Model: "m"}
-	return extension.ToolPlan{
-		Data: []byte(call.ID),
-		Start: &extension.SessionStart{
-			Target:       "secondary",
-			Inputs:       harness.SessionInputs{Model: &modelRef},
-			InitialState: harness.SessionStateValue(`{"agent":"secondary"}`),
-			Input:        []model.ContentPart{{Kind: model.PartText, Text: "child work"}},
-			Report:       true,
-			OutputLimit:  15360,
-		},
+	start := extension.SessionStart{
+		Inputs:       harness.SessionInputs{Model: &modelRef},
+		InitialState: harness.SessionStateValue(`{"agent":"secondary"}`),
+		Input:        []model.ContentPart{{Kind: model.PartText, Text: "child work"}},
+		Report:       true,
+		OutputLimit:  15360,
 	}
-}
-
-func (p *bridgeChildProbe) Execute(ctx context.Context, tc extension.AuthorContext, plan extension.ToolPlan) harness.ToolOutcome {
-	callID := string(plan.Data)
-	arguments := json.RawMessage(`{}`)
 	p.executes.Add(1)
 	if p.mode == "canceled_origin" {
 		p.startedOnce.Do(func() { close(p.started) })
 		<-ctx.Done()
-		_, p.launchErr = tc.Call(context.Background(), "melta.session", "start", arguments)
+		_, p.launchErr = call.StartSession(context.Background(), start)
 		p.doneOnce.Do(func() { close(p.done) })
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultInterrupted, Content: "canceled"}}
+		return extension.ToolResult{}, ctx.Err()
 	}
-	result, err := tc.Call(ctx, "melta.session", "start", arguments)
+	childID, err := call.StartSession(ctx, start)
 	if err != nil {
 		p.launchErr = err
 		p.launchedOnce.Do(func() { close(p.launched) })
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
+		return extension.ToolResult{}, err
 	}
-	var launched struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.Unmarshal(result.Value, &launched); err != nil {
-		p.launchErr = err
-		p.launchedOnce.Do(func() { close(p.launched) })
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultError, Content: err.Error()}}
-	}
-	p.childID = launched.SessionID
+	p.childID = childID
 	<-p.childStarted // the committed child is blocked in its own model request
 	if p.mode == "interrupted_committed" {
 		p.launchedOnce.Do(func() { close(p.launched) })
 		<-ctx.Done()
-		return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultInterrupted, Content: "interrupted"}}
+		return extension.ToolResult{}, ctx.Err()
 	}
-	p.retained = tc
+	p.retained = call.AuthorContext
 	p.launchedOnce.Do(func() { close(p.launched) })
-	return harness.ToolOutcome{Evidence: harness.ExecutionObserved, Result: model.ToolResult{CallID: callID, Status: model.ResultSuccess, Content: launched.SessionID}}
+	return extension.ToolResult{Content: childID}, nil
 }
 
 // shChildGrantNative registers the probe tool under the grant extension,
 // which requests the host session service its start consumes.
-func shChildGrantNative(tool extension.RegisteredTool) extension.Extension {
+func shChildGrantNative(tool extension.ToolFunc) extension.Extension {
 	manifest := registrarManifest("grant")
 	manifest.Services = []string{"melta.session"}
 	return extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
@@ -140,7 +117,7 @@ func bridgeParentHasChildResult(t *testing.T, e *ownerEnv, childID string) bool 
 
 // TestNativeChildBridgeRetainsCommittedChildren proves through the actual
 // registered tool -> frozen start -> session.start -> Harness admission
-// bridge: a canceled Execute origin cannot consume the start even with a
+// bridge: a canceled tool origin cannot start a Session even with a
 // fresh context; a retained Call view is closed after return; and an
 // already-committed child blocked in its own model request survives both
 // parent interruption and executor return, then settles successfully with
@@ -184,7 +161,7 @@ func TestNativeChildBridgeRetainsCommittedChildren(t *testing.T) {
 				})
 				probe := &bridgeChildProbe{mode: row.mode, childStarted: childStarted, started: make(chan struct{}), launched: make(chan struct{}), done: make(chan struct{})}
 				ctx := context.Background()
-				r, err := e.open(ctx, shChildGrantNative(probe))
+				r, err := e.open(ctx, shChildGrantNative(probe.run))
 				testassert.NoError(t, err)
 				t.Cleanup(func() {
 					release()

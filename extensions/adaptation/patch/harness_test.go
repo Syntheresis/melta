@@ -17,52 +17,50 @@ import (
 )
 
 // testWorkspace is the test double for the Host's melta.workspace service. It
-// resolves bindings exactly as the Host does and performs the four Workspace
+// resolves paths exactly as the Host does and performs the four Workspace
 // operations over the real filesystem.
 type testWorkspace struct {
 	root string
 
 	mu           sync.Mutex
-	next         int
-	bindings     map[string]string
 	writes       []string
 	deletes      []string
 	onWrite      func(int)
+	onStat       func(int)
+	stats        int
 	writeErr     func(int) error
 	shortWriteAt int
 }
 
 func newTestWorkspace(t *testing.T, root string) *testWorkspace {
 	t.Helper()
-	return &testWorkspace{root: root, bindings: make(map[string]string)}
+	return &testWorkspace{root: root}
 }
 
 func (w *testWorkspace) call(_ context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
-	if service != workspaceService {
+	if service != extension.ContractWorkspace {
 		return extension.Result{}, fmt.Errorf("unexpected service %q", service)
 	}
 	switch method {
-	case "bind":
+	case "stat":
 		var input struct {
 			Path *string `json:"path"`
 		}
 		if err := json.Unmarshal(args, &input); err != nil || input.Path == nil || *input.Path == "" {
-			return extension.Result{}, fmt.Errorf("invalid bind arguments")
+			return extension.Result{}, fmt.Errorf("invalid stat arguments")
+		}
+		w.stats++
+		if w.onStat != nil {
+			w.onStat(w.stats)
 		}
 		canonical, exists, err := testResolve(w.root, *input.Path)
 		if err != nil {
 			return extension.Result{}, err
 		}
-		w.mu.Lock()
-		w.next++
-		handle := fmt.Sprintf("binding-%d", w.next)
-		w.bindings[handle] = canonical
-		w.mu.Unlock()
 		value, err := json.Marshal(struct {
-			Binding       string `json:"binding"`
 			CanonicalPath string `json:"canonical_path"`
 			Exists        bool   `json:"exists"`
-		}{handle, canonical, exists})
+		}{canonical, exists})
 		return extension.Result{Value: value}, err
 	case "read":
 		target, err := w.target(args)
@@ -79,14 +77,14 @@ func (w *testWorkspace) call(_ context.Context, service, method string, args jso
 		return extension.Result{Value: value}, err
 	case "write":
 		var input struct {
-			Binding    string `json:"binding"`
+			Path       string `json:"path"`
 			Bytes      []byte `json:"bytes"`
 			CreateOnly bool   `json:"create_only"`
 		}
 		if err := json.Unmarshal(args, &input); err != nil {
 			return extension.Result{}, err
 		}
-		target, err := w.targetByHandle(input.Binding)
+		target, _, err := testResolve(w.root, input.Path)
 		if err != nil {
 			return extension.Result{}, err
 		}
@@ -141,22 +139,13 @@ func (w *testWorkspace) call(_ context.Context, service, method string, args jso
 
 func (w *testWorkspace) target(args json.RawMessage) (string, error) {
 	var input struct {
-		Binding string `json:"binding"`
+		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
 		return "", err
 	}
-	return w.targetByHandle(input.Binding)
-}
-
-func (w *testWorkspace) targetByHandle(handle string) (string, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	target, ok := w.bindings[handle]
-	if !ok {
-		return "", fmt.Errorf("unknown binding %q", handle)
-	}
-	return target, nil
+	path, _, err := testResolve(w.root, input.Path)
+	return path, err
 }
 
 func (w *testWorkspace) recordWrite(target string) int {
@@ -166,7 +155,7 @@ func (w *testWorkspace) recordWrite(target string) int {
 	return len(w.writes)
 }
 
-// testResolve mirrors the Host's bind canonicalization: an existing leaf is
+// testResolve mirrors the Host's canonicalization: an existing leaf is
 // resolved through every symlink; an absent leaf resolves its deepest
 // existing parent and appends the remaining components.
 func testResolve(root, path string) (string, bool, error) {
@@ -204,30 +193,12 @@ func testResolve(root, path string) (string, bool, error) {
 	}
 }
 
-// preparePatch drives one patch call through Normalize and Prepare.
-func preparePatch(t *testing.T, ws *testWorkspace, input string) extension.ToolPlan {
+// runPatch drives one patch call.
+func runPatch(t *testing.T, ws *testWorkspace, input string) harness.ToolOutcome {
 	t.Helper()
 	arguments, err := json.Marshal(map[string]string{"input": input})
 	testassert.NoError(t, err)
-	call := model.ToolCall{ID: "call-1", Name: ToolName, Arguments: arguments}
-	normalized, err := (Tool{}).Normalize(extension.AuthorContext{}, call)
-	testassert.NoError(t, err)
-	call.Arguments = normalized
-	return (Tool{}).Prepare(context.Background(), extension.AuthorContext{Call: ws.call}, call)
-}
-
-func executePrepared(t *testing.T, ws *testWorkspace, plan extension.ToolPlan) harness.ToolOutcome {
-	t.Helper()
-	if plan.Immediate != nil {
-		return *plan.Immediate
-	}
-	return (Tool{}).Execute(context.Background(), extension.AuthorContext{Call: ws.call}, plan)
-}
-
-// runPatch drives one patch call through Normalize, Prepare and Execute.
-func runPatch(t *testing.T, ws *testWorkspace, input string) harness.ToolOutcome {
-	t.Helper()
-	return executePrepared(t, ws, preparePatch(t, ws, input))
+	return extension.RunTool(context.Background(), Tool, extension.ToolCall{AuthorContext: extension.AuthorContext{Call: ws.call}, ID: "call-1", Name: ToolName, Arguments: arguments})
 }
 
 func applyPatchInput(t *testing.T, s string) string {

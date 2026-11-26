@@ -1,12 +1,15 @@
 package patch
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
@@ -50,6 +53,7 @@ func TestApplyPatchMidWriteFailureReportsCommittedFiles(t *testing.T) {
 	input := applyPatchInput(t, "*** Add File: new.txt\n+hi\n*** Update File: x.txt\n@@\n alpha\n-BEFORE\n+AFTER\n beta")
 	outcome := runPatch(t, ws, input)
 	outcomeFailed(t, outcome, "A new.txt")
+	testassert.Require(t, strings.HasPrefix(outcome.Result.Content, "Success. Updated the following files:\nA new.txt\nM x.txt\n\n"), "content = %q, want the completed report followed by the failure", outcome.Result.Content)
 	testassert.Require(t, strings.Contains(outcome.Result.Content, "M x.txt") && strings.Contains(outcome.Result.Content, "simulated disk full"), "content = %q, want the completed write reported beside its record failure", outcome.Result.Content)
 	assertFileContent(t, filepath.Join(root, "x.txt"), "alpha\nAFTER\nbeta")
 }
@@ -134,6 +138,7 @@ func TestApplyPatchShortWriteReportsUncertainTarget(t *testing.T) {
 	input := applyPatchInput(t, "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after")
 	outcome := runPatch(t, ws, input)
 	outcomeFailed(t, outcome, "incomplete")
+	testassert.Equal(t, outcome.Evidence, harness.ExecutionUnknown)
 	testassert.Require(t, strings.Contains(outcome.Result.Content, "M new.txt (uncertain)"), "content = %q, want the uncertain destination reported as uncertain", outcome.Result.Content)
 	testassert.Require(t, !strings.Contains(outcome.Result.Content, "M new.txt\n") && !strings.Contains(outcome.Result.Content, "D old.txt"), "content = %q, want no completed claim", outcome.Result.Content)
 	assertFileContent(t, source, "before")
@@ -185,7 +190,7 @@ func TestApplyPatchCanonicalCollisionRejectedBeforeApply(t *testing.T) {
 	ws := newTestWorkspace(t, root)
 	input := applyPatchInput(t, "*** Update File: a.txt\n@@\n-hi\n+bye\n*** Update File: ./a.txt\n@@\n-hi\n+there")
 	outcome := runPatch(t, ws, input)
-	testassert.Require(t, outcome.Result.Status == model.ResultDenied && outcome.Result.Content == harness.PermissionDeniedContent, "outcome = %+v, want the fixed denial", outcome.Result)
+	testassert.Require(t, outcome.Result.Status == model.ResultError && strings.Contains(outcome.Result.Content, "multiple patch entries resolve to the same file"), "outcome = %+v", outcome.Result)
 	assertFileContent(t, filepath.Join(root, "a.txt"), "hi")
 	testassert.Require(t, len(ws.writes) == 0, "writes = %v, want none", ws.writes)
 }
@@ -199,7 +204,7 @@ func TestApplyPatchCanonicalCollisionSymlinkRejected(t *testing.T) {
 	ws := newTestWorkspace(t, root)
 	input := applyPatchInput(t, "*** Update File: real.txt\n@@\n content\n+changed\n*** Delete File: link.txt")
 	outcome := runPatch(t, ws, input)
-	testassert.Require(t, outcome.Result.Status == model.ResultDenied && outcome.Result.Content == harness.PermissionDeniedContent, "outcome = %+v, want the fixed denial", outcome.Result)
+	testassert.Require(t, outcome.Result.Status == model.ResultError && strings.Contains(outcome.Result.Content, "multiple patch entries resolve to the same file"), "outcome = %+v", outcome.Result)
 	assertFileContent(t, real, "content")
 	testassert.Require(t, len(ws.writes) == 0, "writes = %v, want none", ws.writes)
 }
@@ -289,9 +294,8 @@ func TestApplyPatchDestinationAppearingBeforeCreateOnlyWriteIsRefused(t *testing
 	assertFileContent(t, filepath.Join(root, "late.txt"), "outside")
 }
 
-// TestApplyPatchPreconditionsUseCurrentExistence proves the
-// precondition rule: Prepare-time existence is not used; Execute reads
-// each target's current state before the first mutation.
+// TestApplyPatchPreconditionsUseCurrentExistence checks the filesystem state
+// observed when each target is statted before mutation.
 func TestApplyPatchPreconditionsUseCurrentExistence(t *testing.T) {
 	for _, tc := range []struct {
 		name, input          string
@@ -308,14 +312,14 @@ func TestApplyPatchPreconditionsUseCurrentExistence(t *testing.T) {
 				testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
 			}
 			ws := newTestWorkspace(t, root)
-			plan := preparePatch(t, ws, applyPatchInput(t, tc.input))
-			testassert.Require(t, plan.Immediate == nil, "prepare = %+v", plan.Immediate)
-			if tc.exists {
-				testassert.NoError(t, os.Remove(path))
-			} else {
-				testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
+			ws.onStat = func(int) {
+				if tc.exists {
+					testassert.NoError(t, os.Remove(path))
+				} else {
+					testassert.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
+				}
 			}
-			outcome := executePrepared(t, ws, plan)
+			outcome := runPatch(t, ws, applyPatchInput(t, tc.input))
 			testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "outcome = %+v, want success against current existence", outcome.Result)
 			if tc.missingAfter {
 				assertPathMissing(t, path)
@@ -331,13 +335,34 @@ func TestApplyPatchPreconditionsUseCurrentExistence(t *testing.T) {
 		destination := filepath.Join(root, "new.txt")
 		testassert.NoError(t, os.WriteFile(destination, []byte("outside"), 0o644))
 		ws := newTestWorkspace(t, root)
-		plan := preparePatch(t, ws, applyPatchInput(t, "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after"))
-		testassert.Require(t, plan.Immediate == nil, "prepare = %+v", plan.Immediate)
-		testassert.NoError(t, os.Remove(destination))
-		outcome := executePrepared(t, ws, plan)
+		ws.onStat = func(index int) {
+			if index == 2 {
+				testassert.NoError(t, os.Remove(destination))
+			}
+		}
+		outcome := runPatch(t, ws, applyPatchInput(t, "*** Update File: old.txt\n*** Move to: new.txt\n@@\n-before\n+after"))
 		testassert.Require(t, outcome.Result.Status == model.ResultSuccess, "outcome = %+v, want success against current existence", outcome.Result)
 		assertPathMissing(t, source)
 		assertFileContent(t, destination, "after")
+	})
+	t.Run("source disappears after stat", func(t *testing.T) {
+		root := t.TempDir()
+		source := filepath.Join(root, "source.txt")
+		testassert.NoError(t, os.WriteFile(source, []byte("before"), 0o600))
+		ws := newTestWorkspace(t, root)
+		call := func(ctx context.Context, service, method string, args json.RawMessage) (extension.Result, error) {
+			result, err := ws.call(ctx, service, method, args)
+			if err == nil && method == "stat" && strings.Contains(string(args), "source.txt") {
+				testassert.NoError(t, os.Remove(source))
+			}
+			return result, err
+		}
+		input := applyPatchInput(t, "*** Add File: first.txt\n+one\n*** Update File: source.txt\n@@\n-before\n+after")
+		arguments, err := json.Marshal(map[string]string{"input": input})
+		testassert.NoError(t, err)
+		_, err = Tool(context.Background(), extension.ToolCall{AuthorContext: extension.AuthorContext{Call: call}, Arguments: arguments})
+		testassert.Require(t, err != nil && !strings.Contains(err.Error(), "Success. Updated"), "error = %v, want read failure before mutation", err)
+		assertPathMissing(t, filepath.Join(root, "first.txt"))
 	})
 }
 

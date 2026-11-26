@@ -50,7 +50,7 @@ func TestWriteFileRetainsSnapshotWhenTargetChangesBeforeMutation(t *testing.T) {
 				},
 			}
 
-			_, err := execWrite(t, root, "", wrapped, map[string]any{
+			_, err := execWrite(t, root, wrapped, map[string]any{
 				"path":    path,
 				"content": "after",
 			})
@@ -70,7 +70,7 @@ func TestEditFileDiscardsSnapshotWhenEditFailsBeforeMutation(t *testing.T) {
 	path := snapshotLifecycleFile(t, root, "file.txt", "before")
 	store := newSnapshotLifecycleStore(t)
 
-	_, err := execEdit(t, root, "", store, map[string]any{
+	_, err := execEdit(t, root, store, map[string]any{
 		"path":       path,
 		"old_string": "missing",
 		"new_string": "after",
@@ -97,7 +97,7 @@ func TestEditFileRetainsSnapshotWhenTargetChangesBeforeMutation(t *testing.T) {
 		},
 	}
 
-	_, err := execEdit(t, root, "", wrapped, map[string]any{
+	_, err := execEdit(t, root, wrapped, map[string]any{
 		"path":       path,
 		"old_string": "external",
 		"new_string": "after",
@@ -117,13 +117,13 @@ func TestFailedValidationDoesNotDiscardPreviouslyRetainedSnapshot(t *testing.T) 
 	store := newSnapshotLifecycleStore(t)
 
 	{
-		_, err := execWrite(t, root, "", store, map[string]any{
+		_, err := execWrite(t, root, store, map[string]any{
 			"path":    path,
 			"content": "after",
 		})
 		testassert.NoError(t, err)
 	}
-	_, err := execEdit(t, root, "", store, map[string]any{
+	_, err := execEdit(t, root, store, map[string]any{
 		"path":       path,
 		"old_string": "missing",
 		"new_string": "other",
@@ -141,14 +141,14 @@ func TestWriteFileSameGroupSecondWriteControlsSnapshotIdentity(t *testing.T) {
 	store := newSnapshotLifecycleStore(t)
 
 	{
-		_, err := execWrite(t, root, "", store, map[string]any{
+		_, err := execWrite(t, root, store, map[string]any{
 			"path":    path,
 			"content": "first",
 		})
 		testassert.NoError(t, err)
 	}
 	{
-		_, err := execWrite(t, root, "", store, map[string]any{
+		_, err := execWrite(t, root, store, map[string]any{
 			"path":    path,
 			"content": "second",
 		})

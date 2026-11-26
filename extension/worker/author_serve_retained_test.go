@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -151,6 +152,35 @@ func (p *servePipe) wait() error {
 
 func manifest() extension.Manifest {
 	return extension.Manifest{ID: "author", Version: "1", APIVersion: extension.APIVersion, SettingsSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func TestAuthorServeToolCheck(t *testing.T) {
+	var seen model.ToolCall
+	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+		_, err := api.AttachToolCheck(func(_ context.Context, _ extension.AuthorContext, call model.ToolCall) (*string, error) {
+			seen = call
+			reason := "restricted"
+			return &reason, nil
+		}, nil)
+		return nil, err
+	}})
+	if reply := p.hello(extension.APIVersion); reply.Error != nil {
+		t.Fatalf("hello = %+v", reply)
+	}
+	registered := p.activate()
+	if len(registered) != 1 || registered[0].Kind != "check" || string(registered[0].Spec) != "{}" {
+		t.Fatalf("registrations = %+v", registered)
+	}
+	input := model.ToolCall{ID: "call-1", Name: "echo", Arguments: json.RawMessage(`{"x":1}`)}
+	raw := json.RawMessage(`{"id":"call-1","name":"echo","arguments":"eyJ4IjoxfQ=="}`)
+	reply := p.call("check", registered[0].Handle, "check", raw, worker.AuthorCallContext{Token: "t"})
+	if reply.Error != nil {
+		t.Fatalf("check = %+v", reply)
+	}
+	reason, err := worker.DecodeAuthorRefusal(reply.Result)
+	if err != nil || reason == nil || *reason != "restricted" || seen.ID != input.ID || seen.Name != input.Name || !bytes.Equal(seen.Arguments, input.Arguments) {
+		t.Fatalf("reason = %v, call = %+v, err = %v", reason, seen, err)
+	}
 }
 
 func callParams(t *testing.T, handle, method string) json.RawMessage {
@@ -309,7 +339,7 @@ func TestAuthorServeOversizedResultIsCallLocal(t *testing.T) {
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "huge", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "huge", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: json.RawMessage(`"` + strings.Repeat("x", worker.FrameLimit) + `"`)}, nil
 			},
@@ -328,20 +358,23 @@ func TestAuthorServeOversizedResultIsCallLocal(t *testing.T) {
 	}
 }
 
-// TestAuthorServeOpaqueArgumentsAndEffectKnowledge proves argument bytes cross
-// unchanged and a declared effect error keeps its interruption evidence.
-func TestAuthorServeOpaqueArgumentsAndEffectKnowledge(t *testing.T) {
+// TestAuthorServeOpaqueArgumentsAndInterruption proves argument bytes cross
+// unchanged and a declared interruption crosses without execution evidence.
+func TestAuthorServeOpaqueArgumentsAndInterruption(t *testing.T) {
 	opaque := []byte{0xff, 0x00, 0x7b}
 	var seen []byte
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
-		if _, err := api.RegisterTool(model.ToolDefinition{Name: "opaque", Description: "opaque", Parameters: json.RawMessage(`{"type":"object"}`)}, opaqueTool{seen: &seen}, nil); err != nil {
+		if _, err := api.RegisterTool(model.ToolDefinition{Name: "opaque", Description: "opaque", Parameters: json.RawMessage(`{"type":"object"}`)}, func(_ context.Context, call extension.ToolCall) (extension.ToolResult, error) {
+			seen = append([]byte(nil), call.Arguments...)
+			return extension.ToolResult{Content: "ok"}, nil
+		}, nil); err != nil {
 			return nil, err
 		}
 		if _, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "effect", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "effect", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
-				return extension.Result{}, &harness.EffectError{Evidence: harness.ExecutionObserved, Interrupted: true, Err: errors.New("hook boom")}
+				return extension.Result{}, &harness.EffectError{Interrupted: true, Err: errors.New("hook boom")}
 			},
 		}, nil); err != nil {
 			return nil, err
@@ -353,41 +386,19 @@ func TestAuthorServeOpaqueArgumentsAndEffectKnowledge(t *testing.T) {
 	if len(registered) != 2 {
 		t.Fatalf("registrations = %d, want tool and operation", len(registered))
 	}
-	toolCall, err := json.Marshal(struct {
-		ID        string           `json:"id"`
-		Name      string           `json:"name"`
-		Arguments worker.JSONBytes `json:"arguments"`
-	}{ID: "call", Name: "opaque", Arguments: opaque})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply := p.call("normalize", registered[0].Handle, "normalize", toolCall, worker.AuthorCallContext{Token: "t"})
+	toolCall := json.RawMessage(`{"id":"call","name":"opaque","arguments":"/wB7"}`)
+	reply := p.call("run", registered[0].Handle, "run", toolCall, worker.AuthorCallContext{Token: "t"})
 	if reply.Error != nil || !bytes.Equal(seen, opaque) {
-		t.Fatalf("opaque normalize = %+v, seen %v", reply, seen)
+		t.Fatalf("opaque run = %+v, seen %v", reply, seen)
 	}
-	var normalized struct {
-		Arguments worker.JSONBytes `json:"arguments"`
-	}
-	if err := json.Unmarshal(reply.Result, &normalized); err != nil || !bytes.Equal(normalized.Arguments, opaque) {
-		t.Fatalf("normalized bytes = %s, %v", reply.Result, err)
+	outcome, err := worker.DecodeExecuteResult(reply.Result)
+	if err != nil || outcome.Result.Status != model.ResultSuccess || outcome.Result.Content != "ok" {
+		t.Fatalf("outcome = %s, %v", reply.Result, err)
 	}
 	reply = p.call("effect", registered[1].Handle, "effect", json.RawMessage(`{}`), worker.AuthorCallContext{Token: "t"})
-	if reply.Error == nil || !reply.Error.Interrupted || reply.Error.Evidence != harness.ExecutionObserved {
+	if reply.Error == nil || !reply.Error.Interrupted {
 		t.Fatalf("effect error reply = %+v", reply)
 	}
-}
-
-type opaqueTool struct{ seen *[]byte }
-
-func (o opaqueTool) Normalize(_ extension.AuthorContext, call model.ToolCall) (json.RawMessage, error) {
-	*o.seen = append([]byte(nil), call.Arguments...)
-	return call.Arguments, nil
-}
-func (opaqueTool) Prepare(context.Context, extension.AuthorContext, model.ToolCall) extension.ToolPlan {
-	return extension.ToolPlan{}
-}
-func (opaqueTool) Execute(context.Context, extension.AuthorContext, extension.ToolPlan) harness.ToolOutcome {
-	return harness.ToolOutcome{}
 }
 
 // TestAuthorHostcallEmptyArgumentsAndPartial proves an empty hostcall argument
@@ -445,7 +456,7 @@ func TestAuthorHostcallCancellationSendsCancelAndWaits(t *testing.T) {
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "slow", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "slow", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				child, cancel := context.WithCancel(ctx)
 				cancelReady <- cancel
@@ -596,7 +607,7 @@ func TestAuthorHostcallRoutingTokenAndBytes(t *testing.T) {
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "echo", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "echo", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, arguments json.RawMessage) (extension.Result, error) {
 				return call.Call(ctx, "dep", "ping", arguments)
 			},
@@ -636,7 +647,7 @@ func TestAuthorMalformedErrorPartialEndsServe(t *testing.T) {
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "call", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "call", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return call.Call(ctx, "dep", "ping", nil)
 			},
@@ -662,6 +673,7 @@ func TestAuthorErrorClassMappingBothDirections(t *testing.T) {
 		want  error
 	}{
 		{worker.ClassClosed, extension.ErrClosed},
+		{worker.ClassDenied, extension.ErrDenied},
 		{worker.ClassCancelled, context.Canceled},
 		{worker.ClassInvalid, harness.ErrInvalid},
 		{worker.ClassNotFound, harness.ErrNotFound},
@@ -674,11 +686,14 @@ func TestAuthorErrorClassMappingBothDirections(t *testing.T) {
 			t.Fatalf("class %q does not unwrap to %v", tc.class, tc.want)
 		}
 	}
+	if failure := worker.Classify(fmt.Errorf("wrapped: %w", extension.ErrDenied)); failure.Class != worker.ClassDenied {
+		t.Fatalf("wrapped denied error classified as %q, want %q", failure.Class, worker.ClassDenied)
+	}
 	nested := make(chan bool, 1)
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		if _, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "direct", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "direct", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{}, extension.ErrClosed
 			},
@@ -687,7 +702,7 @@ func TestAuthorErrorClassMappingBothDirections(t *testing.T) {
 		}
 		if _, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "nested", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "nested", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				_, err := call.Call(ctx, "dep", "ping", nil)
 				nested <- errors.Is(err, extension.ErrClosed)
@@ -731,7 +746,7 @@ func TestAuthorCancelledClassUnwrapsContext(t *testing.T) {
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "nested", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "nested", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				_, err := call.Call(ctx, "dep", "ping", nil)
 				observed <- errors.Is(err, context.Canceled)
@@ -758,7 +773,7 @@ func TestAuthorOversizedErrorMessageIsCallLocal(t *testing.T) {
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		if _, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "blow", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "blow", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{}, errors.New(strings.Repeat("x", worker.FrameLimit))
 			},
@@ -961,7 +976,7 @@ func startHostcallProbe(t *testing.T) (*servePipe, worker.Frame) {
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "call", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "call", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
 				return call.Call(ctx, "dep", "ping", nil)
 			},
@@ -1024,7 +1039,7 @@ func TestAuthorResultJustUnderFrameLimit(t *testing.T) {
 	p := startServe(t, extension.Extension{Manifest: manifest(), Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 		_, err := api.RegisterOperation(extension.Operation{
 			Target: extension.ExposedTargetHarness,
-			Method: extension.Method{Name: "large", Mode: extension.ModeServiceIO, Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
+			Method: extension.Method{Name: "large", Input: json.RawMessage(`{}`), Success: json.RawMessage(`{}`)},
 			Handler: func(context.Context, extension.AuthorContext, json.RawMessage) (extension.Result, error) {
 				return extension.Result{Value: value}, nil
 			},

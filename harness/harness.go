@@ -14,30 +14,6 @@ import (
 	"github.com/Syntheresis/melta/model"
 )
 
-// CallbackIdentity is the minimal immutable carrier the Harness binds to one
-// effect callback context: the already-reserved result entry identity of the
-// associated effect, or empty where no effect exists.
-type CallbackIdentity struct {
-	RequestID  string
-	ToolCallID string
-	EffectID   string
-}
-
-type callbackIdentityKey struct{}
-
-// WithCallbackIdentity binds one effect identity to a callback context. The
-// value is immutable and grants nothing by itself; the host reads it when it
-// constructs a native call view.
-func WithCallbackIdentity(ctx context.Context, identity CallbackIdentity) context.Context {
-	return context.WithValue(ctx, callbackIdentityKey{}, identity)
-}
-
-// CallbackIdentityFromContext returns the bound effect identity, if any.
-func CallbackIdentityFromContext(ctx context.Context) CallbackIdentity {
-	identity, _ := ctx.Value(callbackIdentityKey{}).(CallbackIdentity)
-	return identity
-}
-
 // JobStopper is the job-stop seam: the Harness cannot import plugin packages,
 // so the interface is declared at its consumer. Nil is legal; StartJob rejects
 // job admission without one (managed shutdown stops every Job).
@@ -93,21 +69,6 @@ type PreparedExecution struct {
 	Release func() error
 }
 
-// HookMode declares one hook's participation contract at its boundary. A pure
-// hook validates and coalesces its changed value in memory with no effect
-// transaction; an effectful hook's execution is its own Harness-settled
-// Operation effect with durable hook_result evidence.
-type HookMode string
-
-const (
-	HookModePure      HookMode = "pure"
-	HookModeEffectful HookMode = "effectful"
-)
-
-func validHookMode(mode HookMode) bool {
-	return mode == HookModePure || mode == HookModeEffectful
-}
-
 // ExecutionEvidence describes one effect execution's knowledge independently
 // of its status: not_started is proven unstarted work, observed is a valid
 // terminal execution response (including cooperative interruption), and
@@ -129,10 +90,8 @@ func validExecutionEvidence(evidence ExecutionEvidence) bool {
 }
 
 // EffectError declares callback interruption independently of its cause.
-// Effectful hooks also declare execution knowledge, validated at publication;
-// pure callbacks use only Interrupted and Err. Unwrap exposes the cause.
+// Unwrap exposes the cause.
 type EffectError struct {
-	Evidence    ExecutionEvidence
 	Err         error
 	Interrupted bool
 }
@@ -149,17 +108,15 @@ type ToolArgumentsResult struct {
 	Refusal   *string
 }
 
-// ToolArgumentsHook is one argument hook: before a concrete tool call
-// prepares, it may rewrite the call's raw argument bytes or refuse the call
+// ToolArgumentsHook is one argument hook: after a concrete tool is bound,
+// it may rewrite the call's raw argument bytes or refuse the call
 // with a reason. Its successful unchanged output passes through verbatim; a
-// changed output must be one JSON object. The bound tool normalizes after the
-// hook chain. Hooks cannot replace the call identity, tool name, or another
-// call's arguments. An effectful hook is a Harness-settled Operation effect; a
-// pure hook runs in memory. Run receives owned call data.
+// changed output must be one JSON object. The final bytes are validated after
+// the hook chain. Hooks cannot replace the call identity, tool name, or another
+// call's arguments. Run receives owned call data.
 type ToolArgumentsHook struct {
 	ID          string
 	ExtensionID string
-	Mode        HookMode
 	Run         func(context.Context, model.ToolCall) (ToolArgumentsResult, error)
 }
 
@@ -226,8 +183,9 @@ type ArgumentStage struct {
 	Release func()
 }
 
-type AuthorizationStage struct {
-	Hooks   []AuthorizationHook
+// CheckStage supplies the registered check hooks for one tool call.
+type CheckStage struct {
+	Hooks   []ToolCheckHook
 	Error   error
 	Release func()
 }
@@ -246,7 +204,6 @@ type ResultStage struct {
 type RequestHook struct {
 	ID          string
 	ExtensionID string
-	Mode        HookMode
 	Run         func(context.Context, RequestHookInput) (RequestConsequence, error)
 }
 
@@ -315,19 +272,17 @@ type InvocationExecution struct {
 	// RequestStage supplies the declarations before each request. When nil,
 	// the admitted catalog and advertisement are used without hooks.
 	RequestStage func() RequestStage
-	// LookupTool binds one implementation after argument hooks complete.
-	LookupTool func(string) (ToolBinding, bool)
+	// LookupTool binds one implementation before argument hooks run.
+	LookupTool func(name string) (ToolBinding, bool, error)
 	// ToolHooks are the selected argument hooks in configured order. Each
-	// runs after the advertisement gate and before concrete preparation; the
+	// runs after the advertisement gate and binding and before validation; the
 	// first receives the original raw call arguments, every later one the
-	// preceding committed value.
+	// preceding hook's value.
 	ToolHooks     []ToolArgumentsHook
 	ArgumentStage func() ArgumentStage
-	// AuthorizationHooks run in order after policy allows the prepared action.
-	AuthorizationHooks []AuthorizationHook
-	AuthorizationStage func() AuthorizationStage
-	// BindLocation binds a location relative to the actual Session Workspace.
-	BindLocation func(string) (canonical string, recheck func() error, err error)
+	// CheckStage supplies the check hooks that run over any call whose final
+	// arguments passed validation.
+	CheckStage func() CheckStage
 	// ToolOutputHooks are the selected output-shaping hooks in configured
 	// order. They run over one settled tool outcome before its result
 	// commits: the first receives the producer's original content, every
@@ -338,40 +293,35 @@ type InvocationExecution struct {
 	Close           func() error
 }
 
-// AuthorizationHook is a pure restriction on a prepared action. Bind returns
-// a canonical location without granting access; the host revalidates it. A
-// nil reason abstains; a nonempty reason denies.
-type AuthorizationHook struct {
-	Run func(context.Context, PreparedAction, func(string) (string, error)) (*string, error)
+// ToolCheckHook is one before-tool check: it runs over the call's final
+// arguments after they pass the bound implementation's schema, and may refuse
+// the call with a model-facing reason. A nil reason abstains; a nonempty reason
+// denies. A check cannot change the call's arguments or identity.
+type ToolCheckHook struct {
+	ID          string
+	ExtensionID string
+	Run         func(context.Context, model.ToolCall) (*string, error)
 }
 
-type locationChecksKey struct{}
-
-// LocationRecheckFromContext returns the call's frozen host location checker,
-// or nil when no locations were bound.
-func LocationRecheckFromContext(ctx context.Context) func() error {
-	check, _ := ctx.Value(locationChecksKey{}).(func() error)
-	return check
-}
-
-// ToolBinding holds one implementation for normalization and preparation.
-// Normalize is pure and returns one JSON object or a per-call error.
+// ToolBinding holds one bound implementation and the parameter schema its
+// final arguments must satisfy. Validate reports whether the arguments are one
+// document the implementation's schema accepts; Run executes the call with
+// those final arguments.
 type ToolBinding struct {
-	Identity  ToolImplementation
-	Normalize func(context.Context, model.ToolCall) (json.RawMessage, error)
-	Prepare   func(context.Context, model.ToolCall) PreparedTool
-	Release   func()
+	Identity ToolImplementation
+	Validate func(json.RawMessage) error
+	Run      func(context.Context, model.ToolCall) ToolOutcome
+	Release  func()
 }
 
 // Execution is one opened execution: the required invocation opener the
-// Harness drives once per Engine call, the Operation's retry classifier and
-// permission evaluator, plus the cleanup of the Operation resources backing
-// them. OpenInvocation must be non-nil; it opens the conversation run's
-// invocation and a distinct maintenance invocation per strategy model
-// request, each with its own opened resources and Close. A nil Retry selects
-// the private standard retry classifier; a nil Permissions evaluator selects
-// the built-in policy; Close is optional when the concrete execution needs no
-// external disposal. The opener owns provisional cleanup on error.
+// Harness drives once per Engine call, the Operation's retry classifier, plus
+// the cleanup of the Operation resources backing them. OpenInvocation must be
+// non-nil; it opens the conversation run's invocation and a distinct
+// maintenance invocation per strategy model request, each with its own opened
+// resources and Close. A nil Retry selects the private standard retry
+// classifier; Close is optional when the concrete execution needs no external
+// disposal. The opener owns provisional cleanup on error.
 type Execution struct {
 	// OpenInvocation opens one Engine invocation's callback contracts over
 	// the Harness-issued request. Successful opening transfers the invoked
@@ -381,11 +331,6 @@ type Execution struct {
 	// Retry classifies one failed physical attempt for the next-attempt
 	// decision. Nil selects the private standard classifier.
 	Retry RetryPolicy
-	// Permissions is the permission evaluator deciding this Operation's
-	// prepared calls, resolved from the same immutable configuration
-	// revision its capture records. Nil selects the included built-in
-	// policy (the zero PermissionPolicy).
-	Permissions PermissionEvaluator
 	// ResolveStrategy resolves the captured strategy identity at one
 	// maintenance procedure start from the execution's own retained
 	// configuration and scopes. Nil supplies the included strategy for its own
@@ -395,35 +340,18 @@ type Execution struct {
 	Close           func() error
 }
 
-// ToolOutcome is one owned tool plan's complete outcome: the model-visible
+// ToolOutcome is one Run callback's complete outcome: the model-visible
 // result returned to the Agent, optional raw-JSON metadata whose semantics
 // belong to the producing tool, and the producer-declared execution knowledge.
-// The Harness validates only well-formedness, the declared knowledge against
-// the producing plan shape, and the durable size bound; it never interprets
-// the value.
+// The Harness validates the result, its evidence and the durable metadata
+// size bound; it never interprets the metadata.
 type ToolOutcome struct {
 	Result   model.ToolResult
 	Metadata json.RawMessage // optional, bounded, well-formed; semantics owned by the tool
-	// Evidence is the producing plan's execution knowledge. It is read only
-	// from executor outcomes, and an executor sets it only when it cannot
-	// report an observed result: empty means the valid returned result is the
-	// observation. An immediate plan's success is observed and every other
-	// immediate status is not_started, whatever value the producer supplied.
+	// Evidence is the Run callback's execution knowledge. Empty means
+	// observed. A malformed result, invalid evidence, or a success with
+	// non-observed evidence settles as invalid with unknown evidence.
 	Evidence ExecutionEvidence
-}
-
-// PreparedTool is one immutable prepared call: exactly one immediate outcome
-// or executor, its declared permission/target pairs, and the canonical
-// bindings permission evaluation and concrete I/O consume. Normalized
-// arguments are Harness-supplied input, never a second value the preparer
-// replaces. Execution and immediate-success plans require a nonempty list of
-// nonempty permission/target pairs; immediate error, denied and interrupted
-// outcomes need no successful target declaration.
-type PreparedTool struct {
-	Permissions        []PermissionRequest
-	CanonicalWorkspace string
-	Immediate          *ToolOutcome
-	Execute            func(context.Context) ToolOutcome
 }
 
 // CreateSessionRequest is the input of one root Session creation.
@@ -2451,9 +2379,6 @@ func ownOperationRecord(rec OperationRecord) OperationRecord {
 	}
 	if rec.State.Request != nil {
 		request := *rec.State.Request
-		if rec.State.Request.HookResults != nil {
-			request.HookResults = append([]EntryRef(nil), rec.State.Request.HookResults...)
-		}
 		out.State.Request = &request
 	}
 	if rec.State.SettledAt != nil {
