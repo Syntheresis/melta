@@ -57,9 +57,25 @@ func (scope *nativeCallScope) workspaceCall(ctx context.Context, method string, 
 	}
 	scope.lease.mu.Lock()
 	validLease := scope.lease.borrowed && !scope.lease.closed && scope.lease.release != nil && scope.lease.key == sessionArtifactDir(scope.dataDir, scope.admittedEntry.SessionID)
+	if scope.lease.mutation == nil {
+		scope.lease.mutation = make(chan struct{}, 1)
+	}
+	mutation := scope.lease.mutation
 	scope.lease.mu.Unlock()
 	if !validLease {
 		return extension.Result{}, extension.ErrClosed
+	}
+	// One execution's writes and deletes run one at a time: the slot is held
+	// from before the preimage capture until the produced identity is
+	// recorded, and a waiting call returns when its context ends.
+	select {
+	case mutation <- struct{}{}:
+	case <-ctx.Done():
+		return extension.Result{}, ctx.Err()
+	}
+	defer func() { <-mutation }()
+	if err := ctx.Err(); err != nil {
+		return extension.Result{}, err
 	}
 	store, err := (&standardTools{dataDir: scope.dataDir}).openCodeGroup(ToolContext{AdmittedEntry: scope.admittedEntry})
 	if err != nil {
