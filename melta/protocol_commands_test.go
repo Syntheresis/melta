@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
@@ -778,27 +779,34 @@ func TestSessionCommandInterruptStop(t *testing.T) {
 			started := make(chan struct{}, 1)
 			release := make(chan struct{})
 			defer releaseCommandGate(release)
-			bg.e.server.setScript(func(sctx context.Context, body string) []string {
-				if lastUserText(body) != "run" {
-					return nil
+			bg.e.server.setScript(func(_ context.Context, body string) []string {
+				if strings.Contains(body, `"held"`) {
+					return textTurnEvents("done")
 				}
+				return toolCallTurnEvents("call-1", "bg_read", "{}")
+			})
+			bg.tools.setRun(func(_ context.Context, _ extension.ToolCall) (extension.ToolResult, error) {
 				select {
 				case started <- struct{}{}:
 				default:
 				}
-				select { // the model request parks until the gate or the run's cancellation
-				case <-release:
-					return textTurnEvents("done")
-				case <-sctx.Done():
-					return nil
-				}
+				<-release
+				return extension.ToolResult{Content: "held"}, nil
 			})
 			{
 				_, err := bg.r.SubmitSession(ctx, testCaller(bg.r), root, commandSubmitRequest(t, "op-int", "run"))
 				testassert.NoError(t, err)
 			}
 			<-started
-			testassert.NoError(t, bg.r.InterruptSession(ctx, testCaller(bg.r), root))
+			interrupted := make(chan error, 1)
+			go func() { interrupted <- bg.r.InterruptSession(ctx, testCaller(bg.r), root) }()
+			select {
+			case err := <-interrupted:
+				testassert.Require(t, err == nil, "InterruptSession = %v, want nil", err)
+			case <-time.After(10 * time.Second):
+				releaseCommandGate(release)
+				t.Fatal("InterruptSession did not return within 10s while the run was held in a tool")
+			}
 			{
 				status, err := operationStatusOf(store, root, "op-int")
 				testassert.Require(t, err == nil && status == harness.OperationRunning, "interrupt waited for the terminal: status = (%q, %v), want still running", status, err)
