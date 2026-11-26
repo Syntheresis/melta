@@ -2101,19 +2101,10 @@ func TestToolOutputShaping(t *testing.T) {
 // the given output hooks, and the second turn captures the next request.
 func runShapingRound(t *testing.T, lookup func(string) (ToolBinding, bool, error), hooks []ToolOutputHook) (*graphStorage, string, model.Request) {
 	t.Helper()
-	admission := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return Execution{}, nil
-	})
-	h, store, c, sessionID := newAdmittedHarness(t, context.Background(), admission)
-	rounds := 0
 	var next model.Request
 	exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
 		return InvocationExecution{
 			Model: func(_ context.Context, request model.Request, _ model.Extra) (model.Stream, error) {
-				rounds++
-				if rounds == 1 {
-					return completedTurnStream(testToolCall("call-1")), nil
-				}
 				next = request
 				return completedTurnStream(), nil
 			},
@@ -2121,10 +2112,8 @@ func runShapingRound(t *testing.T, lookup func(string) (ToolBinding, bool, error
 			ToolOutputHooks: hooks,
 		}, nil
 	}}
-	prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-		return exec, nil
-	})
-	testassert.NoError(t, executeDirect(h, c, h.ctx, testOpID, prepared))
+	_, store, _, sessionID, err := freshExecutionRunConfig(t, context.Background(), testCapture(), exec, nil, testToolCall("call-1"))
+	testassert.NoError(t, err)
 	return store, sessionID, next
 }
 
