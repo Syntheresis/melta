@@ -96,19 +96,22 @@ type configurationEdit struct {
 // raw members keep their exact bytes; the source never creates a missing
 // document. The edit's owning document — and only that document — is
 // atomically replaced after the candidate validates, the edit's candidate
-// check passes, and the final Caller-first cancellation check passes; a
-// connection-bearing edit owns no document and runs its side-effect chain in
-// the same position. Every successful apply writes and publishes the next
-// generation, an absent-member reset that changed nothing included; a failed
-// candidate, a failed check, or a cancellation before the write leaves the
-// source and publication unchanged; after the write starts, no further
-// cancellation check, rebuild, or fallible capture runs before the ready
-// snapshot, its one event, and the build-mutex release — an admitted call
-// completes publication despite Caller disconnect or owner shutdown. A
-// connection-bearing create's credential failure restores the exact prior
-// owning bytes before returning and joins that restore error with the key
-// failure; no atomic success is claimed. Every error path releases each
-// acquired ownership exactly once.
+// check passes, and the final Caller-first cancellation check passes; the
+// replacement covers only a document that still holds the bytes this
+// mutation read, and a document changed since then fails the mutation as a
+// conflict with nothing published. A connection-bearing edit owns no document
+// and runs its side-effect chain in the same position. Every successful apply
+// writes and publishes the next generation, an absent-member reset that
+// changed nothing included; a failed candidate, a failed check, or a
+// cancellation before the write leaves the source and publication unchanged;
+// after the write starts, no further cancellation check, rebuild, or fallible
+// capture runs before the ready snapshot, its one event, and the build-mutex
+// release — an admitted call completes publication despite Caller disconnect
+// or owner shutdown. A connection-bearing create's credential failure
+// restores the exact prior owning bytes only over its own write before
+// returning: an outside edit made meanwhile stays, and the key failure is
+// joined with the restore failure; no atomic success is claimed. Every error
+// path releases each acquired ownership exactly once.
 func (s *configurationService) mutate(ctx context.Context, edit configurationEdit) (configurationCapture, error) {
 	if err := s.canceled(ctx); err != nil {
 		return configurationCapture{}, err
@@ -227,21 +230,24 @@ func (s *configurationService) mutate(ctx context.Context, edit configurationEdi
 		handedOver = true
 		return s.commit(candidate), nil
 	}
-	if err := s.configuration.Write(writeCtx, complete); err != nil {
+	if err := s.configuration.Write(writeCtx, configData, complete); err != nil {
 		s.buildMu.Unlock()
 		return configurationCapture{}, configurationFailure(fmt.Errorf("write main configuration: %w", err))
 	}
 	if conn := edit.connection; conn != nil && conn.keyAction == keyActionSet {
 		// The custom create writes its owning document first, then performs
 		// its managed-key effect and rolls the document bytes back on failure.
-		// The owner's actual refusal — a concurrent external change detected
-		// at the write included — propagates; no ErrExternalKey tolerance
-		// disguises it as success.
+		// The rollback replaces only the mutation's own write: an outside edit
+		// made meanwhile stays, and both failures are joined. The owner's
+		// actual refusal — a concurrent external change detected at the write
+		// included — propagates; no ErrExternalKey tolerance disguises it as
+		// success.
 		if err := s.credentials.Set(writeCtx, conn.keyEnv, conn.keyValue); err != nil {
 			// The restore runs despite a canceled Caller: the exact prior
-			// owning bytes go back and the joined failure claims no atomic
-			// success.
-			restoreErr := s.configuration.Write(writeCtx, configData)
+			// owning bytes go back only over this mutation's own write, so an
+			// outside edit made meanwhile stays and both failures are joined;
+			// no atomic success is claimed.
+			restoreErr := s.configuration.Write(writeCtx, complete, configData)
 			s.buildMu.Unlock()
 			return configurationCapture{}, configurationFailure(errors.Join(fmt.Errorf("persist API key %s: %w", conn.keyEnv, err), restoreErr))
 		}

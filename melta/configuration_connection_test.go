@@ -2037,46 +2037,87 @@ func TestCreateProviderKeyFailureRestoresPriorAbsence(t *testing.T) {
 	})
 }
 
+// TestCreateProviderKeyFailureJoinedRestoreError pins the failed create's
+// restore write over the owning document. The restore-write row injects a
+// sync failure: the error joins the key failure and the restore failure, and
+// no publication claims atomic success. The outside-edit row rewrites the
+// owning document during the restore write's temp sync: the restore replaces
+// only the create's own write, so the outside document stays and the error
+// joins the key failure with the conflict. Both rows assert no connection
+// publication.
 func TestCreateProviderKeyFailureJoinedRestoreError(t *testing.T) {
-	eachPrepStoreOnce(t, func(t *testing.T, store harness.Storage) {
-		server := newConnectionDiscoveryServer(t, connectionFullDiscovery)
-		r, _, sub, closeRuntime := openConnectionSubscription(t, store, server.URL, 8)
-		defer closeRuntime()
-		ctx := context.Background()
-		reserveEnvKey(t, "CONNECTION_RESTORE_KEY")
-		before, generation, warnRev := runtimeMutationBaseline(t, r)
+	const outsideDocument = `{"providers":{},"external_note":"outside"}`
+	rows := []struct {
+		name  string
+		sync  func(t *testing.T, r *Melta, f *os.File) error
+		check func(t *testing.T, r *Melta, before []byte, err error)
+	}{
+		{
+			name: "the restore write fails",
+			sync: func(*testing.T, *Melta, *os.File) error {
+				return errors.New("restore probe failure")
+			},
+			check: func(t *testing.T, r *Melta, before []byte, err error) {
+				t.Helper()
+				testassert.Require(t, strings.Contains(err.Error(), "persist API key") && strings.Contains(err.Error(), "restore"), "joined failure = %v, want the key failure and the restore failure joined", err)
+				// The restore failed: the written create bytes are the honest
+				// state on disk, never a claimed rollback.
+				after, rerr := os.ReadFile(r.configPathForTest())
+				testassert.Require(t, rerr == nil && string(after) != string(before) && strings.Contains(string(after), "newp"), "disk state after the failed restore = (%q, %v), want the written create kept", after, rerr)
+			},
+		},
+		{
+			name: "an outside edit stays",
+			sync: func(t *testing.T, r *Melta, f *os.File) error {
+				testassert.NoError(t, os.WriteFile(r.configPathForTest(), []byte(outsideDocument), 0o600))
+				return f.Sync()
+			},
+			check: func(t *testing.T, r *Melta, _ []byte, err error) {
+				t.Helper()
+				testassert.Require(t, errors.Is(err, harness.ErrConflict), "create over an outside edit = %v, want harness.ErrConflict", err)
+				testassert.Require(t, strings.Contains(err.Error(), "persist API key"), "create over an outside edit = %v, want the key failure named", err)
+				after, rerr := os.ReadFile(r.configPathForTest())
+				testassert.Require(t, rerr == nil && string(after) == outsideDocument, "disk state after the outside edit = (%q, %v), want the outside document kept", after, rerr)
+			},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			eachPrepStoreOnce(t, func(t *testing.T, store harness.Storage) {
+				server := newConnectionDiscoveryServer(t, connectionFullDiscovery)
+				r, _, sub, closeRuntime := openConnectionSubscription(t, store, server.URL, 8)
+				defer closeRuntime()
+				ctx := context.Background()
+				reserveEnvKey(t, "CONNECTION_RESTORE_KEY")
+				before, generation, warnRev := runtimeMutationBaseline(t, r)
 
-		// The restore write itself fails (the second sync of the owning
-		// path): the error joins the key failure and the restore failure,
-		// and no publication claims atomic success.
-		previous := atomicfs.SyncFileFunc
-		syncCount := 0
-		atomicfs.SyncFileFunc = func(f *os.File) error {
-			if filepath.Dir(f.Name()) == filepath.Dir(r.configPathForTest()) &&
-				strings.HasPrefix(filepath.Base(f.Name()), filepath.Base(r.configPathForTest())+".tmp-") {
-				syncCount++
-				if syncCount == 2 { // the restore write
-					return errors.New("restore probe failure")
+				// The second configuration temp sync is the restore write.
+				previous := atomicfs.SyncFileFunc
+				syncCount := 0
+				atomicfs.SyncFileFunc = func(f *os.File) error {
+					if filepath.Dir(f.Name()) == filepath.Dir(r.configPathForTest()) &&
+						strings.HasPrefix(filepath.Base(f.Name()), filepath.Base(r.configPathForTest())+".tmp-") {
+						syncCount++
+						if syncCount == 2 { // the restore write
+							return row.sync(t, r, f)
+						}
+					}
+					return f.Sync()
 				}
-			}
-			return f.Sync()
-		}
-		t.Cleanup(func() { atomicfs.SyncFileFunc = previous })
+				t.Cleanup(func() { atomicfs.SyncFileFunc = previous })
 
-		broken := "sk-\x00-broken"
-		window := 4096
-		baseURL := "https://new.test/v1"
-		restoreEnv := "CONNECTION_RESTORE_KEY"
-		_, err := r.AddProvider(ctx, testCaller(r), "newp", protocol.ProviderEdit{BaseUrl: &baseURL, ApiKeyEnv: &restoreEnv},
-			map[string]protocol.ModelEdit{"m": {ContextWindow: &window}}, &broken)
-		testassert.Require(t, err != nil && errors.Is(err, ErrConfiguration), "create with a failing restore = %v, want the typed failure", err)
-		testassert.Require(t, strings.Contains(err.Error(), "persist API key") && strings.Contains(err.Error(), "restore"), "joined failure = %v, want the key failure and the restore failure joined", err)
-		assertNoConnectionPublication(t, r, sub, generation, warnRev)
-		// The restore failed: the written create bytes are the honest state
-		// on disk, never a claimed rollback.
-		after, rerr := os.ReadFile(r.configPathForTest())
-		testassert.Require(t, rerr == nil && string(after) != string(before) && strings.Contains(string(after), "newp"), "disk state after the failed restore = (%q, %v), want the written create kept", after, rerr)
-	})
+				broken := "sk-\x00-broken"
+				window := 4096
+				baseURL := "https://new.test/v1"
+				restoreEnv := "CONNECTION_RESTORE_KEY"
+				_, err := r.AddProvider(ctx, testCaller(r), "newp", protocol.ProviderEdit{BaseUrl: &baseURL, ApiKeyEnv: &restoreEnv},
+					map[string]protocol.ModelEdit{"m": {ContextWindow: &window}}, &broken)
+				testassert.Require(t, err != nil && errors.Is(err, ErrConfiguration), "create with a failing restore = %v, want the typed failure", err)
+				assertNoConnectionPublication(t, r, sub, generation, warnRev)
+				row.check(t, r, before, err)
+			})
+		})
+	}
 }
 
 func TestCreateProviderRestoreDespiteCancellation(t *testing.T) {

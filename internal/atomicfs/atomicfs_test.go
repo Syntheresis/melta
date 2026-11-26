@@ -62,6 +62,65 @@ func TestWriteDoesNotCreateDestinationDir(t *testing.T) {
 	}
 }
 
+// TestWriteIfUnchanged covers the compare-before-rename publisher: equal
+// previous bytes are replaced, while stale previous bytes, a missing file,
+// and a missing directory each return ErrChanged, change nothing, and leave
+// no temp file.
+func TestWriteIfUnchanged(t *testing.T) {
+	t.Run("equal previous", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "rec.json")
+		testassert.NoError(t, os.WriteFile(path, []byte("original"), 0o600))
+
+		testassert.NoError(t, WriteIfUnchanged(path, []byte("original"), []byte("replacement"), 0o600))
+		got, err := os.ReadFile(path)
+		testassert.NoError(t, err)
+		testassert.Require(t, string(got) == "replacement", "content = %q, want replacement", got)
+		entries, _ := os.ReadDir(dir)
+		testassert.Require(t, len(entries) == 1 && entries[0].Name() == "rec.json", "unexpected dir entries: %v", entries)
+	})
+
+	t.Run("stale previous", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "rec.json")
+		testassert.NoError(t, os.WriteFile(path, []byte("original"), 0o600))
+
+		err := WriteIfUnchanged(path, []byte("stale"), []byte("replacement"), 0o600)
+		testassert.Require(t, errors.Is(err, ErrChanged), "stale write = %v, want ErrChanged", err)
+		got, rerr := os.ReadFile(path)
+		testassert.Require(t, rerr == nil && string(got) == "original", "stale write changed the file: %q (%v)", got, rerr)
+		entries, _ := os.ReadDir(dir)
+		testassert.Require(t, len(entries) == 1 && entries[0].Name() == "rec.json", "unexpected dir entries: %v", entries)
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "rec.json")
+
+		err := WriteIfUnchanged(path, []byte("previous"), []byte("replacement"), 0o600)
+		testassert.Require(t, errors.Is(err, ErrChanged), "missing-file write = %v, want ErrChanged", err)
+		{
+			_, statErr := os.Stat(path)
+			testassert.Require(t, os.IsNotExist(statErr), "a refused missing-file write created the document: %v", statErr)
+		}
+		entries, _ := os.ReadDir(dir)
+		testassert.Require(t, len(entries) == 0, "leftover entries after the refused write: %v", entries)
+	})
+
+	t.Run("missing directory", func(t *testing.T) {
+		dir := t.TempDir()
+		missing := filepath.Join(dir, "gone")
+		path := filepath.Join(missing, "rec.json")
+
+		err := WriteIfUnchanged(path, []byte("previous"), []byte("replacement"), 0o600)
+		testassert.Require(t, errors.Is(err, ErrChanged), "missing-directory write = %v, want ErrChanged", err)
+		{
+			_, statErr := os.Stat(missing)
+			testassert.Require(t, os.IsNotExist(statErr), "a refused missing-directory write created the directory: %v", statErr)
+		}
+	})
+}
+
 func TestCreateExclusiveRefusesOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
