@@ -76,6 +76,82 @@ func TestToolCallDecode(t *testing.T) {
 			t.Fatalf("accepted %q", raw)
 		}
 	}
+	var exact struct {
+		Input string `json:"input"`
+	}
+	for _, tc := range []struct{ raw, want string }{
+		{`{"input":"a","INPUT":"b"}`, "a"},
+		{`{"INPUT":"b"}`, ""},
+	} {
+		exact.Input = ""
+		if err := (ToolCall{Arguments: json.RawMessage(tc.raw)}).Decode(&exact); err != nil || exact.Input != tc.want {
+			t.Fatalf("%s decoded input %q, %v", tc.raw, exact.Input, err)
+		}
+	}
+	type nestedTarget struct {
+		Value string `json:"value"`
+	}
+	var nested struct {
+		Nested nestedTarget `json:"nested"`
+	}
+	for _, tc := range []struct{ raw, want string }{
+		{`{"nested":{"value":"a","VALUE":"b"}}`, "a"},
+		{`{"nested":{"VALUE":"b"}}`, ""},
+	} {
+		nested.Nested = nestedTarget{}
+		if err := (ToolCall{Arguments: json.RawMessage(tc.raw)}).Decode(&nested); err != nil || nested.Nested.Value != tc.want {
+			t.Fatalf("%s decoded nested value %q, %v", tc.raw, nested.Nested.Value, err)
+		}
+	}
+	var list struct {
+		Items []nestedTarget `json:"items"`
+	}
+	for _, tc := range []struct{ raw, want string }{
+		{`{"items":[{"value":"a","VALUE":"b"}]}`, "a"},
+		{`{"items":[{"VALUE":"b"}]}`, ""},
+	} {
+		list.Items = nil
+		if err := (ToolCall{Arguments: json.RawMessage(tc.raw)}).Decode(&list); err != nil || len(list.Items) != 1 || list.Items[0].Value != tc.want {
+			t.Fatalf("%s decoded items %+v, %v", tc.raw, list.Items, err)
+		}
+	}
+	var repeated struct {
+		A struct {
+			X int `json:"x"`
+			Y int `json:"y"`
+		} `json:"a"`
+	}
+	if err := (ToolCall{Arguments: json.RawMessage(`{"a":{"x":1},"a":{"y":2}}`)}).Decode(&repeated); err != nil || repeated.A.X != 0 || repeated.A.Y != 2 {
+		t.Fatalf("repeated member decoded %+v, %v", repeated.A, err)
+	}
+	var repeatedNested struct {
+		Outer struct {
+			A struct {
+				X int `json:"x"`
+				Y int `json:"y"`
+			} `json:"a"`
+		} `json:"outer"`
+	}
+	if err := (ToolCall{Arguments: json.RawMessage(`{"outer":{"a":{"x":1},"a":{"y":2}}}`)}).Decode(&repeatedNested); err != nil || repeatedNested.Outer.A.X != 0 || repeatedNested.Outer.A.Y != 2 {
+		t.Fatalf("repeated nested member decoded %+v, %v", repeatedNested.Outer.A, err)
+	}
+	type embeddedTarget struct {
+		Promoted string
+	}
+	var named struct {
+		embeddedTarget
+		Untagged string
+	}
+	if err := (ToolCall{Arguments: json.RawMessage(`{"Promoted":"p","Untagged":"u"}`)}).Decode(&named); err != nil || named.Promoted != "p" || named.Untagged != "u" {
+		t.Fatalf("exact names decoded %+v, %v", named, err)
+	}
+	var raw struct {
+		Raw json.RawMessage `json:"raw"`
+	}
+	const rawDocument = `{"raw": { "z" : 1, "z" : 2, "A" : [ 3 ] }}`
+	if err := (ToolCall{Arguments: json.RawMessage(rawDocument)}).Decode(&raw); err != nil || !bytes.Equal(raw.Raw, []byte(`{ "z" : 1, "z" : 2, "A" : [ 3 ] }`)) {
+		t.Fatalf("raw member decoded %q, %v", raw.Raw, err)
+	}
 }
 
 func TestSessionStartCodec(t *testing.T) {

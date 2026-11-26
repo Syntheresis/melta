@@ -3,10 +3,12 @@ package extension
 import (
 	"bytes"
 	"context"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 
 	"github.com/Syntheresis/melta/harness"
@@ -29,12 +31,15 @@ type ToolResult struct {
 
 var ErrOutcomeUnknown = errors.New("extension: outcome unknown")
 
+// Decode decodes the tool arguments into v. Member names match exactly at every
+// level: a member that differs only in case from a struct field is ignored, and
+// a repeated name keeps only its last value.
 func (c ToolCall) Decode(v any) error {
 	raw := bytes.TrimSpace(c.Arguments)
 	if len(raw) == 0 || raw[0] != '{' {
 		return errors.New("tool arguments must be a JSON object")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder := json.NewDecoder(bytes.NewReader(exactMemberNames(raw, reflect.TypeOf(v))))
 	decoder.UseNumber()
 	if err := decoder.Decode(v); err != nil {
 		return err
@@ -46,6 +51,191 @@ func (c ToolCall) Decode(v any) error {
 		return err
 	}
 	return nil
+}
+
+var (
+	jsonUnmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
+	textUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+)
+
+// decodesItself reports whether t decodes its own JSON, by value or pointer
+// receiver. Such a type owns its member rules and is never rewritten.
+func decodesItself(t reflect.Type) bool {
+	return t.Implements(jsonUnmarshalerType) || t.Implements(textUnmarshalerType) ||
+		reflect.PointerTo(t).Implements(jsonUnmarshalerType) || reflect.PointerTo(t).Implements(textUnmarshalerType)
+}
+
+// opaqueType reports whether t has no struct member names to match.
+func opaqueType(t reflect.Type) bool {
+	return t == nil || t.Kind() == reflect.Interface || decodesItself(t)
+}
+
+// exactMemberNames rebuilds one raw JSON value guided by its target type so
+// that every object decoded into a struct keeps only the members named exactly
+// after its fields. Member values keep their bytes; a value of a different JSON
+// kind is left to the unchanged decode's error, and a type that decodes itself,
+// an interface or a scalar is not rewritten.
+func exactMemberNames(raw []byte, t reflect.Type) []byte {
+	if opaqueType(t) {
+		return raw
+	}
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+		if opaqueType(t) {
+			return raw
+		}
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		return exactStructMemberNames(raw, t)
+	case reflect.Slice, reflect.Array:
+		if opaqueType(t.Elem()) {
+			return raw
+		}
+		return exactElementMemberNames(raw, t.Elem())
+	case reflect.Map:
+		if opaqueType(t.Elem()) {
+			return raw
+		}
+		return exactMapValueMemberNames(raw, t.Elem())
+	}
+	return raw
+}
+
+// exactStructMemberNames keeps only the members named exactly after a struct
+// field; the decoded map already keeps only a repeated name's last value. A
+// value that is not a JSON object is left to the decoder.
+func exactStructMemberNames(raw []byte, t reflect.Type) []byte {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
+		return raw
+	}
+	fields := jsonFieldTypes(t)
+	for name, value := range members {
+		field, ok := fields[name]
+		if !ok {
+			delete(members, name)
+			continue
+		}
+		members[name] = exactMemberNames(value, field)
+	}
+	return writeObject(members)
+}
+
+// exactElementMemberNames rewrites each element of one array value.
+func exactElementMemberNames(raw []byte, elem reflect.Type) []byte {
+	var elements []json.RawMessage
+	if err := json.Unmarshal(raw, &elements); err != nil || elements == nil {
+		return raw
+	}
+	for i, element := range elements {
+		elements[i] = exactMemberNames(element, elem)
+	}
+	return writeArray(elements)
+}
+
+// exactMapValueMemberNames rewrites the values of one object value; keys are
+// untouched and a repeated key already keeps its last value.
+func exactMapValueMemberNames(raw []byte, elem reflect.Type) []byte {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
+		return raw
+	}
+	for name, value := range members {
+		members[name] = exactMemberNames(value, elem)
+	}
+	return writeObject(members)
+}
+
+// writeObject writes members back as one JSON object; their order is immaterial.
+func writeObject(members map[string]json.RawMessage) []byte {
+	var out bytes.Buffer
+	out.WriteByte('{')
+	first := true
+	for name, value := range members {
+		if !first {
+			out.WriteByte(',')
+		}
+		first = false
+		key, _ := json.Marshal(name)
+		out.Write(key)
+		out.WriteByte(':')
+		out.Write(value)
+	}
+	out.WriteByte('}')
+	return out.Bytes()
+}
+
+// writeArray writes elements back as one JSON array.
+func writeArray(elements []json.RawMessage) []byte {
+	var out bytes.Buffer
+	out.WriteByte('[')
+	for i, element := range elements {
+		if i > 0 {
+			out.WriteByte(',')
+		}
+		out.Write(element)
+	}
+	out.WriteByte(']')
+	return out.Bytes()
+}
+
+// jsonField is one struct field name and the type decoded into it.
+type jsonField struct {
+	typ   reflect.Type
+	depth int
+}
+
+// jsonFieldTypes maps each JSON name encoding/json reads for t to its field
+// type: the tag name before the first comma or else the Go name of an exported
+// field; "json:\"-\"" and unexported non-embedded fields are skipped; fields of
+// an untagged embedded struct or pointer to struct are promoted.
+func jsonFieldTypes(t reflect.Type) map[string]reflect.Type {
+	found := make(map[string]jsonField)
+	addJSONFields(t, 0, make(map[reflect.Type]bool), found)
+	fields := make(map[string]reflect.Type, len(found))
+	for name, field := range found {
+		fields[name] = field.typ
+	}
+	return fields
+}
+
+func addJSONFields(t reflect.Type, depth int, visiting map[reflect.Type]bool, found map[string]jsonField) {
+	if visiting[t] {
+		return
+	}
+	visiting[t] = true
+	defer delete(visiting, t)
+	var embedded []reflect.Type
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		tag := field.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		embeddedType := field.Type
+		if embeddedType.Kind() == reflect.Ptr {
+			embeddedType = embeddedType.Elem()
+		}
+		if field.Anonymous && name == "" && embeddedType.Kind() == reflect.Struct {
+			embedded = append(embedded, embeddedType)
+			continue
+		}
+		if !field.IsExported() {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		if current, ok := found[name]; ok && current.depth <= depth {
+			continue
+		}
+		found[name] = jsonField{typ: field.Type, depth: depth}
+	}
+	for _, embeddedType := range embedded {
+		addJSONFields(embeddedType, depth+1, visiting, found)
+	}
 }
 
 func RunTool(ctx context.Context, f ToolFunc, call ToolCall) harness.ToolOutcome {
