@@ -7,13 +7,12 @@ package worker
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
-
-	"github.com/Syntheresis/melta/extension"
 )
 
 // FrameLimit is the maximum size of one encoded frame envelope, excluding its
@@ -43,7 +42,24 @@ var ErrFrameTooLarge = errors.New("worker: frame exceeds the size limit")
 // JSONBytes is one opaque byte value carried as a base64 JSON string. Decoding
 // accepts only canonical padded standard base64; the decoded bytes are
 // preserved unchanged and may be any bytes, not only JSON.
-type JSONBytes = extension.WireBytes
+type JSONBytes []byte
+
+func (b JSONBytes) MarshalJSON() ([]byte, error) {
+	return json.Marshal(base64.StdEncoding.EncodeToString(b))
+}
+
+func (b *JSONBytes) UnmarshalJSON(data []byte) error {
+	var encoded *string
+	if err := json.Unmarshal(data, &encoded); err != nil || encoded == nil {
+		return errors.New("opaque value must be a base64 string")
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(*encoded)
+	if err != nil || base64.StdEncoding.EncodeToString(decoded) != *encoded {
+		return errors.New("opaque value must be canonical base64")
+	}
+	*b = decoded
+	return nil
+}
 
 // Frame is one protocol envelope. The members used by each kind are:
 // request carries id, method and params; response carries id and exactly one

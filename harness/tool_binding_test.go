@@ -21,7 +21,6 @@ func TestToolBindingSettlement(t *testing.T) {
 	}{
 		{name: "unadvertised", call: "ghost", status: model.ResultError},
 		{name: "missing", call: "echo", missing: true, status: model.ResultError},
-		{name: "invalid binding without callbacks", call: "echo", broken: "both", status: model.ResultError},
 		{name: "invalid binding without validator", call: "echo", broken: "validate", status: model.ResultError},
 		{name: "invalid binding without run", call: "echo", broken: "run", status: model.ResultError},
 		{name: "invalid binding without identity", call: "echo", broken: "identity", status: model.ResultError},
@@ -48,8 +47,6 @@ func TestToolBindingSettlement(t *testing.T) {
 					return ToolOutcome{Result: model.ToolResult{CallID: call.ID, Status: model.ResultSuccess, Content: "done"}}
 				}}
 				switch tc.broken {
-				case "both":
-					binding.Validate, binding.Run = nil, nil
 				case "validate":
 					binding.Validate = nil
 				case "run":

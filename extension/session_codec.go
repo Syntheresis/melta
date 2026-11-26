@@ -1,89 +1,14 @@
 package extension
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
 )
-
-// WireBytes is an opaque byte value encoded as canonical padded base64.
-type WireBytes []byte
-
-func (b WireBytes) MarshalJSON() ([]byte, error) {
-	return json.Marshal(base64.StdEncoding.EncodeToString(b))
-}
-
-func (b *WireBytes) UnmarshalJSON(data []byte) error {
-	var encoded *string
-	if err := json.Unmarshal(data, &encoded); err != nil || encoded == nil {
-		return errors.New("opaque value must be a base64 string")
-	}
-	decoded, err := base64.StdEncoding.Strict().DecodeString(*encoded)
-	if err != nil || base64.StdEncoding.EncodeToString(decoded) != *encoded {
-		return errors.New("opaque value must be canonical base64")
-	}
-	*b = decoded
-	return nil
-}
-
-type WireExtra struct {
-	Key   WireBytes `json:"key"`
-	Value WireBytes `json:"value"`
-}
-
-func EncodeExtra(extra model.Extra) []WireExtra {
-	keys := make([]string, 0, len(extra))
-	for key := range extra {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	var out []WireExtra
-	for _, key := range keys {
-		out = append(out, WireExtra{Key: WireBytes(key), Value: WireBytes(extra[key])})
-	}
-	return out
-}
-
-func DecodeExtra(extra []WireExtra) model.Extra {
-	if len(extra) == 0 {
-		return nil
-	}
-	out := make(model.Extra, len(extra))
-	for _, entry := range extra {
-		out[string(entry.Key)] = append(json.RawMessage(nil), entry.Value...)
-	}
-	return out
-}
-
-type WireContentPart struct {
-	Kind           string      `json:"kind"`
-	Text           string      `json:"text,omitempty"`
-	URL            string      `json:"url,omitempty"`
-	OpaqueWireType string      `json:"opaque_wire_type,omitempty"`
-	Extra          []WireExtra `json:"extra,omitempty"`
-}
-
-func EncodeContentParts(parts []model.ContentPart) []WireContentPart {
-	out := make([]WireContentPart, len(parts))
-	for i, part := range parts {
-		out[i] = WireContentPart{Kind: string(part.Kind), Text: part.Text, URL: part.URL, OpaqueWireType: part.OpaqueWireType, Extra: EncodeExtra(part.Extra)}
-	}
-	return out
-}
-
-func DecodeContentParts(parts []WireContentPart) []model.ContentPart {
-	out := make([]model.ContentPart, len(parts))
-	for i, part := range parts {
-		out[i] = model.ContentPart{Kind: model.PartKind(part.Kind), Text: part.Text, URL: part.URL, OpaqueWireType: part.OpaqueWireType, Extra: DecodeExtra(part.Extra)}
-	}
-	return out
-}
 
 // sessionStartDocument is the start document of the melta.session start host
 // call: the Session-inputs object create_session takes, an optional raw initial

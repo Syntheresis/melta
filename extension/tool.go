@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -329,10 +330,10 @@ func (c AuthorContext) ReadFile(ctx context.Context, path string) ([]byte, error
 
 func (c AuthorContext) writeFile(ctx context.Context, path string, content []byte, createOnly bool) error {
 	err := c.invoke(ctx, ContractWorkspace, "write", struct {
-		Path       string    `json:"path"`
-		Bytes      WireBytes `json:"bytes"`
-		CreateOnly bool      `json:"create_only"`
-	}{path, WireBytes(content), createOnly}, nil)
+		Path       string `json:"path"`
+		Bytes      string `json:"bytes"`
+		CreateOnly bool   `json:"create_only"`
+	}{path, base64.StdEncoding.EncodeToString(content), createOnly}, nil)
 	return uncertainMutation(err)
 }
 

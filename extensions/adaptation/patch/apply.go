@@ -20,69 +20,54 @@ const (
 	outcomeUncertain
 )
 
-// boundTarget holds the path and facts observed before validation.
-type boundTarget struct {
-	Canonical string
-	Path      string
-	Exists    bool
-}
-
 // parseAndStatTargets parses the patch, stats every target and rejects duplicate paths.
 func parseAndStatTargets(ctx context.Context, call extension.AuthorContext, input string) ([]fileOp, error) {
 	parsed, err := parsePatch(input)
 	if err != nil {
 		return nil, err
 	}
-	ops := make([]fileOp, 0, len(parsed.ops))
-	targets := make([]boundTarget, 0, len(parsed.ops)*2)
-	for _, parsedOp := range parsed.ops {
-		op := parsedOp
-		op.source, err = statTarget(ctx, call, op.path)
-		if err != nil {
+	seen := make(map[string]bool, len(parsed.ops)*2)
+	for i := range parsed.ops {
+		op := &parsed.ops[i]
+		if op.sourceExists, err = statTarget(ctx, call, op.path, seen); err != nil {
 			return nil, err
 		}
-		targets = append(targets, op.source)
 		if op.movePath != "" {
-			destination, err := statTarget(ctx, call, op.movePath)
-			if err != nil {
+			if op.destinationExists, err = statTarget(ctx, call, op.movePath, seen); err != nil {
 				return nil, err
 			}
-			op.destination = &destination
-			targets = append(targets, destination)
 		}
-		ops = append(ops, op)
 	}
-	seen := make(map[string]bool, len(targets))
-	for _, target := range targets {
-		key := filepath.Clean(target.Canonical)
-		if seen[key] {
-			return nil, fmt.Errorf("apply_patch: multiple patch entries resolve to the same file: %s", target.Canonical)
-		}
-		seen[key] = true
-	}
-	return ops, nil
+	return parsed.ops, nil
 }
 
-func statTarget(ctx context.Context, call extension.AuthorContext, path string) (boundTarget, error) {
+// statTarget reports whether one patch target exists and refuses it when an
+// earlier entry of the same patch resolved to the same file.
+func statTarget(ctx context.Context, call extension.AuthorContext, path string, seen map[string]bool) (bool, error) {
 	result, err := call.StatFile(ctx, path)
 	if err != nil {
-		return boundTarget{}, err
+		return false, err
 	}
-	return boundTarget{Canonical: result.Path, Path: path, Exists: result.Exists}, nil
+	key := filepath.Clean(result.Path)
+	if seen[key] {
+		return false, fmt.Errorf("apply_patch: multiple patch entries resolve to the same file: %s", result.Path)
+	}
+	seen[key] = true
+	return result.Exists, nil
 }
 
-func writeTarget(ctx context.Context, call extension.AuthorContext, target boundTarget, content []byte, createOnly bool) (outcome, error) {
+func writeTarget(ctx context.Context, call extension.AuthorContext, path string, content []byte, createOnly bool) (outcome, error) {
 	var err error
 	if createOnly {
-		err = call.CreateFile(ctx, target.Path, content)
+		err = call.CreateFile(ctx, path, content)
 	} else {
-		err = call.WriteFile(ctx, target.Path, content)
+		err = call.WriteFile(ctx, path, content)
 	}
 	return mutationOutcome(err)
 }
 
-func deleteTarget(ctx context.Context, call extension.AuthorContext, target boundTarget) (outcome, error) {
-	return mutationOutcome(call.DeleteFile(ctx, target.Path))
+func deleteTarget(ctx context.Context, call extension.AuthorContext, path string) (outcome, error) {
+	return mutationOutcome(call.DeleteFile(ctx, path))
 }
 
 // mutationOutcome reads the Host's reported completion independently of its
@@ -137,12 +122,12 @@ func buildApplyPlans(ctx context.Context, call extension.AuthorContext, ops []fi
 		pl := applyPlan{op: op}
 		switch op.kind {
 		case opAdd:
-			if op.source.Exists {
+			if op.sourceExists {
 				return nil, fmt.Errorf("apply_patch: %s already exists (Add File requires the path to not exist)", op.path)
 			}
 			pl.newContent = buildAddContent(op)
 		case opUpdate:
-			data, err := readExisting(ctx, call, op.source, "Update")
+			data, err := readExisting(ctx, call, op.path, op.sourceExists, "Update")
 			if err != nil {
 				return nil, err
 			}
@@ -153,7 +138,7 @@ func buildApplyPlans(ctx context.Context, call extension.AuthorContext, ops []fi
 				return nil, err
 			}
 		case opDelete:
-			data, err := readExisting(ctx, call, op.source, "Delete")
+			data, err := readExisting(ctx, call, op.path, op.sourceExists, "Delete")
 			if err != nil {
 				return nil, err
 			}
@@ -161,7 +146,7 @@ func buildApplyPlans(ctx context.Context, call extension.AuthorContext, ops []fi
 			pl.preLines = splitLinesRaw(data)
 		}
 		if op.movePath != "" {
-			if op.destination.Exists {
+			if op.destinationExists {
 				return nil, fmt.Errorf("apply_patch: %s (move destination) already exists (Move over an existing file is not allowed)", op.movePath)
 			}
 			if len(op.hunks) == 0 {
@@ -174,13 +159,13 @@ func buildApplyPlans(ctx context.Context, call extension.AuthorContext, ops []fi
 }
 
 // readExisting reads one source that the patch requires to exist.
-func readExisting(ctx context.Context, call extension.AuthorContext, target boundTarget, requirement string) ([]byte, error) {
-	if !target.Exists {
-		return nil, fmt.Errorf("apply_patch: %s does not exist (%s requires the path to exist)", target.Path, requirement)
+func readExisting(ctx context.Context, call extension.AuthorContext, path string, exists bool, requirement string) ([]byte, error) {
+	if !exists {
+		return nil, fmt.Errorf("apply_patch: %s does not exist (%s requires the path to exist)", path, requirement)
 	}
-	data, err := call.ReadFile(ctx, target.Path)
+	data, err := call.ReadFile(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("apply_patch: read %s: %w", target.Path, err)
+		return nil, fmt.Errorf("apply_patch: read %s: %w", path, err)
 	}
 	return data, nil
 }
@@ -323,7 +308,7 @@ func applyOne(ctx context.Context, call extension.AuthorContext, pl *applyPlan, 
 		if err := revalidateSourceContent(ctx, call, pl); err != nil {
 			return nil, err
 		}
-		writeOutcome, err := writeTarget(ctx, call, *pl.op.destination, []byte(pl.newContent), true)
+		writeOutcome, err := writeTarget(ctx, call, pl.op.movePath, []byte(pl.newContent), true)
 		if writeOutcome == outcomeCompleted || writeOutcome == outcomeUncertain {
 			*committed = append(*committed, appliedOp{kind: "M", path: pl.op.movePath, uncertain: writeOutcome == outcomeUncertain})
 		}
@@ -347,7 +332,7 @@ func applyOne(ctx context.Context, call extension.AuthorContext, pl *applyPlan, 
 }
 
 func revalidateSourceContent(ctx context.Context, call extension.AuthorContext, pl *applyPlan) error {
-	data, err := call.ReadFile(ctx, pl.op.source.Path)
+	data, err := call.ReadFile(ctx, pl.op.path)
 	if err != nil {
 		return fmt.Errorf("apply_patch: read %s before mutation: %w", pl.op.path, err)
 	}
@@ -364,16 +349,16 @@ func applyOriginalMutation(ctx context.Context, call extension.AuthorContext, pl
 	switch {
 	case pl.op.movePath != "":
 		kind = "D"
-		result, err = deleteTarget(ctx, call, pl.op.source)
+		result, err = deleteTarget(ctx, call, pl.op.path)
 	case pl.op.kind == opAdd:
 		kind = "A"
-		result, err = writeTarget(ctx, call, pl.op.source, []byte(pl.newContent), true)
+		result, err = writeTarget(ctx, call, pl.op.path, []byte(pl.newContent), true)
 	case pl.op.kind == opUpdate:
 		kind = "M"
-		result, err = writeTarget(ctx, call, pl.op.source, []byte(pl.newContent), false)
+		result, err = writeTarget(ctx, call, pl.op.path, []byte(pl.newContent), false)
 	case pl.op.kind == opDelete:
 		kind = "D"
-		result, err = deleteTarget(ctx, call, pl.op.source)
+		result, err = deleteTarget(ctx, call, pl.op.path)
 	}
 	if result == outcomeCompleted || result == outcomeUncertain {
 		committed = append(committed, appliedOp{kind: kind, path: pl.op.path, uncertain: result == outcomeUncertain})
