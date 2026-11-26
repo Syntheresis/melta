@@ -250,8 +250,10 @@ func modelPostState(captured configurationCapture, providerID, modelID string) *
 // creation. The optional write-only key is never written to the raw layer:
 // the one credential-input rule applies before any side effect, the
 // candidate validates completely before any write, and the managed key is
-// persisted only after the owning file — a failure there restores the exact
-// prior bytes. The result carries the created provider's actual binding.
+// persisted only after the owning file — a failure there restores the prior
+// bytes over the create's own write, leaves a document changed meanwhile as
+// it is, and reports both failures. The result carries the created
+// provider's actual binding.
 func (r *Melta) AddProvider(ctx context.Context, c Caller, providerID string, patch protocol.ProviderEdit, models map[string]protocol.ModelEdit, key *string) (protocol.ProviderMutation, error) {
 	release, err := r.enter(ctx)
 	if err != nil {

@@ -1329,30 +1329,22 @@ func TestRuntimeOwnerCloseAfterWriteBeginsFinishesPublication(t *testing.T) {
 	})
 }
 
-// TestConfigurationMutateExternalEditorRaceLastWriterWins proves the
-// last-writer-wins rule against a REAL concurrent external editor: the
-// mutation is parked in its validation stage — after the raw inputs and the
-// complete owning bytes are captured, before the final cancellation check
-// and the atomic write — the main test goroutine performs a valid OS write
-// to the same owning file in that window, and the mutation still wins with
-// its complete earlier candidate bytes. A mid-window reread or merge would
-// be discriminated: the external document carries a changed provider value
-// and a new unowned top-level member absent from the captured root. No CAS,
-// no mtime checks, no second writer.
-func TestConfigurationMutateExternalEditorRaceLastWriterWins(t *testing.T) {
+// TestConfigurationMutateRefusesAnOutsideEdit proves the compare-before-write
+// rule against a REAL concurrent external editor: the mutation is parked in
+// its owning temp sync — after the raw inputs and the complete owning bytes
+// are captured, after the final cancellation check, immediately before its
+// comparison — the main test goroutine performs a valid OS write to the same
+// owning file in that window, and the mutation fails as a conflict instead of
+// replacing it. The outside document stays, no revision is published, and the
+// error carries both the configuration failure and the conflict classes. A
+// mid-window reread or merge would be discriminated: the outside document
+// carries a changed provider value and a new unowned top-level member absent
+// from the captured root.
+func TestConfigurationMutateRefusesAnOutsideEdit(t *testing.T) {
 	h := newServiceHarness(t)
 	writeServiceFile(t, h.configPath, mutationConfigDocument())
-	var parked int32 // the validator parks only the edit build
-	arrive := make(chan struct{}, 1)
-	gate := make(chan struct{})
-	candidateBarrier = func() {
-		if atomic.LoadInt32(&parked) == 1 {
-			arrive <- struct{}{}
-			<-gate
-		}
-	}
-	t.Cleanup(func() { candidateBarrier = nil })
 	svc := h.service(context.Background(), servicePlugin("capowner", &h.opens, acceptValidator))
+	svc.attachWarnings(newWarningStore())
 	{
 		_, err := svc.publish(context.Background())
 		testassert.NoError(t, err)
@@ -1360,32 +1352,27 @@ func TestConfigurationMutateExternalEditorRaceLastWriterWins(t *testing.T) {
 	sub, err := svc.obs.subscribe(4)
 	testassert.NoError(t, err)
 	t.Cleanup(sub.Close)
+	_, first, warnRev := metadataBaseline(t, svc, h.configPath)
+	probe := installOwningSyncProbe(t, h.configPath)
+	probe.mu.Lock()
+	probe.park = true
+	probe.mu.Unlock()
+	// Failure cleanup releases the parked owning write and restores the seam
+	// before the fixture disposal, deterministically, on every exit.
+	releasePark := sync.OnceFunc(probe.releaseProbe)
+	defer func() {
+		releasePark()
+		probe.restore()
+	}()
 
-	atomic.StoreInt32(&parked, 1)
-	type result struct {
-		cfg configurationCapture
-		err error
-	}
-	done := make(chan result, 1)
+	done := make(chan error, 1)
 	go func() {
 		settings := mutationSettings()
 		settings.Extensions["capowner"] = `{"enabled":true}`
-		cfg, err := svc.mutate(context.Background(), editSettings(settings))
-		done <- result{cfg, err}
+		_, err := svc.mutate(context.Background(), editSettings(settings))
+		done <- err
 	}()
-	// Failure cleanup: release the parked validation and join the worker
-	// before the fixture disposal, on every exit, with no sleep inference.
-	// The join is conditional — on the success path the single result was
-	// already consumed below.
-	release := sync.OnceFunc(func() { close(gate) })
-	received := false
-	defer func() {
-		release()
-		if !received {
-			<-done
-		}
-	}()
-	<-arrive // the mutation captured its inputs and complete owning bytes
+	probe.awaitWriteStarted(t)
 
 	// The real concurrent external editor: a valid whole-file OS write in
 	// the open window, with a changed provider value and a new unowned
@@ -1393,43 +1380,11 @@ func TestConfigurationMutateExternalEditorRaceLastWriterWins(t *testing.T) {
 	external := strings.Replace(mutationConfigDocument(), `"name":"One"`, `"name":"Two"`, 1)
 	external = strings.TrimSuffix(external, "}") + `,"external_note":"added mid-window"}`
 	writeServiceFile(t, h.configPath, external)
-	release()
+	releasePark()
 
 	got := <-done
-	received = true
-	testassert.Require(t, got.err == nil && got.cfg.snapshot.generation == 2 && svc.current() == got.cfg.snapshot, "mutation after the concurrent external write: %v; race mutation = generation %d, want 2 published", got.err, got.cfg.snapshot.generation)
-	nextConfigurationEvent(t, sub, "2")
-
-	// The file: the complete earlier candidate bytes won — the captured old
-	// provider value is preserved, the external member is gone, and the
-	// requested settings are new — pinned against independent expected
-	// values.
-	root := fileRoot(t, h.configPath)
-	{
-		_, ok := root["external_note"]
-		testassert.Require(t, !ok, "the external editor's mid-window member survived: %s", root["external_note"])
-	}
-	var providers struct {
-		Prov struct {
-			Models map[string]struct {
-				Name string `json:"name"`
-			} `json:"models"`
-		} `json:"prov"`
-	}
-	testassert.NoError(t, json.Unmarshal(root["providers"], &providers))
-	testassert.Equal(t, providers.Prov.Models["m"].Name, "One")
-	{
-		got, want := compactJSON(t, root["sessions"]), compactJSON(t, mustMarshal(t, mutationSettings().Sessions))
-		testassert.Equal(t, got, want)
-	}
-	{
-		got, want := compactJSON(t, root["tools"]), compactJSON(t, mutationSettings().Tools)
-		testassert.Equal(t, got, want)
-	}
-
-	// The published projection: the same winning candidate's settings.
-	view := projectSettings(svc.current())
-	testassert.Require(t, view.Sessions == mutationSettings().Sessions && compactJSON(t, view.Tools) == compactJSON(t, mutationSettings().Tools), "published settings = %+v, want the requested shape", view)
+	assertMetadataRefused(t, svc, sub, h.configPath, []byte(external), first, warnRev, got, harness.ErrConflict)
+	testassert.Require(t, errors.Is(got, ErrConfiguration), "conflict = %v, want the configuration failure class too", got)
 }
 
 // nextConfigurationEvent reads one event and proves it is the configuration

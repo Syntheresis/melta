@@ -1,21 +1,33 @@
 package melta
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"sync"
 
+	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/atomicfs"
 	"github.com/Syntheresis/melta/internal/config"
 )
 
+// errConfigurationChanged reports a write that found its configuration
+// document missing or holding bytes other than the ones its caller read.
+var errConfigurationChanged = fmt.Errorf("configuration document changed since it was read: %w", harness.ErrConflict)
+
 // ConfigurationSource supplies and replaces one complete configuration
 // document. Read reports a missing document as an error wrapping
-// fs.ErrNotExist; Write is an atomic replacement that fails with the previous
-// bytes unchanged.
+// fs.ErrNotExist. Write replaces the document with data and takes the bytes
+// its caller read as previous: when it finds the document missing or holding
+// other bytes, it fails with an error wrapping harness.ErrConflict. Any failed
+// Write leaves the document as it was. A source whose document other programs
+// can write without a lock it shares compares as late as it can; a change
+// after its comparison is replaced.
 type ConfigurationSource interface {
 	Read(ctx context.Context) ([]byte, error)
-	Write(ctx context.Context, data []byte) error
+	Write(ctx context.Context, previous, data []byte) error
 }
 
 // CredentialSource supplies credential observations and managed updates
@@ -48,7 +60,9 @@ type fileConfiguration struct {
 }
 
 // NewFileConfigurationSource returns a configuration source over the explicit
-// path. Reads never create the document; writes are atomic replacements.
+// path. Reads never create the document. A write replaces it atomically only
+// when it holds the bytes its caller read; the file is compared immediately
+// before the rename, so a change that lands between the two is still replaced.
 func NewFileConfigurationSource(path string) ConfigurationSource {
 	return &fileConfiguration{path: path}
 }
@@ -60,8 +74,12 @@ func (s *fileConfiguration) Read(ctx context.Context) ([]byte, error) {
 	return os.ReadFile(s.path) // #nosec G703 -- the path is the host's explicitly selected configuration location.
 }
 
-func (s *fileConfiguration) Write(_ context.Context, data []byte) error {
-	return atomicfs.Write(s.path, data, 0o600)
+func (s *fileConfiguration) Write(_ context.Context, previous, data []byte) error {
+	err := atomicfs.WriteIfUnchanged(s.path, previous, data, 0o600)
+	if errors.Is(err, atomicfs.ErrChanged) {
+		return errConfigurationChanged
+	}
+	return err
 }
 
 // valueConfiguration is the locked value-backed configuration source: one
@@ -72,8 +90,8 @@ type valueConfiguration struct {
 }
 
 // NewValueConfigurationSource returns a configuration source backed by the
-// supplied bytes. Writes replace the held bytes; readers receive an owned
-// copy.
+// supplied bytes. A write replaces the held bytes only while it still holds
+// the bytes its caller read; readers receive an owned copy.
 func NewValueConfigurationSource(data []byte) ConfigurationSource {
 	return &valueConfiguration{data: append([]byte(nil), data...)}
 }
@@ -87,9 +105,12 @@ func (s *valueConfiguration) Read(ctx context.Context) ([]byte, error) {
 	return append([]byte(nil), s.data...), nil
 }
 
-func (s *valueConfiguration) Write(_ context.Context, data []byte) error {
+func (s *valueConfiguration) Write(_ context.Context, previous, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !bytes.Equal(s.data, previous) {
+		return errConfigurationChanged
+	}
 	s.data = append([]byte(nil), data...)
 	return nil
 }
