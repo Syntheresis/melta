@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Syntheresis/melta/agent"
 	"github.com/Syntheresis/melta/model"
@@ -41,6 +42,37 @@ func buildToolResultContent(evidence ExecutionEvidence, base string) string {
 		return unknownToolResultPrefix + "\n\n" + base
 	}
 	return base
+}
+
+// maxToolResultBytes bounds one tool result's final model-facing content. It
+// keeps a Go worker's tool response inside one 4 MiB frame: content travels
+// as a JSON string in which one byte can take six, and metadata as base64, so
+// 448 KiB of content with 1 MiB of metadata encodes to at most 4,150,752
+// bytes with short ids, which leaves 43,552 bytes for the tool call id.
+const maxToolResultBytes = 448 << 10
+
+// boundToolContent makes content valid UTF-8 and cuts it to
+// maxToolResultBytes. Each invalid byte becomes U+FFFD, the text stored JSON
+// already holds for it, so content under the bound is stored as before.
+// Longer content is cut at a rune boundary and ends with "\n[truncated]",
+// counted in the bound.
+func boundToolContent(content string) string {
+	if !utf8.ValidString(content) {
+		content = string([]rune(content))
+	}
+	return truncateCompletionText(content, maxToolResultBytes)
+}
+
+// BoundToolOutcome bounds an extension tool's outcome before result hooks
+// and settlement see it: content becomes valid UTF-8 of at most 448 KiB,
+// cut at a rune boundary and ending with "\n[truncated]" when longer, and
+// metadata longer than 1 MiB is dropped.
+func BoundToolOutcome(outcome ToolOutcome) ToolOutcome {
+	outcome.Result.Content = boundToolContent(outcome.Result.Content)
+	if len(outcome.Metadata) > maxToolMetadataBytes {
+		outcome.Metadata = nil
+	}
+	return outcome
 }
 
 // shapingFailureDiagnostic renders one aborted shaping chain's bounded
@@ -1676,13 +1708,14 @@ func (d *executionDriver) shapeToolOutput(ctx context.Context, inv *openedInvoca
 // the outcome's original content otherwise — and are stored alongside that
 // original content and an aborted chain's bounded processing failure; the
 // settled result returned to the caller carries that same final content and
-// unchanged status. A refusal names its hook. The outcome's metadata is
-// committed only when it is one well-formed JSON value within the durable
-// bound; invalid or oversized metadata is dropped while the result still
-// commits. Pre-intent exits carry their accepted selection when applicable;
-// Run outcomes copy the intent's committed final arguments and hook
-// provenance. The suspended running request state clears when this was the
-// last pending call's result.
+// unchanged status. The final content is made valid UTF-8 and cut to the
+// content bound while the original content is stored as given. A refusal names
+// its hook. The outcome's metadata is committed only when it is one
+// well-formed JSON value within the durable bound; invalid or oversized
+// metadata is dropped while the result still commits. Pre-intent exits carry
+// their accepted selection when applicable; Run outcomes copy the intent's
+// committed final arguments and hook provenance. The suspended running request
+// state clears when this was the last pending call's result.
 func (h *Harness) commitToolResult(ctx context.Context, c *coordinator, operationID string, pending PendingToolCall, outcome ToolOutcome, shaping *toolShaping, fromIntent bool, selection toolSelection, refusedBy *HookIdentity) (model.ToolResult, error) {
 	base := outcome.Result.Content
 	var failure string
@@ -1690,7 +1723,7 @@ func (h *Harness) commitToolResult(ctx context.Context, c *coordinator, operatio
 		base, failure = shaping.base, shaping.failure
 	}
 	evidence := outcome.Evidence
-	content := buildToolResultContent(evidence, base)
+	content := boundToolContent(buildToolResultContent(evidence, base))
 	c.mu.Lock()
 	op, ok := c.graph.Operation(operationID)
 	if !ok {

@@ -26,6 +26,10 @@ type ToolCall struct {
 	Arguments json.RawMessage
 }
 
+// ToolResult is what a tool function returns: the model-facing content and
+// optional JSON metadata for clients. RunTool bounds both: content longer
+// than 448 KiB is cut and ends with "\n[truncated]", and metadata longer than
+// 1 MiB is dropped.
 type ToolResult struct {
 	Content  string
 	Metadata json.RawMessage
@@ -244,6 +248,12 @@ func addJSONFields(t reflect.Type, depth int, visiting map[reflect.Type]bool, fo
 	}
 }
 
+// RunTool runs one tool function and maps what it returns onto the Harness
+// outcome. A returned result is an observed success. A returned error becomes
+// the model-facing error text with no metadata: interrupted when it is the
+// cancelled call context's error, and of unknown outcome when it wraps
+// ErrOutcomeUnknown. The outcome is bounded as harness.BoundToolOutcome
+// describes.
 func RunTool(ctx context.Context, f ToolFunc, call ToolCall) harness.ToolOutcome {
 	result, err := f(ctx, call)
 	out := harness.ToolOutcome{
@@ -264,7 +274,7 @@ func RunTool(ctx context.Context, f ToolFunc, call ToolCall) harness.ToolOutcome
 			out.Evidence = harness.ExecutionUnknown
 		}
 	}
-	return out
+	return harness.BoundToolOutcome(out)
 }
 
 // Activation supplies the entry point's settings and service calls.

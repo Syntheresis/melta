@@ -2096,6 +2096,38 @@ func TestToolOutputShaping(t *testing.T) {
 	})
 }
 
+// runShapingRound drives one complete tool round over the admitted fixture:
+// the first model turn requests call-1, the given lookup settles it through
+// the given output hooks, and the second turn captures the next request.
+func runShapingRound(t *testing.T, lookup func(string) (ToolBinding, bool, error), hooks []ToolOutputHook) (*graphStorage, string, model.Request) {
+	t.Helper()
+	admission := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+		return Execution{}, nil
+	})
+	h, store, c, sessionID := newAdmittedHarness(t, context.Background(), admission)
+	rounds := 0
+	var next model.Request
+	exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
+		return InvocationExecution{
+			Model: func(_ context.Context, request model.Request, _ model.Extra) (model.Stream, error) {
+				rounds++
+				if rounds == 1 {
+					return completedTurnStream(testToolCall("call-1")), nil
+				}
+				next = request
+				return completedTurnStream(), nil
+			},
+			LookupTool:      lookup,
+			ToolOutputHooks: hooks,
+		}, nil
+	}}
+	prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
+		return exec, nil
+	})
+	testassert.NoError(t, executeDirect(h, c, h.ctx, testOpID, prepared))
+	return store, sessionID, next
+}
+
 // TestToolShapingPreservesUnknownOutcomeNotice proves the D3 captured-request
 // rows: an executor that acted but answered invalidly settles unknown, and
 // whether a shaper successfully returns innocuous cancellation text or fails,
@@ -2105,36 +2137,8 @@ func TestToolShapingPreservesUnknownOutcomeNotice(t *testing.T) {
 	invalidExecutor := func(ctx context.Context, call model.ToolCall) ToolOutcome {
 		return ToolOutcome{Evidence: ExecutionObserved, Result: model.ToolResult{CallID: "wrong-call", Status: model.ResultSuccess, Content: "ran"}}
 	}
-	run := func(t *testing.T, hooks []ToolOutputHook) (*graphStorage, string, model.Request) {
-		t.Helper()
-		admission := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return Execution{}, nil
-		})
-		h, store, c, sessionID := newAdmittedHarness(t, context.Background(), admission)
-		rounds := 0
-		var next model.Request
-		exec := Execution{OpenInvocation: func(context.Context, InvocationRequest) (InvocationExecution, error) {
-			return InvocationExecution{
-				Model: func(_ context.Context, request model.Request, _ model.Extra) (model.Stream, error) {
-					rounds++
-					if rounds == 1 {
-						return completedTurnStream(testToolCall("call-1")), nil
-					}
-					next = request
-					return completedTurnStream(), nil
-				},
-				LookupTool:      fixtureToolLookup(invalidExecutor),
-				ToolOutputHooks: hooks,
-			}, nil
-		}}
-		prepared := preparedExecutionFor(testCapture(), func(context.Context, OperationAdmission) (Execution, error) {
-			return exec, nil
-		})
-		testassert.NoError(t, executeDirect(h, c, h.ctx, testOpID, prepared))
-		return store, sessionID, next
-	}
 	t.Run("successful shaper cannot erase the unknown notice", func(t *testing.T) {
-		store, sessionID, next := run(t, []ToolOutputHook{shapingHook("shaper.cancel", func(context.Context, ToolOutputInput) (string, error) {
+		store, sessionID, next := runShapingRound(t, fixtureToolLookup(invalidExecutor), []ToolOutputHook{shapingHook("shaper.cancel", func(context.Context, ToolOutputInput) (string, error) {
 			return interruptedToolResultContent, nil
 		})})
 		want := unknownToolResultPrefix + "\n\n" + interruptedToolResultContent
@@ -2145,7 +2149,7 @@ func TestToolShapingPreservesUnknownOutcomeNotice(t *testing.T) {
 			"stored result = %+v, want the shaped text under the preserved notice with the durable original and unknown evidence", stored)
 	})
 	t.Run("failing shaper cannot erase the unknown notice", func(t *testing.T) {
-		store, sessionID, next := run(t, []ToolOutputHook{shapingHook("shaper.boom", func(context.Context, ToolOutputInput) (string, error) {
+		store, sessionID, next := runShapingRound(t, fixtureToolLookup(invalidExecutor), []ToolOutputHook{shapingHook("shaper.boom", func(context.Context, ToolOutputInput) (string, error) {
 			return "", errors.New("shaper broke")
 		})})
 		want := unknownToolResultPrefix + "\n\n" + invalidToolResultContent
@@ -2155,6 +2159,75 @@ func TestToolShapingPreservesUnknownOutcomeNotice(t *testing.T) {
 		testassert.Require(t, stored.Content == want && stored.OriginalContent == invalidToolResultContent && stored.Evidence == ExecutionUnknown && stored.ShapingFailure == "shaper broke",
 			"stored result = %+v, want the original under the preserved notice with the bounded failure and unknown evidence", stored)
 	})
+}
+
+// TestToolResultContentCeiling proves the final model-facing content bound:
+// settlement stores and returns valid UTF-8 of at most 458752 bytes, cut at a
+// rune boundary and ending with the marker, while the producer's original
+// content stays as given.
+func TestToolResultContentCeiling(t *testing.T) {
+	const marker = "\n[truncated]"
+	repeat := strings.Repeat
+	for _, row := range []struct {
+		name         string
+		status       model.ToolResultStatus
+		evidence     ExecutionEvidence
+		content      string
+		shaped       string
+		want         string
+		wantOriginal string
+	}{
+		{
+			name: "at the ceiling", status: model.ResultSuccess, evidence: ExecutionObserved,
+			content: repeat("a", 458752), want: repeat("a", 458752), wantOriginal: repeat("a", 458752),
+		},
+		{
+			name: "one byte over", status: model.ResultSuccess, evidence: ExecutionObserved,
+			content: repeat("a", 458753), want: repeat("a", 458740) + marker, wantOriginal: repeat("a", 458753),
+		},
+		{
+			name: "cut inside a rune", status: model.ResultSuccess, evidence: ExecutionObserved,
+			content: repeat("a", 458739) + repeat("é", 8), want: repeat("a", 458739) + marker, wantOriginal: repeat("a", 458739) + repeat("é", 8),
+		},
+		{
+			name: "unknown outcome notice counts", status: model.ResultError, evidence: ExecutionUnknown,
+			content: repeat("a", 458752), want: (unknownToolResultPrefix + "\n\n" + repeat("a", 458752))[:458740] + marker, wantOriginal: repeat("a", 458752),
+		},
+		{
+			name: "invalid bytes under the ceiling", status: model.ResultSuccess, evidence: ExecutionObserved,
+			content: "x\xff\xfey", want: "x\uFFFD\uFFFDy", wantOriginal: "x\uFFFD\uFFFDy",
+		},
+		{
+			name: "invalid bytes over the ceiling", status: model.ResultSuccess, evidence: ExecutionObserved,
+			content: repeat("\xff", 458752), want: repeat("\uFFFD", 152913) + marker, wantOriginal: repeat("\uFFFD", 458752),
+		},
+		{
+			name: "shaped over the ceiling", status: model.ResultSuccess, evidence: ExecutionObserved,
+			content: "ran", shaped: repeat("a", 458753), want: repeat("a", 458740) + marker, wantOriginal: "ran",
+		},
+		{
+			name: "shaped under the ceiling", status: model.ResultSuccess, evidence: ExecutionObserved,
+			content: repeat("a", 500000), shaped: "ok", want: "ok", wantOriginal: repeat("a", 500000),
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			executor := func(context.Context, model.ToolCall) ToolOutcome {
+				return ToolOutcome{Evidence: row.evidence, Result: model.ToolResult{CallID: "call-1", Status: row.status, Content: row.content}}
+			}
+			var hooks []ToolOutputHook
+			if row.shaped != "" {
+				hooks = []ToolOutputHook{shapingHook("shaper.one", func(context.Context, ToolOutputInput) (string, error) {
+					return row.shaped, nil
+				})}
+			}
+			store, sessionID, next := runShapingRound(t, fixtureToolLookup(executor), hooks)
+			text := toolMessageText(t, next, "call-1")
+			testassert.Require(t, text == row.want, "next request tool message = %d bytes, want %d bytes", len(text), len(row.want))
+			stored := storedShapingResult(t, store, sessionID)
+			testassert.Require(t, stored.Content == row.want, "stored content = %d bytes, want %d bytes", len(stored.Content), len(row.want))
+			testassert.Require(t, stored.OriginalContent == row.wantOriginal, "stored original content = %d bytes, want %d bytes", len(stored.OriginalContent), len(row.wantOriginal))
+		})
+	}
 }
 
 // TestOpenedInvocationOutputHookRules proves the output-hook contract at

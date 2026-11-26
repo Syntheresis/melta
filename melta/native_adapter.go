@@ -31,9 +31,14 @@ func (t registeredExtensionTool) check() error {
 	return activation.unavailableLocked()
 }
 
+// Run runs the registered tool and bounds its outcome before the Harness
+// hands it to result hooks. Whatever supplied the content and metadata (the
+// extension's function, a worker's result or error, or the failure text of
+// an activation that was lost), the outcome leaves here bounded as
+// harness.BoundToolOutcome describes.
 func (t registeredExtensionTool) Run(ctx context.Context, tc ToolContext, call model.ToolCall) harness.ToolOutcome {
 	if err := t.check(); err != nil {
-		return harness.ToolOutcome{Result: bindingToolResult(call.ID, err, false), Evidence: harness.ExecutionNotStarted}
+		return harness.BoundToolOutcome(harness.ToolOutcome{Result: bindingToolResult(call.ID, err, false), Evidence: harness.ExecutionNotStarted})
 	}
 	child, cancel := context.WithCancel(ctx)
 	activation := t.binding.entry.activation
@@ -48,7 +53,7 @@ func (t registeredExtensionTool) Run(ctx context.Context, tc ToolContext, call m
 		ExtensionID: activation.id, Settings: bytes.Clone(activation.section),
 		Session: tc.Session, State: bytes.Clone(t.states[activation.id]), Call: scope.call,
 	}
-	return t.binding.entry.value.(nativeTool).tool(scope.ctx, author, call)
+	return harness.BoundToolOutcome(t.binding.entry.value.(nativeTool).tool(scope.ctx, author, call))
 }
 
 func (s *nativeSnapshot) checkHooks(tc ToolContext, sel selection) []harness.ToolCheckHook {

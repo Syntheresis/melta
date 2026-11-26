@@ -2,6 +2,7 @@ package melta
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -486,6 +487,101 @@ func TestExecutableLiteralToolResults(t *testing.T) {
 			} else {
 				testassert.Require(t, got.Result.Status == model.ResultError && got.Evidence == harness.ExecutionUnknown, "invalid result: %+v", got)
 			}
+		})
+	}
+}
+
+// TestRegisteredWorkerToolOutcomeIsBounded proves the host bound on every
+// extension tool outcome: a worker's result, a worker's error and a lost
+// activation's failure text all leave the host adapter bounded before result
+// hooks see them.
+func TestRegisteredWorkerToolOutcomeIsBounded(t *testing.T) {
+	const marker = "\n[truncated]"
+	manifest := executableTestManifest()
+	metadata := base64.StdEncoding.EncodeToString([]byte(`"` + strings.Repeat("m", 1048575) + `"`))
+	var lostCalls atomic.Int32
+	for _, row := range []struct {
+		name  string
+		reply func(peer *testExecutablePeer, frame worker.Frame)
+		check func(t *testing.T, call func() harness.ToolOutcome)
+	}{
+		{
+			name: "a result over the bounds",
+			reply: func(peer *testExecutablePeer, frame worker.Frame) {
+				peer.sendValue(frame.ID, json.RawMessage(`{"result":{"call_id":"call","status":"success","content":"`+
+					strings.Repeat("a", 458753)+`"},"metadata":"`+metadata+`","evidence":"observed"}`))
+			},
+			check: func(t *testing.T, call func() harness.ToolOutcome) {
+				outcome := call()
+				testassert.Require(t, outcome.Result.Status == model.ResultSuccess && outcome.Evidence == harness.ExecutionObserved &&
+					outcome.Result.Content == strings.Repeat("a", 458740)+marker && len(outcome.Metadata) == 0,
+					"outcome carries %d content bytes and %d metadata bytes with %s/%s evidence, want 458740 content bytes plus the marker, no metadata and success/observed",
+					len(outcome.Result.Content), len(outcome.Metadata), outcome.Result.Status, outcome.Evidence)
+			},
+		},
+		{
+			name: "an error envelope",
+			reply: func(peer *testExecutablePeer, frame worker.Frame) {
+				peer.send(worker.Frame{Kind: worker.KindResponse, ID: frame.ID, Error: &worker.Error{Class: worker.ClassInternal, Message: strings.Repeat("a", 500000)}})
+			},
+			check: func(t *testing.T, call func() harness.ToolOutcome) {
+				outcome := call()
+				want := ("internal: " + strings.Repeat("a", 500000))[:458740] + marker
+				testassert.Require(t, outcome.Result.Status == model.ResultError && outcome.Result.Content == want,
+					"outcome carries %d content bytes with %s status, want %d content bytes with error status",
+					len(outcome.Result.Content), outcome.Result.Status, len(want))
+			},
+		},
+		{
+			name: "a lost activation",
+			reply: func(peer *testExecutablePeer, frame worker.Frame) {
+				lostCalls.Add(1)
+				peer.sendValue(frame.ID, json.RawMessage(`{"result":{"call_id":"call","status":"`+
+					strings.Repeat("s", 500000)+`","content":"x"},"evidence":"observed"}`))
+			},
+			check: func(t *testing.T, call func() harness.ToolOutcome) {
+				for i := 0; i < 2; i++ {
+					outcome := call()
+					testassert.Require(t, outcome.Result.Status == model.ResultError && len(outcome.Result.Content) == 458752 &&
+						strings.HasSuffix(outcome.Result.Content, marker),
+						"call %d outcome carries %d content bytes with %s status, want 458752 bytes ending with the marker and error status",
+						i+1, len(outcome.Result.Content), outcome.Result.Status)
+				}
+				testassert.Equal(t, lostCalls.Load(), int32(1))
+			},
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			spawner := &testPeerSpawner{t: t, factory: func() *testExecutablePeer {
+				return newTestExecutablePeer(t, true, authoringPeer(manifest, row.reply))
+			}}
+			spawner.install()
+			owner := &configurationService{}
+			guest := executableAuthorExtension(manifest, "peer", func(context.Context, []string) ([]string, error) { return []string{}, nil })
+			candidate, err := owner.prepareNativeCandidate(context.Background(), []nativeActivationSpec{{extension: guest, section: json.RawMessage(`{"enabled":true}`), installed: true}})
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			defer candidate.release()
+			if candidate.inactive[manifest.ID] != nil {
+				t.Fatalf("activation inactive: %v", candidate.inactive)
+			}
+			if err := candidate.publishForTest(); err != nil {
+				t.Fatalf("publish: %v", err)
+			}
+			awaitRegistered(t, candidate, executableTestToolName)
+			stage := candidate.snapshotForTest()
+			defer stage.release()
+			binding := stage.bindTool(executableTestToolName)
+			if binding == nil {
+				t.Fatal("peer.tool is not registered")
+			}
+			defer binding.release()
+			tool := registeredExtensionTool{binding: binding}
+			row.check(t, func() harness.ToolOutcome {
+				return tool.Run(context.Background(), ToolContext{Session: harness.SessionIdentity{SessionID: "session", Workspace: t.TempDir()}},
+					model.ToolCall{ID: "call", Name: executableTestToolName, Arguments: []byte(`{}`)})
+			})
 		})
 	}
 }
