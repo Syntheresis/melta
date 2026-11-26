@@ -547,7 +547,7 @@ func TestExecutableLiteralSessionStart(t *testing.T) {
 	frame := peer.next()
 	var params worker.AuthorCallParams
 	testassert.NoError(t, json.Unmarshal(frame.Params, &params))
-	start := json.RawMessage(`{"inputs":"e30=","initial_state":"eyJ0b2tlbiI6MX0=","input":"W3sia2luZCI6InRleHQiLCJ0ZXh0IjoibGl0ZXJhbCBjaGlsZCJ9XQ==","report":false,"output_limit":0}`)
+	start := json.RawMessage(`{"inputs":{},"initial_state":{"token":1},"input":[{"kind":"text","text":"literal child"}],"report":false,"output_limit":0}`)
 	hostcall, err := json.Marshal(worker.AuthorHostcallParams{Token: params.Context.Token, Service: extension.ContractSession, Method: "start", Arguments: worker.JSONBytes(start)})
 	testassert.NoError(t, err)
 	peer.send(worker.Frame{Kind: worker.KindRequest, ID: "start", Method: worker.MethodHostcall, Params: hostcall})

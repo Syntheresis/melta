@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/catalog"
 	"github.com/Syntheresis/melta/model"
@@ -279,7 +280,7 @@ func projectConversationItem(sessionID string, fact harness.HistoryFact, results
 	var err error
 	switch fact.Kind {
 	case harness.EntryInput:
-		content, contentErr := projectContentParts(fact.Input.Content)
+		content, contentErr := extension.ProtocolContent(fact.Input.Content)
 		if contentErr != nil {
 			return nil, fmt.Errorf("project input entry %q: %w", fact.EntryID, contentErr)
 		}
@@ -345,7 +346,7 @@ func optionalIdentity(identity string) *string {
 // when that result has committed.
 func projectAssistantItem(id string, fact harness.HistoryFact, results map[string]harness.ToolResultEntry) (protocol.AssistantItem, error) {
 	entry := fact.Assistant
-	content, err := projectContentParts(entry.Content)
+	content, err := extension.ProtocolContent(entry.Content)
 	if err != nil {
 		return protocol.AssistantItem{}, fmt.Errorf("project assistant entry %q: %w", fact.EntryID, err)
 	}
@@ -365,7 +366,7 @@ func projectAssistantItem(id string, fact harness.HistoryFact, results map[strin
 		Source:      entry.Source.String(),
 		Content:     content,
 		ToolCalls:   calls,
-		Extra:       extraObject(entry.Extra),
+		Extra:       extension.ProtocolExtra(entry.Extra),
 	}
 	if entry.Refusal != "" {
 		refusal := entry.Refusal
@@ -396,7 +397,7 @@ func projectToolCall(call harness.ToolCallRecord, results map[string]harness.Too
 		Id:        call.ID,
 		Name:      call.Name,
 		Arguments: string(arguments),
-		Extra:     extraObject(call.Extra),
+		Extra:     extension.ProtocolExtra(call.Extra),
 	}
 	result, ok := results[call.ResultEntryID]
 	if !ok {
@@ -453,7 +454,7 @@ func projectSignalItem(id string, fact harness.HistoryFact) protocol.SignalItem 
 func projectMessages(messages []model.Message) ([]protocol.Message, error) {
 	out := make([]protocol.Message, 0, len(messages))
 	for _, m := range messages {
-		content, err := projectContentParts(m.Content)
+		content, err := extension.ProtocolContent(m.Content)
 		if err != nil {
 			return nil, err
 		}
@@ -474,7 +475,7 @@ func projectMessages(messages []model.Message) ([]protocol.Message, error) {
 			wire.Name = &name
 		}
 		if len(m.Extra) > 0 {
-			wire.Extra = extraObject(m.Extra)
+			wire.Extra = extension.ProtocolExtra(m.Extra)
 		}
 		if len(m.ToolCalls) > 0 {
 			calls := make([]protocol.MessageToolCall, 0, len(m.ToolCalls))
@@ -485,7 +486,7 @@ func projectMessages(messages []model.Message) ([]protocol.Message, error) {
 					ArgumentsBase64: base64.StdEncoding.EncodeToString(call.Arguments),
 				}
 				if len(call.Extra) > 0 {
-					view.Extra = extraObject(call.Extra)
+					view.Extra = extension.ProtocolExtra(call.Extra)
 				}
 				calls = append(calls, view)
 			}
@@ -509,43 +510,6 @@ func checkpointDisplayModel(entry *harness.ContextCheckpointEntry) *protocol.Mod
 	}
 	model := entry.Facts[0].Model.String()
 	return &model
-}
-
-// projectContentParts maps one validated content list to its generated
-// union parts, each carrying its own validated extras.
-func projectContentParts(parts []model.ContentPart) ([]protocol.ContentPart, error) {
-	out := make([]protocol.ContentPart, 0, len(parts))
-	for _, part := range parts {
-		var wire protocol.ContentPart
-		var err error
-		switch part.Kind {
-		case model.PartText:
-			err = wire.FromTextPart(protocol.TextPart{Kind: protocol.TextPartKindText, Text: part.Text, Extra: extraObject(part.Extra)})
-		case model.PartImageURL:
-			err = wire.FromImageURLPart(protocol.ImageURLPart{Kind: protocol.ImageUrl, Url: part.URL, Extra: extraObject(part.Extra)})
-		case model.PartOpaque:
-			err = wire.FromOpaquePart(protocol.OpaquePart{Kind: protocol.Opaque, OpaqueWireType: part.OpaqueWireType, Extra: extraObject(part.Extra)})
-		default:
-			return nil, fmt.Errorf("content part kind %q is not one of text, image_url or opaque", part.Kind)
-		}
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, wire)
-	}
-	return out, nil
-}
-
-// extraObject maps one validated raw extra set to the generated raw-valued
-// object — the same map shape, converted directly; the generated From*
-// constructor serializes it into the union's own bytes before returning, so
-// no reference escapes. Absent extras stay omitted.
-func extraObject(extra model.Extra) *protocol.JSONObject {
-	if len(extra) == 0 {
-		return nil
-	}
-	out := protocol.JSONObject(extra)
-	return &out
 }
 
 // wireRevision derives the wire revision pair from one value pair: the
@@ -722,7 +686,7 @@ func projectPending(view harness.SessionReadView) (protocol.PendingQueues, error
 func projectPendingInputs(items []harness.PendingInput) ([]protocol.PendingInput, error) {
 	out := make([]protocol.PendingInput, 0, len(items))
 	for _, item := range items {
-		content, err := projectContentParts(item.Content)
+		content, err := extension.ProtocolContent(item.Content)
 		if err != nil {
 			return nil, fmt.Errorf("project pending input %q: %w", item.OperationID, err)
 		}

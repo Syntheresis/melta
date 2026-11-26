@@ -178,6 +178,6 @@ func hostSessionMethods() []Method {
 	members := `{"type":"array","items":{"type":"object","required":["kind","id","starter"],"properties":{"kind":{"enum":["session","job"]},"id":{"type":"string"},"starter":{"type":"string"}},"additionalProperties":false}}`
 	return []Method{
 		ServiceMethod("members", empty, members, "", ""),
-		ServiceMethod("start", `{"type":"object","required":["inputs","initial_state","input","report","output_limit"],"properties":{"inputs":{"type":"string"},"initial_state":{"type":"string"},"input":{"type":"string"},"report":{"type":"boolean"},"output_limit":{"type":"integer"}},"additionalProperties":false}`, started, "", started),
+		ServiceMethod("start", `{"type":"object","required":["inputs","input","report","output_limit"],"properties":{"inputs":{"type":"object"},"initial_state":{},"input":{"type":"array","items":{"type":"object"}},"report":{"type":"boolean"},"output_limit":{"type":"integer"}},"additionalProperties":false}`, started, "", started),
 	}
 }

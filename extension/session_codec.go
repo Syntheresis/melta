@@ -1,10 +1,10 @@
 package extension
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 
 	"github.com/Syntheresis/melta/harness"
@@ -85,99 +85,74 @@ func DecodeContentParts(parts []WireContentPart) []model.ContentPart {
 	return out
 }
 
-type sessionInputsJSON struct {
-	Model *struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
-	} `json:"model,omitempty"`
-	Instructions *string   `json:"instructions,omitempty"`
-	Prompt       *string   `json:"prompt,omitempty"`
-	Tools        *[]string `json:"tools,omitempty"`
-	Strategy     *struct {
-		ID       string     `json:"id"`
-		Settings *WireBytes `json:"settings,omitempty"`
-	} `json:"strategy,omitempty"`
+// sessionStartDocument is the start document of the melta.session start host
+// call: the Session-inputs object create_session takes, an optional raw initial
+// state as state.set carries, and the content parts submit takes.
+type sessionStartDocument struct {
+	Inputs       harness.SessionInputs  `json:"inputs"`
+	InitialState json.RawMessage        `json:"initial_state,omitempty"`
+	Input        []protocol.ContentPart `json:"input"`
+	Report       bool                   `json:"report"`
+	OutputLimit  int                    `json:"output_limit"`
 }
 
-type sessionStartJSON struct {
-	Inputs       WireBytes `json:"inputs"`
-	InitialState WireBytes `json:"initial_state"`
-	Input        WireBytes `json:"input"`
-	Report       bool      `json:"report"`
-	OutputLimit  int       `json:"output_limit"`
-}
-
+// EncodeSessionStart encodes one typed start. Its parts are caller input, so
+// each is checked by the model's content rule before it is projected; the
+// initial state is written as its own JSON value, so it keeps its bytes. Any
+// failure is invalid input, as the host would class the same start.
 func EncodeSessionStart(start SessionStart) (json.RawMessage, error) {
-	inputs := sessionInputsJSON{Instructions: start.Inputs.Instructions, Prompt: start.Inputs.Prompt}
-	if start.Inputs.Tools != nil {
-		inputs.Tools = &start.Inputs.Tools
+	raw, err := encodeSessionStart(start)
+	if err != nil {
+		return nil, fmt.Errorf("session start: %v: %w", err, harness.ErrInvalid)
 	}
-	if start.Inputs.Model != nil {
-		inputs.Model = &struct {
-			Provider string `json:"provider"`
-			Model    string `json:"model"`
-		}{start.Inputs.Model.Provider, start.Inputs.Model.Model}
-	}
-	if start.Inputs.Strategy != nil {
-		inputs.Strategy = &struct {
-			ID       string     `json:"id"`
-			Settings *WireBytes `json:"settings,omitempty"`
-		}{ID: start.Inputs.Strategy.ID}
-		if start.Inputs.Strategy.Settings != nil {
-			settings := WireBytes(start.Inputs.Strategy.Settings)
-			inputs.Strategy.Settings = &settings
+	return raw, nil
+}
+
+func encodeSessionStart(start SessionStart) (json.RawMessage, error) {
+	for _, part := range start.Input {
+		if err := model.ValidateContentPart(part); err != nil {
+			return nil, err
 		}
 	}
-	rawInputs, err := json.Marshal(inputs)
+	parts, err := ProtocolContent(start.Input)
 	if err != nil {
 		return nil, err
 	}
-	rawParts, err := json.Marshal(EncodeContentParts(start.Input))
+	input := make([]json.RawMessage, len(parts))
+	for i, part := range parts {
+		input[i], _ = part.MarshalJSON() // a raw union returns its bytes; it cannot fail
+	}
+	inputs, err := json.Marshal(start.Inputs)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(sessionStartJSON{Inputs: rawInputs, InitialState: WireBytes(start.InitialState), Input: rawParts, Report: start.Report, OutputLimit: start.OutputLimit})
-}
-
-// decodeSessionDocument decodes exactly one non-null JSON document with the
-// native strict rules, so an undeclared member or concatenated document is
-// refused wherever a session document is read.
-func decodeSessionDocument(raw []byte, dst any) error {
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return errors.New("document must not be null")
+	report, _ := json.Marshal(start.Report)
+	limit, _ := json.Marshal(start.OutputLimit)
+	members := map[string]json.RawMessage{"inputs": inputs, "input": writeArray(input), "report": report, "output_limit": limit}
+	if len(start.InitialState) != 0 {
+		if !json.Valid(start.InitialState) {
+			return nil, errors.New("initial state is not one JSON value")
+		}
+		members["initial_state"] = json.RawMessage(start.InitialState)
 	}
-	return protocol.DecodeDocument(raw, dst)
+	return writeObject(members), nil
 }
 
+// DecodeSessionStart decodes one start document with the generated request
+// value rules, the Session-inputs decoder create_session uses and the content
+// parts submit uses, so every member name matches exactly.
 func DecodeSessionStart(raw json.RawMessage) (SessionStart, error) {
-	var wire sessionStartJSON
-	if err := decodeSessionDocument(raw, &wire); err != nil {
+	var document sessionStartDocument
+	if err := protocol.DecodeValue(raw, &document); err != nil {
 		return SessionStart{}, err
 	}
-	var inputs sessionInputsJSON
-	if err := decodeSessionDocument(wire.Inputs, &inputs); err != nil {
+	input, err := ModelContent(document.Input)
+	if err != nil {
 		return SessionStart{}, err
 	}
-	var parts []WireContentPart
-	if err := decodeSessionDocument(wire.Input, &parts); err != nil {
-		return SessionStart{}, err
-	}
-	start := SessionStart{InitialState: append(harness.SessionStateValue(nil), wire.InitialState...), Report: wire.Report, OutputLimit: wire.OutputLimit}
-	start.Inputs.Instructions, start.Inputs.Prompt = inputs.Instructions, inputs.Prompt
-	if inputs.Tools != nil {
-		start.Inputs.Tools = *inputs.Tools
-	}
-	if inputs.Model != nil {
-		start.Inputs.Model = &model.ModelRef{Provider: inputs.Model.Provider, Model: inputs.Model.Model}
-	}
-	if inputs.Strategy != nil {
-		start.Inputs.Strategy = &harness.StrategySelection{ID: inputs.Strategy.ID}
-		if inputs.Strategy.Settings != nil {
-			start.Inputs.Strategy.Settings = append(json.RawMessage{}, (*inputs.Strategy.Settings)...)
-		}
-	}
-	if len(parts) != 0 {
-		start.Input = DecodeContentParts(parts)
+	start := SessionStart{Inputs: document.Inputs, InitialState: harness.SessionStateValue(document.InitialState), Report: document.Report, OutputLimit: document.OutputLimit}
+	if len(input) != 0 {
+		start.Input = input
 	}
 	return start, nil
 }

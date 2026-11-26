@@ -3,7 +3,6 @@ package extension
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,9 +154,12 @@ func TestToolCallDecode(t *testing.T) {
 }
 
 func TestSessionStartCodec(t *testing.T) {
-	instructions, prompt := "instructions", "prompt"
+	prompt := "prompt"
 	start := SessionStart{
-		Inputs:       harness.SessionInputs{Tools: []string{"a", "a"}, Strategy: &harness.StrategySelection{ID: "x", Settings: json.RawMessage("{")}},
+		Inputs: harness.SessionInputs{
+			Model: &model.ModelRef{Provider: "provider", Model: "model"}, Prompt: &prompt,
+			Tools: []string{"a", "b"}, Strategy: &harness.StrategySelection{ID: "x", Settings: json.RawMessage(`{"n":9007199254740993}`)},
+		},
 		InitialState: harness.SessionStateValue(`{"n":9007199254740993}`),
 		Input:        []model.ContentPart{{Kind: model.PartText, Text: "hello", Extra: model.Extra{"x": json.RawMessage(`{"a":1}`)}}},
 		Report:       true, OutputLimit: 10,
@@ -170,25 +172,13 @@ func TestSessionStartCodec(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, start) {
 		t.Fatalf("round trip: %+v, %v", got, err)
 	}
-	start.Inputs.Model = &model.ModelRef{Provider: "incomplete"}
-	start.Inputs.Instructions, start.Inputs.Prompt = &instructions, &prompt
-	start.Inputs.Strategy = &harness.StrategySelection{Settings: json.RawMessage{0xff, '{'}}
-	raw, err = EncodeSessionStart(start)
+	raw, err = EncodeSessionStart(SessionStart{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err = DecodeSessionStart(raw)
-	if err != nil || !reflect.DeepEqual(got, start) {
-		t.Fatalf("partial model and opaque strategy round trip: %+v, %v", got, err)
-	}
-	start.Inputs.Model = &model.ModelRef{Provider: "provider", Model: "model"}
-	raw, err = EncodeSessionStart(start)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err = DecodeSessionStart(raw)
-	if err != nil || !reflect.DeepEqual(got, start) {
-		t.Fatalf("complete model round trip: %+v, %v", got, err)
+	if err != nil || !reflect.DeepEqual(got, SessionStart{}) {
+		t.Fatalf("empty start round trip: %s -> %+v, %v", raw, got, err)
 	}
 	start.Input = nil
 	raw, err = EncodeSessionStart(start)
@@ -199,11 +189,23 @@ func TestSessionStartCodec(t *testing.T) {
 	if err != nil || got.Input != nil || !reflect.DeepEqual(got, start) {
 		t.Fatalf("nil input round trip: %+v, %v", got, err)
 	}
-	encoded := func(document string) string {
-		return base64.StdEncoding.EncodeToString([]byte(document))
+	instructions := "instructions"
+	for _, tc := range []struct {
+		name  string
+		start SessionStart
+	}{
+		{"text part carrying a URL", SessionStart{Input: []model.ContentPart{{Kind: model.PartText, Text: "x", URL: "https://example.org"}}}},
+		{"instructions and prompt together", SessionStart{Inputs: harness.SessionInputs{Instructions: &instructions, Prompt: &prompt}}},
+		{"initial state that is not one JSON value", SessionStart{InitialState: harness.SessionStateValue(`0,"x":1`)}},
+		{"initial state behind a vertical tab", SessionStart{InitialState: harness.SessionStateValue(append([]byte{0x0b}, "{}"...))}},
+		{"initial state behind a no-break space", SessionStart{InitialState: harness.SessionStateValue(append([]byte{0xc2, 0xa0}, "{}"...))}},
+	} {
+		if _, err := EncodeSessionStart(tc.start); !errors.Is(err, harness.ErrInvalid) {
+			t.Fatalf("%s: encode error = %v, want invalid input", tc.name, err)
+		}
 	}
 	startDocument := func(inputs, input string) string {
-		return fmt.Sprintf(`{"inputs":%q,"initial_state":"","input":%q,"report":false,"output_limit":0}`, encoded(inputs), encoded(input))
+		return fmt.Sprintf(`{"inputs":%s,"input":%s,"report":false,"output_limit":0}`, inputs, input)
 	}
 	for _, tc := range []struct {
 		name string
@@ -216,6 +218,8 @@ func TestSessionStartCodec(t *testing.T) {
 		{"unknown input member", startDocument(`{}`, `[{"kind":"text","text":"x","unknown":true}]`)},
 		{"null inputs", startDocument(`null`, `[]`)},
 		{"null input", startDocument(`{}`, `null`)},
+		{"case variant inputs member", startDocument(`{"Prompt":"x"}`, `[]`)},
+		{"null initial state", strings.Replace(startDocument(`{}`, `[]`), `"report"`, `"initial_state":null,"report"`, 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := DecodeSessionStart(json.RawMessage(tc.raw)); err == nil {
@@ -354,5 +358,28 @@ func TestTypedCallPartial(t *testing.T) {
 	}
 	if err := c.DeleteFile(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "refused") || !strings.Contains(err.Error(), "no") {
 		t.Fatalf("failure = %v", err)
+	}
+}
+
+func TestTypedStartKeepsRawBytes(t *testing.T) {
+	const state, extra = `{ "label" : "<x>" }`, `{ "k" : 1, "k" : 2 }`
+	var sent json.RawMessage
+	call := AuthorContext{Call: func(_ context.Context, service, method string, args json.RawMessage) (Result, error) {
+		sent = append(json.RawMessage(nil), args...)
+		return Result{Value: json.RawMessage(`{"session_id":"s"}`)}, nil
+	}}
+	start := SessionStart{
+		InitialState: harness.SessionStateValue(state),
+		Input:        []model.ContentPart{{Kind: model.PartText, Text: "x", Extra: model.Extra{"k": json.RawMessage(extra)}}},
+	}
+	if _, err := call.StartSession(context.Background(), start); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(sent, []byte(`"initial_state":`+state)) || !bytes.Contains(sent, []byte(`"k":`+extra)) {
+		t.Fatalf("sent %s, want the raw state and extra bytes", sent)
+	}
+	got, err := DecodeSessionStart(sent)
+	if err != nil || string(got.InitialState) != state || string(got.Input[0].Extra["k"]) != extra {
+		t.Fatalf("start %s decoded %+v, %v, want the raw state and extra bytes", sent, got, err)
 	}
 }

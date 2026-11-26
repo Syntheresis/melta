@@ -42,7 +42,10 @@ func DecodeValue(data []byte, dst any) error {
 }
 
 // ValidateValue applies the generated value rules to one already-decoded
-// value against its raw JSON bytes.
+// value against its raw JSON bytes. A value whose type implements
+// json.Unmarshaler, by value or pointer receiver, keeps its own decoder's
+// rules; the one generated request union is still validated because its
+// decoder stores the raw bytes without checking them.
 func ValidateValue(raw []byte, dst any) error {
 	if dst == nil {
 		return nil
@@ -61,6 +64,16 @@ type enumValue interface {
 
 var contentPartType = reflect.TypeOf(ContentPart{})
 
+// unmarshalerType is the JSON decoder contract: a value of this type applies
+// its own rules while decoding, so the generated value rules never repeat them.
+var unmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
+
+// decodesItself reports whether a value of t decodes its own JSON, directly or
+// through its pointer.
+func decodesItself(t reflect.Type) bool {
+	return t.Implements(unmarshalerType) || reflect.PointerTo(t).Implements(unmarshalerType)
+}
+
 // rawMessageType is the one generated alias whose bytes are the opaque JSON
 // value itself: the schema still requires an object, but the transport must
 // never re-interpret or renumber its members.
@@ -70,7 +83,10 @@ var rawMessageType = reflect.TypeOf(json.RawMessage(nil))
 // every required member (no omitempty tag) is present, every present declared
 // member is non-null, every generated enum holds a declared value, and the one
 // request union selects exactly its discriminator variant with the same
-// closed-member validation applied to its raw bytes. Recursion covers structs,
+// closed-member validation applied to its raw bytes. A value whose type
+// implements json.Unmarshaler, by value or pointer receiver, is left to that
+// decoder and is not re-validated; the request union is checked first because
+// its generated decoder does not apply its own rules. Recursion covers structs,
 // pointers, slices, and typed maps; arbitrary interface and raw-message map
 // values stay opaque, including null and exact numbers.
 func validateDecodedValue(raw []byte, v reflect.Value, path string) error {
@@ -79,17 +95,17 @@ func validateDecodedValue(raw []byte, v reflect.Value, path string) error {
 	}
 	t := v.Type()
 	switch {
-	case t == rawMessageType:
-		return nil
 	case t == contentPartType:
 		return validateContentPart(raw, v.Interface().(ContentPart), path)
+	case t.Kind() == reflect.Ptr:
+		return validateDecodedValue(raw, v.Elem(), path)
+	case decodesItself(t):
+		return nil // the type's own decoder already applied its rules
 	case t.Kind() == reflect.String:
 		if enum, ok := v.Interface().(enumValue); ok && !enum.Valid() {
 			return fmt.Errorf("%s %q is not a declared enum value", path, v.String())
 		}
 		return nil
-	case t.Kind() == reflect.Ptr:
-		return validateDecodedValue(raw, v.Elem(), path)
 	case t.Kind() == reflect.Slice:
 		var elements []json.RawMessage
 		if err := json.Unmarshal(raw, &elements); err != nil {

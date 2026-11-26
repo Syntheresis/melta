@@ -2,10 +2,8 @@ package melta
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
@@ -79,11 +77,7 @@ func TestSessionStartDocumentIsStrict(t *testing.T) {
 		session: parent.Identity, host: r.config.composition,
 	}
 	defer scope.end()
-	encoded := func(document string) string {
-		return base64.StdEncoding.EncodeToString([]byte(document))
-	}
-	start := json.RawMessage(fmt.Sprintf(`{"inputs":%q,"initial_state":"","input":%q,"report":false,"output_limit":0}`,
-		encoded(`{"prompt":"x","unknown":true}`), encoded(`[]`)))
+	start := json.RawMessage(`{"inputs":{"prompt":"x","unknown":true},"input":[],"report":false,"output_limit":0}`)
 	before, err := store.ListSessionIDs(callCtx)
 	testassert.NoError(t, err)
 	_, err = scope.call(callCtx, extension.ContractSession, "start", start)

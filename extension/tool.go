@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/Syntheresis/melta/harness"
@@ -147,20 +148,24 @@ func exactMapValueMemberNames(raw []byte, elem reflect.Type) []byte {
 	return writeObject(members)
 }
 
-// writeObject writes members back as one JSON object; their order is immaterial.
+// writeObject writes members as one JSON object in name order, each value as
+// its own encoded bytes; json.Marshal would compact and re-escape them.
 func writeObject(members map[string]json.RawMessage) []byte {
+	names := make([]string, 0, len(members))
+	for name := range members {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	var out bytes.Buffer
 	out.WriteByte('{')
-	first := true
-	for name, value := range members {
-		if !first {
+	for i, name := range names {
+		if i > 0 {
 			out.WriteByte(',')
 		}
-		first = false
 		key, _ := json.Marshal(name)
 		out.Write(key)
 		out.WriteByte(':')
-		out.Write(value)
+		out.Write(members[name])
 	}
 	out.WriteByte('}')
 	return out.Bytes()
@@ -282,6 +287,12 @@ func (c AuthorContext) invoke(ctx context.Context, service, method string, reque
 	if err != nil {
 		return err
 	}
+	return c.send(ctx, service, method, args, value)
+}
+
+// send makes one host call with already-encoded arguments, which go out
+// unchanged.
+func (c AuthorContext) send(ctx context.Context, service, method string, args json.RawMessage, value any) error {
 	result, err := c.Call(ctx, service, method, args)
 	if err != nil {
 		return err
@@ -372,7 +383,7 @@ func (c AuthorContext) StartSession(ctx context.Context, start SessionStart) (st
 	var value struct {
 		SessionID string `json:"session_id"`
 	}
-	err = c.invoke(ctx, ContractSession, "start", args, &value)
+	err = c.send(ctx, ContractSession, "start", args, &value)
 	if err != nil {
 		var callErr *CallError
 		if errors.As(err, &callErr) {

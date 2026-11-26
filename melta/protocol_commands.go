@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/model"
 	"github.com/Syntheresis/melta/protocol"
@@ -58,7 +59,7 @@ func (r *Melta) CreateSession(ctx context.Context, c Caller, workspace string, r
 // scope is denied before the Harness sees it. A buffered item's result keeps
 // Operation nil even after a later drain admits work under that identity.
 func (r *Melta) SubmitSession(ctx context.Context, c Caller, sessionID string, req protocol.SubmitRequest) (protocol.SubmitResult, error) {
-	content, err := convertContentParts(req.Content)
+	content, err := extension.ModelContent(req.Content)
 	if err != nil {
 		return protocol.SubmitResult{}, err
 	}
@@ -127,7 +128,7 @@ func (r *Melta) CompactSession(ctx context.Context, c Caller, sessionID string, 
 // and a Session target outside its scope is denied. The destination header
 // comes from the narrow post-transition metadata read.
 func (r *Melta) ForkSession(ctx context.Context, c Caller, sessionID string, req protocol.ForkRequest) (protocol.ForkResult, error) {
-	content, err := convertContentParts(req.Content)
+	content, err := extension.ModelContent(req.Content)
 	if err != nil {
 		return protocol.ForkResult{}, err
 	}
@@ -345,71 +346,4 @@ func sessionHeaderAfter(ctx context.Context, h *harness.Harness, sessionID strin
 		return protocol.Session{}, err
 	}
 	return projectSession(header, instance), nil
-}
-
-// convertContentParts maps one generated content union list to canonical
-// model parts through the generated accessors. It performs union decoding
-// only: the Harness accepting boundary validates and clones every part
-// through model.NewContentPart before any admission or effect, for both
-// Submit and Fork. Unknown discriminator and union decode failures wrap the
-// shared harness.ErrInvalid sentinel.
-func convertContentParts(parts []protocol.ContentPart) ([]model.ContentPart, error) {
-	out := make([]model.ContentPart, 0, len(parts))
-	for i, wire := range parts {
-		part, err := convertContentPart(wire)
-		if err != nil {
-			return nil, fmt.Errorf("content[%d]: %w", i, err)
-		}
-		out = append(out, part)
-	}
-	return out, nil
-}
-
-// convertContentPart maps one generated union member to its canonical kind
-// with exactly that kind's field; extras ride the identical raw-valued map
-// conversion, so numbers and opaque extras are preserved. It adds no
-// model-semantic validation: the Harness boundary owns that rule.
-func convertContentPart(wire protocol.ContentPart) (model.ContentPart, error) {
-	invalid := func(format string, args ...any) (model.ContentPart, error) {
-		return model.ContentPart{}, fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), harness.ErrInvalid)
-	}
-	kind, err := wire.Discriminator()
-	if err != nil {
-		return invalid("decode content part: %v", err)
-	}
-	var part model.ContentPart
-	switch kind {
-	case "text":
-		value, err := wire.AsTextPart()
-		if err != nil {
-			return invalid("decode text part: %v", err)
-		}
-		part = model.ContentPart{Kind: model.PartText, Text: value.Text, Extra: modelExtra(value.Extra)}
-	case "image_url":
-		value, err := wire.AsImageURLPart()
-		if err != nil {
-			return invalid("decode image_url part: %v", err)
-		}
-		part = model.ContentPart{Kind: model.PartImageURL, URL: value.Url, Extra: modelExtra(value.Extra)}
-	case "opaque":
-		value, err := wire.AsOpaquePart()
-		if err != nil {
-			return invalid("decode opaque part: %v", err)
-		}
-		part = model.ContentPart{Kind: model.PartOpaque, OpaqueWireType: value.OpaqueWireType, Extra: modelExtra(value.Extra)}
-	default:
-		return invalid("content part kind %q is not one of text, image_url or opaque", kind)
-	}
-	return part, nil
-}
-
-// modelExtra converts one generated raw-valued object to the canonical extra
-// set by the identical direct map conversion; the Harness accepting boundary
-// clones it through model.NewContentPart, so no reference to the wire value
-// escapes.
-func modelExtra(extra *protocol.JSONObject) model.Extra {
-	if extra == nil {
-		return nil
-	}
-	return model.Extra(*extra)
 }

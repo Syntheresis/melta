@@ -442,7 +442,13 @@ func TestExtensionSessionCommands(t *testing.T) {
 	_, err = command("submit", `{"operation_id":"op-case","Operation_id":"op-case-other","mode":"regular","content":[{"kind":"text","text":"x"}]}`, "req-case")
 	testassert.Require(t, errors.Is(err, harness.ErrInvalid), "case-variant generated request member = %v, want invalid", err)
 	testassert.Require(t, errors.Is(readOperationError(ctx, r, session.Identity.SessionID, "op-case"), harness.ErrNotFound) && errors.Is(readOperationError(ctx, r, session.Identity.SessionID, "op-case-other"), harness.ErrNotFound), "case-variant generated request member mutated Session state")
-	testassert.Require(t, countEvent(events.all(), "command:submit") == submitReached+2, "malformed generated values refused before reaching the bridge: %v", events.all())
+	// The content union's generated decoder stores the raw bytes without
+	// checking them, so the union's own validation still refuses an
+	// undeclared part member.
+	_, err = command("submit", `{"operation_id":"op-bad-part","mode":"regular","content":[{"kind":"text","text":"x","bogus":true}]}`, "req-bad-part")
+	testassert.Require(t, errors.Is(err, harness.ErrInvalid), "undeclared content-part member = %v, want invalid", err)
+	testassert.Require(t, errors.Is(readOperationError(ctx, r, session.Identity.SessionID, "op-bad-part"), harness.ErrNotFound), "refused content part mutated Session state")
+	testassert.Require(t, countEvent(events.all(), "command:submit") == submitReached+3, "malformed generated values refused before reaching the bridge: %v", events.all())
 
 	// Every fixed command route reaches its ordinary producer through the
 	// same bridge.
@@ -483,8 +489,9 @@ func TestExtensionSessionCommands(t *testing.T) {
 	testassert.Require(t, countEvent(events.all(), "command:revert-call-error") == 0, "pre-traversal revert produced a CallError partial")
 
 	// Create uses its ordinary request value and Caller authorization on a
-	// Harness-target command route.
-	created, err := r.InvokeExtension(ctx, harnessCaller, fixtureRequest(fixtureExtensionID, "command_harness", harnessTarget(), `{"method":"create_session","arguments":{"workspace":"`+workspace+`"}}`, "req-create"))
+	// Harness-target command route; its Session inputs pass the shared
+	// generated-value decoder because their own decoder applies their rules.
+	created, err := r.InvokeExtension(ctx, harnessCaller, fixtureRequest(fixtureExtensionID, "command_harness", harnessTarget(), `{"method":"create_session","arguments":{"workspace":"`+workspace+`","inputs":{"prompt":"x"}}}`, "req-create"))
 	testassert.NoError(t, err)
 	testassert.Require(t, created.Failure == nil, "create_session failure = %+v", created.Failure)
 	var createdSession struct {
@@ -492,13 +499,16 @@ func TestExtensionSessionCommands(t *testing.T) {
 	}
 	testassert.NoError(t, json.Unmarshal(created.Value, &createdSession))
 	testassert.Require(t, createdSession.SessionID != "", "create_session returned no Session: %s", created.Value)
+	header, err := r.harness.ReadSessionHeader(ctx, createdSession.SessionID)
+	testassert.NoError(t, err)
+	testassert.Require(t, header.Inputs.Prompt != nil && *header.Inputs.Prompt == "x", "created Session inputs = %+v, want the prompt", header.Inputs)
 
 	// A client operation may dispatch the command bridge; the method's own
 	// arguments are then validated by the ordinary producer.
 	pure, err := r.InvokeExtension(ctx, harnessCaller, fixtureRequest(fixtureExtensionID, "pure_command", harnessTarget(), `{"method":"submit","arguments":{}}`, "req-pure"))
 	testassert.Require(t, err != nil && pure.Failure == nil && errors.Is(err, harness.ErrInvalid), "operation command = (%+v, %v), want the producer's argument refusal", pure, err)
 	testassert.Require(t, countEvent(events.all(), "pure:submit:attempt") == 1, "operation did not attempt the command bridge")
-	testassert.Require(t, countEvent(events.all(), "command:submit") == submitReached+2, "the command attempt reached the wrong producer: %v", events.all())
+	testassert.Require(t, countEvent(events.all(), "command:submit") == submitReached+3, "the command attempt reached the wrong producer: %v", events.all())
 }
 
 // TestExtensionCommandContractParity proves both melta.commands entry points
