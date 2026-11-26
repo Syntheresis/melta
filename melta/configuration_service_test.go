@@ -1235,8 +1235,8 @@ func (s *countingConfigurationSource) Read(ctx context.Context) ([]byte, error) 
 	return s.inner.Read(ctx)
 }
 
-func (s *countingConfigurationSource) Write(ctx context.Context, data []byte) error {
-	return s.inner.Write(ctx, data)
+func (s *countingConfigurationSource) Write(ctx context.Context, previous, data []byte) error {
+	return s.inner.Write(ctx, previous, data)
 }
 
 // TestNativeActivationFailureStickyUntilReenable proves a failed enabled

@@ -150,14 +150,12 @@ func TestOpenStoreOwnsNamespaceAcrossRoots(t *testing.T) {
 // HTTP host: one published reload reaches a direct Subscription.
 func TestEmbeddedSubscribe(t *testing.T) {
 	options := testOwnerOptions(t)
-	source := options.Configuration
 	owner, err := melta.Open(context.Background(), options)
 	testassert.NoError(t, err)
 	defer func() { _ = owner.Close(context.Background()) }()
 	sub, err := owner.Subscribe(8)
 	testassert.NoError(t, err)
 	defer sub.Close()
-	testassert.NoError(t, source.Write(context.Background(), []byte(`{"sessions":{"archive_after_days":9}}`)))
 	revision, err := owner.Reload(context.Background(), testCaller(t, owner))
 	testassert.Require(t, err == nil && revision.Generation == "2", "Reload = (%q, %v), want generation 2", revision, err)
 	select {

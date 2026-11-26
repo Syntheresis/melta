@@ -20,9 +20,8 @@ import (
 // restore. One group holds one fixed entry directory, snapshots/1. It knows
 // nothing about conversation, claims, session metadata, transcript, tokens or
 // compaction files — an isolated target code group is addressed through
-// OpenCodeStore with no conversation state at all. One production call owns
-// one handle; its sub-operations run sequentially, so the store keeps no
-// cross-call claim state.
+// OpenCodeStore with no conversation state at all. Callers serialize the
+// mutations of one group, so the store keeps no cross-call claim state.
 type CodeStore struct {
 	snapshotsDir string
 }

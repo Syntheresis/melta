@@ -179,6 +179,11 @@ type artifactCallLease struct {
 	mu      sync.Mutex
 	release func()
 	closed  bool
+	// mutation is the execution's Workspace mutation lock: a one-slot channel
+	// that a write or delete holds from its preimage capture until its
+	// produced identity is recorded. A call waiting for it stops waiting when
+	// its context ends. It is created on first use under mu.
+	mutation chan struct{}
 }
 
 // artifactLeaseKey carries one callback tree's lease to a host service

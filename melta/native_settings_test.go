@@ -241,6 +241,32 @@ func TestSettingsReplace(t *testing.T) {
 		}
 	})
 
+	t.Run("an outside edit during the write conflicts and stays", func(t *testing.T) {
+		reset(t)
+		probe := installOwningSyncProbe(t, h.configPath)
+		probe.mu.Lock()
+		probe.park = true
+		probe.mu.Unlock()
+		releasePark := sync.OnceFunc(probe.releaseProbe)
+		defer func() {
+			releasePark()
+			probe.restore()
+		}()
+		done := make(chan error, 1)
+		go func() { done <- invoke(`{"enabled":true,"key":"SETTINGS_KEY","grant":"changed"}`) }()
+		probe.awaitWriteStarted(t)
+		outside := `{"providers":{},"extensions":{"setting":{"enabled":true,"key":"SETTINGS_KEY","grant":"old","value":7}}}`
+		writeServiceFile(t, h.configPath, outside)
+		releasePark()
+		err := <-done
+		if !errors.Is(err, harness.ErrConflict) || ErrorCode(err) != protocol.ErrorCodeConflict {
+			t.Fatalf("replace over an outside edit = %v, want conflict", err)
+		}
+		if after := string(mustRead(t, h.configPath)); after != outside {
+			t.Fatalf("conflict file = %s, want the outside bytes %s", after, outside)
+		}
+	})
+
 	t.Run("a second replace from the same activation", func(t *testing.T) {
 		const changed = `{"enabled":true,"key":"SETTINGS_KEY","grant":"second"}`
 		t.Run("after the first changed the section conflicts", func(t *testing.T) {

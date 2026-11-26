@@ -9,12 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/atomicfs"
+	"github.com/Syntheresis/melta/internal/snapshot"
 	"github.com/Syntheresis/melta/internal/storage"
 	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/model"
@@ -305,4 +307,126 @@ func TestWorkspaceReportsCompletedMutationOnRecordFailure(t *testing.T) {
 	if readErr != nil || string(data) != "after" {
 		t.Fatalf("completed content: %q %v", data, readErr)
 	}
+}
+
+// TestWorkspaceMutationsOfOneExecutionRunOneAtATime proves that one
+// execution's Workspace writes and deletes hold the lease's mutation slot from
+// the preimage capture through the recorded identity, that a read runs while a
+// mutation holds the slot, and that a waiting mutation returns its own
+// cancellation instead of starting after the holder finishes.
+func TestWorkspaceMutationsOfOneExecutionRunOneAtATime(t *testing.T) {
+	for _, method := range []string{"write", "delete"} {
+		t.Run(method, func(t *testing.T) {
+			root, dataDir := t.TempDir(), t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "file"), []byte("before"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			lease := workspaceTestLease(t, dataDir, "session")
+			scope := nativeCallScope{session: harness.SessionIdentity{SessionID: "session", Workspace: root}, dataDir: dataDir, admittedEntry: harness.EntryRef{SessionID: "session", EntryID: "entry"}, lease: lease}
+			held := func() bool {
+				lease.mu.Lock()
+				defer lease.mu.Unlock()
+				return len(lease.mutation) == 1
+			}
+			args := json.RawMessage(`{"path":"file"}`)
+			if method == "write" {
+				args = json.RawMessage(`{"path":"file","bytes":"YWZ0ZXI=","create_only":false}`)
+			}
+			parked := make(chan struct{}, 2)
+			resume := make(chan struct{}, 1)
+			var syncs atomic.Int32
+			previous := atomicfs.SyncFileFunc
+			atomicfs.SyncFileFunc = func(f *os.File) error {
+				if strings.HasPrefix(filepath.Base(f.Name()), "meta.json.tmp-") {
+					if n := syncs.Add(1); n == 1 || n == 3 {
+						parked <- struct{}{}
+						<-resume
+					}
+				}
+				if previous != nil {
+					return previous(f)
+				}
+				return f.Sync()
+			}
+			var result extension.Result
+			var callErr error
+			done := make(chan struct{})
+			defer func() {
+				close(resume)
+				<-done
+				atomicfs.SyncFileFunc = previous
+			}()
+			go func() {
+				defer close(done)
+				result, callErr = scope.workspaceCall(context.Background(), method, args)
+			}()
+			awaitSignal(t, parked, "the mutation's preimage sync")
+			if !held() {
+				t.Fatal("mutation lock is free at the preimage capture")
+			}
+			if method == "write" {
+				readDone := make(chan struct{})
+				var readResult extension.Result
+				var readErr error
+				go func() {
+					defer close(readDone)
+					readResult, readErr = scope.workspaceCall(context.Background(), "read", json.RawMessage(`{"path":"file"}`))
+				}()
+				awaitSignal(t, readDone, "the read during the parked mutation")
+				if readErr != nil || string(readResult.Value) != `{"bytes":"YmVmb3Jl"}` {
+					t.Fatalf("read during mutation: %s %v", readResult.Value, readErr)
+				}
+				inner, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				waiting := &doneConsultedContext{Context: inner, consulted: make(chan struct{})}
+				waiterDone := make(chan struct{})
+				var waiterErr error
+				go func() {
+					defer close(waiterDone)
+					_, waiterErr = scope.workspaceCall(waiting, "delete", json.RawMessage(`{"path":"file"}`))
+				}()
+				awaitSignal(t, waiting.consulted, "the waiting mutation's wait for the lock")
+				cancel()
+				awaitSignal(t, waiterDone, "the cancelled waiting mutation")
+				if !errors.Is(waiterErr, context.Canceled) {
+					t.Fatalf("waiting mutation: %v", waiterErr)
+				}
+				if !held() {
+					t.Fatal("mutation lock is free while the write is parked")
+				}
+				assertFileContent(t, filepath.Join(root, "file"), "before")
+			}
+			resume <- struct{}{}
+			awaitSignal(t, parked, "the mutation's identity sync")
+			if !held() {
+				t.Fatal("mutation lock is free at the identity record")
+			}
+			resume <- struct{}{}
+			awaitSignal(t, done, "the mutation")
+			if callErr != nil || string(result.Value) != `{"outcome":"completed"}` {
+				t.Fatalf("%s: %s %v", method, result.Value, callErr)
+			}
+			if held() {
+				t.Fatal("mutation lock is held after the call returned")
+			}
+			reverted, err := snapshot.RevertCodeGroups([]string{groupDir(dataDir, "session", "entry")})
+			if err != nil || len(reverted.Restored) != 1 || len(reverted.Skipped) != 0 {
+				t.Fatalf("revert: %+v %v", reverted, err)
+			}
+			assertFileContent(t, filepath.Join(root, "file"), "before")
+		})
+	}
+}
+
+// doneConsultedContext closes consulted the first time Done is called, so a
+// test learns that the call holding it has started waiting on its context.
+type doneConsultedContext struct {
+	context.Context
+	once      sync.Once
+	consulted chan struct{}
+}
+
+func (c *doneConsultedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.consulted) })
+	return c.Context.Done()
 }
