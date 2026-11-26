@@ -7,6 +7,7 @@ package melta
 // client cases belong to their owners and are not reproduced in both forms.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Syntheresis/melta/extension"
@@ -43,22 +45,46 @@ func hashHex(raw []byte) string {
 }
 
 func TestToolReturnTransportParity(t *testing.T) {
+	jsonString := func(n int) json.RawMessage {
+		return json.RawMessage(`"` + strings.Repeat("m", n-2) + `"`)
+	}
+	const marker = "\n[truncated]"
 	for _, workerHost := range []bool{false, true} {
 		for _, row := range []struct {
-			name     string
-			cancel   bool
-			err      error
-			status   model.ToolResultStatus
-			evidence harness.ExecutionEvidence
+			name         string
+			cancel       bool
+			err          error
+			status       model.ToolResultStatus
+			evidence     harness.ExecutionEvidence
+			callID       string
+			content      string
+			metadata     json.RawMessage
+			wantContent  string
+			wantMetadata json.RawMessage
 		}{
-			{"success", false, nil, model.ResultSuccess, harness.ExecutionObserved},
-			{"error", false, errors.New("failed"), model.ResultError, harness.ExecutionObserved},
-			{"unknown", false, extension.ErrOutcomeUnknown, model.ResultError, harness.ExecutionUnknown},
-			{"cancel unknown", true, fmt.Errorf("%w: %w", extension.ErrOutcomeUnknown, context.Canceled), model.ResultInterrupted, harness.ExecutionUnknown},
-			{"cancel", true, context.Canceled, model.ResultInterrupted, harness.ExecutionObserved},
-			{"late success", true, nil, model.ResultSuccess, harness.ExecutionObserved},
-			{"late unrelated error", true, errors.New("failed"), model.ResultError, harness.ExecutionObserved},
-			{"live cancellation error", false, context.Canceled, model.ResultError, harness.ExecutionObserved},
+			{name: "success", status: model.ResultSuccess, evidence: harness.ExecutionObserved},
+			{name: "error", err: errors.New("failed"), status: model.ResultError, evidence: harness.ExecutionObserved},
+			{name: "unknown", err: extension.ErrOutcomeUnknown, status: model.ResultError, evidence: harness.ExecutionUnknown},
+			{name: "cancel unknown", cancel: true, err: fmt.Errorf("%w: %w", extension.ErrOutcomeUnknown, context.Canceled), status: model.ResultInterrupted, evidence: harness.ExecutionUnknown},
+			{name: "cancel", cancel: true, err: context.Canceled, status: model.ResultInterrupted, evidence: harness.ExecutionObserved},
+			{name: "late success", cancel: true, status: model.ResultSuccess, evidence: harness.ExecutionObserved},
+			{name: "late unrelated error", cancel: true, err: errors.New("failed"), status: model.ResultError, evidence: harness.ExecutionObserved},
+			{name: "live cancellation error", err: context.Canceled, status: model.ResultError, evidence: harness.ExecutionObserved},
+			{
+				name: "content over the ceiling", status: model.ResultSuccess, evidence: harness.ExecutionObserved,
+				content: strings.Repeat("<", 600000), metadata: jsonString(1048576),
+				wantContent: strings.Repeat("<", 458740) + marker, wantMetadata: jsonString(1048576),
+			},
+			{
+				name: "largest response", status: model.ResultSuccess, evidence: harness.ExecutionObserved,
+				callID: strings.Repeat("a", 43000), content: strings.Repeat("<", 458752), metadata: jsonString(1048576),
+				wantContent: strings.Repeat("<", 458752), wantMetadata: jsonString(1048576),
+			},
+			{
+				name: "metadata over the bound", status: model.ResultSuccess, evidence: harness.ExecutionObserved,
+				content: "ok", metadata: jsonString(4194304),
+				wantContent: "ok",
+			},
 		} {
 			name := "native"
 			if workerHost {
@@ -67,6 +93,14 @@ func TestToolReturnTransportParity(t *testing.T) {
 			t.Run(name+"/"+row.name, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
+				content := row.content
+				if content == "" {
+					content = "ok"
+				}
+				callID := row.callID
+				if callID == "" {
+					callID = "call"
+				}
 				manifest := registrarManifest("tool-parity")
 				author := extension.Extension{Manifest: manifest, Activate: func(_ context.Context, api extension.API) (func(context.Context) error, error) {
 					_, err := api.RegisterTool(testDescribeTool("tool"), func(callCtx context.Context, _ extension.ToolCall) (extension.ToolResult, error) {
@@ -74,7 +108,7 @@ func TestToolReturnTransportParity(t *testing.T) {
 							cancel()
 							<-callCtx.Done()
 						}
-						return extension.ToolResult{Content: "ok"}, row.err
+						return extension.ToolResult{Content: content, Metadata: row.metadata}, row.err
 					}, nil)
 					return nil, err
 				}}
@@ -93,9 +127,14 @@ func TestToolReturnTransportParity(t *testing.T) {
 				binding := stage.bindTool("tool")
 				testassert.Require(t, binding != nil, "tool not registered")
 				defer binding.release()
-				outcome := binding.entry.value.(nativeTool).tool(ctx, extension.AuthorContext{}, model.ToolCall{ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)})
+				outcome := binding.entry.value.(nativeTool).tool(ctx, extension.AuthorContext{}, model.ToolCall{ID: callID, Name: "tool", Arguments: json.RawMessage(`{}`)})
 				if outcome.Result.Status != row.status || outcome.Evidence != row.evidence {
 					t.Fatalf("outcome = %+v, want %s/%s", outcome, row.status, row.evidence)
+				}
+				if row.wantContent != "" {
+					testassert.Require(t, outcome.Result.Content == row.wantContent && bytes.Equal(outcome.Metadata, row.wantMetadata) && outcome.Result.CallID == callID,
+						"outcome carries %d content bytes, %d metadata bytes and call id %q, want %d content bytes, %d metadata bytes and call id %q",
+						len(outcome.Result.Content), len(outcome.Metadata), outcome.Result.CallID, len(row.wantContent), len(row.wantMetadata), callID)
 				}
 			})
 		}
