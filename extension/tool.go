@@ -364,10 +364,13 @@ func uncertainMutation(err error) error {
 	return err
 }
 
+// SetState sets the calling extension's Session state to value, sent as
+// written; a value that is not exactly one JSON value is invalid input.
 func (c AuthorContext) SetState(ctx context.Context, value json.RawMessage) error {
-	return c.invoke(ctx, ContractState, "set", struct {
-		Value json.RawMessage `json:"value"`
-	}{value}, nil)
+	if err := checkRawValue(value); err != nil {
+		return err
+	}
+	return c.send(ctx, ContractState, "set", writeObject(map[string]json.RawMessage{"value": value}), nil)
 }
 
 func (c AuthorContext) Members(ctx context.Context) ([]Member, error) {
@@ -395,10 +398,14 @@ func (c AuthorContext) StartSession(ctx context.Context, start SessionStart) (st
 	return value.SessionID, err
 }
 
+// ReplaceSettings replaces the calling extension's settings section with
+// section, sent as written; a section that is not exactly one JSON value is
+// invalid input.
 func (c AuthorContext) ReplaceSettings(ctx context.Context, section json.RawMessage) error {
-	return c.invoke(ctx, ContractSettings, "replace", struct {
-		Section json.RawMessage `json:"section"`
-	}{section}, nil)
+	if err := checkRawValue(section); err != nil {
+		return err
+	}
+	return c.send(ctx, ContractSettings, "replace", writeObject(map[string]json.RawMessage{"section": section}), nil)
 }
 
 func (c AuthorContext) Credential(ctx context.Context, field string) (string, error) {
@@ -434,9 +441,27 @@ func (c AuthorContext) ReportWarning(ctx context.Context, kind, message string) 
 		Message string `json:"message"`
 	}{kind, message}, nil)
 }
+
+// Command issues one Session command. A json.RawMessage request is sent as
+// written and must be exactly one JSON value; any other request is marshaled.
 func (c AuthorContext) Command(ctx context.Context, method string, request, result any) error {
+	if raw, ok := request.(json.RawMessage); ok {
+		if err := checkRawValue(raw); err != nil {
+			return err
+		}
+		return c.send(ctx, ContractCommands, method, raw, result)
+	}
 	if request == nil {
 		request = struct{}{}
 	}
 	return c.invoke(ctx, ContractCommands, method, request, result)
+}
+
+// checkRawValue refuses an author's raw JSON that is not exactly one JSON
+// value, so it cannot add members of its own to the request it is sent in.
+func checkRawValue(raw json.RawMessage) error {
+	if !json.Valid(raw) {
+		return fmt.Errorf("raw value is not one JSON value: %w", harness.ErrInvalid)
+	}
+	return nil
 }

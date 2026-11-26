@@ -12,6 +12,7 @@ import (
 	"github.com/Syntheresis/melta/extension"
 	"github.com/Syntheresis/melta/harness"
 	"github.com/Syntheresis/melta/internal/storage"
+	"github.com/Syntheresis/melta/internal/testassert"
 	"github.com/Syntheresis/melta/protocol"
 )
 
@@ -491,5 +492,68 @@ func TestSettingsReplaceThroughWorker(t *testing.T) {
 	defer denied.release()
 	if denied.inactive["settings-worker"] == nil {
 		t.Fatal("worker activated without its requested warning grant")
+	}
+}
+
+// TestReplaceSettingsWithOwnSectionKeepsTheFile covers a typed replace that
+// sends an activation's own hand-formatted section: natively and through the
+// worker, the configuration file stays byte-identical and a second replace
+// from the same activation still succeeds.
+func TestReplaceSettingsWithOwnSectionKeepsTheFile(t *testing.T) {
+	const section = `{ "enabled" : true, "label" : "<b>", "n": 1.50 }`
+	for _, worker := range []bool{false, true} {
+		t.Run(map[bool]string{false: "native", true: "worker"}[worker], func(t *testing.T) {
+			ctx := context.Background()
+			h := newServiceHarness(t)
+			sections, err := marshalRawObject(map[string]json.RawMessage{"own": json.RawMessage(section)}, true)
+			testassert.NoError(t, err)
+			file, err := marshalRoot(map[string]json.RawMessage{"providers": json.RawMessage(`{}`), "extensions": sections})
+			testassert.NoError(t, err)
+			writeServiceFile(t, h.configPath, string(file))
+			manifest := registrarManifest("own")
+			manifest.SettingsSchema = []byte(`{"type":"object"}`)
+			manifest.Services = []string{extension.ContractSettings}
+			activate := func(_ context.Context, api extension.API) (func(context.Context) error, error) {
+				_, err := api.RegisterOperation(extension.Operation{
+					Target: extension.ExposedTargetHarness,
+					Method: extension.Method{Name: "keep", Input: []byte(`{}`), Success: []byte(`{}`)},
+					Handler: func(ctx context.Context, call extension.AuthorContext, _ json.RawMessage) (extension.Result, error) {
+						for range 2 {
+							if err := call.ReplaceSettings(ctx, call.Settings); err != nil {
+								return extension.Result{}, err
+							}
+						}
+						return extension.Result{Value: json.RawMessage(`{}`)}, nil
+					},
+				}, nil)
+				return nil, err
+			}
+			svc := h.preparedService(ctx)
+			if worker {
+				spawner := &adapterSpawner{t: t, factory: func() (extension.Extension, func()) {
+					return adapterAuthor(manifest, activate), nil
+				}}
+				spawner.install()
+				candidate, err := svc.prepareNativeCandidate(ctx, []nativeActivationSpec{{extension: executableAuthorExtension(manifest, "own", adapterEnvironment), section: []byte(section), installed: true}})
+				testassert.NoError(t, err)
+				defer candidate.release()
+				testassert.Require(t, len(candidate.inactive) == 0, "inactive extensions: %v", candidate.inactive)
+				testassert.NoError(t, candidate.publishForTest())
+			} else {
+				svc.authors = append(svc.authors, nativeActivationSpec{extension: extension.Extension{Manifest: manifest, Activate: activate}, section: []byte(section)})
+				_, err := svc.publish(ctx)
+				testassert.NoError(t, err)
+			}
+			r, _ := openProjectionRuntime(t, storage.NewMemory())
+			defer closeProjectionRuntime(r)
+			original := r.config
+			r.config = svc
+			defer func() { r.config = original }()
+			_, err = r.invokeRegisteredOperation(ctx, testCaller(r), "own", "keep", harnessTarget(), json.RawMessage(`{}`), "")
+			testassert.NoError(t, err)
+			got, err := os.ReadFile(h.configPath)
+			testassert.NoError(t, err)
+			testassert.Equal(t, string(got), string(file))
+		})
 	}
 }

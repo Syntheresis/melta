@@ -383,3 +383,40 @@ func TestTypedStartKeepsRawBytes(t *testing.T) {
 		t.Fatalf("start %s decoded %+v, %v, want the raw state and extra bytes", sent, got, err)
 	}
 }
+
+func TestTypedCallsSendRawJSONAsWritten(t *testing.T) {
+	const value = `{ "a" : "<b>", "n": 1.50 }`
+	var sent []string
+	call := AuthorContext{Call: func(_ context.Context, _, _ string, args json.RawMessage) (Result, error) {
+		sent = append(sent, string(args))
+		return Result{Value: json.RawMessage(`null`)}, nil
+	}}
+	ctx := context.Background()
+	if err := call.SetState(ctx, json.RawMessage(value)); err != nil {
+		t.Fatal(err)
+	}
+	if err := call.ReplaceSettings(ctx, json.RawMessage(value)); err != nil {
+		t.Fatal(err)
+	}
+	if err := call.Command(ctx, "submit", json.RawMessage(value), nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{`{"value":` + value + `}`, `{"section":` + value + `}`, value}
+	if !reflect.DeepEqual(sent, want) {
+		t.Fatalf("sent %q, want %q", sent, want)
+	}
+	for _, raw := range []json.RawMessage{json.RawMessage(`0,"value":1`), nil} {
+		for name, run := range map[string]func() error{
+			"state":    func() error { return call.SetState(ctx, raw) },
+			"settings": func() error { return call.ReplaceSettings(ctx, raw) },
+			"command":  func() error { return call.Command(ctx, "submit", raw, nil) },
+		} {
+			if err := run(); !errors.Is(err, harness.ErrInvalid) {
+				t.Fatalf("%s %q: error = %v, want invalid input", name, raw, err)
+			}
+		}
+	}
+	if len(sent) != len(want) {
+		t.Fatalf("an invalid raw value reached the host: %q", sent[len(want):])
+	}
+}
