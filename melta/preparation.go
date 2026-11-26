@@ -25,7 +25,7 @@ import (
 // callback contracts. It is the preparation's only associated continuation:
 // there is no intermediate execution-plan type and no independently
 // configured opener.
-type openInvocation func(context.Context, harness.OperationAdmission, selection, harness.InvocationRequest) (harness.InvocationExecution, error)
+type openInvocation func(context.Context, harness.OperationAdmission, selection, harness.InvocationRequest) harness.InvocationExecution
 
 // selection is one immutable preparation or execution input set: the composed
 // candidate, the retained activation capture and Session state, the prompt
@@ -338,11 +338,10 @@ func (p *preparation) bind() func(context.Context, harness.PreparationRequest) (
 // opening and closure around every Engine call — the conversation run and
 // each maintenance model request. The returned Execution carries the
 // invocation factory, which publishes scope_opened for the invocation before
-// it calls the opener and scope_closed when the invocation closes, also when
-// opening fails after the opened event. Hooks' final prompt and tools can
-// never be replaced by stale pre-hook values: each invocation hands the new
-// selection with the actual committed admission and the Harness-issued
-// request to this preparation's opener. The committed opener receives the
+// it calls the opener and scope_closed when the invocation closes. Hooks'
+// final prompt and tools can never be replaced by stale pre-hook values: each
+// invocation hands the new selection with the actual committed admission and
+// the Harness-issued request to this preparation's opener. The committed opener receives the
 // artifact token's release and runs it from the prepared execution's own
 // release. Only after the opening succeeds does the collected prompt
 // presentation publish, so a failed fork or admission never creates warnings
@@ -370,11 +369,7 @@ func (p *preparation) open(ctx context.Context, admission harness.OperationAdmis
 		// registered tool and hook lookups come from the retained capture.
 		invocationSelection := sel
 		invocationSelection.lease = artifactLease
-		invocation, err := opener(ctx, admission, invocationSelection, request)
-		if err != nil {
-			publishScope(protocol.ScopeClosed, request)
-			return harness.InvocationExecution{}, err
-		}
+		invocation := opener(ctx, admission, invocationSelection, request)
 		closeInvocation := invocation.Close
 		invocation.Close = func() error {
 			var closeErr error
@@ -736,7 +731,7 @@ func wireDebugDir(location string) string {
 // advertisement gate rejects unknown names before dispatch; retry
 // classification and disposal belong to the shared machinery.
 func (p *preparation) concreteOpener(transport, compactTransport preparedTransport, session harness.SessionIdentity, workspace string, catalog []model.ToolDefinition, visible []string, overridden map[string]bool, subprocessEnv func(context.Context) ([]string, error)) openInvocation {
-	return func(_ context.Context, admission harness.OperationAdmission, sel selection, request harness.InvocationRequest) (harness.InvocationExecution, error) {
+	return func(_ context.Context, admission harness.OperationAdmission, sel selection, request harness.InvocationRequest) harness.InvocationExecution {
 		sessionID := admission.AdmittedEntry.SessionID
 		tc := ToolContext{
 			Session:       session,
@@ -853,7 +848,7 @@ func (p *preparation) concreteOpener(transport, compactTransport preparedTranspo
 				}
 				return harness.ResultStage{Hooks: registeredResultHooks(current, sel, session), Release: func() { _ = current.release() }}
 			},
-		}, nil
+		}
 	}
 }
 

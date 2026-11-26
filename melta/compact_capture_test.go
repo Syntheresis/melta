@@ -373,12 +373,11 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 				Execution:     capture,
 				AdmittedAt:    time.Now(),
 			}
-			inv, err := opener(context.Background(), admission, sel, harness.InvocationRequest{
+			inv := opener(context.Background(), admission, sel, harness.InvocationRequest{
 				ID:      "inv-maintenance",
 				Purpose: harness.InvocationPurposeMaintenance,
 				Model:   capture.Compact.Model,
 			})
-			testassert.NoError(t, err)
 			testassert.Require(t, inv.Model != nil, "opened maintenance invocation carries no Model callback")
 			wantDefault := `"conversation"`
 			if tc.wantCompactOn == "m2" {
@@ -399,12 +398,11 @@ func TestConcreteOpenerCompactModel(t *testing.T) {
 			// when the compact model is the conversation model the two closures
 			// are built identically over the one shared transport, so both hit
 			// the same wire model and credential.
-			conv, err := opener(context.Background(), admission, sel, harness.InvocationRequest{
+			conv := opener(context.Background(), admission, sel, harness.InvocationRequest{
 				ID:      "inv-conversation",
 				Purpose: harness.InvocationPurposeConversation,
 				Model:   capture.Model,
 			})
-			testassert.NoError(t, err)
 			testassert.Equal(t, string(conv.ModelParameters["bound_default"]), `"conversation"`)
 			stream, err = conv.Model(context.Background(), req, nil)
 			testassert.NoError(t, err)
